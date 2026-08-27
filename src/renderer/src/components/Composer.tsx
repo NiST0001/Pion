@@ -1,17 +1,39 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactElement } from 'react'
+import { ArrowUp, Square } from 'lucide-react'
 
 interface ComposerProps {
   busy: boolean
   queued: { steering: number; followUp: number }
   disabled: boolean
+  prefill: string
   onSend: (text: string) => void
   onAbort: () => void
 }
 
-export function Composer({ busy, queued, disabled, onSend, onAbort }: ComposerProps): ReactElement {
+export function Composer({
+  busy,
+  queued,
+  disabled,
+  prefill,
+  onSend,
+  onAbort
+}: ComposerProps): ReactElement {
   const [value, setValue] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    if (prefill) {
+      setValue(prefill)
+      textareaRef.current?.focus()
+      requestAnimationFrame(() => {
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto'
+          textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`
+        }
+      })
+    }
+  }, [prefill])
 
   const submit = useCallback(() => {
     const text = value.trim()
@@ -40,9 +62,11 @@ export function Composer({ busy, queued, disabled, onSend, onAbort }: ComposerPr
       {busy && (
         <div className="composer-hint">
           <span className="pulse">● 运行中</span>
-          {queuedTotal > 0 && <span className="queued">排队 {queuedTotal} 条（将作为转向消息注入）</span>}
+          {queuedTotal > 0 && (
+            <span className="queued">排队 {queuedTotal} 条（将作为转向消息注入）</span>
+          )}
           <button className="ghost-button stop-button" onClick={onAbort}>
-            停止
+            <Square size={11} /> 停止
           </button>
         </div>
       )}
@@ -50,7 +74,7 @@ export function Composer({ busy, queued, disabled, onSend, onAbort }: ComposerPr
         <textarea
           ref={textareaRef}
           value={value}
-          placeholder={disabled ? 'agent 未运行…' : '给 Pion 发消息… (Enter 发送 / Shift+Enter 换行)'}
+          placeholder={disabled ? 'agent 未运行…' : '描述任务… (Enter 发送 / Shift+Enter 换行)'}
           disabled={disabled}
           rows={1}
           onChange={(event) => {
@@ -59,8 +83,13 @@ export function Composer({ busy, queued, disabled, onSend, onAbort }: ComposerPr
           }}
           onKeyDown={handleKeyDown}
         />
-        <button className="send-button" onClick={submit} disabled={disabled || value.trim() === ''}>
-          发送
+        <button
+          className="send-button"
+          onClick={submit}
+          disabled={disabled || value.trim() === ''}
+          title="发送"
+        >
+          <ArrowUp size={16} />
         </button>
       </div>
     </footer>

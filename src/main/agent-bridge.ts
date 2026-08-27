@@ -1,25 +1,47 @@
 import { join } from 'node:path'
 import { BrowserWindow } from 'electron'
-import { RpcClient, getPackageDir } from '@earendil-works/pi-coding-agent'
-import type { AgentStatus, SessionInfo } from '../shared/types'
+import {
+  RpcClient,
+  SessionManager,
+  getPackageDir
+} from '@earendil-works/pi-coding-agent'
+import type { SessionEntry, SessionTreeNode } from '@earendil-works/pi-coding-agent'
+import type {
+  AgentStatus,
+  ModelOption,
+  SessionInfo,
+  SessionMeta,
+  TreeNodeLite,
+  WireEntry,
+  WireMessage
+} from '../shared/types'
+import { messageText } from '../shared/types'
 
 const EVENT_CHANNEL = 'pion:agent-event'
 const STATUS_CHANNEL = 'pion:agent-status'
 const STATE_CHANNEL = 'pion:agent-state'
+const SESSIONS_CHANNEL = 'pion:agent-sessions'
+const TREE_CHANNEL = 'pion:agent-tree'
 
-/** Events after which the session info is re-pushed to the renderer. */
+/** Events after which derived state (model/session/tree) is re-pushed. */
 const STATE_REFRESH_EVENTS = new Set([
   'agent_settled',
   'session_info_changed',
   'thinking_level_changed'
 ])
 
+interface PushedTree {
+  tree: TreeNodeLite[]
+  leafId: string | null
+}
+
 /**
  * Owns the pi agent RPC subprocess.
  *
  * pi runs headless (`node dist/cli.js --mode rpc`) and speaks JSON lines on
  * stdin/stdout; `RpcClient` handles the framing. This bridge forwards every
- * event to the renderer and keeps a small amount of derived state in sync.
+ * event to the renderer and keeps derived state (session list, branch tree)
+ * in sync.
  */
 export class AgentBridge {
   private client: RpcClient | null = null
@@ -45,6 +67,8 @@ export class AgentBridge {
     this.win?.webContents.send(STATUS_CHANNEL, this.status)
   }
 
+  // ---------------------------------------------------------------- lifecycle
+
   async start(cwd: string): Promise<void> {
     if (this.client) {
       if (this.status.cwd === cwd) return
@@ -61,7 +85,7 @@ export class AgentBridge {
       this.win?.webContents.send(EVENT_CHANNEL, event)
       const type = (event as { type?: string }).type
       if (typeof type === 'string' && STATE_REFRESH_EVENTS.has(type)) {
-        void this.pushState()
+        void this.refresh()
       }
     })
 
@@ -70,7 +94,7 @@ export class AgentBridge {
       await client.start()
       console.log('[pion] agent subprocess running, cwd:', cwd)
       this.setStatus({ phase: 'running' })
-      await this.pushState()
+      await this.refresh()
     } catch (err) {
       this.client = null
       const message = err instanceof Error ? err.message : String(err)
@@ -106,6 +130,117 @@ export class AgentBridge {
     await this.client?.abort()
   }
 
+  getStderr(): string {
+    return this.client?.getStderr() ?? ''
+  }
+
+  // ---------------------------------------------------------------- sessions
+
+  async newSession(): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    const result = await this.client.newSession()
+    if (!result.cancelled) await this.refresh()
+  }
+
+  /**
+   * Fork the session right before a user message entry.
+   * Resolves with that message's text (to prefill the composer).
+   */
+  async forkAt(entryId: string): Promise<{ text: string; cancelled: boolean }> {
+    if (!this.client) throw new Error('agent 未启动')
+    const result = await this.client.fork(entryId)
+    if (!result.cancelled) await this.refresh()
+    return { text: result.text, cancelled: result.cancelled }
+  }
+
+  async switchSession(sessionPath: string): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    const result = await this.client.switchSession(sessionPath)
+    if (!result.cancelled) await this.refresh()
+  }
+
+  async getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null> {
+    if (!this.client) return null
+    try {
+      const { entries, leafId } = await this.client.getEntries()
+      return { entries: entries.map(toWireEntry), leafId }
+    } catch {
+      return null
+    }
+  }
+
+  async getTree(): Promise<PushedTree | null> {
+    if (!this.client) return null
+    try {
+      const { tree, leafId } = await this.client.getTree()
+      return { tree: tree.map(toTreeNodeLite), leafId }
+    } catch {
+      return null
+    }
+  }
+
+  // ---------------------------------------------------------------- models
+
+  async getModels(): Promise<ModelOption[]> {
+    if (!this.client) return []
+    try {
+      const models = await this.client.getAvailableModels()
+      return models.map((m) => ({
+        provider: m.provider,
+        id: m.id,
+        contextWindow: m.contextWindow,
+        reasoning: m.reasoning
+      }))
+    } catch {
+      return []
+    }
+  }
+
+  async setModel(provider: string, modelId: string): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    await this.client.setModel(provider, modelId)
+    await this.refresh()
+  }
+
+  async getThinkingLevels(): Promise<string[]> {
+    if (!this.client) return []
+    try {
+      return await this.client.getAvailableThinkingLevels()
+    } catch {
+      return []
+    }
+  }
+
+  async setThinkingLevel(level: string): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    type ThinkingLevelParam = Parameters<RpcClient['setThinkingLevel']>[0]
+    await this.client.setThinkingLevel(level as ThinkingLevelParam)
+    await this.refresh()
+  }
+
+  // ---------------------------------------------------------------- sessions list
+
+  async listSessions(cwd?: string): Promise<SessionMeta[]> {
+    const dir = cwd ?? this.status.cwd
+    if (!dir) return []
+    try {
+      const infos = await SessionManager.list(dir)
+      return infos.map((info) => ({
+        path: info.path,
+        id: info.id,
+        name: info.name,
+        timestamp: info.created instanceof Date ? info.created.toISOString() : String(info.created),
+        mtime: info.modified instanceof Date ? info.modified.getTime() : Date.parse(String(info.modified)) || 0,
+        preview: (info.firstMessage ?? '').slice(0, 120),
+        messageCount: info.messageCount
+      }))
+    } catch {
+      return []
+    }
+  }
+
+  // ---------------------------------------------------------------- state
+
   async getSessionInfo(): Promise<SessionInfo | null> {
     if (!this.client) return null
     try {
@@ -115,27 +250,83 @@ export class AgentBridge {
     }
   }
 
-  getStderr(): string {
-    return this.client?.getStderr() ?? ''
-  }
-
   private async toSessionInfo(): Promise<SessionInfo | null> {
     const client = this.client
     if (!client) return null
     const state = await client.getState()
+    const model = state.model as { provider?: string; id?: string; name?: string } | undefined
     return {
-      provider: state.model?.provider,
-      model: state.model?.id,
+      provider: model?.provider,
+      model: model?.name ?? model?.id,
+      modelId: model?.id,
       thinkingLevel: state.thinkingLevel,
       isStreaming: state.isStreaming,
+      sessionFile: state.sessionFile,
+      sessionId: state.sessionId,
       sessionName: state.sessionName,
+      autoCompactionEnabled: state.autoCompactionEnabled,
       messageCount: state.messageCount,
       pendingMessageCount: state.pendingMessageCount
     }
   }
 
-  private async pushState(): Promise<void> {
+  /** Push state + session list + branch tree to the renderer. */
+  private async refresh(): Promise<void> {
     const info = await this.getSessionInfo()
     this.win?.webContents.send(STATE_CHANNEL, info)
+    const sessions = await this.listSessions()
+    this.win?.webContents.send(SESSIONS_CHANNEL, sessions)
+    const tree = await this.getTree()
+    this.win?.webContents.send(TREE_CHANNEL, tree)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mapping helpers (SDK shapes -> wire shapes)
+// ---------------------------------------------------------------------------
+
+function toWireEntry(entry: SessionEntry): WireEntry {
+  const wire: WireEntry = {
+    type: entry.type,
+    id: entry.id,
+    parentId: entry.parentId,
+    timestamp: entry.timestamp
+  }
+  const record = entry as unknown as Record<string, unknown>
+  if (entry.type === 'message') {
+    wire.message = record.message as WireMessage
+  } else if (entry.type === 'compaction') {
+    wire.summary = record.summary as string
+  }
+  return wire
+}
+
+function toTreeNodeLite(node: SessionTreeNode): TreeNodeLite {
+  const entry = node.entry as unknown as Record<string, unknown>
+  const message = entry.message as WireMessage | undefined
+  let kind: TreeNodeLite['kind'] = 'other'
+  let snippet = ''
+  if (message?.role === 'user') {
+    kind = 'user'
+    snippet = messageText(message).replace(/\s+/g, ' ').slice(0, 90)
+  } else if (message?.role === 'assistant') {
+    kind = 'assistant'
+    snippet = messageText(message).replace(/\s+/g, ' ').slice(0, 70)
+  } else if (node.entry.type === 'compaction') {
+    kind = 'compaction'
+    snippet = '上下文压缩点'
+  } else if (node.entry.type === 'branch_summary') {
+    kind = 'other'
+    snippet = '分支摘要'
+  } else {
+    snippet = node.entry.type
+  }
+  return {
+    id: node.entry.id,
+    parentId: node.entry.parentId,
+    kind,
+    snippet: snippet || '(空)',
+    label: node.label,
+    children: node.children.map(toTreeNodeLite)
   }
 }

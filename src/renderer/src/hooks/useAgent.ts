@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
-import type { AgentStatus, SessionInfo, WireEvent, WireEventInput, WireMessage } from '../../../shared/types'
-import { messageText } from '../../../shared/types'
+import type {
+  AgentStatus,
+  ModelOption,
+  ProjectMeta,
+  SessionInfo,
+  SessionMeta,
+  TreeNodeLite,
+  ToolResultPayload,
+  WireEntry,
+  WireEvent,
+  WireEventInput,
+  WireMessage
+} from '../../../shared/types'
+import { messageText, messageThinking, messageToolCalls } from '../../../shared/types'
 
 // ---------------------------------------------------------------------------
 // State model
@@ -9,19 +21,51 @@ import { messageText } from '../../../shared/types'
 export interface ToolItem {
   id: string
   name: string
-  argsText: string
   status: 'running' | 'done' | 'error'
-  resultText: string
+  isError: boolean
+  /** Target file for fs tools */
+  path?: string
+  /** Bash / powershell command */
+  command?: string
+  /** Edit tool: display diff */
+  diff?: string
+  /** Write tool: file content from args */
+  writeContent?: string
+  /** Generic textual output */
+  outputText?: string
 }
 
 export type TimelineItem =
-  | { kind: 'user'; id: number; text: string }
-  | { kind: 'assistant'; id: number; text: string; thinking: string; streaming: boolean; error?: string }
+  | { kind: 'user'; id: number; entryId?: string; text: string }
+  | {
+      kind: 'assistant'
+      id: number
+      entryId?: string
+      text: string
+      thinking: string
+      streaming: boolean
+      error?: string
+    }
   | { kind: 'tool'; id: number; tool: ToolItem }
+  | { kind: 'compaction'; id: number; summary: string }
+
+export interface FileChange {
+  path: string
+  kind: 'edit' | 'write'
+  diff?: string
+  content?: string
+  additions: number
+  deletions: number
+}
 
 export interface AgentState {
   status: AgentStatus
   session: SessionInfo | null
+  sessions: SessionMeta[]
+  tree: { tree: TreeNodeLite[]; leafId: string | null } | null
+  projects: ProjectMeta[]
+  models: ModelOption[]
+  thinkingLevels: string[]
   timeline: TimelineItem[]
   busy: boolean
   queued: { steering: number; followUp: number }
@@ -30,6 +74,11 @@ export interface AgentState {
 const initialState: AgentState = {
   status: { phase: 'stopped' },
   session: null,
+  sessions: [],
+  tree: null,
+  projects: [],
+  models: [],
+  thinkingLevels: [],
   timeline: [],
   busy: false,
   queued: { steering: 0, followUp: 0 }
@@ -38,7 +87,59 @@ const initialState: AgentState = {
 type Action =
   | { type: 'status'; status: AgentStatus }
   | { type: 'session'; session: SessionInfo | null }
+  | { type: 'sessions'; sessions: SessionMeta[] }
+  | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
+  | { type: 'projects'; projects: ProjectMeta[] }
+  | { type: 'models'; models: ModelOption[] }
+  | { type: 'thinkingLevels'; levels: string[] }
   | { type: 'event'; event: WireEventInput }
+  | { type: 'loadEntries'; entries: WireEntry[] }
+  | { type: 'clearTimeline' }
+
+// ---------------------------------------------------------------------------
+// Tool arg / result parsing (shared by live events and session replay)
+// ---------------------------------------------------------------------------
+
+function parseToolArgs(name: string, args: unknown): Partial<ToolItem> {
+  const a = (args ?? {}) as Record<string, unknown>
+  const out: Partial<ToolItem> = {}
+  if (typeof a.path === 'string') out.path = a.path
+  if (typeof a.command === 'string') out.command = a.command
+  if (typeof a.pattern === 'string') out.command = a.pattern
+  if (name === 'write' && typeof a.content === 'string') out.writeContent = a.content
+  if (name === 'edit' && Array.isArray(a.edits)) {
+    // aggregate preview of the edit texts
+    const edits = a.edits as Array<Record<string, unknown>>
+    out.command = edits
+      .map((e) => `${String(e.oldText ?? '')} → ${String(e.newText ?? '')}`)
+      .join('\n')
+      .slice(0, 200)
+  }
+  return out
+}
+
+function resultText(payload: ToolResultPayload | undefined | null): string {
+  const content = payload?.content
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter((c) => c && c.type === 'text' && typeof c.text === 'string')
+    .map((c) => c.text as string)
+    .join('\n')
+}
+
+function applyToolResult(tool: ToolItem, result: unknown, isError: boolean): ToolItem {
+  const payload = (result ?? {}) as ToolResultPayload
+  const next: ToolItem = {
+    ...tool,
+    status: isError ? 'error' : 'done',
+    isError,
+    outputText: resultText(payload)
+  }
+  const details = payload.details
+  if (typeof details?.diff === 'string') next.diff = details.diff
+  // bash output lives in content text
+  return next
+}
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -46,38 +147,54 @@ type Action =
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text
-  return `${text.slice(0, max)}… (+${text.length - max} 字符)`
-}
-
-function formatArgs(args: unknown): string {
-  if (args === undefined || args === null) return ''
-  try {
-    return truncate(JSON.stringify(args), 240)
-  } catch {
-    return String(args)
-  }
-}
-
-function formatResult(toolName: string, result: unknown): string {
-  if (result === undefined || result === null) return ''
-  const r = result as Record<string, unknown>
-  if (toolName === 'bash' || toolName === 'powershell') {
-    const stdout = typeof r.stdout === 'string' ? r.stdout : ''
-    const stderr = typeof r.stderr === 'string' ? r.stderr : ''
-    const exit = r.exitCode
-    const body = (stdout || stderr || '').trim()
-    return `[exit ${String(exit)}] ${truncate(body, 1200)}`
-  }
-  try {
-    return truncate(JSON.stringify(result, null, 2), 1200)
-  } catch {
-    return String(result)
-  }
+  return `${text.slice(0, max)}…`
 }
 
 function errorText(event: WireMessage | undefined): string {
   if (!event) return '未知错误'
   return event.errorMessage || messageText(event) || '未知错误'
+}
+
+/** Count added/removed lines of a pi display diff. */
+export function diffStats(diff: string): { additions: number; deletions: number } {
+  let additions = 0
+  let deletions = 0
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('+')) additions++
+    else if (line.startsWith('-')) deletions++
+  }
+  return { additions, deletions }
+}
+
+/** Derive the touched-file list from a timeline (for the changes panel). */
+export function deriveChanges(timeline: TimelineItem[]): FileChange[] {
+  const byPath = new Map<string, FileChange>()
+  for (const item of timeline) {
+    if (item.kind !== 'tool') continue
+    const { tool } = item
+    if (tool.name === 'edit' && tool.path && tool.diff) {
+      const stats = diffStats(tool.diff)
+      const existing = byPath.get(tool.path)
+      byPath.set(tool.path, {
+        path: tool.path,
+        kind: 'edit',
+        diff: tool.diff,
+        additions: (existing?.additions ?? 0) + stats.additions,
+        deletions: (existing?.deletions ?? 0) + stats.deletions
+      })
+    } else if (tool.name === 'write' && tool.path) {
+      const content = tool.writeContent ?? ''
+      const lines = content.split('\n').length
+      byPath.set(tool.path, {
+        path: tool.path,
+        kind: 'write',
+        content,
+        additions: lines,
+        deletions: 0
+      })
+    }
+  }
+  return [...byPath.values()]
 }
 
 // ---------------------------------------------------------------------------
@@ -89,23 +206,39 @@ let nextId = 1
 function reducer(state: AgentState, action: Action): AgentState {
   switch (action.type) {
     case 'status': {
-      const stopped = action.status.phase === 'stopped' || action.status.phase === 'error'
+      const dead = action.status.phase === 'stopped' || action.status.phase === 'error'
       return {
         ...state,
         status: action.status,
-        busy: stopped ? false : state.busy,
-        session: stopped ? null : state.session
+        busy: dead ? false : state.busy,
+        session: dead ? null : state.session,
+        sessions: dead ? [] : state.sessions,
+        tree: dead ? null : state.tree
       }
     }
     case 'session':
       return { ...state, session: action.session }
+    case 'sessions':
+      return { ...state, sessions: action.sessions }
+    case 'tree':
+      return { ...state, tree: action.tree }
+    case 'projects':
+      return { ...state, projects: action.projects }
+    case 'models':
+      return { ...state, models: action.models }
+    case 'thinkingLevels':
+      return { ...state, thinkingLevels: action.levels }
+    case 'loadEntries':
+      return { ...state, timeline: entriesToTimeline(action.entries), busy: false }
+    case 'clearTimeline':
+      return { ...state, timeline: [], busy: false, queued: { steering: 0, followUp: 0 } }
     case 'event':
       return reduceEvent(state, action.event)
   }
 }
 
 function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
-  // 可信边界：未建模的事件类型在 default 分支静默忽略
+  // trusted boundary: unmodelled event types fall through to the default branch
   const event = input as WireEvent
   switch (event.type) {
     case 'agent_start':
@@ -122,7 +255,10 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
       if (message?.role === 'user') {
         return {
           ...state,
-          timeline: [...state.timeline, { kind: 'user', id: nextId++, text: messageText(message) }]
+          timeline: [
+            ...state.timeline,
+            { kind: 'user', id: nextId++, text: messageText(message) }
+          ]
         }
       }
       if (message?.role === 'assistant') {
@@ -159,10 +295,35 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
     case 'message_end': {
       const { message } = event
       const text = messageText(message)
+      const thinking = messageThinking(message)
       const timeline = state.timeline.map((item) => {
         if (item.kind !== 'assistant' || !item.streaming) return item
-        return { ...item, text: text || item.text, streaming: false }
+        return {
+          ...item,
+          text: text || item.text,
+          thinking: thinking || item.thinking,
+          streaming: false
+        }
       })
+      return { ...state, timeline }
+    }
+
+    case 'entry_appended': {
+      const entry = event.entry
+      if (!entry || entry.type !== 'message') return state
+      const role = (entry.message as WireMessage | undefined)?.role
+      const timeline = [...state.timeline]
+      // attach the entry id to the most recent matching item that lacks one
+      for (let i = timeline.length - 1; i >= 0; i--) {
+        const item = timeline[i]
+        const isMatch =
+          (item.kind === 'user' && role === 'user' && !item.entryId) ||
+          (item.kind === 'assistant' && role === 'assistant' && !item.entryId)
+        if (isMatch) {
+          timeline[i] = { ...item, entryId: entry.id } as TimelineItem
+          break
+        }
+      }
       return { ...state, timeline }
     }
 
@@ -170,9 +331,9 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
       const tool: ToolItem = {
         id: event.toolCallId,
         name: event.toolName,
-        argsText: formatArgs(event.args),
         status: 'running',
-        resultText: ''
+        isError: false,
+        ...parseToolArgs(event.toolName, event.args)
       }
       return { ...state, timeline: [...state.timeline, { kind: 'tool', id: nextId++, tool }] }
     }
@@ -180,22 +341,15 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
     case 'tool_execution_update': {
       const timeline = state.timeline.map((item) => {
         if (item.kind !== 'tool' || item.tool.id !== event.toolCallId) return item
-        return { ...item, tool: { ...item.tool, resultText: formatResult(item.tool.name, event.partialResult) } }
+        return { ...item, tool: { ...item.tool, outputText: truncate(resultText(event.partialResult as ToolResultPayload), 2000) } }
       })
       return { ...state, timeline }
     }
 
     case 'tool_execution_end': {
-      const timeline = state.timeline.map((item): TimelineItem => {
+      const timeline = state.timeline.map((item) => {
         if (item.kind !== 'tool' || item.tool.id !== event.toolCallId) return item
-        return {
-          ...item,
-          tool: {
-            ...item.tool,
-            status: event.isError ? 'error' : 'done',
-            resultText: formatResult(item.tool.name, event.result)
-          }
-        }
+        return { ...item, tool: applyToolResult(item.tool, event.result, event.isError) }
       })
       return { ...state, timeline }
     }
@@ -205,6 +359,17 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
         ...state,
         queued: { steering: event.steering?.length ?? 0, followUp: event.followUp?.length ?? 0 }
       }
+
+    case 'compaction_end': {
+      if (event.aborted || event.errorMessage) return state
+      return {
+        ...state,
+        timeline: [
+          ...state.timeline,
+          { kind: 'compaction', id: nextId++, summary: '上下文已压缩' }
+        ]
+      }
+    }
 
     default:
       return state
@@ -220,40 +385,132 @@ function finalizeStreaming(state: AgentState): AgentState {
 }
 
 // ---------------------------------------------------------------------------
+// Session replay: entries -> timeline
+// ---------------------------------------------------------------------------
+
+function entriesToTimeline(entries: WireEntry[]): TimelineItem[] {
+  const items: TimelineItem[] = []
+  for (const entry of entries) {
+    if (entry.type === 'compaction') {
+      if (typeof entry.summary === 'string') {
+        items.push({ kind: 'compaction', id: nextId++, summary: '上下文已压缩' })
+      }
+      continue
+    }
+    if (entry.type !== 'message') continue
+    const message = entry.message
+    if (!message) continue
+
+    if (message.role === 'user') {
+      items.push({ kind: 'user', id: nextId++, entryId: entry.id, text: messageText(message) })
+      continue
+    }
+
+    if (message.role === 'assistant') {
+      items.push({
+        kind: 'assistant',
+        id: nextId++,
+        entryId: entry.id,
+        text: messageText(message),
+        thinking: messageThinking(message),
+        streaming: false
+      })
+      for (const call of messageToolCalls(message)) {
+        items.push({
+          kind: 'tool',
+          id: nextId++,
+          tool: {
+            id: call.id,
+            name: call.name,
+            status: 'done',
+            isError: false,
+            ...parseToolArgs(call.name, call.arguments)
+          }
+        })
+      }
+      continue
+    }
+
+    if (message.role === 'toolResult') {
+      const record = message as unknown as Record<string, unknown>
+      const toolCallId = typeof record.toolCallId === 'string' ? record.toolCallId : null
+      if (!toolCallId) continue
+      // fill the most recent pending tool item with this id
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i]
+        if (item.kind === 'tool' && item.tool.id === toolCallId) {
+          items[i] = {
+            ...item,
+            tool: applyToolResult(item.tool, message, Boolean(record.isError))
+          }
+          break
+        }
+      }
+    }
+  }
+  return items
+}
+
+// ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
 
 export function useAgent() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const api = typeof window !== 'undefined' ? window.pion : undefined
-  const startedRef = useRef(false)
+  const bootstrapped = useRef(false)
 
   useEffect(() => {
     if (!api) return
-    const offStatus = api.onStatus((status) => dispatch({ type: 'status', status }))
-    const offState = api.onState((session) => dispatch({ type: 'session', session }))
-    const offEvent = api.onEvent((event) => dispatch({ type: 'event', event }))
-    return () => {
-      offStatus()
-      offState()
-      offEvent()
-    }
+    const offs = [
+      api.onStatus((status) => dispatch({ type: 'status', status })),
+      api.onState((session) => dispatch({ type: 'session', session })),
+      api.onSessions((sessions) => dispatch({ type: 'sessions', sessions })),
+      api.onTree((tree) => dispatch({ type: 'tree', tree })),
+      api.onProjects((projects) => dispatch({ type: 'projects', projects })),
+      api.onEvent((event) => dispatch({ type: 'event', event }))
+    ]
+    return () => offs.forEach((off) => off())
+  }, [api])
+
+  /** Rebuild the timeline from the active session's entries. */
+  const reloadTimeline = useCallback(async () => {
+    if (!api) return
+    const result = await api.getEntries()
+    if (result) dispatch({ type: 'loadEntries', entries: result.entries })
+  }, [api])
+
+  const refreshModels = useCallback(async () => {
+    if (!api) return
+    const [models, levels] = await Promise.all([api.getAvailableModels(), api.getThinkingLevels()])
+    dispatch({ type: 'models', models })
+    dispatch({ type: 'thinkingLevels', levels })
   }, [api])
 
   const start = useCallback(
     async (cwd: string) => {
       if (!api) return
-      startedRef.current = true
       dispatch({ type: 'status', status: { phase: 'starting', cwd } })
+      dispatch({ type: 'clearTimeline' })
       await api.startAgent(cwd)
+      await reloadTimeline()
+      await refreshModels()
     },
-    [api]
+    [api, reloadTimeline, refreshModels]
   )
 
-  const stop = useCallback(async () => {
-    if (!api) return
-    await api.stopAgent()
-  }, [api])
+  const bootstrap = useCallback(async () => {
+    if (!api || bootstrapped.current) return
+    bootstrapped.current = true
+    let projects = await api.listProjects()
+    let cwd = projects[0]?.cwd
+    if (!cwd) {
+      cwd = await api.defaultWorkspace()
+      projects = await api.addProject(cwd)
+    }
+    dispatch({ type: 'projects', projects })
+    await start(cwd)
+  }, [api, start])
 
   const send = useCallback(
     async (message: string) => {
@@ -268,15 +525,98 @@ export function useAgent() {
     await api.abort()
   }, [api])
 
-  const pickWorkspace = useCallback(async (): Promise<string | null> => {
-    if (!api) return null
-    return api.pickWorkspace()
+  const newSession = useCallback(async () => {
+    if (!api) return
+    await api.newSession()
+    dispatch({ type: 'clearTimeline' })
   }, [api])
 
-  const actions = useMemo(
-    () => ({ start, stop, send, abort, pickWorkspace }),
-    [start, stop, send, abort, pickWorkspace]
+  /** Fork before a user message; resolves with the message text for prefill. */
+  const forkAt = useCallback(
+    async (entryId: string): Promise<string> => {
+      if (!api) return ''
+      const result = await api.forkAt(entryId)
+      if (!result.cancelled) {
+        await reloadTimeline()
+        return result.text
+      }
+      return ''
+    },
+    [api, reloadTimeline]
   )
 
-  return { state, actions, hasBridge: Boolean(api), startedRef }
+  const switchSession = useCallback(
+    async (sessionPath: string) => {
+      if (!api) return
+      await api.switchSession(sessionPath)
+      await reloadTimeline()
+    },
+    [api, reloadTimeline]
+  )
+
+  const addProject = useCallback(
+    async (cwd: string) => {
+      if (!api) return
+      const projects = await api.addProject(cwd)
+      dispatch({ type: 'projects', projects })
+    },
+    [api]
+  )
+
+  const removeProject = useCallback(
+    async (cwd: string) => {
+      if (!api) return
+      const projects = await api.removeProject(cwd)
+      dispatch({ type: 'projects', projects })
+    },
+    [api]
+  )
+
+  const setModel = useCallback(
+    async (provider: string, modelId: string) => {
+      if (!api) return
+      await api.setModel(provider, modelId)
+      await refreshModels()
+    },
+    [api, refreshModels]
+  )
+
+  const setThinkingLevel = useCallback(
+    async (level: string) => {
+      if (!api) return
+      await api.setThinkingLevel(level)
+    },
+    [api]
+  )
+
+  const actions = useMemo(
+    () => ({
+      bootstrap,
+      start,
+      send,
+      abort,
+      newSession,
+      forkAt,
+      switchSession,
+      addProject,
+      removeProject,
+      setModel,
+      setThinkingLevel
+    }),
+    [
+      bootstrap,
+      start,
+      send,
+      abort,
+      newSession,
+      forkAt,
+      switchSession,
+      addProject,
+      removeProject,
+      setModel,
+      setThinkingLevel
+    ]
+  )
+
+  return { state, actions, hasBridge: Boolean(api) }
 }

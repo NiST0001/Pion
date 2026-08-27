@@ -2,17 +2,29 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { AgentBridge } from './agent-bridge'
+import { ProjectStore } from './projects'
+import type { ProjectMeta } from '../shared/types'
 
 const bridge = new AgentBridge()
+const projects = new ProjectStore()
+
+let projectsPush = (list: ProjectMeta[]): void => {
+  // replaced once a window exists
+  void list
+}
+
+function pushProjects(): void {
+  projectsPush(projects.list())
+}
 
 function createWindow(): void {
   const win = new BrowserWindow({
-    width: 1120,
-    height: 780,
-    minWidth: 720,
-    minHeight: 480,
+    width: 1280,
+    height: 820,
+    minWidth: 900,
+    minHeight: 560,
     title: 'Pion',
-    backgroundColor: '#16181d',
+    backgroundColor: '#14161b',
     show: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
@@ -23,9 +35,27 @@ function createWindow(): void {
     }
   })
 
+  const push = (list: ProjectMeta[]): void => {
+    if (!win.isDestroyed()) win.webContents.send('pion:projects', list)
+  }
+  projectsPush = push
+  push(projects.list())
+
   win.once('ready-to-show', () => win.show())
   win.on('closed', () => bridge.unbind(win))
   bridge.bind(win)
+
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    console.error(`[pion] page load FAILED: ${code} ${desc} ${url}`)
+  })
+  win.webContents.on('render-process-gone', (_e, details) => {
+    console.error(`[pion] renderer GONE: ${details.reason} ${details.exitCode ?? ''}`)
+  })
+  win.webContents.on('console-message', (event) => {
+    if (event.level === 'warning' || event.level === 'error') {
+      console.error(`[pion:renderer] ${event.message}`)
+    }
+  })
 
   if (process.env.ELECTRON_RENDERER_URL) {
     void win.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -35,14 +65,54 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
-  ipcMain.handle('pion:agent-start', (_event, cwd: string) => bridge.start(cwd))
+  // agent lifecycle -----------------------------------------------------------
+  ipcMain.handle('pion:agent-start', async (_event, cwd: string) => {
+    const result = await bridge.start(cwd)
+    projects.touch(cwd)
+    pushProjects()
+    return result
+  })
   ipcMain.handle('pion:agent-stop', () => bridge.stop())
   ipcMain.handle('pion:agent-send', (_event, message: string) => bridge.send(message))
   ipcMain.handle('pion:agent-abort', () => bridge.abort())
   ipcMain.handle('pion:agent-state', () => bridge.getSessionInfo())
   ipcMain.handle('pion:agent-stderr', () => bridge.getStderr())
   ipcMain.handle('pion:agent-status', () => bridge.getStatus())
-  ipcMain.handle('pion:default-workspace', () => homedir())
+
+  // session management ----------------------------------------------------------
+  ipcMain.handle('pion:agent-new-session', () => bridge.newSession())
+  ipcMain.handle('pion:agent-fork', (_event, entryId: string) => bridge.forkAt(entryId))
+  ipcMain.handle('pion:agent-switch-session', (_event, sessionPath: string) =>
+    bridge.switchSession(sessionPath)
+  )
+  ipcMain.handle('pion:agent-entries', () => bridge.getEntries())
+  ipcMain.handle('pion:agent-tree', () => bridge.getTree())
+  ipcMain.handle('pion:agent-sessions', (_event, cwd?: string) => bridge.listSessions(cwd))
+
+  // model & thinking ------------------------------------------------------------
+  ipcMain.handle('pion:agent-models', () => bridge.getModels())
+  ipcMain.handle('pion:agent-set-model', (_event, provider: string, modelId: string) =>
+    bridge.setModel(provider, modelId)
+  )
+  ipcMain.handle('pion:agent-thinking-levels', () => bridge.getThinkingLevels())
+  ipcMain.handle('pion:agent-set-thinking', (_event, level: string) =>
+    bridge.setThinkingLevel(level)
+  )
+
+  // projects ----------------------------------------------------------------------
+  ipcMain.handle('pion:projects-list', () => projects.list())
+  ipcMain.handle('pion:projects-add', (_event, cwd: string) => {
+    projects.touch(cwd)
+    pushProjects()
+    return projects.list()
+  })
+  ipcMain.handle('pion:projects-remove', (_event, cwd: string) => {
+    projects.remove(cwd)
+    pushProjects()
+    return projects.list()
+  })
+
+  // misc --------------------------------------------------------------------------
   ipcMain.handle('pion:pick-workspace', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],
@@ -50,6 +120,7 @@ function registerIpc(): void {
     })
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
+  ipcMain.handle('pion:default-workspace', () => homedir())
 }
 
 app.whenReady().then(() => {
