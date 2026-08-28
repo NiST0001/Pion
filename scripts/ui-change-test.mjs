@@ -218,9 +218,11 @@ await evaluate(`(() => {
 await sleep(180)
 await check('拖拽后会话顺序可改变', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && before.length >= 2 && after[0] === before[1] && after[1] === before[0]; })()`)
 await evaluate(`window.__pionTaskSessionBefore = document.querySelector('.task-panel')?.dataset.sessionKey ?? null`)
+await evaluate(`window.__pionProjectOrderBefore = [...document.querySelectorAll('.project-folder .project-folder-name')].map((item) => item.textContent)`)
 await evaluate(`(() => { const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const target = [...(list?.querySelectorAll('.side-session') ?? [])].find((item) => item.dataset.sessionPath !== window.__pionActiveSessionBefore); target?.click(); return Boolean(target); })()`)
 await sleep(1200)
 await check('任务面板随会话切换', `(() => { const before = window.__pionTaskSessionBefore; const after = document.querySelector('.task-panel')?.dataset.sessionKey; return Boolean(before && after && before !== after); })()`)
+await check('激活会话不会自动置顶项目', `JSON.stringify(window.__pionProjectOrderBefore) === JSON.stringify([...document.querySelectorAll('.project-folder .project-folder-name')].map((item) => item.textContent))`)
 await check('激活会话不会自动置顶', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && after[0] === before[1] && after[1] === before[0]; })()`)
 await evaluate(`(() => {
   const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2)

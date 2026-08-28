@@ -16,7 +16,7 @@ import type {
 } from '../../../shared/types'
 import { messageText, messageThinking, messageToolCalls } from '../../../shared/types'
 
-const SESSION_ORDER_STORAGE_KEY = 'pion:session-order'
+const SESSION_ORDER_STORAGE_KEY = 'pion:session-order-v2'
 
 type SessionOrderMap = Record<string, string[]>
 
@@ -45,6 +45,11 @@ function writeSessionOrderMap(map: SessionOrderMap): void {
   }
 }
 
+function sessionCreatedTime(session: SessionMeta): number {
+  const timestamp = Date.parse(session.timestamp)
+  return Number.isFinite(timestamp) ? timestamp : session.mtime
+}
+
 function orderSessions(sessions: SessionMeta[], previous: SessionMeta[] = []): SessionMeta[] {
   if (sessions.length <= 1) return sessions
   const projectCwd = sessions[0]?.projectCwd
@@ -60,23 +65,23 @@ function orderSessions(sessions: SessionMeta[], previous: SessionMeta[] = []): S
       orderedPaths.push(path)
     }
   }
-  for (const path of sessions.map((session) => session.path)) {
-    if (!seen.has(path)) {
-      seen.add(path)
-      orderedPaths.push(path)
-    }
+
+  // Pi returns sessions by last activity. New sessions must not jump to the
+  // top merely because they were just opened, so unknown sessions use their
+  // immutable creation time and are appended in that stable order.
+  const newSessions = sessions
+    .filter((session) => !seen.has(session.path))
+    .sort((a, b) => sessionCreatedTime(a) - sessionCreatedTime(b) || a.path.localeCompare(b.path))
+  for (const session of newSessions) {
+    seen.add(session.path)
+    orderedPaths.push(session.path)
   }
 
   const map = new Map(sessions.map((session) => [session.path, session]))
-  const ordered = orderedPaths.flatMap((path) => {
+  return orderedPaths.flatMap((path) => {
     const session = map.get(path)
     return session ? [session] : []
   })
-
-  if (saved.length !== orderedPaths.length || saved.some((path, index) => path !== orderedPaths[index])) {
-    writeSessionOrderMap({ ...readSessionOrderMap(), [projectCwd]: orderedPaths })
-  }
-  return ordered
 }
 
 function reorderSessionsByPaths(sessions: SessionMeta[], paths: string[]): SessionMeta[] {

@@ -35,7 +35,7 @@ export class ProjectStore {
     return this.cache
   }
 
-  /** Add a workspace or bump its lastUsedAt. */
+  /** Add a workspace or update its usage timestamp without changing its order. */
   touch(cwd: string): ProjectMeta[] {
     const list = this.list().map((p) => ({ ...p }))
     const now = Date.now()
@@ -45,7 +45,6 @@ export class ProjectStore {
     } else {
       list.push({ cwd, name: basename(cwd) || cwd, addedAt: now, lastUsedAt: now })
     }
-    list.sort((a, b) => b.lastUsedAt - a.lastUsedAt)
     this.save(list)
     return list
   }

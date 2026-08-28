@@ -8,23 +8,21 @@ interface TaskTarget {
   done: boolean
 }
 
-const DEFAULT_TASKS: TaskTarget[] = [
-  { id: 'understand', title: '梳理任务目标与验收标准', done: true },
-  { id: 'inspect', title: '检查项目结构与现有实现', done: true },
-  { id: 'plan', title: '确定交互与技术方案', done: true },
-  { id: 'implement', title: '实现核心功能与数据流', done: false },
-  { id: 'polish', title: '完善界面细节和交互状态', done: false },
-  { id: 'verify-types', title: '运行类型检查并修复问题', done: false },
-  { id: 'verify-build', title: '执行构建与自动化验证', done: false },
-  { id: 'review', title: '复查改动并整理交付说明', done: false },
-  { id: 'document', title: '补充使用说明与注意事项', done: false },
-  { id: 'finish', title: '确认任务完成并提交变更', done: false }
-]
-
 const TASK_STORAGE_PREFIX = 'pion:session-tasks:'
 
-function cloneDefaultTasks(): TaskTarget[] {
-  return DEFAULT_TASKS.map((task) => ({ ...task }))
+function createDefaultTasks(): TaskTarget[] {
+  return [
+    { id: 'understand', title: '梳理任务目标与验收标准', done: true },
+    { id: 'inspect', title: '检查项目结构与现有实现', done: true },
+    { id: 'plan', title: '确定交互与技术方案', done: true },
+    { id: 'implement', title: '实现核心功能与数据流', done: false },
+    { id: 'polish', title: '完善界面细节和交互状态', done: false },
+    { id: 'verify-types', title: '运行类型检查并修复问题', done: false },
+    { id: 'verify-build', title: '执行构建与自动化验证', done: false },
+    { id: 'review', title: '复查改动并整理交付说明', done: false },
+    { id: 'document', title: '补充使用说明与注意事项', done: false },
+    { id: 'finish', title: '确认任务完成并提交变更', done: false }
+  ]
 }
 
 function taskStorageKey(sessionKey: string): string {
@@ -32,27 +30,24 @@ function taskStorageKey(sessionKey: string): string {
 }
 
 function loadTasks(sessionKey: string): TaskTarget[] {
-  if (typeof window === 'undefined') return cloneDefaultTasks()
+  const defaults = createDefaultTasks()
+  if (typeof window === 'undefined') return defaults
   try {
     const raw = window.localStorage.getItem(taskStorageKey(sessionKey))
-    if (!raw) return cloneDefaultTasks()
+    if (!raw) return defaults
     const saved = JSON.parse(raw) as unknown
-    if (!Array.isArray(saved)) return cloneDefaultTasks()
-    const doneById = new Map(
-      saved.flatMap((task) => {
-        if (!task || typeof task !== 'object') return []
-        const record = task as Record<string, unknown>
-        return typeof record.id === 'string' && typeof record.done === 'boolean'
-          ? [[record.id, record.done] as const]
-          : []
-      })
-    )
-    return DEFAULT_TASKS.map((task) => ({
-      ...task,
-      done: doneById.get(task.id) ?? task.done
-    }))
+    if (!Array.isArray(saved)) return defaults
+    const tasks = saved.flatMap((task): TaskTarget[] => {
+      if (!task || typeof task !== 'object') return []
+      const record = task as Record<string, unknown>
+      if (typeof record.id !== 'string' || typeof record.title !== 'string' || typeof record.done !== 'boolean') {
+        return []
+      }
+      return [{ id: record.id, title: record.title, done: record.done }]
+    })
+    return tasks.length === saved.length ? tasks : defaults
   } catch {
-    return cloneDefaultTasks()
+    return defaults
   }
 }
 

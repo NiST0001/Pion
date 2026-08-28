@@ -212,7 +212,7 @@ export function App(): ReactElement {
   )
 
   const changes = useMemo(() => deriveChanges(state.timeline), [state.timeline])
-  const taskSessionKey = state.session?.sessionId || state.session?.sessionFile || state.status.cwd || 'default'
+  const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
   const messageHistory = useMemo(
     () => state.timeline.flatMap((item) => (
       item.kind === 'user' && item.text.trim() ? [item.text] : []
