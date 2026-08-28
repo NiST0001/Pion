@@ -26,6 +26,7 @@ function createWindow(): void {
     title: 'Pion',
     backgroundColor: '#14161b',
     show: false,
+    frame: false, // 自绘标题栏
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,
@@ -41,7 +42,15 @@ function createWindow(): void {
   projectsPush = push
   push(projects.list())
 
-  win.once('ready-to-show', () => win.show())
+  const pushMaximized = (): void => {
+    if (!win.isDestroyed()) win.webContents.send('pion:window-state', win.isMaximized())
+  }
+  win.on('maximize', pushMaximized)
+  win.on('unmaximize', pushMaximized)
+  win.once('ready-to-show', () => {
+    win.show()
+    pushMaximized()
+  })
   win.on('closed', () => bridge.unbind(win))
   bridge.bind(win)
 
@@ -98,6 +107,38 @@ function registerIpc(): void {
   ipcMain.handle('pion:agent-set-thinking', (_event, level: string) =>
     bridge.setThinkingLevel(level)
   )
+
+  // agent settings ----------------------------------------------------------------
+  ipcMain.handle('pion:agent-set-auto-compaction', (_event, enabled: boolean) =>
+    bridge.setAutoCompaction(enabled)
+  )
+  ipcMain.handle('pion:agent-set-auto-retry', (_event, enabled: boolean) =>
+    bridge.setAutoRetry(enabled)
+  )
+  ipcMain.handle('pion:agent-compact', () => bridge.compactNow())
+  ipcMain.handle('pion:agent-export-html', () => bridge.exportSessionHtml())
+  ipcMain.handle('pion:agent-rename-session', (_event, name: string) => bridge.renameSession(name))
+  ipcMain.handle('pion:agent-set-steering-mode', (_event, mode: 'all' | 'one-at-a-time') =>
+    bridge.setSteeringMode(mode)
+  )
+  ipcMain.handle('pion:agent-set-follow-up-mode', (_event, mode: 'all' | 'one-at-a-time') =>
+    bridge.setFollowUpMode(mode)
+  )
+
+  // window ----------------------------------------------------------------------
+  ipcMain.handle('pion:window-state', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    return win?.isMaximized() ?? false
+  })
+  ipcMain.on('pion:window-control', (event, action: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win.isDestroyed()) return
+    if (action === 'minimize') win.minimize()
+    else if (action === 'toggle-maximize') {
+      if (win.isMaximized()) win.unmaximize()
+      else win.maximize()
+    } else if (action === 'close') win.close()
+  })
 
   // projects ----------------------------------------------------------------------
   ipcMain.handle('pion:projects-list', () => projects.list())

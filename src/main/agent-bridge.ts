@@ -218,6 +218,49 @@ export class AgentBridge {
     await this.refresh()
   }
 
+  // ---------------------------------------------------------------- agent settings
+
+  async setAutoCompaction(enabled: boolean): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    await this.client.setAutoCompaction(enabled)
+    await this.refresh()
+  }
+
+  async setAutoRetry(enabled: boolean): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    await this.client.setAutoRetry(enabled)
+  }
+
+  async compactNow(): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    await this.client.compact()
+    await this.refresh()
+  }
+
+  async exportSessionHtml(): Promise<string> {
+    if (!this.client) throw new Error('agent 未启动')
+    const result = await this.client.exportHtml()
+    return result.path
+  }
+
+  async renameSession(name: string): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    await this.client.setSessionName(name)
+    await this.refresh()
+  }
+
+  async setSteeringMode(mode: 'all' | 'one-at-a-time'): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    await this.client.setSteeringMode(mode)
+    await this.refresh()
+  }
+
+  async setFollowUpMode(mode: 'all' | 'one-at-a-time'): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    await this.client.setFollowUpMode(mode)
+    await this.refresh()
+  }
+
   // ---------------------------------------------------------------- sessions list
 
   async listSessions(cwd?: string): Promise<SessionMeta[]> {
@@ -265,6 +308,8 @@ export class AgentBridge {
       sessionId: state.sessionId,
       sessionName: state.sessionName,
       autoCompactionEnabled: state.autoCompactionEnabled,
+      steeringMode: state.steeringMode,
+      followUpMode: state.followUpMode,
       messageCount: state.messageCount,
       pendingMessageCount: state.pendingMessageCount
     }

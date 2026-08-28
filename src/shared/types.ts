@@ -30,6 +30,8 @@ export interface SessionInfo {
   sessionId: string
   sessionName?: string
   autoCompactionEnabled?: boolean
+  steeringMode?: 'all' | 'one-at-a-time'
+  followUpMode?: 'all' | 'one-at-a-time'
   messageCount: number
   pendingMessageCount?: number
 }
@@ -240,6 +242,17 @@ export interface PionApi {
   getThinkingLevels(): Promise<string[]>
   setThinkingLevel(level: string): Promise<void>
 
+  // agent settings ------------------------------------------------------------
+  setAutoCompaction(enabled: boolean): Promise<void>
+  setAutoRetry(enabled: boolean): Promise<void>
+  /** Compact the session context now (LLM summarization). */
+  compactNow(): Promise<void>
+  /** Export the session to HTML; resolves with the output path. */
+  exportSessionHtml(): Promise<string>
+  renameSession(name: string): Promise<void>
+  setSteeringMode(mode: 'all' | 'one-at-a-time'): Promise<void>
+  setFollowUpMode(mode: 'all' | 'one-at-a-time'): Promise<void>
+
   // projects ----------------------------------------------------------------
   listProjects(): Promise<ProjectMeta[]>
   addProject(cwd: string): Promise<ProjectMeta[]>
@@ -254,6 +267,13 @@ export interface PionApi {
   pickWorkspace(): Promise<string | null>
   /** Default workspace suggestion (user home directory). */
   defaultWorkspace(): Promise<string>
+
+  // window -------------------------------------------------------------------
+  minimizeWindow(): void
+  toggleMaximizeWindow(): void
+  closeWindow(): void
+  getWindowState(): Promise<boolean>
+  onWindowState(listener: (maximized: boolean) => void): () => void
 
   // events ------------------------------------------------------------------
   /** Subscribe to agent events; returns an unsubscribe function. */

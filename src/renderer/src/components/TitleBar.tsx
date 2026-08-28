@@ -1,0 +1,63 @@
+import type { ReactElement } from 'react'
+import { Maximize2, Minimize2, Minus, Settings, X } from 'lucide-react'
+import type { AgentPhase } from '../../../shared/types'
+
+interface TitleBarProps {
+  cwd?: string
+  phase: AgentPhase
+  sessionName?: string
+  maximized: boolean
+  onOpenSettings: () => void
+}
+
+export function TitleBar({
+  cwd,
+  phase,
+  sessionName,
+  maximized,
+  onOpenSettings
+}: TitleBarProps): ReactElement {
+  const title = [shorten(cwd ?? ''), sessionName].filter(Boolean).join(' · ')
+  return (
+    <header className="titlebar">
+      <div className="titlebar-brand">
+        <span className="brand-mark">π⁺</span>
+        <span className="brand-name">Pion</span>
+        <span className={`dot dot-${phase}`} title={phase} />
+      </div>
+      <div className="titlebar-path" title={cwd}>
+        {title || 'Pion'}
+      </div>
+      <div className="titlebar-right">
+        <button className="titlebar-btn" title="设置" onClick={onOpenSettings}>
+          <Settings size={14} />
+        </button>
+        <span className="titlebar-sep" />
+        <button
+          className="titlebar-btn"
+          title="最小化"
+          onClick={() => window.pion.minimizeWindow()}
+        >
+          <Minus size={14} />
+        </button>
+        <button
+          className="titlebar-btn"
+          title={maximized ? '还原' : '最大化'}
+          onClick={() => window.pion.toggleMaximizeWindow()}
+        >
+          {maximized ? <Minimize2 size={12} /> : <Maximize2 size={11} />}
+        </button>
+        <button className="titlebar-btn titlebar-close" title="关闭" onClick={() => window.pion.closeWindow()}>
+          <X size={15} />
+        </button>
+      </div>
+    </header>
+  )
+}
+
+function shorten(path: string): string {
+  if (!path) return ''
+  const parts = path.replace(/^\/home\/[^/]+/, '~').split('/')
+  if (parts.length <= 3) return parts.join('/')
+  return `…/${parts.slice(-2).join('/')}`
+}

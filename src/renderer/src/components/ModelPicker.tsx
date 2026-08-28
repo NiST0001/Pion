@@ -16,11 +16,13 @@ function useOutsideClose(ref: React.RefObject<HTMLElement | null>, onClose: () =
 export function ModelPicker({
   models,
   currentModelId,
-  onSelect
+  onSelect,
+  compact = false
 }: {
   models: ModelOption[]
   currentModelId?: string
   onSelect: (provider: string, modelId: string) => void
+  compact?: boolean
 }): ReactElement {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -29,7 +31,7 @@ export function ModelPicker({
   const current = models.find((m) => m.id === currentModelId)
 
   return (
-    <div className="picker" ref={ref}>
+    <div className={`picker${compact ? ' picker-compact' : ''}`} ref={ref}>
       <button className="picker-trigger" onClick={() => setOpen((v) => !v)} title="切换模型">
         <span className="picker-value">{current?.id ?? currentModelId ?? '模型'}</span>
         <ChevronDown size={13} />

@@ -589,6 +589,45 @@ export function useAgent() {
     [api]
   )
 
+  // --- agent settings -------------------------------------------------------
+  const setAutoCompaction = useCallback(
+    async (enabled: boolean) => {
+      await api?.setAutoCompaction(enabled)
+    },
+    [api]
+  )
+  const setAutoRetry = useCallback(
+    async (enabled: boolean) => {
+      await api?.setAutoRetry(enabled)
+    },
+    [api]
+  )
+  const compactNow = useCallback(async () => {
+    await api?.compactNow()
+  }, [api])
+  const exportHtml = useCallback(
+    async (): Promise<string> => (await api?.exportSessionHtml()) ?? '',
+    [api]
+  )
+  const renameSession = useCallback(
+    async (name: string) => {
+      await api?.renameSession(name)
+    },
+    [api]
+  )
+  const setSteeringMode = useCallback(
+    async (mode: 'all' | 'one-at-a-time') => {
+      await api?.setSteeringMode(mode)
+    },
+    [api]
+  )
+  const setFollowUpMode = useCallback(
+    async (mode: 'all' | 'one-at-a-time') => {
+      await api?.setFollowUpMode(mode)
+    },
+    [api]
+  )
+
   const actions = useMemo(
     () => ({
       bootstrap,
@@ -601,7 +640,14 @@ export function useAgent() {
       addProject,
       removeProject,
       setModel,
-      setThinkingLevel
+      setThinkingLevel,
+      setAutoCompaction,
+      setAutoRetry,
+      compactNow,
+      exportHtml,
+      renameSession,
+      setSteeringMode,
+      setFollowUpMode
     }),
     [
       bootstrap,
@@ -614,7 +660,14 @@ export function useAgent() {
       addProject,
       removeProject,
       setModel,
-      setThinkingLevel
+      setThinkingLevel,
+      setAutoCompaction,
+      setAutoRetry,
+      compactNow,
+      exportHtml,
+      renameSession,
+      setSteeringMode,
+      setFollowUpMode
     ]
   )
 

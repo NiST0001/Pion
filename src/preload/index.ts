@@ -36,6 +36,21 @@ const api: PionApi = {
   getThinkingLevels: () => ipcRenderer.invoke('pion:agent-thinking-levels'),
   setThinkingLevel: (level) => ipcRenderer.invoke('pion:agent-set-thinking', level),
 
+  // agent settings
+  setAutoCompaction: (enabled) => ipcRenderer.invoke('pion:agent-set-auto-compaction', enabled),
+  setAutoRetry: (enabled) => ipcRenderer.invoke('pion:agent-set-auto-retry', enabled),
+  compactNow: () => ipcRenderer.invoke('pion:agent-compact'),
+  exportSessionHtml: () => ipcRenderer.invoke('pion:agent-export-html'),
+  renameSession: (name) => ipcRenderer.invoke('pion:agent-rename-session', name),
+  setSteeringMode: (mode) => ipcRenderer.invoke('pion:agent-set-steering-mode', mode),
+  setFollowUpMode: (mode) => ipcRenderer.invoke('pion:agent-set-follow-up-mode', mode),
+
+  // window
+  minimizeWindow: () => ipcRenderer.send('pion:window-control', 'minimize'),
+  toggleMaximizeWindow: () => ipcRenderer.send('pion:window-control', 'toggle-maximize'),
+  closeWindow: () => ipcRenderer.send('pion:window-control', 'close'),
+  getWindowState: () => ipcRenderer.invoke('pion:window-state'),
+
   // projects
   listProjects: () => ipcRenderer.invoke('pion:projects-list'),
   addProject: (cwd) => ipcRenderer.invoke('pion:projects-add', cwd),
@@ -54,7 +69,8 @@ const api: PionApi = {
   onSessions: (listener) => subscribe<SessionMeta[]>('pion:agent-sessions', listener),
   onTree: (listener) =>
     subscribe<{ tree: TreeNodeLite[]; leafId: string | null } | null>('pion:agent-tree', listener),
-  onProjects: (listener) => subscribe<ProjectMeta[]>('pion:projects', listener)
+  onProjects: (listener) => subscribe<ProjectMeta[]>('pion:projects', listener),
+  onWindowState: (listener) => subscribe<boolean>('pion:window-state', listener)
 }
 
 contextBridge.exposeInMainWorld('pion', api)
