@@ -20,6 +20,7 @@ const api: PionApi = {
   startAgent: (cwd) => ipcRenderer.invoke('pion:agent-start', cwd),
   stopAgent: () => ipcRenderer.invoke('pion:agent-stop'),
   send: (message) => ipcRenderer.invoke('pion:agent-send', message),
+  queue: (message) => ipcRenderer.invoke('pion:agent-queue', message),
   abort: () => ipcRenderer.invoke('pion:agent-abort'),
 
   // session management

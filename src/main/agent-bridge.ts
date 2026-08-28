@@ -129,6 +129,17 @@ export class AgentBridge {
     }
   }
 
+  /** Queue a follow-up while running; fall back to a prompt when idle. */
+  async queue(message: string): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    const state = await this.client.getState().catch(() => null)
+    if (state?.isStreaming) {
+      await this.client.followUp(message)
+    } else {
+      await this.client.prompt(message)
+    }
+  }
+
   async abort(): Promise<void> {
     await this.client?.abort()
   }

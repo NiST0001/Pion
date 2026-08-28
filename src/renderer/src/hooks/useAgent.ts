@@ -521,6 +521,14 @@ export function useAgent() {
     [api]
   )
 
+  const queue = useCallback(
+    async (message: string) => {
+      if (!api || message.trim() === '') return
+      await api.queue(message.trim())
+    },
+    [api]
+  )
+
   const abort = useCallback(async () => {
     if (!api) return
     await api.abort()
@@ -671,6 +679,7 @@ export function useAgent() {
       bootstrap,
       start,
       send,
+      queue,
       abort,
       newSession,
       forkAt,
@@ -695,6 +704,7 @@ export function useAgent() {
       bootstrap,
       start,
       send,
+      queue,
       abort,
       newSession,
       forkAt,

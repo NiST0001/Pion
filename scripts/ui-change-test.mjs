@@ -83,6 +83,7 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`document.querySelectorAll('.composer-inline-controls .thinking-segment').length > 0`)) break
 }
 await check('composer 输入框存在', `!!document.querySelector('.composer-row textarea')`)
+await check('快捷键提示为 Tab 排队 Enter 直接发送', `document.querySelector('.composer-row textarea')?.getAttribute('placeholder')?.includes('Tab 排队') && document.querySelector('.composer-row textarea')?.getAttribute('placeholder')?.includes('Enter 直接发送')`)
 await check('模型选择器嵌入输入框', `!!document.querySelector('.composer-row .composer-inline-controls .picker')`)
 await check('模型选择器显示当前模型', `(document.querySelector('.composer-inline-controls .picker-value')?.textContent ?? '').length > 0`)
 await check('模型选择器可打开', `(() => { document.querySelector('.composer-inline-controls .picker-trigger')?.click(); return true })()`)

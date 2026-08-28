@@ -10,6 +10,7 @@ interface ComposerProps {
   /** 嵌入输入框底部的控制区（模型/思考级别选择器等） */
   controls?: ReactNode
   onSend: (text: string) => void
+  onQueue: (text: string) => void
   onAbort: () => void
 }
 
@@ -20,6 +21,7 @@ export function Composer({
   prefill,
   controls,
   onSend,
+  onQueue,
   onAbort
 }: ComposerProps): ReactElement {
   const [value, setValue] = useState('')
@@ -38,15 +40,31 @@ export function Composer({
     }
   }, [prefill])
 
+  const clearValue = useCallback((): void => {
+    setValue('')
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'
+  }, [])
+
   const submit = useCallback(() => {
     const text = value.trim()
     if (text === '' || disabled) return
     onSend(text)
-    setValue('')
-    if (textareaRef.current) textareaRef.current.style.height = 'auto'
-  }, [value, disabled, onSend])
+    clearValue()
+  }, [value, disabled, onSend, clearValue])
+
+  const queue = useCallback(() => {
+    const text = value.trim()
+    if (text === '' || disabled) return
+    onQueue(text)
+    clearValue()
+  }, [value, disabled, onQueue, clearValue])
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.metaKey && value.trim() !== '') {
+      event.preventDefault()
+      queue()
+      return
+    }
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault()
       submit()
@@ -67,7 +85,7 @@ export function Composer({
           <textarea
             ref={textareaRef}
             value={value}
-            placeholder={disabled ? 'agent 未运行…' : '描述任务… (Enter 发送 / Shift+Enter 换行)'}
+            placeholder={disabled ? 'agent 未运行…' : '描述任务… (Tab 排队 / Enter 直接发送)'}
             disabled={disabled}
             rows={1}
             onChange={(event) => {
@@ -82,7 +100,7 @@ export function Composer({
           className="send-button"
           onClick={submit}
           disabled={disabled || value.trim() === ''}
-          title="发送"
+          title="Enter 直接发送"
         >
           <ArrowUp size={16} />
         </button>

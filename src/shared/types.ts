@@ -228,8 +228,10 @@ export interface PionApi {
   startAgent(cwd: string): Promise<void>
   /** Stop the agent subprocess. */
   stopAgent(): Promise<void>
-  /** Send a prompt (agent idle) or a steering message (agent busy). */
+  /** Send directly: prompt when idle or steer when the agent is busy. */
   send(message: string): Promise<void>
+  /** Queue a follow-up message for after the current run. */
+  queue(message: string): Promise<void>
   /** Abort the current run. */
   abort(): Promise<void>
 

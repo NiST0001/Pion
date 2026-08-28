@@ -202,6 +202,7 @@ export function App(): ReactElement {
               </>
             }
             onSend={(text) => void actions.send(text)}
+            onQueue={(text) => void actions.queue(text)}
             onAbort={() => void actions.abort()}
           />
         </div>

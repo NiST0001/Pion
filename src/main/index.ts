@@ -83,6 +83,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('pion:agent-stop', () => bridge.stop())
   ipcMain.handle('pion:agent-send', (_event, message: string) => bridge.send(message))
+  ipcMain.handle('pion:agent-queue', (_event, message: string) => bridge.queue(message))
   ipcMain.handle('pion:agent-abort', () => bridge.abort())
   ipcMain.handle('pion:agent-state', () => bridge.getSessionInfo())
   ipcMain.handle('pion:agent-stderr', () => bridge.getStderr())
