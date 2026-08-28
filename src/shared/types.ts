@@ -275,7 +275,7 @@ export interface PionApi {
   /** Fork the session at an entry; resolves with the message text at the fork point. */
   forkAt(entryId: string): Promise<{ text: string; cancelled: boolean }>
   /** Switch to another session file. */
-  switchSession(sessionPath: string): Promise<void>
+  switchSession(sessionPath: string): Promise<{ cancelled: boolean }>
   /** Delete a persisted session file. */
   deleteSession(sessionPath: string): Promise<DeleteSessionResult>
   /** Copy the selected session's active branch into a new session. */

@@ -309,8 +309,8 @@ export function deriveChanges(timeline: TimelineItem[]): FileChange[] {
 let nextId = 1
 
 const INITIAL_HISTORY_ITEMS = 10
-const HISTORY_CHUNK_SIZE = 24
-const HISTORY_CHUNK_DELAY_MS = 70
+const HISTORY_ENTRY_CHUNK_SIZE = 80
+const HISTORY_CHUNK_DELAY_MS = 24
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -577,6 +577,43 @@ function finalizeStreaming(state: AgentState): AgentState {
 // Session replay: entries -> timeline
 // ---------------------------------------------------------------------------
 
+interface HistoricalToolResult {
+  result: unknown
+  isError: boolean
+}
+
+function collectToolResults(entries: WireEntry[]): Map<string, HistoricalToolResult> {
+  const results = new Map<string, HistoricalToolResult>()
+  for (const entry of entries) {
+    if (entry.type !== 'message' || entry.message?.role !== 'toolResult') continue
+    const record = entry.message as Record<string, unknown>
+    if (typeof record.toolCallId !== 'string') continue
+    results.set(record.toolCallId, {
+      result: entry.message,
+      isError: Boolean(record.isError)
+    })
+  }
+  return results
+}
+
+function timelineItemCount(entry: WireEntry): number {
+  if (entry.type === 'compaction') return typeof entry.summary === 'string' ? 1 : 0
+  if (entry.type !== 'message' || !entry.message) return 0
+  if (entry.message.role === 'user') return 1
+  if (entry.message.role === 'assistant') return 1 + messageToolCalls(entry.message).length
+  return 0
+}
+
+function initialEntryStart(entries: WireEntry[]): number {
+  let count = 0
+  let start = entries.length
+  while (start > 0 && count < INITIAL_HISTORY_ITEMS) {
+    start -= 1
+    count += timelineItemCount(entries[start])
+  }
+  return start
+}
+
 function modeFromEntries(entries: WireEntry[]): AgentMode {
   let mode: AgentMode = 'build'
   for (const entry of entries) {
@@ -590,7 +627,10 @@ function modeFromEntries(entries: WireEntry[]): AgentMode {
   return mode
 }
 
-function entriesToTimeline(entries: WireEntry[]): TimelineItem[] {
+function entriesToTimeline(
+  entries: WireEntry[],
+  toolResults: Map<string, HistoricalToolResult> = collectToolResults(entries)
+): TimelineItem[] {
   const items: TimelineItem[] = []
   for (const entry of entries) {
     if (entry.type === 'compaction') {
@@ -619,37 +659,22 @@ function entriesToTimeline(entries: WireEntry[]): TimelineItem[] {
         historical: true
       })
       for (const call of messageToolCalls(message)) {
+        const tool: ToolItem = {
+          id: call.id,
+          name: call.name,
+          status: 'done',
+          isError: false,
+          ...parseToolArgs(call.name, call.arguments)
+        }
+        const result = toolResults.get(call.id)
         items.push({
           kind: 'tool',
           id: nextId++,
           historical: true,
-          tool: {
-            id: call.id,
-            name: call.name,
-            status: 'done',
-            isError: false,
-            ...parseToolArgs(call.name, call.arguments)
-          }
+          tool: result ? applyToolResult(tool, result.result, result.isError) : tool
         })
       }
       continue
-    }
-
-    if (message.role === 'toolResult') {
-      const record = message as unknown as Record<string, unknown>
-      const toolCallId = typeof record.toolCallId === 'string' ? record.toolCallId : null
-      if (!toolCallId) continue
-      // fill the most recent pending tool item with this id
-      for (let i = items.length - 1; i >= 0; i--) {
-        const item = items[i]
-        if (item.kind === 'tool' && item.tool.id === toolCallId) {
-          items[i] = {
-            ...item,
-            tool: applyToolResult(item.tool, message, Boolean(record.isError))
-          }
-          break
-        }
-      }
     }
   }
   return items
@@ -731,15 +756,22 @@ export function useAgent() {
     const result = await api.getEntries()
     if (!result || loadId !== timelineLoadId.current) return
 
-    const items = entriesToTimeline(result.entries)
-    const initialStart = Math.max(0, items.length - INITIAL_HISTORY_ITEMS)
-    dispatch({ type: 'loadEntries', items: items.slice(initialStart), mode: modeFromEntries(result.entries) })
+    // Only parse the newest entries before the first paint. Older messages are
+    // converted in entry-sized chunks so large sessions do not block the UI.
+    const toolResults = collectToolResults(result.entries)
+    const initialStart = initialEntryStart(result.entries)
+    const initialItems = entriesToTimeline(result.entries.slice(initialStart), toolResults)
+    const mode = modeFromEntries(result.entries)
+    dispatch({ type: 'loadEntries', items: initialItems, mode })
 
-    for (let end = initialStart; end > 0; end -= HISTORY_CHUNK_SIZE) {
+    for (let end = initialStart; end > 0; end -= HISTORY_ENTRY_CHUNK_SIZE) {
       await wait(HISTORY_CHUNK_DELAY_MS)
       if (loadId !== timelineLoadId.current) return
-      const start = Math.max(0, end - HISTORY_CHUNK_SIZE)
-      dispatch({ type: 'prependEntries', items: items.slice(start, end) })
+      const start = Math.max(0, end - HISTORY_ENTRY_CHUNK_SIZE)
+      dispatch({
+        type: 'prependEntries',
+        items: entriesToTimeline(result.entries.slice(start, end), toolResults)
+      })
     }
   }, [api])
 
@@ -761,8 +793,7 @@ export function useAgent() {
       dispatch({ type: 'status', status: { phase: 'starting', cwd } })
       dispatch({ type: 'clearTimeline' })
       await api.startAgent(cwd)
-      await reloadTimeline()
-      await refreshModels()
+      await Promise.all([reloadTimeline(), refreshModels()])
     },
     [api, reloadTimeline, refreshModels]
   )
@@ -822,10 +853,11 @@ export function useAgent() {
   )
 
   const switchSession = useCallback(
-    async (sessionPath: string) => {
-      if (!api) return
-      await api.switchSession(sessionPath)
-      await reloadTimeline()
+    async (sessionPath: string): Promise<{ cancelled: boolean }> => {
+      if (!api) return { cancelled: true }
+      const result = await api.switchSession(sessionPath)
+      if (!result.cancelled) await reloadTimeline()
+      return result
     },
     [api, reloadTimeline]
   )

@@ -47,8 +47,10 @@ export function App(): ReactElement {
   const [sidebarWidth, setSidebarWidth] = useState(276)
   const [reviewWidth, setReviewWidth] = useState(390)
   const [sessionQuery, setSessionQuery] = useState('')
+  const [pendingSession, setPendingSession] = useState<{ cwd: string; path: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const panelResizeRef = useRef<PanelResizeState | null>(null)
+  const sessionSelectionId = useRef(0)
 
   // bootstrap: pick the most recent project (or home) and start the agent
   useEffect(() => {
@@ -104,6 +106,15 @@ export function App(): ReactElement {
     return off
   }, [hasBridge])
 
+  // Keep sidebar selection independent from the slower session replay. Once
+  // the agent reports the target session, the optimistic selection is cleared.
+  useEffect(() => {
+    if (!pendingSession) return
+    if (state.status.cwd === pendingSession.cwd && state.session?.sessionFile === pendingSession.path) {
+      setPendingSession(null)
+    }
+  }, [pendingSession, state.session?.sessionFile, state.status.cwd])
+
   // auto-scroll while the conversation grows
   const timelineLength = state.timeline.length
   const lastItem = state.timeline[timelineLength - 1]
@@ -146,6 +157,8 @@ export function App(): ReactElement {
 
   const handleSelectProject = useCallback(
     async (cwd: string) => {
+      sessionSelectionId.current += 1
+      setPendingSession(null)
       if (cwd === state.status.cwd) return
       await actions.start(cwd)
     },
@@ -161,6 +174,8 @@ export function App(): ReactElement {
 
   const handleNewSession = useCallback(
     async (cwd?: string) => {
+      sessionSelectionId.current += 1
+      setPendingSession(null)
       if (cwd) await activateProject(cwd)
       await actions.newSession()
     },
@@ -186,10 +201,26 @@ export function App(): ReactElement {
 
   const handleSelectSession = useCallback(
     async (cwd: string, path: string) => {
-      await activateProject(cwd)
-      await actions.switchSession(path)
+      if (cwd === state.status.cwd && path === state.session?.sessionFile) {
+        setPendingSession(null)
+        return
+      }
+      const requestId = ++sessionSelectionId.current
+      const previousSelection = pendingSession
+      setPendingSession({ cwd, path })
+      try {
+        await activateProject(cwd)
+        const result = await actions.switchSession(path)
+        if (result.cancelled && requestId === sessionSelectionId.current) {
+          setPendingSession(previousSelection)
+          return
+        }
+      } catch (error) {
+        if (requestId === sessionSelectionId.current) setPendingSession(previousSelection)
+        console.error('[pion] 切换会话失败', error)
+      }
     },
-    [actions, activateProject]
+    [actions, activateProject, pendingSession, state.session?.sessionFile, state.status.cwd]
   )
 
   const handleDeleteSession = useCallback(
@@ -239,6 +270,9 @@ export function App(): ReactElement {
     setDrawerChange(null)
   }, [])
 
+  const activeCwd = pendingSession?.cwd ?? state.status.cwd
+  const activePath = pendingSession?.path ?? state.session?.sessionFile
+
   if (!hasBridge) {
     return (
       <div className="boot-error">
@@ -276,8 +310,8 @@ export function App(): ReactElement {
               sessionsByProject={state.sessionsByProject}
               branchesByProject={state.branchesByProject}
               searchQuery={sessionQuery}
-              activeCwd={state.status.cwd}
-              activePath={state.session?.sessionFile}
+              activeCwd={activeCwd}
+              activePath={activePath}
               onSelect={(cwd) => void handleSelectProject(cwd)}
               onAdd={() => void handleAddProject()}
               onRemove={(cwd) => void actions.removeProject(cwd)}

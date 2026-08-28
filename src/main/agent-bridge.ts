@@ -149,7 +149,9 @@ export class AgentBridge {
       await client.start()
       console.log('[pion] agent subprocess running, cwd:', cwd)
       this.setStatus({ phase: 'running' })
-      await this.refresh()
+      // The renderer requests timeline/model data in parallel. Do not make
+      // startup wait for the secondary sidebar refresh to finish.
+      void this.refresh()
     } catch (err) {
       this.client = null
       const message = err instanceof Error ? err.message : String(err)
@@ -219,10 +221,11 @@ export class AgentBridge {
     return { text: result.text, cancelled: result.cancelled }
   }
 
-  async switchSession(sessionPath: string): Promise<void> {
+  async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
     if (!this.client) throw new Error('agent 未启动')
     const result = await this.client.switchSession(sessionPath)
-    if (!result.cancelled) await this.refresh()
+    if (!result.cancelled) void this.refreshSessionInfo()
+    return { cancelled: result.cancelled }
   }
 
   /** Resolve a session path against the sessions visible for the active cwd. */
@@ -535,13 +538,20 @@ export class AgentBridge {
     }
   }
 
+  /** Push only the active session state after a session switch. */
+  private async refreshSessionInfo(): Promise<void> {
+    this.win?.webContents.send(STATE_CHANNEL, await this.getSessionInfo())
+  }
+
   /** Push state + session list + branch tree to the renderer. */
   private async refresh(): Promise<void> {
-    const info = await this.getSessionInfo()
+    const [info, sessions, tree] = await Promise.all([
+      this.getSessionInfo(),
+      this.listSessions(),
+      this.getTree()
+    ])
     this.win?.webContents.send(STATE_CHANNEL, info)
-    const sessions = await this.listSessions()
     this.win?.webContents.send(SESSIONS_CHANNEL, sessions)
-    const tree = await this.getTree()
     this.win?.webContents.send(TREE_CHANNEL, tree)
   }
 }
