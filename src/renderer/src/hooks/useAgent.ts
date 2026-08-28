@@ -122,7 +122,7 @@ export interface ToolItem {
 }
 
 export type TimelineItem =
-  | { kind: 'user'; id: number; entryId?: string; text: string }
+  | { kind: 'user'; id: number; entryId?: string; text: string; historical?: boolean }
   | {
       kind: 'assistant'
       id: number
@@ -131,9 +131,10 @@ export type TimelineItem =
       thinking: string
       streaming: boolean
       error?: string
+      historical?: boolean
     }
-  | { kind: 'tool'; id: number; tool: ToolItem }
-  | { kind: 'compaction'; id: number; summary: string }
+  | { kind: 'tool'; id: number; tool: ToolItem; historical?: boolean }
+  | { kind: 'compaction'; id: number; summary: string; historical?: boolean }
 
 export interface FileChange {
   path: string
@@ -155,6 +156,7 @@ export interface AgentState {
   models: ModelOption[]
   thinkingLevels: string[]
   timeline: TimelineItem[]
+  timelineMutation: 'replace' | 'prepend' | 'append' | null
   busy: boolean
   queued: { steering: number; followUp: number }
 }
@@ -170,6 +172,7 @@ const initialState: AgentState = {
   models: [],
   thinkingLevels: [],
   timeline: [],
+  timelineMutation: null,
   busy: false,
   queued: { steering: 0, followUp: 0 }
 }
@@ -186,7 +189,8 @@ type Action =
   | { type: 'models'; models: ModelOption[] }
   | { type: 'thinkingLevels'; levels: string[] }
   | { type: 'event'; event: WireEventInput }
-  | { type: 'loadEntries'; entries: WireEntry[] }
+  | { type: 'loadEntries'; items: TimelineItem[] }
+  | { type: 'prependEntries'; items: TimelineItem[] }
   | { type: 'clearTimeline' }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +300,14 @@ export function deriveChanges(timeline: TimelineItem[]): FileChange[] {
 
 let nextId = 1
 
+const INITIAL_HISTORY_ITEMS = 10
+const HISTORY_CHUNK_SIZE = 24
+const HISTORY_CHUNK_DELAY_MS = 70
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
 function reducer(state: AgentState, action: Action): AgentState {
   switch (action.type) {
     case 'status': {
@@ -360,11 +372,31 @@ function reducer(state: AgentState, action: Action): AgentState {
     case 'thinkingLevels':
       return { ...state, thinkingLevels: action.levels }
     case 'loadEntries':
-      return { ...state, timeline: entriesToTimeline(action.entries), busy: false }
+      return {
+        ...state,
+        timeline: action.items,
+        timelineMutation: 'replace',
+        busy: false
+      }
+    case 'prependEntries':
+      if (action.items.length === 0) return state
+      return {
+        ...state,
+        timeline: [...action.items, ...state.timeline],
+        timelineMutation: 'prepend'
+      }
     case 'clearTimeline':
-      return { ...state, timeline: [], busy: false, queued: { steering: 0, followUp: 0 } }
-    case 'event':
-      return reduceEvent(state, action.event)
+      return {
+        ...state,
+        timeline: [],
+        timelineMutation: 'replace',
+        busy: false,
+        queued: { steering: 0, followUp: 0 }
+      }
+    case 'event': {
+      const next = reduceEvent(state, action.event)
+      return next.timeline === state.timeline ? next : { ...next, timelineMutation: 'append' }
+    }
   }
 }
 
@@ -524,7 +556,7 @@ function entriesToTimeline(entries: WireEntry[]): TimelineItem[] {
   for (const entry of entries) {
     if (entry.type === 'compaction') {
       if (typeof entry.summary === 'string') {
-        items.push({ kind: 'compaction', id: nextId++, summary: '上下文已压缩' })
+        items.push({ kind: 'compaction', id: nextId++, summary: '上下文已压缩', historical: true })
       }
       continue
     }
@@ -533,7 +565,7 @@ function entriesToTimeline(entries: WireEntry[]): TimelineItem[] {
     if (!message) continue
 
     if (message.role === 'user') {
-      items.push({ kind: 'user', id: nextId++, entryId: entry.id, text: messageText(message) })
+      items.push({ kind: 'user', id: nextId++, entryId: entry.id, text: messageText(message), historical: true })
       continue
     }
 
@@ -544,12 +576,14 @@ function entriesToTimeline(entries: WireEntry[]): TimelineItem[] {
         entryId: entry.id,
         text: messageText(message),
         thinking: messageThinking(message),
-        streaming: false
+        streaming: false,
+        historical: true
       })
       for (const call of messageToolCalls(message)) {
         items.push({
           kind: 'tool',
           id: nextId++,
+          historical: true,
           tool: {
             id: call.id,
             name: call.name,
@@ -590,6 +624,7 @@ export function useAgent() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const api = typeof window !== 'undefined' ? window.pion : undefined
   const bootstrapped = useRef(false)
+  const timelineLoadId = useRef(0)
 
   useEffect(() => {
     if (!api) return
@@ -650,11 +685,23 @@ export function useAgent() {
     }
   }, [api, state.projects, state.branchesByProject])
 
-  /** Rebuild the timeline from the active session's entries. */
+  /** Rebuild the timeline progressively, showing the newest viewport first. */
   const reloadTimeline = useCallback(async () => {
     if (!api) return
+    const loadId = ++timelineLoadId.current
     const result = await api.getEntries()
-    if (result) dispatch({ type: 'loadEntries', entries: result.entries })
+    if (!result || loadId !== timelineLoadId.current) return
+
+    const items = entriesToTimeline(result.entries)
+    const initialStart = Math.max(0, items.length - INITIAL_HISTORY_ITEMS)
+    dispatch({ type: 'loadEntries', items: items.slice(initialStart) })
+
+    for (let end = initialStart; end > 0; end -= HISTORY_CHUNK_SIZE) {
+      await wait(HISTORY_CHUNK_DELAY_MS)
+      if (loadId !== timelineLoadId.current) return
+      const start = Math.max(0, end - HISTORY_CHUNK_SIZE)
+      dispatch({ type: 'prependEntries', items: items.slice(start, end) })
+    }
   }, [api])
 
   const refreshModels = useCallback(async () => {

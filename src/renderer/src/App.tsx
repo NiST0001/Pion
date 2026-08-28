@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { FolderOpen, Settings, Sparkles, Store } from 'lucide-react'
 import { useAgent, deriveChanges } from './hooks/useAgent'
@@ -113,11 +113,19 @@ export function App(): ReactElement {
         ? lastItem.tool.outputText?.length ?? 0
         : 0
     : 0
-  useEffect(() => {
+  const lastItemId = lastItem?.id ?? null
+  const previousTimelineHeight = useRef(0)
+  useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    el.scrollTop = el.scrollHeight
-  }, [timelineLength, lastGrow])
+    const previousHeight = previousTimelineHeight.current
+    if (state.timelineMutation === 'prepend' && previousHeight > 0) {
+      el.scrollTop += el.scrollHeight - previousHeight
+    } else if (state.timelineMutation !== null) {
+      el.scrollTop = el.scrollHeight
+    }
+    previousTimelineHeight.current = el.scrollHeight
+  }, [lastGrow, lastItemId, state.timelineMutation, timelineLength])
 
   const handleFork = useCallback(
     async (entryId: string) => {
@@ -320,9 +328,9 @@ export function App(): ReactElement {
               <div className="timeline">
                 {state.timeline.map((item) =>
                   item.kind === 'tool' ? (
-                    <ToolCallItem key={item.id} tool={item.tool} />
+                    <ToolCallItem key={item.id} tool={item.tool} historical={item.historical} />
                   ) : item.kind === 'compaction' ? (
-                    <div key={item.id} className="compaction-marker">
+                    <div key={item.id} className={`compaction-marker${item.historical ? ' history-reveal' : ''}`}>
                       {item.summary}
                     </div>
                   ) : (
