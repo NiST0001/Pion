@@ -181,6 +181,18 @@ export function Composer({
       event.preventDefault()
       return
     }
+    if (
+      showCommandMenu &&
+      event.key === 'Tab' &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey
+    ) {
+      event.preventDefault()
+      selectSlashCommand(activeCommandIndex)
+      return
+    }
     if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.metaKey && value.trim() !== '') {
       event.preventDefault()
       queue()
