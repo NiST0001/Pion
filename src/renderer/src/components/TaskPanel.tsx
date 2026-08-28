@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 import { ArrowDown, Check, Circle, ListTodo } from 'lucide-react'
 
@@ -21,14 +21,65 @@ const DEFAULT_TASKS: TaskTarget[] = [
   { id: 'finish', title: '确认任务完成并提交变更', done: false }
 ]
 
+const TASK_STORAGE_PREFIX = 'pion:session-tasks:'
+
+function cloneDefaultTasks(): TaskTarget[] {
+  return DEFAULT_TASKS.map((task) => ({ ...task }))
+}
+
+function taskStorageKey(sessionKey: string): string {
+  return `${TASK_STORAGE_PREFIX}${encodeURIComponent(sessionKey)}`
+}
+
+function loadTasks(sessionKey: string): TaskTarget[] {
+  if (typeof window === 'undefined') return cloneDefaultTasks()
+  try {
+    const raw = window.localStorage.getItem(taskStorageKey(sessionKey))
+    if (!raw) return cloneDefaultTasks()
+    const saved = JSON.parse(raw) as unknown
+    if (!Array.isArray(saved)) return cloneDefaultTasks()
+    const doneById = new Map(
+      saved.flatMap((task) => {
+        if (!task || typeof task !== 'object') return []
+        const record = task as Record<string, unknown>
+        return typeof record.id === 'string' && typeof record.done === 'boolean'
+          ? [[record.id, record.done] as const]
+          : []
+      })
+    )
+    return DEFAULT_TASKS.map((task) => ({
+      ...task,
+      done: doneById.get(task.id) ?? task.done
+    }))
+  } catch {
+    return cloneDefaultTasks()
+  }
+}
+
+function saveTasks(sessionKey: string, tasks: TaskTarget[]): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(taskStorageKey(sessionKey), JSON.stringify(tasks))
+  } catch {
+    // Task persistence is best effort and should never block the chat UI.
+  }
+}
+
 /** Compact, expandable work-plan surface docked above the composer. */
-export function TaskPanel(): ReactElement {
+export function TaskPanel({ sessionKey }: { sessionKey: string }): ReactElement {
   const [expanded, setExpanded] = useState(true)
-  const [tasks, setTasks] = useState(DEFAULT_TASKS)
+  const [tasks, setTasks] = useState(() => loadTasks(sessionKey))
   const completed = tasks.filter((task) => task.done).length
 
+  useEffect(() => {
+    saveTasks(sessionKey, tasks)
+  }, [sessionKey, tasks])
+
   return (
-    <section className={`task-panel${expanded ? ' expanded' : ' collapsed'}`}>
+    <section
+      className={`task-panel${expanded ? ' expanded' : ' collapsed'}`}
+      data-session-key={sessionKey}
+    >
       <div className="task-panel-card">
         <div className="task-panel-head">
           <div className="task-panel-summary">

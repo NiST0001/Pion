@@ -212,6 +212,7 @@ export function App(): ReactElement {
   )
 
   const changes = useMemo(() => deriveChanges(state.timeline), [state.timeline])
+  const taskSessionKey = state.session?.sessionId || state.session?.sessionFile || state.status.cwd || 'default'
   const messageHistory = useMemo(
     () => state.timeline.flatMap((item) => (
       item.kind === 'user' && item.text.trim() ? [item.text] : []
@@ -336,7 +337,7 @@ export function App(): ReactElement {
           </main>
 
           <div className="composer-dock">
-            <TaskPanel />
+            <TaskPanel key={taskSessionKey} sessionKey={taskSessionKey} />
             <Composer
               busy={state.busy}
               queued={state.queued}

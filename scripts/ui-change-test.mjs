@@ -111,6 +111,7 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`document.querySelectorAll('.composer-inline-controls .thinking-segment').length > 0`)) break
 }
 await check('composer 输入框存在', `!!document.querySelector('.composer-row textarea')`)
+await check('任务面板绑定当前会话', `Boolean(document.querySelector('.task-panel')?.dataset.sessionKey)`)
 await check('任务面板默认展开', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === 'true' && !!document.querySelector('.task-panel-list')`)
 await check('任务面板使用圆形切换按钮', `(() => { const button = document.querySelector('.task-panel-toggle'); const rect = button?.getBoundingClientRect(); return !!button && !!rect && rect.width >= 40 && Math.abs(rect.width - rect.height) < 1 && getComputedStyle(button).borderRadius === '50%' && getComputedStyle(button).boxShadow !== 'none'; })()`)
 await check('任务面板使用单一上下箭头', `document.querySelectorAll('.task-panel-toggle-icon').length === 1 && document.querySelector('.task-panel-toggle-icon')?.tagName === 'svg'`)
@@ -216,8 +217,10 @@ await evaluate(`(() => {
 })()`)
 await sleep(180)
 await check('拖拽后会话顺序可改变', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && before.length >= 2 && after[0] === before[1] && after[1] === before[0]; })()`)
+await evaluate(`window.__pionTaskSessionBefore = document.querySelector('.task-panel')?.dataset.sessionKey ?? null`)
 await evaluate(`(() => { const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const target = [...(list?.querySelectorAll('.side-session') ?? [])].find((item) => item.dataset.sessionPath !== window.__pionActiveSessionBefore); target?.click(); return Boolean(target); })()`)
 await sleep(1200)
+await check('任务面板随会话切换', `(() => { const before = window.__pionTaskSessionBefore; const after = document.querySelector('.task-panel')?.dataset.sessionKey; return Boolean(before && after && before !== after); })()`)
 await check('激活会话不会自动置顶', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && after[0] === before[1] && after[1] === before[0]; })()`)
 await evaluate(`(() => {
   const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2)
