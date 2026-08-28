@@ -35,7 +35,8 @@ const STATE_CHANNEL = 'pion:agent-state'
 const SESSIONS_CHANNEL = 'pion:agent-sessions'
 const TREE_CHANNEL = 'pion:agent-tree'
 const PLAN_EXTENSION_PATH = resolve(__dirname, '../../node_modules/@narumitw/pi-plan-mode/dist/index.ts')
-const MAX_SESSION_BACKENDS = 10
+/** Global pool size shared by every project and worktree. */
+const MAX_RETAINED_BACKENDS = 10
 
 /** Events after which derived state (model/session/tree) is re-pushed. */
 const STATE_REFRESH_EVENTS = new Set([
@@ -104,8 +105,9 @@ function parseGitWorktrees(output: string): GitWorktreeRecord[] {
  * pi runs headless (`node dist/cli.js --mode rpc`) and speaks JSON lines on
  * stdin/stdout; `RpcClient` handles the framing. A session backend is loaded
  * when its session is selected and remains alive while another session is
- * selected. At most ten backends are retained; the oldest is evicted before
- * loading an eleventh. Only the active backend's events are forwarded.
+ * selected. A global pool retains at most ten backends across all projects and
+ * worktrees; the oldest is evicted before loading an eleventh. Only the active
+ * backend's events are forwarded.
  */
 export class AgentBridge {
   private readonly backends = new Map<string, BackendRecord>()
@@ -263,7 +265,7 @@ export class AgentBridge {
 
   /** Stop the oldest retained backend before opening another one. */
   private async evictOldestBackend(excludeKey?: string): Promise<void> {
-    while (this.backends.size >= MAX_SESSION_BACKENDS) {
+    while (this.backends.size >= MAX_RETAINED_BACKENDS) {
       const victim = this.backendOrder.find((key) => key !== excludeKey && this.backends.has(key))
       if (!victim) throw new Error('无法为新的会话后端腾出空间')
       console.log('[pion] evicting oldest session backend:', victim)
@@ -467,15 +469,21 @@ export class AgentBridge {
     return { cancelled: false }
   }
 
-  /** Resolve a session path against the sessions visible for the active cwd. */
+  /**
+   * Resolve a session path without restricting it to the currently selected
+   * project. The backend pool is global, so a session from another project or
+   * worktree can be selected and reused as well.
+   */
   private async resolveListedSession(sessionPath: string): Promise<string> {
-    const cwd = this.activeCwd ?? this.status.cwd
-    if (!cwd) throw new Error('没有活动工作目录')
     const requested = resolve(sessionPath)
-    const sessions = await SessionManager.list(cwd)
-    const match = sessions.find((session) => resolve(session.path) === requested)
-    if (!match) throw new Error('会话不存在，或不属于当前项目')
-    return resolve(match.path)
+    if (!(await pathExists(requested))) throw new Error('会话不存在')
+    try {
+      const manager = this.openSessionManager(requested)
+      if (!manager.getSessionFile()) throw new Error('会话文件无效')
+    } catch {
+      throw new Error('会话不存在')
+    }
+    return requested
   }
 
   private async stopBackend(key: string): Promise<void> {
