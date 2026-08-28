@@ -13,6 +13,7 @@ import { ReviewPanel } from './components/ReviewPanel'
 import { ModelPicker, ThinkingPicker } from './components/ModelPicker'
 import { TitleBar } from './components/TitleBar'
 import { SettingsModal } from './components/SettingsModal'
+import { SkillsToolsModal } from './components/SkillsToolsModal'
 
 type ResizeTarget = 'sidebar' | 'review'
 
@@ -36,6 +37,7 @@ export function App(): ReactElement {
   const [prefill, setPrefill] = useState('')
   const [drawerChange, setDrawerChange] = useState<FileChange | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [reviewOpen, setReviewOpen] = useState(false)
@@ -239,6 +241,7 @@ export function App(): ReactElement {
               searchQuery={sessionQuery}
               onSearch={setSessionQuery}
               onNewSession={() => void handleNewSession()}
+              onOpenCapabilities={() => setCapabilitiesOpen(true)}
             />
             <ProjectList
               projects={state.projects}
@@ -350,6 +353,10 @@ export function App(): ReactElement {
         )}
       </div>
 
+      <SkillsToolsModal
+        open={capabilitiesOpen}
+        onClose={() => setCapabilitiesOpen(false)}
+      />
       <SettingsModal
         open={settingsOpen}
         session={state.session}

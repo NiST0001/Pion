@@ -5,6 +5,7 @@ import type {
   ProjectMeta,
   SessionInfo,
   SessionMeta,
+  SkillInfo,
   TreeNodeLite,
   WireEventInput
 } from '../shared/types'
@@ -39,6 +40,7 @@ const api: PionApi = {
 
   // model & thinking
   getAvailableModels: () => ipcRenderer.invoke('pion:agent-models'),
+  getSkills: () => ipcRenderer.invoke('pion:agent-skills') as Promise<SkillInfo[]>,
   setModel: (provider, modelId) => ipcRenderer.invoke('pion:agent-set-model', provider, modelId),
   getThinkingLevels: () => ipcRenderer.invoke('pion:agent-thinking-levels'),
   setThinkingLevel: (level) => ipcRenderer.invoke('pion:agent-set-thinking', level),

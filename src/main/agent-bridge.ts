@@ -14,6 +14,7 @@ import type {
   ModelOption,
   SessionInfo,
   SessionMeta,
+  SkillInfo,
   TreeNodeLite,
   WireEntry,
   WireMessage
@@ -282,6 +283,21 @@ export class AgentBridge {
     if (!this.client) throw new Error('agent 未启动')
     await this.client.setModel(provider, modelId)
     await this.refresh()
+  }
+
+  async getSkills(): Promise<SkillInfo[]> {
+    if (!this.client) return []
+    try {
+      const commands = await this.client.getCommands()
+      return commands
+        .filter((command) => command.source === 'skill')
+        .map((command) => ({
+          name: command.name.replace(/^skill:/, ''),
+          description: command.description
+        }))
+    } catch {
+      return []
+    }
   }
 
   async getThinkingLevels(): Promise<string[]> {

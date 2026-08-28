@@ -12,7 +12,6 @@ import {
   Loader2,
   MessageSquarePlus,
   Search,
-  Sparkles,
   Trash2,
   Wrench
 } from 'lucide-react'
@@ -64,14 +63,14 @@ function Section({
 export function SidebarToolbar({
   searchQuery,
   onSearch,
-  onNewSession
+  onNewSession,
+  onOpenCapabilities
 }: {
   searchQuery: string
   onSearch: (value: string) => void
   onNewSession: () => void
+  onOpenCapabilities: () => void
 }): ReactElement {
-  const [toolsOpen, setToolsOpen] = useState(false)
-
   return (
     <div className="sidebar-toolbar">
       <div className="sidebar-quick-actions">
@@ -86,39 +85,15 @@ export function SidebarToolbar({
         </button>
         <button
           type="button"
-          className={`sidebar-tools-button${toolsOpen ? ' active' : ''}`}
-          aria-expanded={toolsOpen}
-          onClick={() => setToolsOpen((open) => !open)}
-          title="技能与工具"
+          className="sidebar-tools-button"
+          onClick={onOpenCapabilities}
+          title="打开技能与工具"
         >
           <Wrench size={14} />
           <span>技能与工具</span>
-          <ChevronDown size={13} className="sidebar-tools-chevron" />
+          <ChevronRight size={13} className="sidebar-tools-arrow" />
         </button>
       </div>
-
-      {toolsOpen && (
-        <div className="sidebar-tools-panel" role="region" aria-label="技能与工具">
-          <div className="sidebar-tools-panel-head">
-            <Sparkles size={13} />
-            <span>当前工作区能力</span>
-          </div>
-          <div className="sidebar-tool-row">
-            <FileDiff size={13} />
-            <span>
-              <strong>文件与终端</strong>
-              <small>读取、编辑文件和运行命令</small>
-            </span>
-          </div>
-          <div className="sidebar-tool-row">
-            <GitBranch size={13} />
-            <span>
-              <strong>会话工作流</strong>
-              <small>分支、压缩和导出会话</small>
-            </span>
-          </div>
-        </div>
-      )}
 
       <label className="sidebar-search">
         <Search size={14} aria-hidden="true" />

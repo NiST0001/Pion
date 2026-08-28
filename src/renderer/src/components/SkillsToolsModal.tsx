@@ -1,0 +1,284 @@
+import { useEffect, useState } from 'react'
+import type { ReactElement } from 'react'
+import {
+  ChevronRight,
+  FileDiff,
+  Loader2,
+  Sparkles,
+  Terminal,
+  Wrench,
+  X
+} from 'lucide-react'
+import type { SkillInfo } from '../../../shared/types'
+
+type CapabilityPage = 'skills' | 'tools'
+
+interface ToolInfo {
+  name: string
+  title: string
+  description: string
+}
+
+const BUILTIN_TOOLS: ToolInfo[] = [
+  {
+    name: 'read',
+    title: '读取文件',
+    description: '查看文本文件、图片和项目中的现有内容。'
+  },
+  {
+    name: 'write',
+    title: '写入文件',
+    description: '创建新文件或完整覆盖已有文件内容。'
+  },
+  {
+    name: 'edit',
+    title: '编辑文件',
+    description: '通过精确文本替换修改代码，保留变更边界。'
+  },
+  {
+    name: 'bash',
+    title: '执行命令',
+    description: '在当前项目目录运行构建、测试和其他 Shell 命令。'
+  }
+]
+
+export function SkillsToolsModal({
+  open,
+  onClose
+}: {
+  open: boolean
+  onClose: () => void
+}): ReactElement | null {
+  const [page, setPage] = useState<CapabilityPage>('skills')
+  const [skills, setSkills] = useState<SkillInfo[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!open) return
+    setPage('skills')
+    setSkills([])
+    setError('')
+    setLoading(true)
+    let active = true
+
+    void window.pion.getSkills()
+      .then((loadedSkills) => {
+        if (active) setSkills(loadedSkills)
+      })
+      .catch((err: unknown) => {
+        if (active) setError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      active = false
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [open, onClose])
+
+  if (!open) return null
+
+  return (
+    <div className="modal-backdrop capabilities-backdrop" onClick={onClose}>
+      <div
+        className="modal capabilities-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="capabilities-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="modal-head">
+          <div>
+            <div className="modal-kicker">PION CAPABILITIES</div>
+            <h2 id="capabilities-title">技能与工具</h2>
+          </div>
+          <button type="button" className="icon-button capabilities-close" onClick={onClose} title="关闭">
+            <X size={16} />
+          </button>
+        </header>
+
+        <div className="capabilities-body">
+          <nav className="capabilities-nav" aria-label="能力分类">
+            <div className="capabilities-nav-label">能力目录</div>
+            <CapabilityNavItem
+              page="skills"
+              active={page === 'skills'}
+              icon={<Sparkles size={15} />}
+              label="技能"
+              description="工作流与方法"
+              onClick={() => setPage('skills')}
+            />
+            <CapabilityNavItem
+              page="tools"
+              active={page === 'tools'}
+              icon={<Wrench size={15} />}
+              label="工具"
+              description="文件与命令"
+              onClick={() => setPage('tools')}
+            />
+          </nav>
+
+          <main className="capabilities-content">
+            {page === 'skills' ? (
+              <SkillsPage skills={skills} loading={loading} error={error} />
+            ) : (
+              <ToolsPage />
+            )}
+          </main>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CapabilityNavItem({
+  page,
+  active,
+  icon,
+  label,
+  description,
+  onClick
+}: {
+  page: CapabilityPage
+  active: boolean
+  icon: ReactElement
+  label: string
+  description: string
+  onClick: () => void
+}): ReactElement {
+  return (
+    <button
+      type="button"
+      data-page={page}
+      className={`capabilities-nav-item${active ? ' active' : ''}`}
+      aria-current={active ? 'page' : undefined}
+      onClick={onClick}
+    >
+      <span className="capabilities-nav-icon">{icon}</span>
+      <span className="capabilities-nav-copy">
+        <strong>{label}</strong>
+        <small>{description}</small>
+      </span>
+      <ChevronRight size={13} className="capabilities-nav-arrow" />
+    </button>
+  )
+}
+
+function SkillsPage({
+  skills,
+  loading,
+  error
+}: {
+  skills: SkillInfo[]
+  loading: boolean
+  error: string
+}): ReactElement {
+  return (
+    <section className="capabilities-page" data-page="skills">
+      <div className="capabilities-page-heading">
+        <div className="capabilities-page-kicker">SKILLS</div>
+        <h3>技能</h3>
+        <p>技能是可复用的工作方法，会根据当前工作区和用户配置自动加载。</p>
+      </div>
+
+      <div className="capabilities-toolbar">
+        <span className="capabilities-count">
+          {loading ? '正在读取…' : `${skills.length} 项已加载`}
+        </span>
+        <span className="capabilities-source">当前工作区 · 用户配置</span>
+      </div>
+
+      {error && <div className="capabilities-error">读取技能失败：{error}</div>}
+      {loading && (
+        <div className="capabilities-empty">
+          <Loader2 size={16} className="spin" />
+          <span>正在读取可用技能…</span>
+        </div>
+      )}
+      {!loading && skills.length === 0 && !error && (
+        <div className="capabilities-empty">
+          <Sparkles size={18} />
+          <span>当前没有发现可用技能</span>
+        </div>
+      )}
+      {!loading && skills.length > 0 && (
+        <div className="capabilities-grid">
+          {skills.map((skill) => (
+            <CapabilityCard
+              key={skill.name}
+              kind="skill"
+              icon={<Sparkles size={16} />}
+              name={skill.name}
+              description={skill.description || '可调用的工作技能。'}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function ToolsPage(): ReactElement {
+  return (
+    <section className="capabilities-page" data-page="tools">
+      <div className="capabilities-page-heading">
+        <div className="capabilities-page-kicker">TOOLS</div>
+        <h3>工具</h3>
+        <p>工具是 agent 在当前工作区中可以直接调用的文件和终端能力。</p>
+      </div>
+
+      <div className="capabilities-toolbar">
+        <span className="capabilities-count">{BUILTIN_TOOLS.length} 项可用</span>
+        <span className="capabilities-source">Pi 内置工具</span>
+      </div>
+
+      <div className="capabilities-grid">
+        {BUILTIN_TOOLS.map((tool) => (
+          <CapabilityCard
+            key={tool.name}
+            kind="tool"
+            icon={tool.name === 'bash' ? <Terminal size={16} /> : <FileDiff size={16} />}
+            name={tool.name}
+            title={tool.title}
+            description={tool.description}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function CapabilityCard({
+  kind,
+  icon,
+  name,
+  title,
+  description
+}: {
+  kind: 'skill' | 'tool'
+  icon: ReactElement
+  name: string
+  title?: string
+  description: string
+}): ReactElement {
+  return (
+    <article className={`capability-card capability-card-${kind} ${kind}-card`}>
+      <span className="capability-card-icon">{icon}</span>
+      <div className="capability-card-copy">
+        <div className="capability-card-name-row">
+          <strong>{title || name}</strong>
+          <code>{kind === 'skill' ? `/${name}` : name}</code>
+        </div>
+        <p>{description}</p>
+      </div>
+    </article>
+  )
+}

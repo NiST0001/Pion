@@ -113,6 +113,7 @@ function registerIpc(): void {
 
   // model & thinking ------------------------------------------------------------
   ipcMain.handle('pion:agent-models', () => bridge.getModels())
+  ipcMain.handle('pion:agent-skills', () => bridge.getSkills())
   ipcMain.handle('pion:agent-set-model', (_event, provider: string, modelId: string) =>
     bridge.setModel(provider, modelId)
   )

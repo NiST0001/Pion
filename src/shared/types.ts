@@ -181,6 +181,11 @@ export interface ModelOption {
   reasoning?: boolean
 }
 
+export interface SkillInfo {
+  name: string
+  description?: string
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -261,6 +266,7 @@ export interface PionApi {
 
   // model & thinking --------------------------------------------------------
   getAvailableModels(): Promise<ModelOption[]>
+  getSkills(): Promise<SkillInfo[]>
   setModel(provider: string, modelId: string): Promise<void>
   getThinkingLevels(): Promise<string[]>
   setThinkingLevel(level: string): Promise<void>
