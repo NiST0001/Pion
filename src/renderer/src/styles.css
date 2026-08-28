@@ -4262,8 +4262,8 @@ body {
 }
 
 .task-panel.collapsed .task-panel-toggle {
-  top: auto;
-  bottom: 0;
+  top: -48px;
+  bottom: auto;
 }
 
 .task-panel.collapsed .task-panel-toggle:hover {
