@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react'
-import { GitBranch, User as UserIcon } from 'lucide-react'
+import { GitBranch } from 'lucide-react'
 import type { TimelineItem } from '../hooks/useAgent'
 import { Markdown } from './Markdown'
 
@@ -26,16 +26,12 @@ export function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactE
             </button>
           )}
         </div>
-        <div className="avatar avatar-user">
-          <UserIcon size={14} />
-        </div>
       </div>
     )
   }
 
   return (
     <div className={`row row-assistant${item.historical ? ' history-reveal' : ''}${item.streaming ? ' streaming-reveal' : ''}`}>
-      <div className="avatar avatar-assistant">π</div>
       <div className="bubble bubble-assistant">
         {item.thinking !== '' && (
           <details className="thinking">

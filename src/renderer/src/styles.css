@@ -900,30 +900,6 @@ button {
   justify-content: flex-end;
 }
 
-.avatar {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  margin-top: 2px;
-}
-
-.avatar-user {
-  background: var(--bg-hover);
-  color: var(--fg-dim);
-  order: 2;
-}
-
-.avatar-assistant {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-weight: 700;
-}
-
 .bubble {
   max-width: min(86%, 760px);
   padding: 10px 14px;
@@ -3417,24 +3393,6 @@ body {
 
 .row {
   gap: 12px;
-}
-
-.avatar {
-  width: 30px;
-  height: 30px;
-  margin-top: 4px;
-  border-radius: 50%;
-}
-
-.avatar-assistant {
-  background: var(--accent-soft);
-  border: 1px solid rgba(var(--accent-rgb), 0.28);
-  color: var(--accent-strong);
-}
-
-.avatar-user {
-  background: var(--bg-active);
-  color: var(--fg-dim);
 }
 
 .bubble {
