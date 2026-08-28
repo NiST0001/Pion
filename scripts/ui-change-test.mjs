@@ -147,6 +147,7 @@ await check('header 中无模型选择器', `!document.querySelector('.app-heade
 // --- 3. 设置面板入口位于左下角 ---
 await check('设置面板默认关闭', `!document.querySelector('.settings-modal, .modal')`)
 await check('设置入口位于左侧栏底部', `!!document.querySelector('.sidebar-footer .sidebar-settings')`)
+await check('插件商店入口位于设置旁边', `(() => { const button = document.querySelector('.sidebar-plugin-store'); return !!button && button.textContent?.includes('插件商店') && button.getAttribute('title')?.includes('官方插件商店'); })()`)
 await evaluate(`document.querySelector('.sidebar-footer .sidebar-settings')?.click()`)
 await sleep(400)
 await check('点击左下角设置后面板打开', `!!document.querySelector('.settings-modal')`)

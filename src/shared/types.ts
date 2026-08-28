@@ -309,6 +309,8 @@ export interface PionApi {
   pickWorkspace(): Promise<string | null>
   /** Default workspace suggestion (user home directory). */
   defaultWorkspace(): Promise<string>
+  /** Open the official pi package/plugin catalog in the system browser. */
+  openPluginStore(): Promise<void>
 
   // window -------------------------------------------------------------------
   minimizeWindow(): void

@@ -73,6 +73,7 @@ const api: PionApi = {
   getStderr: () => ipcRenderer.invoke('pion:agent-stderr'),
   pickWorkspace: () => ipcRenderer.invoke('pion:pick-workspace'),
   defaultWorkspace: () => ipcRenderer.invoke('pion:default-workspace'),
+  openPluginStore: () => ipcRenderer.invoke('pion:open-plugin-store'),
 
   // events
   onEvent: (listener) => subscribe<WireEventInput>('pion:agent-event', listener),

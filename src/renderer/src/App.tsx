@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
-import { FolderOpen, Settings, Sparkles } from 'lucide-react'
+import { FolderOpen, Settings, Sparkles, Store } from 'lucide-react'
 import { useAgent, deriveChanges } from './hooks/useAgent'
 import type { FileChange } from './hooks/useAgent'
 import { ChatMessage } from './components/ChatMessage'
@@ -280,6 +280,14 @@ export function App(): ReactElement {
             <button className="sidebar-settings" onClick={() => setSettingsOpen(true)}>
               <Settings size={14} />
               <span>设置</span>
+            </button>
+            <button
+              className="sidebar-settings sidebar-plugin-store"
+              title="打开 pi 官方插件商店"
+              onClick={() => void window.pion.openPluginStore()}
+            >
+              <Store size={14} />
+              <span>插件商店</span>
             </button>
           </div>
           <div

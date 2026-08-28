@@ -255,6 +255,8 @@ button {
 }
 
 .sidebar-footer {
+  display: flex;
+  gap: 6px;
   flex-shrink: 0;
   padding: 8px 10px 10px;
   border-top: 1px solid var(--border-soft);
@@ -263,9 +265,13 @@ button {
 .sidebar-settings {
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 9px;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  padding: 7px 6px;
+  white-space: nowrap;
   border-radius: var(--radius-sm);
   color: var(--fg-dim);
   font-size: 12px;
