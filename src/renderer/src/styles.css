@@ -4273,6 +4273,14 @@ body {
   height: 18px;
 }
 
+.task-panel-toggle-icon {
+  transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.task-panel-toggle.collapsed .task-panel-toggle-icon {
+  transform: rotate(180deg);
+}
+
 .task-panel-list {
   transition: opacity 0.2s ease 0.08s, transform 0.38s cubic-bezier(0.22, 1, 0.36, 1);
 }

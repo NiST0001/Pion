@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { ReactElement } from 'react'
-import { Check, ChevronDown, Circle, ListTodo } from 'lucide-react'
+import { ArrowUp, Check, Circle, ListTodo } from 'lucide-react'
 
 interface TaskTarget {
   id: string
@@ -74,7 +74,7 @@ export function TaskPanel(): ReactElement {
         aria-controls="task-target-list"
         onClick={() => setExpanded((value) => !value)}
       >
-        {expanded ? <ChevronDown size={15} /> : <ListTodo size={15} />}
+        <ArrowUp size={18} className="task-panel-toggle-icon" />
       </button>
     </section>
   )
