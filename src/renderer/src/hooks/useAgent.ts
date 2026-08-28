@@ -482,14 +482,17 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
       const { message } = event
       const text = messageText(message)
       const thinking = messageThinking(message)
-      const timeline = state.timeline.map((item) => {
-        if (item.kind !== 'assistant' || !item.streaming) return item
-        return {
+      const timeline = state.timeline.flatMap((item) => {
+        if (item.kind !== 'assistant' || !item.streaming) return [item]
+        const nextText = text || item.text
+        const nextThinking = thinking || item.thinking
+        if (nextText === '' && nextThinking === '' && !item.error) return []
+        return [{
           ...item,
-          text: text || item.text,
-          thinking: thinking || item.thinking,
+          text: nextText,
+          thinking: nextThinking,
           streaming: false
-        }
+        }]
       })
       return { ...state, timeline }
     }
@@ -574,9 +577,11 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
 
 /** Close out any assistant bubble still marked as streaming. */
 function finalizeStreaming(state: AgentState): AgentState {
-  const timeline = state.timeline.map((item) =>
-    item.kind === 'assistant' && item.streaming ? { ...item, streaming: false } : item
-  )
+  const timeline = state.timeline.flatMap((item) => {
+    if (item.kind !== 'assistant' || !item.streaming) return [item]
+    if (item.text === '' && item.thinking === '' && !item.error) return []
+    return [{ ...item, streaming: false }]
+  })
   return { ...state, timeline }
 }
 
@@ -656,16 +661,21 @@ function entriesToTimeline(
     }
 
     if (message.role === 'assistant') {
-      items.push({
-        kind: 'assistant',
-        id: nextId++,
-        entryId: entry.id,
-        text: messageText(message),
-        thinking: messageThinking(message),
-        streaming: false,
-        historical: true
-      })
-      for (const call of messageToolCalls(message)) {
+      const text = messageText(message)
+      const thinking = messageThinking(message)
+      const calls = messageToolCalls(message)
+      if (text !== '' || thinking !== '') {
+        items.push({
+          kind: 'assistant',
+          id: nextId++,
+          entryId: entry.id,
+          text,
+          thinking,
+          streaming: false,
+          historical: true
+        })
+      }
+      for (const call of calls) {
         const tool: ToolItem = {
           id: call.id,
           name: call.name,

@@ -48,7 +48,13 @@ export function ToolCallItem({
 
   return (
     <div className={`tool-call tool-${tool.status}${historical ? ' history-reveal' : ''}`}>
-      <button className="tool-head" onClick={() => setOpen((v) => !v)} type="button">
+      <button
+        className="tool-head"
+        onClick={() => setOpen((v) => !v)}
+        type="button"
+        aria-expanded={open}
+        aria-label={`${open ? '收起' : '展开'}${label}工具详情`}
+      >
         <span className="tool-chevron">{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
         <span className={`tool-icon ${tool.status === 'running' ? 'spin' : ''}`}>
           {tool.status === 'running' ? (

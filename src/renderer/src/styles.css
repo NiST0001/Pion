@@ -1200,22 +1200,27 @@ button {
    ========================================================================== */
 
 .tool-call {
-  max-width: min(92%, 800px);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
+  width: 100%;
+  max-width: 100%;
+  margin: -8px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   font-size: 12.5px;
-  overflow: hidden;
+  overflow: visible;
   animation: rise 0.18s ease;
 }
 
 .tool-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
   width: 100%;
-  padding: 7px 10px;
+  min-height: 28px;
+  padding: 3px 5px;
+  border-radius: 7px;
+  color: var(--fg-dim);
   font-family: var(--mono);
   text-align: left;
 }
@@ -1258,7 +1263,7 @@ button {
 .tool-name {
   flex-shrink: 0;
   font-weight: 600;
-  color: var(--accent-strong);
+  color: var(--fg-dim);
 }
 
 .tool-path {
@@ -1292,9 +1297,11 @@ button {
 }
 
 .tool-body {
-  border-top: 1px solid var(--border-soft);
-  padding: 8px;
-  background: var(--bg);
+  margin: 2px 0 3px 24px;
+  padding: 4px 0 4px 12px;
+  border-top: 0;
+  border-left: 1px solid var(--border-soft);
+  background: transparent;
 }
 
 .tool-command {
@@ -3633,13 +3640,17 @@ body {
 }
 
 .tool-call {
-  border-color: var(--border);
-  border-radius: 12px;
-  background: var(--surface-tint);
+  width: 100%;
+  max-width: 100%;
+  margin: -8px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .tool-head {
-  padding: 9px 12px;
+  min-height: 28px;
+  padding: 3px 5px;
 }
 
 @keyframes history-item-reveal {
@@ -3708,9 +3719,11 @@ body {
 }
 
 .tool-body {
-  background: var(--bg);
-  border-top-color: var(--border-soft);
-  padding: 10px;
+  margin: 2px 0 3px 24px;
+  padding: 4px 0 4px 12px;
+  background: transparent;
+  border-top: 0;
+  border-left-color: var(--border-soft);
 }
 
 .code-block pre,
