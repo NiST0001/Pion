@@ -1879,49 +1879,6 @@ button {
   gap: 12px;
 }
 
-/* ==========================================================================
-   Status bar
-   ========================================================================== */
-
-.status-bar {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 5px 18px;
-  font-size: 11px;
-  color: var(--fg-faint);
-  font-family: var(--mono);
-  border-top: 1px solid var(--border-soft);
-  background: var(--bg-elev);
-  flex-shrink: 0;
-}
-
-.status-bar .status-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.status-right {
-  margin-left: auto;
-  opacity: 0.6;
-}
-
-.status-phase.phase-running {
-  color: var(--ok);
-}
-
-.status-phase.phase-error {
-  color: var(--danger);
-}
-
-.status-phase.phase-starting {
-  color: var(--warn);
-}
-
 .pulse {
   animation: blink 1.4s infinite;
 }
@@ -3483,13 +3440,6 @@ body {
 .composer-status-row {
   max-width: 800px;
   margin-top: 6px;
-}
-
-.status-bar {
-  padding: 6px 24px;
-  background: var(--bg);
-  border-top-color: var(--border-soft);
-  font-size: 10px;
 }
 
 .tool-call {

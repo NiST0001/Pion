@@ -6,7 +6,6 @@ import type { FileChange } from './hooks/useAgent'
 import { ChatMessage } from './components/ChatMessage'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
-import { StatusBar } from './components/StatusBar'
 import { ProjectList, SessionList, BranchTree, ChangeList } from './components/Sidebar'
 import { ChangesDrawer } from './components/ChangesDrawer'
 import { ReviewPanel } from './components/ReviewPanel'
@@ -205,7 +204,6 @@ export function App(): ReactElement {
             onSend={(text) => void actions.send(text)}
             onAbort={() => void actions.abort()}
           />
-          <StatusBar status={state.status} session={state.session} />
         </div>
 
         {reviewOpen && (
