@@ -3411,8 +3411,9 @@ body {
 
 .composer-row {
   max-width: 800px;
+  min-height: 104px;
   gap: 12px;
-  padding: 12px 12px 10px 17px;
+  padding: 14px 14px 12px 18px;
   background: var(--bg-input);
   border-color: var(--border);
   border-radius: 18px;
@@ -3426,18 +3427,18 @@ body {
 }
 
 .composer textarea {
-  min-height: 34px;
+  min-height: 46px;
   font-size: 14px;
   line-height: 1.5;
 }
 
 .composer-inline-controls {
-  min-height: 24px;
+  min-height: 28px;
 }
 
 .send-button {
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.18);
 }
