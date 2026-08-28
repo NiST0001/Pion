@@ -200,8 +200,10 @@ export function App(): ReactElement {
       <SettingsModal
         open={settingsOpen}
         session={state.session}
+        models={state.models}
         onClose={() => setSettingsOpen(false)}
         actions={{
+          setModel: actions.setModel,
           setAutoCompaction: actions.setAutoCompaction,
           setAutoRetry: actions.setAutoRetry,
           compactNow: actions.compactNow,
