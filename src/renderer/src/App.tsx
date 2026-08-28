@@ -24,9 +24,9 @@ interface PanelResizeState {
 }
 
 const MIN_SIDEBAR_WIDTH = 220
-const MAX_SIDEBAR_WIDTH = 440
+const MAX_SIDEBAR_WIDTH = 2200
 const MIN_REVIEW_WIDTH = 300
-const MAX_REVIEW_WIDTH = 560
+const MAX_REVIEW_WIDTH = 2800
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
