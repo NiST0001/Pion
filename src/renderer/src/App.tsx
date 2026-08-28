@@ -14,6 +14,7 @@ import { ModelPicker, ThinkingPicker } from './components/ModelPicker'
 import { TitleBar } from './components/TitleBar'
 import { SettingsModal } from './components/SettingsModal'
 import { SkillsToolsModal } from './components/SkillsToolsModal'
+import { PluginStoreModal } from './components/PluginStoreModal'
 
 type ResizeTarget = 'sidebar' | 'review'
 
@@ -38,6 +39,7 @@ export function App(): ReactElement {
   const [drawerChange, setDrawerChange] = useState<FileChange | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
+  const [pluginStoreOpen, setPluginStoreOpen] = useState(false)
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [reviewOpen, setReviewOpen] = useState(false)
@@ -285,7 +287,7 @@ export function App(): ReactElement {
             <button
               className="sidebar-settings sidebar-plugin-store"
               title="打开 pi 官方插件商店"
-              onClick={() => void window.pion.openPluginStore()}
+              onClick={() => setPluginStoreOpen(true)}
             >
               <Store size={14} />
               <span>插件商店</span>
@@ -381,6 +383,10 @@ export function App(): ReactElement {
       <SkillsToolsModal
         open={capabilitiesOpen}
         onClose={() => setCapabilitiesOpen(false)}
+      />
+      <PluginStoreModal
+        open={pluginStoreOpen}
+        onClose={() => setPluginStoreOpen(false)}
       />
       <SettingsModal
         open={settingsOpen}

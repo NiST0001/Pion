@@ -35,6 +35,7 @@
 - Markdown 渲染（GFM、代码高亮、一键复制）
 - 工具调用卡片：edit 显示彩色 Diff（+/- 行统计），write/bash/read 折叠详情
 - 运行中可继续输入（自动作为转向消息 steer 注入）或中止
+- 内置 pi 官方插件商店（`https://pi.dev/packages`）
 
 ### 项目
 - 多项目管理：侧栏切换工作目录（agent 子进程随目录重启）
@@ -113,6 +114,7 @@ src/
             ├── ToolCallItem.tsx  # 工具调用卡片
             ├── Composer.tsx      # 输入区（发送/停止/转向提示）
             ├── ModelPicker.tsx   # 模型 + 思考级别选择器
+            ├── PluginStoreModal.tsx # 内置 pi 官方插件目录
             └── StatusBar.tsx
 ```
 

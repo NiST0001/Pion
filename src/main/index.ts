@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { AgentBridge } from './agent-bridge'
@@ -7,7 +7,6 @@ import type { ProjectMeta } from '../shared/types'
 
 const bridge = new AgentBridge()
 const projects = new ProjectStore()
-const PI_PLUGIN_STORE_URL = 'https://pi.dev/packages'
 
 let projectsPush = (list: ProjectMeta[]): void => {
   // replaced once a window exists
@@ -33,6 +32,7 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false, // required for ESM preload scripts
+      webviewTag: true,
       spellcheck: false
     }
   })
@@ -171,7 +171,6 @@ function registerIpc(): void {
   })
 
   // misc --------------------------------------------------------------------------
-  ipcMain.handle('pion:open-plugin-store', () => shell.openExternal(PI_PLUGIN_STORE_URL))
   ipcMain.handle('pion:pick-workspace', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],
