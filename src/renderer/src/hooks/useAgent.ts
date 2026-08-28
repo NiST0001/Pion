@@ -15,6 +15,74 @@ import type {
 } from '../../../shared/types'
 import { messageText, messageThinking, messageToolCalls } from '../../../shared/types'
 
+const SESSION_ORDER_STORAGE_KEY = 'pion:session-order'
+
+type SessionOrderMap = Record<string, string[]>
+
+function readSessionOrderMap(): SessionOrderMap {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(SESSION_ORDER_STORAGE_KEY)
+    const parsed = raw ? JSON.parse(raw) as unknown : {}
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, paths]) => (
+        Array.isArray(paths) && paths.every((path) => typeof path === 'string')
+      ))
+    ) as SessionOrderMap
+  } catch {
+    return {}
+  }
+}
+
+function writeSessionOrderMap(map: SessionOrderMap): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(SESSION_ORDER_STORAGE_KEY, JSON.stringify(map))
+  } catch {
+    // best effort - ordering should never block the agent UI
+  }
+}
+
+function orderSessions(sessions: SessionMeta[]): SessionMeta[] {
+  if (sessions.length <= 1) return sessions
+  const projectCwd = sessions[0]?.projectCwd
+  if (!projectCwd) return sessions
+
+  const currentPaths = new Set(sessions.map((session) => session.path))
+  const saved = readSessionOrderMap()[projectCwd] ?? []
+  const orderedPaths = [
+    ...saved.filter((path) => currentPaths.has(path)),
+    ...sessions.map((session) => session.path).filter((path) => !saved.includes(path))
+  ]
+  const map = new Map(sessions.map((session) => [session.path, session]))
+  const ordered = orderedPaths.flatMap((path) => {
+    const session = map.get(path)
+    return session ? [session] : []
+  })
+
+  if (saved.length !== orderedPaths.length || saved.some((path, index) => path !== orderedPaths[index])) {
+    writeSessionOrderMap({ ...readSessionOrderMap(), [projectCwd]: orderedPaths })
+  }
+  return ordered
+}
+
+function reorderSessionsByPaths(sessions: SessionMeta[], paths: string[]): SessionMeta[] {
+  const byPath = new Map(sessions.map((session) => [session.path, session]))
+  const ordered = paths.flatMap((path) => {
+    const session = byPath.get(path)
+    return session ? [session] : []
+  })
+  const included = new Set(ordered.map((session) => session.path))
+  return [...ordered, ...sessions.filter((session) => !included.has(session.path))]
+}
+
+function saveSessionOrder(projectCwd: string, paths: string[]): void {
+  const map = readSessionOrderMap()
+  map[projectCwd] = [...new Set(paths)]
+  writeSessionOrderMap(map)
+}
+
 // ---------------------------------------------------------------------------
 // State model
 // ---------------------------------------------------------------------------
@@ -94,6 +162,7 @@ type Action =
   | { type: 'projectSessions'; sessionsByProject: Record<string, SessionMeta[]> }
   | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
   | { type: 'projects'; projects: ProjectMeta[] }
+  | { type: 'reorderSessions'; cwd: string; paths: string[] }
   | { type: 'models'; models: ModelOption[] }
   | { type: 'thinkingLevels'; levels: string[] }
   | { type: 'event'; event: WireEventInput }
@@ -234,6 +303,15 @@ function reducer(state: AgentState, action: Action): AgentState {
     }
     case 'projectSessions':
       return { ...state, sessionsByProject: action.sessionsByProject }
+    case 'reorderSessions': {
+      const current = state.sessionsByProject[action.cwd] ?? []
+      const ordered = reorderSessionsByPaths(current, action.paths)
+      return {
+        ...state,
+        sessions: state.status.cwd === action.cwd ? ordered : state.sessions,
+        sessionsByProject: { ...state.sessionsByProject, [action.cwd]: ordered }
+      }
+    }
     case 'tree':
       return { ...state, tree: action.tree }
     case 'projects': {
@@ -484,7 +562,7 @@ export function useAgent() {
     const offs = [
       api.onStatus((status) => dispatch({ type: 'status', status })),
       api.onState((session) => dispatch({ type: 'session', session })),
-      api.onSessions((sessions) => dispatch({ type: 'sessions', sessions })),
+      api.onSessions((sessions) => dispatch({ type: 'sessions', sessions: orderSessions(sessions) })),
       api.onTree((tree) => dispatch({ type: 'tree', tree })),
       api.onProjects((projects) => dispatch({ type: 'projects', projects })),
       api.onEvent((event) => dispatch({ type: 'event', event }))
@@ -506,7 +584,7 @@ export function useAgent() {
     }
 
     void Promise.all(
-      projectList.map(async (project) => [project.cwd, await api.listSessions(project.cwd)] as const)
+      projectList.map(async (project) => [project.cwd, orderSessions(await api.listSessions(project.cwd))] as const)
     ).then((entries) => {
       if (cancelled) return
       dispatch({ type: 'projectSessions', sessionsByProject: Object.fromEntries(entries) })
@@ -605,6 +683,11 @@ export function useAgent() {
     },
     [api, reloadTimeline]
   )
+
+  const reorderSessions = useCallback((cwd: string, paths: string[]) => {
+    saveSessionOrder(cwd, paths)
+    dispatch({ type: 'reorderSessions', cwd, paths })
+  }, [])
 
   const deleteSession = useCallback(
     async (sessionPath: string) => {
@@ -727,6 +810,7 @@ export function useAgent() {
       newSession,
       forkAt,
       switchSession,
+      reorderSessions,
       deleteSession,
       copySession,
       getSessionForkMessages,
@@ -752,6 +836,7 @@ export function useAgent() {
       newSession,
       forkAt,
       switchSession,
+      reorderSessions,
       deleteSession,
       copySession,
       getSessionForkMessages,

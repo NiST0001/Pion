@@ -4228,6 +4228,46 @@ body {
   color: var(--accent-strong);
 }
 
+.side-session {
+  cursor: grab;
+  transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease, outline-color 0.12s ease;
+}
+
+.side-session:active {
+  cursor: grabbing;
+}
+
+.side-session-content {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  gap: 6px;
+}
+
+.side-session-drag {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--fg-faint);
+  opacity: 0.45;
+  transition: color 0.12s ease, opacity 0.12s ease;
+}
+
+.side-session:hover .side-session-drag,
+.side-session.drag-over .side-session-drag {
+  color: var(--accent-strong);
+  opacity: 1;
+}
+
+.side-session.dragging {
+  opacity: 0.42;
+}
+
+.side-session.drag-over {
+  background: var(--accent-soft);
+  outline: 1px dashed rgba(var(--accent-rgb), 0.55);
+  outline-offset: -1px;
+}
+
 .project-folder-empty {
   padding: 5px 8px 6px;
   color: var(--fg-faint);

@@ -9,6 +9,7 @@ import {
   Folder,
   FolderPlus,
   GitBranch,
+  GripVertical,
   Loader2,
   MessageSquarePlus,
   Search,
@@ -123,6 +124,7 @@ export function ProjectList({
   onAdd,
   onRemove,
   onNewSession,
+  onReorder,
   onSelectSession,
   onDelete,
   onCopy,
@@ -138,6 +140,7 @@ export function ProjectList({
   onAdd: () => void
   onRemove: (cwd: string) => void
   onNewSession: (cwd: string) => void
+  onReorder: (cwd: string, paths: string[]) => void
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
   onCopy: (cwd: string, path: string) => Promise<void>
@@ -151,7 +154,7 @@ export function ProjectList({
       const visibleSessions = normalizedQuery
         ? sessions.filter((session) => sessionMatchesQuery(session, normalizedQuery))
         : sessions
-      return { project, sessions: visibleSessions }
+      return { project, sessions: visibleSessions, allSessions: sessions }
     })
     .filter(({ sessions }) => !normalizedQuery || sessions.length > 0)
 
@@ -168,7 +171,7 @@ export function ProjectList({
       {visibleProjects.length === 0 && (
         <div className="side-empty">{normalizedQuery ? '没有匹配的会话' : '暂无项目'}</div>
       )}
-      {visibleProjects.map(({ project, sessions }) => (
+      {visibleProjects.map(({ project, sessions, allSessions }) => (
         <ProjectFolder
           key={project.cwd}
           project={project}
@@ -180,6 +183,8 @@ export function ProjectList({
           onSelect={onSelect}
           onRemove={onRemove}
           onNewSession={onNewSession}
+          allSessions={allSessions}
+          onReorder={onReorder}
           onSelectSession={onSelectSession}
           onDelete={onDelete}
           onCopy={onCopy}
@@ -194,8 +199,10 @@ export function ProjectList({
 function ProjectBranch({
   projectCwd,
   sessions,
+  allSessions,
   activePath,
   onNewSession,
+  onReorder,
   onSelectSession,
   onDelete,
   onCopy,
@@ -204,8 +211,10 @@ function ProjectBranch({
 }: {
   projectCwd: string
   sessions: SessionMeta[]
+  allSessions: SessionMeta[]
   activePath?: string
   onNewSession: (cwd: string) => void
+  onReorder: (cwd: string, paths: string[]) => void
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
   onCopy: (cwd: string, path: string) => Promise<void>
@@ -213,6 +222,18 @@ function ProjectBranch({
   onFork: (cwd: string, path: string, entryId: string) => Promise<string>
 }): ReactElement {
   const [open, setOpen] = useState(true)
+
+  const handleReorder = (orderedVisible: SessionMeta[]): void => {
+    const visiblePaths = new Set(sessions.map((session) => session.path))
+    let visibleIndex = 0
+    const orderedAll = allSessions.map((session) => {
+      if (!visiblePaths.has(session.path)) return session
+      const replacement = orderedVisible[visibleIndex]
+      visibleIndex += 1
+      return replacement ?? session
+    })
+    onReorder(projectCwd, orderedAll.map((session) => session.path))
+  }
 
   return (
     <div className="project-branch">
@@ -250,6 +271,7 @@ function ProjectBranch({
               sessions={sessions}
               activePath={activePath}
               onSelect={(path) => onSelectSession(projectCwd, path)}
+              onReorder={handleReorder}
               onDelete={(path) => onDelete(projectCwd, path)}
               onCopy={(path) => onCopy(projectCwd, path)}
               getForkMessages={(path) => getForkMessages(projectCwd, path)}
@@ -265,6 +287,7 @@ function ProjectBranch({
 function ProjectFolder({
   project,
   sessions,
+  allSessions,
   activeCwd,
   activePath,
   searchActive,
@@ -272,6 +295,7 @@ function ProjectFolder({
   onSelect,
   onRemove,
   onNewSession,
+  onReorder,
   onSelectSession,
   onDelete,
   onCopy,
@@ -280,6 +304,7 @@ function ProjectFolder({
 }: {
   project: ProjectMeta
   sessions: SessionMeta[]
+  allSessions: SessionMeta[]
   activeCwd?: string
   activePath?: string
   searchActive: boolean
@@ -287,6 +312,7 @@ function ProjectFolder({
   onSelect: (cwd: string) => void
   onRemove: (cwd: string) => void
   onNewSession: (cwd: string) => void
+  onReorder: (cwd: string, paths: string[]) => void
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
   onCopy: (cwd: string, path: string) => Promise<void>
@@ -336,8 +362,10 @@ function ProjectFolder({
           <ProjectBranch
             projectCwd={project.cwd}
             sessions={sessions}
+            allSessions={allSessions}
             activePath={activePath}
             onNewSession={onNewSession}
+            onReorder={onReorder}
             onSelectSession={onSelectSession}
             onDelete={onDelete}
             onCopy={onCopy}
@@ -375,6 +403,7 @@ function sessionMatchesQuery(session: SessionMeta, query: string): boolean {
 interface SessionItemActions {
   activePath?: string
   onSelect: (path: string) => void
+  onReorder: (sessions: SessionMeta[]) => void
   onDelete: (path: string) => Promise<void>
   onCopy: (path: string) => Promise<void>
   getForkMessages: (path: string) => Promise<ForkMessageOption[]>
@@ -385,12 +414,15 @@ function SessionItems({
   sessions,
   activePath,
   onSelect,
+  onReorder,
   onDelete,
   onCopy,
   getForkMessages,
   onFork
 }: { sessions: SessionMeta[] } & SessionItemActions): ReactElement {
   const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(null)
+  const [draggedPath, setDraggedPath] = useState<string | null>(null)
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null)
 
   useEffect(() => {
     if (contextMenu && !sessions.some((session) => session.path === contextMenu.session.path)) {
@@ -410,26 +442,73 @@ function SessionItems({
     })
   }
 
+  const clearDragState = (): void => {
+    setDraggedPath(null)
+    setDragOverPath(null)
+  }
+
+  const handleDragStart = (event: React.DragEvent<HTMLDivElement>, session: SessionMeta): void => {
+    setDraggedPath(session.path)
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', session.path)
+  }
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>, targetPath: string): void => {
+    event.preventDefault()
+    const sourcePath = event.dataTransfer.getData('text/plain') || draggedPath
+    if (!sourcePath || sourcePath === targetPath) {
+      clearDragState()
+      return
+    }
+    const fromIndex = sessions.findIndex((session) => session.path === sourcePath)
+    const toIndex = sessions.findIndex((session) => session.path === targetPath)
+    if (fromIndex < 0 || toIndex < 0) {
+      clearDragState()
+      return
+    }
+    const reordered = [...sessions]
+    const [moved] = reordered.splice(fromIndex, 1)
+    reordered.splice(toIndex, 0, moved)
+    onReorder(reordered)
+    clearDragState()
+  }
+
   return (
     <>
       {sessions.map((session) => (
         <div
           key={session.path}
-          className={`side-item side-session${session.path === activePath ? ' active' : ''}`}
+          data-session-path={session.path}
+          className={`side-item side-session${session.path === activePath ? ' active' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
+          draggable
+          onDragStart={(event) => handleDragStart(event, session)}
+          onDragOver={(event) => {
+            event.preventDefault()
+            event.dataTransfer.dropEffect = 'move'
+            if (session.path !== draggedPath) setDragOverPath(session.path)
+          }}
+          onDragLeave={() => {
+            if (session.path === dragOverPath) setDragOverPath(null)
+          }}
+          onDrop={(event) => handleDrop(event, session.path)}
+          onDragEnd={clearDragState}
           onClick={() => {
             setContextMenu(null)
             onSelect(session.path)
           }}
           onContextMenu={(event) => openContextMenu(event, session)}
-          title={`${session.path}\n右键查看更多操作`}
+          title={`${session.path}\n拖拽调整顺序 · 右键查看更多操作`}
         >
-          <div className="side-session-main">
-            <span className="side-item-label">
-              {session.name || session.preview || '未命名会话'}
-            </span>
-            <span className="side-session-meta">
-              {formatTime(session.mtime)} · {session.messageCount} 条消息
-            </span>
+          <div className="side-session-content">
+            <GripVertical size={13} className="side-session-drag" aria-hidden="true" />
+            <div className="side-session-main">
+              <span className="side-item-label">
+                {session.name || session.preview || '未命名会话'}
+              </span>
+              <span className="side-session-meta">
+                {formatTime(session.mtime)} · {session.messageCount} 条消息
+              </span>
+            </div>
           </div>
         </div>
       ))}
@@ -455,6 +534,7 @@ export function SessionList({
   searchQuery,
   activePath,
   onSelect,
+  onReorder,
   onNew,
   onDelete,
   onCopy,
@@ -465,6 +545,7 @@ export function SessionList({
   searchQuery: string
   activePath?: string
   onSelect: (path: string) => void
+  onReorder: (sessions: SessionMeta[]) => void
   onNew: () => void
   onDelete: (path: string) => Promise<void>
   onCopy: (path: string) => Promise<void>
@@ -493,6 +574,7 @@ export function SessionList({
         sessions={visibleSessions}
         activePath={activePath}
         onSelect={onSelect}
+        onReorder={onReorder}
         onDelete={onDelete}
         onCopy={onCopy}
         getForkMessages={getForkMessages}

@@ -253,6 +253,7 @@ export function App(): ReactElement {
               onAdd={() => void handleAddProject()}
               onRemove={(cwd) => void actions.removeProject(cwd)}
               onNewSession={(cwd) => void handleNewSession(cwd)}
+              onReorder={(cwd, paths) => actions.reorderSessions(cwd, paths)}
               onSelectSession={(cwd, path) => void handleSelectSession(cwd, path)}
               onDelete={handleDeleteSession}
               onCopy={handleCopySession}

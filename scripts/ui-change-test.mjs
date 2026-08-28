@@ -198,6 +198,36 @@ await check('左侧会话栏已移除变更', `!document.querySelector('.side-ch
 await check('项目下默认存在 main 分支', `document.querySelectorAll('.project-folder').length > 0 && document.querySelectorAll('.project-branch-name').length > 0 && Array.from(document.querySelectorAll('.project-branch-name')).every(e => e.textContent?.trim() === 'main')`)
 await check('分支提供新建会话按钮', `document.querySelectorAll('.project-branch-new').length > 0 && !document.querySelector('.project-folder-new')`)
 await check('会话嵌套在分支下', `document.querySelectorAll('.project-branch-sessions .side-session').length > 0`)
+await check('会话项可拖拽排序', `Array.from(document.querySelectorAll('.project-branch-sessions .side-session')).every(e => e.draggable && !!e.querySelector('.side-session-drag'))`)
+await evaluate(`(() => {
+  const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2)
+  const items = list ? [...list.querySelectorAll('.side-session')] : []
+  if (items.length < 2 || typeof DataTransfer === 'undefined' || typeof DragEvent === 'undefined') return false
+  window.__pionSessionOrderBefore = items.map((item) => item.dataset.sessionPath)
+  const data = new DataTransfer()
+  items[0].dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: data }))
+  items[1].dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: data }))
+  items[1].dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: data }))
+  items[0].dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: data }))
+  return true
+})()`)
+await sleep(180)
+await check('拖拽后会话顺序可改变', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && before.length >= 2 && after[0] === before[1] && after[1] === before[0]; })()`)
+await evaluate(`(() => { const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); list?.querySelectorAll('.side-session')[1]?.click(); return true })()`)
+await sleep(450)
+await check('激活会话不会自动置顶', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && after[0] === before[1] && after[1] === before[0]; })()`)
+await evaluate(`(() => {
+  const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2)
+  const items = list ? [...list.querySelectorAll('.side-session')] : []
+  if (items.length < 2 || typeof DataTransfer === 'undefined' || typeof DragEvent === 'undefined') return false
+  const data = new DataTransfer()
+  items[1].dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: data }))
+  items[0].dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: data }))
+  items[0].dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: data }))
+  items[1].dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: data }))
+  return true
+})()`)
+await sleep(180)
 await evaluate(`document.querySelector('.project-branch-sessions .side-session')?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 120, clientY: 160 }))`)
 await sleep(300)
 await check('右键菜单打开', `!!document.querySelector('.context-menu')`)
