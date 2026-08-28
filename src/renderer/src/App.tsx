@@ -6,6 +6,7 @@ import type { FileChange } from './hooks/useAgent'
 import { ChatMessage } from './components/ChatMessage'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
+import { BranchCreateModal } from './components/BranchCreateModal'
 import { ProjectList, SidebarToolbar } from './components/Sidebar'
 import { ChangesDrawer } from './components/ChangesDrawer'
 import { ReviewPanel } from './components/ReviewPanel'
@@ -39,6 +40,7 @@ export function App(): ReactElement {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [pluginStoreOpen, setPluginStoreOpen] = useState(false)
+  const [branchDialogCwd, setBranchDialogCwd] = useState<string | null>(null)
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [reviewOpen, setReviewOpen] = useState(false)
@@ -165,18 +167,22 @@ export function App(): ReactElement {
     [actions, activateProject]
   )
 
-  const handleNewBranch = useCallback(
-    async (cwd: string) => {
-      const name = window.prompt('新建 Git 分支', 'feature/new-branch')?.trim()
-      if (!name) return
-      try {
-        await actions.createBranch(cwd, name)
-      } catch (err) {
-        window.alert(`创建分支失败：${err instanceof Error ? err.message : String(err)}`)
-      }
+  const handleNewBranch = useCallback((cwd: string) => {
+    setBranchDialogCwd(cwd)
+  }, [])
+
+  const handleCreateBranch = useCallback(
+    async (name: string): Promise<void> => {
+      if (!branchDialogCwd) return
+      await actions.createBranch(branchDialogCwd, name)
+      setBranchDialogCwd(null)
     },
-    [actions]
+    [actions, branchDialogCwd]
   )
+
+  const closeBranchDialog = useCallback(() => {
+    setBranchDialogCwd(null)
+  }, [])
 
   const handleSelectSession = useCallback(
     async (cwd: string, path: string) => {
@@ -395,6 +401,13 @@ export function App(): ReactElement {
       <PluginStoreModal
         open={pluginStoreOpen}
         onClose={() => setPluginStoreOpen(false)}
+      />
+      <BranchCreateModal
+        open={branchDialogCwd !== null}
+        projectName={state.projects.find((project) => project.cwd === branchDialogCwd)?.name ?? '当前项目'}
+        projectCwd={branchDialogCwd ?? ''}
+        onClose={closeBranchDialog}
+        onSubmit={handleCreateBranch}
       />
       <SettingsModal
         open={settingsOpen}
