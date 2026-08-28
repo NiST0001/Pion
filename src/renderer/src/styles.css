@@ -4163,19 +4163,19 @@ body {
 .task-panel-toggle {
   position: absolute;
   z-index: 5;
-  top: -16px;
+  top: -22px;
   left: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 44px;
+  height: 44px;
   padding: 0;
-  border: 1px solid rgba(var(--accent-rgb), 0.75);
+  border: 2px solid var(--bg-elev);
   border-radius: 50%;
   background: var(--accent);
   color: #2a1b16;
-  box-shadow: 0 5px 16px rgba(var(--accent-rgb), 0.28), 0 0 0 4px var(--bg);
+  box-shadow: 0 9px 24px rgba(0, 0, 0, 0.28), 0 0 0 2px rgba(var(--accent-rgb), 0.5), 0 0 0 6px var(--bg);
   transform: translateX(-50%);
   transition: background 0.14s ease, color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
 }
@@ -4183,17 +4183,22 @@ body {
 .task-panel-toggle:hover {
   background: var(--accent-strong);
   color: #2a1b16;
-  box-shadow: 0 7px 18px rgba(var(--accent-rgb), 0.34), 0 0 0 4px var(--bg);
-  transform: translateX(-50%) translateY(-1px);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34), 0 0 0 2px rgba(var(--accent-rgb), 0.7), 0 0 0 6px var(--bg);
+  transform: translateX(-50%) translateY(-2px);
 }
 
 .task-panel.collapsed .task-panel-toggle {
   top: auto;
-  bottom: -16px;
+  bottom: -22px;
 }
 
 .task-panel.collapsed .task-panel-toggle:hover {
-  transform: translateX(-50%) translateY(1px);
+  transform: translateX(-50%) translateY(2px);
+}
+
+.task-panel-toggle > svg {
+  width: 18px;
+  height: 18px;
 }
 
 .task-panel-list {
