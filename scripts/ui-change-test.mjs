@@ -186,8 +186,11 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`document.querySelectorAll('.side-session').length > 0`)) break
 }
 await check('会话项存在', `document.querySelectorAll('.side-session').length > 0`)
-await check('项目以文件夹形式包含会话', `document.querySelectorAll('.project-folder').length > 0 && document.querySelectorAll('.project-folder-sessions .side-session').length > 0`)
-await evaluate(`document.querySelector('.project-folder-sessions .side-session')?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 120, clientY: 160 }))`)
+await check('左侧会话栏已移除变更', `!document.querySelector('.side-change') && !Array.from(document.querySelectorAll('.side-section-title')).some(e => e.textContent?.trim() === '变更')`)
+await check('项目下默认存在 main 分支', `document.querySelectorAll('.project-folder').length > 0 && document.querySelectorAll('.project-branch-name').length > 0 && Array.from(document.querySelectorAll('.project-branch-name')).every(e => e.textContent?.trim() === 'main')`)
+await check('分支提供新建会话按钮', `document.querySelectorAll('.project-branch-new').length > 0 && !document.querySelector('.project-folder-new')`)
+await check('会话嵌套在分支下', `document.querySelectorAll('.project-branch-sessions .side-session').length > 0`)
+await evaluate(`document.querySelector('.project-branch-sessions .side-session')?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 120, clientY: 160 }))`)
 await sleep(300)
 await check('右键菜单打开', `!!document.querySelector('.context-menu')`)
 await check('菜单含复制会话', `Array.from(document.querySelectorAll('.context-menu-item')).some(e => e.textContent?.includes('从会话复制'))`)

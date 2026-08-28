@@ -7,7 +7,7 @@ import { ChatMessage } from './components/ChatMessage'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
 import { TaskPanel } from './components/TaskPanel'
-import { ProjectList, BranchTree, ChangeList, SidebarToolbar } from './components/Sidebar'
+import { ProjectList, SidebarToolbar } from './components/Sidebar'
 import { ChangesDrawer } from './components/ChangesDrawer'
 import { ReviewPanel } from './components/ReviewPanel'
 import { ModelPicker, ThinkingPicker } from './components/ModelPicker'
@@ -256,12 +256,6 @@ export function App(): ReactElement {
               getForkMessages={handleGetForkMessages}
               onFork={handleForkSession}
             />
-            <BranchTree
-              tree={state.tree?.tree ?? null}
-              leafId={state.tree?.leafId ?? null}
-              onFork={(id) => void handleFork(id)}
-            />
-            <ChangeList changes={changes} onSelect={(change) => setDrawerChange(change)} />
           </div>
           <div className="sidebar-footer">
             <button className="sidebar-settings" onClick={() => setSettingsOpen(true)}>

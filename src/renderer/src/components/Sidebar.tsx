@@ -216,6 +216,77 @@ export function ProjectList({
   )
 }
 
+function ProjectBranch({
+  projectCwd,
+  sessions,
+  activePath,
+  onNewSession,
+  onSelectSession,
+  onDelete,
+  onCopy,
+  getForkMessages,
+  onFork
+}: {
+  projectCwd: string
+  sessions: SessionMeta[]
+  activePath?: string
+  onNewSession: (cwd: string) => void
+  onSelectSession: (cwd: string, path: string) => void
+  onDelete: (cwd: string, path: string) => Promise<void>
+  onCopy: (cwd: string, path: string) => Promise<void>
+  getForkMessages: (cwd: string, path: string) => Promise<ForkMessageOption[]>
+  onFork: (cwd: string, path: string, entryId: string) => Promise<string>
+}): ReactElement {
+  const [open, setOpen] = useState(true)
+
+  return (
+    <div className="project-branch">
+      <div
+        className="project-branch-head"
+        title="main · Pion 会话分组，不会创建 Git worktree"
+      >
+        <button
+          type="button"
+          className="project-branch-toggle"
+          aria-expanded={open}
+          aria-label={open ? '收起 main 分支' : '展开 main 分支'}
+          onClick={() => setOpen((value) => !value)}
+        >
+          {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </button>
+        <GitBranch size={13} className="project-branch-icon" />
+        <span className="project-branch-name">main</span>
+        <span className="project-branch-count">{sessions.length}</span>
+        <button
+          type="button"
+          className="project-branch-new"
+          title="在 main 分支中新建会话"
+          onClick={() => onNewSession(projectCwd)}
+        >
+          <MessageSquarePlus size={13} />
+        </button>
+      </div>
+      {open && (
+        <div className="project-branch-sessions">
+          {sessions.length === 0 ? (
+            <div className="project-folder-empty">暂无会话</div>
+          ) : (
+            <SessionItems
+              sessions={sessions}
+              activePath={activePath}
+              onSelect={(path) => onSelectSession(projectCwd, path)}
+              onDelete={(path) => onDelete(projectCwd, path)}
+              onCopy={(path) => onCopy(projectCwd, path)}
+              getForkMessages={(path) => getForkMessages(projectCwd, path)}
+              onFork={(path, entryId) => onFork(projectCwd, path, entryId)}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function ProjectFolder({
   project,
   sessions,
@@ -270,18 +341,7 @@ function ProjectFolder({
         </button>
         <Folder size={14} className="project-folder-icon" />
         <span className="project-folder-name">{project.name}</span>
-        <span className="project-folder-count">{sessions.length}</span>
-        <button
-          type="button"
-          className="project-folder-new"
-          title="在此项目中新建会话"
-          onClick={(event) => {
-            event.stopPropagation()
-            onNewSession(project.cwd)
-          }}
-        >
-          <MessageSquarePlus size={12} />
-        </button>
+        <span className="project-folder-count">1</span>
         {canRemove && (
           <button
             type="button"
@@ -297,20 +357,18 @@ function ProjectFolder({
         )}
       </div>
       {expanded && (
-        <div className="project-folder-sessions">
-          {sessions.length === 0 ? (
-            <div className="project-folder-empty">暂无会话</div>
-          ) : (
-            <SessionItems
-              sessions={sessions}
-              activePath={activePath}
-              onSelect={(path) => onSelectSession(project.cwd, path)}
-              onDelete={(path) => onDelete(project.cwd, path)}
-              onCopy={(path) => onCopy(project.cwd, path)}
-              getForkMessages={(path) => getForkMessages(project.cwd, path)}
-              onFork={(path, entryId) => onFork(project.cwd, path, entryId)}
-            />
-          )}
+        <div className="project-folder-branches">
+          <ProjectBranch
+            projectCwd={project.cwd}
+            sessions={sessions}
+            activePath={activePath}
+            onNewSession={onNewSession}
+            onSelectSession={onSelectSession}
+            onDelete={onDelete}
+            onCopy={onCopy}
+            getForkMessages={getForkMessages}
+            onFork={onFork}
+          />
         </div>
       )}
     </div>
