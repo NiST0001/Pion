@@ -111,6 +111,8 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`!!document.querySelector('.composer-inline-controls .thinking-trigger')`)) break
 }
 await check('composer 输入框存在', `!!document.querySelector('.composer-row textarea')`)
+await check('输入框宽度已扩大', `getComputedStyle(document.querySelector('.composer-row')).maxWidth === '1600px'`)
+await check('输入框高度已扩大', `document.querySelector('.composer-row')?.getBoundingClientRect().height >= 170`)
 await check('任务面板已移除', `!document.querySelector('.task-panel')`)
 await check('输入框含构建/计划模式切换', `document.querySelectorAll('.composer-mode-option[data-mode]').length === 2 && !!document.querySelector('.composer-mode-option[data-mode="build"]') && !!document.querySelector('.composer-mode-option[data-mode="plan"]')`)
 await evaluate(`document.querySelector('.composer-mode-option[data-mode="build"]')?.click()`)
