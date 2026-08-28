@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 import type {
+  AgentMode,
   AgentStatus,
   BranchInfo,
   ForkMessageOption,
@@ -7,6 +8,7 @@ import type {
   ProjectMeta,
   SessionInfo,
   SessionMeta,
+  SlashCommandInfo,
   TreeNodeLite,
   ToolResultPayload,
   WireEntry,
@@ -155,6 +157,8 @@ export interface AgentState {
   projects: ProjectMeta[]
   models: ModelOption[]
   thinkingLevels: string[]
+  commands: SlashCommandInfo[]
+  mode: AgentMode
   timeline: TimelineItem[]
   timelineMutation: 'replace' | 'prepend' | 'append' | null
   busy: boolean
@@ -171,6 +175,8 @@ const initialState: AgentState = {
   projects: [],
   models: [],
   thinkingLevels: [],
+  commands: [],
+  mode: 'build',
   timeline: [],
   timelineMutation: null,
   busy: false,
@@ -188,8 +194,10 @@ type Action =
   | { type: 'reorderSessions'; cwd: string; paths: string[] }
   | { type: 'models'; models: ModelOption[] }
   | { type: 'thinkingLevels'; levels: string[] }
+  | { type: 'commands'; commands: SlashCommandInfo[] }
+  | { type: 'mode'; mode: AgentMode }
   | { type: 'event'; event: WireEventInput }
-  | { type: 'loadEntries'; items: TimelineItem[] }
+  | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode }
   | { type: 'prependEntries'; items: TimelineItem[] }
   | { type: 'clearTimeline' }
 
@@ -318,7 +326,9 @@ function reducer(state: AgentState, action: Action): AgentState {
         busy: dead ? false : state.busy,
         session: dead ? null : state.session,
         sessions: dead ? [] : state.sessions,
-        tree: dead ? null : state.tree
+        tree: dead ? null : state.tree,
+        commands: dead ? [] : state.commands,
+        mode: dead ? 'build' : state.mode
       }
     }
     case 'session':
@@ -371,10 +381,15 @@ function reducer(state: AgentState, action: Action): AgentState {
       return { ...state, models: action.models }
     case 'thinkingLevels':
       return { ...state, thinkingLevels: action.levels }
+    case 'commands':
+      return { ...state, commands: action.commands }
+    case 'mode':
+      return { ...state, mode: action.mode }
     case 'loadEntries':
       return {
         ...state,
         timeline: action.items,
+        mode: action.mode ?? state.mode,
         timelineMutation: 'replace',
         busy: false
       }
@@ -389,6 +404,7 @@ function reducer(state: AgentState, action: Action): AgentState {
       return {
         ...state,
         timeline: [],
+        mode: 'build',
         timelineMutation: 'replace',
         busy: false,
         queued: { steering: 0, followUp: 0 }
@@ -473,7 +489,17 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
 
     case 'entry_appended': {
       const entry = event.entry
-      if (!entry || entry.type !== 'message') return state
+      if (!entry) return state
+      if (entry.type === 'custom' && entry.customType === 'plan-mode-state') {
+        const data = entry.data
+        const enabled = data && typeof data === 'object'
+          ? (data as Record<string, unknown>).enabled
+          : undefined
+        return typeof enabled === 'boolean'
+          ? { ...state, mode: enabled ? 'plan' : 'build' }
+          : state
+      }
+      if (entry.type !== 'message') return state
       const role = (entry.message as WireMessage | undefined)?.role
       const timeline = [...state.timeline]
       // attach the entry id to the most recent matching item that lacks one
@@ -550,6 +576,19 @@ function finalizeStreaming(state: AgentState): AgentState {
 // ---------------------------------------------------------------------------
 // Session replay: entries -> timeline
 // ---------------------------------------------------------------------------
+
+function modeFromEntries(entries: WireEntry[]): AgentMode {
+  let mode: AgentMode = 'build'
+  for (const entry of entries) {
+    if (entry.type !== 'custom' || entry.customType !== 'plan-mode-state') continue
+    const data = entry.data
+    const enabled = data && typeof data === 'object'
+      ? (data as Record<string, unknown>).enabled
+      : undefined
+    if (typeof enabled === 'boolean') mode = enabled ? 'plan' : 'build'
+  }
+  return mode
+}
 
 function entriesToTimeline(entries: WireEntry[]): TimelineItem[] {
   const items: TimelineItem[] = []
@@ -694,7 +733,7 @@ export function useAgent() {
 
     const items = entriesToTimeline(result.entries)
     const initialStart = Math.max(0, items.length - INITIAL_HISTORY_ITEMS)
-    dispatch({ type: 'loadEntries', items: items.slice(initialStart) })
+    dispatch({ type: 'loadEntries', items: items.slice(initialStart), mode: modeFromEntries(result.entries) })
 
     for (let end = initialStart; end > 0; end -= HISTORY_CHUNK_SIZE) {
       await wait(HISTORY_CHUNK_DELAY_MS)
@@ -706,9 +745,14 @@ export function useAgent() {
 
   const refreshModels = useCallback(async () => {
     if (!api) return
-    const [models, levels] = await Promise.all([api.getAvailableModels(), api.getThinkingLevels()])
+    const [models, levels, commands] = await Promise.all([
+      api.getAvailableModels(),
+      api.getThinkingLevels(),
+      api.getCommands()
+    ])
     dispatch({ type: 'models', models })
     dispatch({ type: 'thinkingLevels', levels })
+    dispatch({ type: 'commands', commands })
   }, [api])
 
   const start = useCallback(
@@ -874,6 +918,15 @@ export function useAgent() {
     [api]
   )
 
+  const setMode = useCallback(
+    async (mode: AgentMode) => {
+      if (!api) return
+      await api.setMode(mode)
+      dispatch({ type: 'mode', mode })
+    },
+    [api]
+  )
+
   // --- agent settings -------------------------------------------------------
   const setAutoCompaction = useCallback(
     async (enabled: boolean) => {
@@ -933,6 +986,7 @@ export function useAgent() {
       removeProject,
       setModel,
       setThinkingLevel,
+      setMode,
       setAutoCompaction,
       setAutoRetry,
       compactNow,
@@ -960,6 +1014,7 @@ export function useAgent() {
       removeProject,
       setModel,
       setThinkingLevel,
+      setMode,
       setAutoCompaction,
       setAutoRetry,
       compactNow,

@@ -112,7 +112,9 @@ function registerIpc(): void {
   ipcMain.handle('pion:agent-tree', () => bridge.getTree())
   ipcMain.handle('pion:agent-sessions', (_event, cwd?: string) => bridge.listSessions(cwd))
 
-  // model & thinking ------------------------------------------------------------
+  // commands, modes, model & thinking -------------------------------------------
+  ipcMain.handle('pion:agent-commands', () => bridge.getCommands())
+  ipcMain.handle('pion:agent-set-mode', (_event, mode: 'build' | 'plan') => bridge.setMode(mode))
   ipcMain.handle('pion:agent-models', () => bridge.getModels())
   ipcMain.handle('pion:agent-skills', () => bridge.getSkills())
   ipcMain.handle('pion:agent-set-model', (_event, provider: string, modelId: string) =>

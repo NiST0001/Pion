@@ -35,6 +35,8 @@
 - Markdown 渲染（GFM、代码高亮、一键复制）
 - 工具调用卡片：edit 显示彩色 Diff（+/- 行统计），write/bash/read 折叠详情
 - 运行中可继续输入（自动作为转向消息 steer 注入）或中止
+- 输入 `/` 打开动态斜杠命令菜单，支持 pi 扩展、提示词模板和技能命令
+- 输入框内置「构建 / 计划」模式切换；计划模式由 `@narumitw/pi-plan-mode` 提供只读探索和方案整理能力
 - 内置 pi 官方插件商店（`https://pi.dev/packages`）
 
 ### 项目
@@ -55,6 +57,7 @@
 ### 模型
 - 模型选择器：按 provider 分组，显示上下文窗口与推理能力标记
 - 思考级别切换（off/minimal/low/medium/high…按模型支持）
+- 构建 / 计划模式和斜杠命令均通过 RPC 接入 pi，计划状态随会话恢复
 
 ## 开发
 
@@ -121,7 +124,6 @@ src/
 ## 说明
 
 - 本项目**仅本地开发**，未配置打包分发（electron-builder 等）；`npm run dev` 为主工作流。
-- 模型/思考等级切换、会话树、fork 均已接入；RPC 尚有能力未接 UI：compact（手动压缩）、
-  export_html、get_commands（斜杠命令面板）——可在 `src/main/agent-bridge.ts` 按
-  `RpcClient` API 继续扩展。
+- 模型/思考等级切换、会话树、fork、斜杠命令和计划模式均已接入；RPC 尚有能力未接 UI：
+  compact（手动压缩）、export_html——可在 `src/main/agent-bridge.ts` 按 `RpcClient` API 继续扩展。
 - 会话文件由 pi 自身管理（JSONL，按目录分桶），Pion 只读扫描列表、切换时交给 pi 加载。

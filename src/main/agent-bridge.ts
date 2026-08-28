@@ -10,6 +10,7 @@ import {
 } from '@earendil-works/pi-coding-agent'
 import type { SessionEntry, SessionTreeNode } from '@earendil-works/pi-coding-agent'
 import type {
+  AgentMode,
   AgentStatus,
   BranchInfo,
   DeleteSessionResult,
@@ -18,6 +19,7 @@ import type {
   SessionInfo,
   SessionMeta,
   SkillInfo,
+  SlashCommandInfo,
   TreeNodeLite,
   WireEntry,
   WireMessage
@@ -31,6 +33,7 @@ const STATUS_CHANNEL = 'pion:agent-status'
 const STATE_CHANNEL = 'pion:agent-state'
 const SESSIONS_CHANNEL = 'pion:agent-sessions'
 const TREE_CHANNEL = 'pion:agent-tree'
+const PLAN_EXTENSION_PATH = resolve(__dirname, '../../node_modules/@narumitw/pi-plan-mode/dist/index.ts')
 
 /** Events after which derived state (model/session/tree) is re-pushed. */
 const STATE_REFRESH_EVENTS = new Set([
@@ -125,7 +128,13 @@ export class AgentBridge {
 
     // RpcClient spawns `node <cliPath> --mode rpc`; the path must be absolute.
     const cliPath = join(getPackageDir(), 'dist', 'cli.js')
-    const client = new RpcClient({ cliPath, cwd })
+    const args = (await pathExists(PLAN_EXTENSION_PATH))
+      ? ['--extension', PLAN_EXTENSION_PATH]
+      : []
+    if (args.length === 0) {
+      console.warn('[pion] plan mode extension not found:', PLAN_EXTENSION_PATH)
+    }
+    const client = new RpcClient({ cliPath, cwd, args })
 
     client.onEvent((event) => {
       this.win?.webContents.send(EVENT_CHANNEL, event)
@@ -302,6 +311,27 @@ export class AgentBridge {
     } catch {
       return null
     }
+  }
+
+  // ---------------------------------------------------------------- commands & modes
+
+  async getCommands(): Promise<SlashCommandInfo[]> {
+    if (!this.client) return []
+    try {
+      const commands = await this.client.getCommands()
+      return commands.map(({ name, description, source }) => ({ name, description, source }))
+    } catch {
+      return []
+    }
+  }
+
+  async setMode(mode: AgentMode): Promise<void> {
+    if (!this.client) throw new Error('agent 未启动')
+    const commands = await this.client.getCommands()
+    if (!commands.some((command) => command.name === 'plan')) {
+      throw new Error('计划模式扩展未加载')
+    }
+    await this.client.prompt(mode === 'plan' ? '/plan start' : '/plan exit')
   }
 
   // ---------------------------------------------------------------- models
@@ -532,6 +562,9 @@ function toWireEntry(entry: SessionEntry): WireEntry {
     wire.message = record.message as WireMessage
   } else if (entry.type === 'compaction') {
     wire.summary = record.summary as string
+  } else if (entry.type === 'custom') {
+    if (typeof record.customType === 'string') wire.customType = record.customType
+    wire.data = record.data
   }
   return wire
 }

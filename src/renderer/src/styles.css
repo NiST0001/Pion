@@ -3507,8 +3507,134 @@ body {
   line-height: 1.5;
 }
 
+.composer-input-main {
+  position: relative;
+}
+
 .composer-inline-controls {
   min-height: 28px;
+}
+
+.composer-mode-picker {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--surface-tint);
+}
+
+.composer-mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 23px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: var(--fg-faint);
+  font-size: 10.5px;
+  line-height: 1;
+  transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.composer-mode-option:hover:not(:disabled) {
+  color: var(--fg-dim);
+  background: var(--bg-hover);
+}
+
+.composer-mode-option.active {
+  background: var(--bg-hover);
+  color: var(--fg);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+}
+
+.composer-mode-plan .composer-mode-option.active:last-child {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.composer-mode-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.slash-command-menu {
+  position: absolute;
+  z-index: 30;
+  bottom: calc(100% + 10px);
+  left: 0;
+  display: flex;
+  width: min(540px, 100%);
+  max-height: min(360px, 46vh);
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;
+  padding: 7px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  box-shadow: var(--shadow-pop);
+}
+
+.slash-command-heading {
+  padding: 3px 8px 5px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+}
+
+.slash-command-option {
+  display: grid;
+  grid-template-columns: minmax(96px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 32px;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  text-align: left;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.slash-command-option:hover,
+.slash-command-option.active {
+  background: var(--accent-soft);
+  border-color: rgba(var(--accent-rgb), 0.2);
+}
+
+.slash-command-name {
+  overflow: hidden;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-command-description {
+  overflow: hidden;
+  color: var(--fg-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slash-command-source {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--surface-tint);
+  color: var(--fg-faint);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.composer-row:has(.slash-command-menu) {
+  border-color: rgba(var(--accent-rgb), 0.72);
+  box-shadow: 0 0 0 3px var(--accent-soft), var(--composer-shadow);
 }
 
 .send-button {

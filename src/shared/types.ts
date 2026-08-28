@@ -12,6 +12,8 @@
 
 export type AgentPhase = 'stopped' | 'starting' | 'running' | 'error'
 
+export type AgentMode = 'build' | 'plan'
+
 export interface AgentStatus {
   phase: AgentPhase
   /** Human-readable error when phase === 'error' */
@@ -102,6 +104,9 @@ export interface WireEntry {
   message?: WireMessage
   /** Present when type === 'compaction' */
   summary?: string
+  /** Present when type === 'custom' */
+  customType?: string
+  data?: unknown
   [key: string]: unknown
 }
 
@@ -197,6 +202,15 @@ export interface SkillInfo {
   description?: string
 }
 
+export type SlashCommandSource = 'extension' | 'prompt' | 'skill'
+
+export interface SlashCommandInfo {
+  /** Command name without the leading slash. */
+  name: string
+  description?: string
+  source: SlashCommandSource
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -278,6 +292,8 @@ export interface PionApi {
   // model & thinking --------------------------------------------------------
   getAvailableModels(): Promise<ModelOption[]>
   getSkills(): Promise<SkillInfo[]>
+  getCommands(): Promise<SlashCommandInfo[]>
+  setMode(mode: AgentMode): Promise<void>
   setModel(provider: string, modelId: string): Promise<void>
   getThinkingLevels(): Promise<string[]>
   setThinkingLevel(level: string): Promise<void>

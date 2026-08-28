@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactElement, ReactNode } from 'react'
-import { ArrowUp, Square } from 'lucide-react'
+import { ArrowUp, Hammer, ListTodo, Square } from 'lucide-react'
+import type { AgentMode, SlashCommandInfo } from '../../../shared/types'
 
 interface ComposerProps {
   busy: boolean
@@ -11,6 +12,9 @@ interface ComposerProps {
   history: string[]
   /** 嵌入输入框底部的控制区（模型/思考级别选择器等） */
   controls?: ReactNode
+  commands: SlashCommandInfo[]
+  mode: AgentMode
+  onModeChange: (mode: AgentMode) => void
   onSend: (text: string) => void
   onQueue: (text: string) => void
   onAbort: () => void
@@ -23,11 +27,15 @@ export function Composer({
   prefill,
   history,
   controls,
+  commands,
+  mode,
+  onModeChange,
   onSend,
   onQueue,
   onAbort
 }: ComposerProps): ReactElement {
   const [value, setValue] = useState('')
+  const [commandIndex, setCommandIndex] = useState(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const historyIndexRef = useRef<number | null>(null)
   const historyDraftRef = useRef('')
@@ -103,6 +111,18 @@ export function Composer({
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
   }, [resetHistoryNavigation])
 
+  const slashMatch = value.match(/^\s*\/([^\s]*)$/)
+  const slashQuery = slashMatch?.[1].toLocaleLowerCase() ?? null
+  const commandOptions = slashQuery === null
+    ? []
+    : commands.filter((command) => command.name.toLocaleLowerCase().startsWith(slashQuery)).slice(0, 8)
+  const showCommandMenu = !disabled && commandOptions.length > 0
+  const activeCommandIndex = Math.min(commandIndex, Math.max(0, commandOptions.length - 1))
+
+  useEffect(() => {
+    setCommandIndex(0)
+  }, [slashQuery])
+
   const submit = useCallback(() => {
     const text = value.trim()
     if (text === '' || disabled) return
@@ -118,6 +138,29 @@ export function Composer({
   }, [value, disabled, onQueue, clearValue])
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (showCommandMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      event.preventDefault()
+      setCommandIndex((current) => {
+        const last = commandOptions.length - 1
+        if (last < 0) return 0
+        return event.key === 'ArrowDown'
+          ? Math.min(current + 1, last)
+          : Math.max(current - 1, 0)
+      })
+      return
+    }
+
+    if (
+      showCommandMenu &&
+      event.key === 'Enter' &&
+      !event.shiftKey &&
+      !event.nativeEvent.isComposing
+    ) {
+      event.preventDefault()
+      selectSlashCommand(activeCommandIndex)
+      return
+    }
+
     const historyDirection = event.key === 'ArrowUp' ? 'up' : event.key === 'ArrowDown' ? 'down' : null
     const atHistoryBoundary = historyDirection === 'up'
       ? event.currentTarget.selectionStart === 0 && event.currentTarget.selectionEnd === 0
@@ -154,17 +197,66 @@ export function Composer({
     element.style.height = `${Math.min(element.scrollHeight, 200)}px`
   }
 
+  const selectSlashCommand = (index: number): void => {
+    const command = commandOptions[index]
+    if (!command) return
+    resetHistoryNavigation()
+    const nextValue = `/${command.name} `
+    setValue(nextValue)
+    setCommandIndex(0)
+    requestAnimationFrame(() => {
+      const element = textareaRef.current
+      if (!element) return
+      autoSize(element)
+      element.focus()
+      element.setSelectionRange(nextValue.length, nextValue.length)
+    })
+  }
+
+  const sourceLabel = (source: SlashCommandInfo['source']): string => {
+    if (source === 'skill') return '技能'
+    if (source === 'prompt') return '提示词'
+    return '扩展'
+  }
+
   const queuedTotal = queued.steering + queued.followUp
 
   return (
     <footer className="composer">
-      <div className="composer-row">
+      <div className={`composer-row composer-mode-${mode}`}>
         <div className="composer-input-main">
+          {showCommandMenu && (
+            <div id="slash-command-menu" className="slash-command-menu" role="listbox" aria-label="斜杠命令">
+              <div className="slash-command-heading">斜杠命令</div>
+              {commandOptions.map((command, index) => (
+                <button
+                  type="button"
+                  key={`${command.source}:${command.name}`}
+                  className={`slash-command-option${index === activeCommandIndex ? ' active' : ''}`}
+                  role="option"
+                  aria-selected={index === activeCommandIndex}
+                  title={command.description || `执行 /${command.name}`}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => selectSlashCommand(index)}
+                >
+                  <span className="slash-command-name">/{command.name}</span>
+                  <span className="slash-command-description">{command.description || '无描述'}</span>
+                  <span className="slash-command-source">{sourceLabel(command.source)}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
             ref={textareaRef}
             value={value}
-            placeholder={disabled ? 'agent 未运行…' : '描述任务… (↑↓ 编辑历史 / Tab 排队 / Enter 直接发送)'}
+            placeholder={disabled
+              ? 'agent 未运行…'
+              : mode === 'plan'
+                ? '计划模式：描述要探索和设计的目标… (↑↓ 编辑历史 / Tab 排队 / Enter 直接发送)'
+                : '描述任务… (↑↓ 编辑历史 / Tab 排队 / Enter 直接发送)'}
             disabled={disabled}
+            aria-autocomplete="list"
+            aria-controls="slash-command-menu"
             rows={1}
             onChange={(event) => {
               resetHistoryNavigation()
@@ -174,7 +266,35 @@ export function Composer({
             onKeyDown={handleKeyDown}
             aria-keyshortcuts="ArrowUp ArrowDown"
           />
-          <div className="composer-inline-controls">{controls}</div>
+          <div className="composer-inline-controls">
+            <div className="composer-mode-picker" role="group" aria-label="工作模式">
+              <button
+                type="button"
+                data-mode="build"
+                className={`composer-mode-option${mode === 'build' ? ' active' : ''}`}
+                aria-pressed={mode === 'build'}
+                disabled={disabled || busy}
+                title="构建模式：允许修改项目文件"
+                onClick={() => onModeChange('build')}
+              >
+                <Hammer size={12} />
+                <span>构建</span>
+              </button>
+              <button
+                type="button"
+                data-mode="plan"
+                className={`composer-mode-option${mode === 'plan' ? ' active' : ''}`}
+                aria-pressed={mode === 'plan'}
+                disabled={disabled || busy}
+                title="计划模式：只读探索并制定实现方案"
+                onClick={() => onModeChange('plan')}
+              >
+                <ListTodo size={12} />
+                <span>计划</span>
+              </button>
+            </div>
+            {controls}
+          </div>
         </div>
         <button
           className="send-button"

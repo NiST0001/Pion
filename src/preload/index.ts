@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  AgentMode,
   AgentStatus,
   BranchInfo,
   PionApi,
@@ -7,6 +8,7 @@ import type {
   SessionInfo,
   SessionMeta,
   SkillInfo,
+  SlashCommandInfo,
   TreeNodeLite,
   WireEventInput
 } from '../shared/types'
@@ -39,7 +41,9 @@ const api: PionApi = {
   getEntries: () => ipcRenderer.invoke('pion:agent-entries'),
   getTree: () => ipcRenderer.invoke('pion:agent-tree'),
 
-  // model & thinking
+  // commands, modes, model & thinking
+  getCommands: () => ipcRenderer.invoke('pion:agent-commands') as Promise<SlashCommandInfo[]>,
+  setMode: (mode: AgentMode) => ipcRenderer.invoke('pion:agent-set-mode', mode),
   getAvailableModels: () => ipcRenderer.invoke('pion:agent-models'),
   getSkills: () => ipcRenderer.invoke('pion:agent-skills') as Promise<SkillInfo[]>,
   setModel: (provider, modelId) => ipcRenderer.invoke('pion:agent-set-model', provider, modelId),

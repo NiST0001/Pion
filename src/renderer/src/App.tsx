@@ -354,6 +354,9 @@ export function App(): ReactElement {
               disabled={state.status.phase !== 'running'}
               prefill={prefill}
               history={messageHistory}
+              commands={state.commands}
+              mode={state.mode}
+              onModeChange={(mode) => void actions.setMode(mode)}
               controls={
                 <>
                   <ModelPicker
