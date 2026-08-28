@@ -37,7 +37,7 @@
 - 运行中可继续输入（自动作为转向消息 steer 注入）或中止
 - 输入 `/` 打开动态斜杠命令菜单，支持 pi 扩展、提示词模板和技能命令
 - 输入框内置「构建 / 计划」模式切换；计划模式由 `@narumitw/pi-plan-mode` 提供只读探索和方案整理能力
-- 内置 pi 官方插件商店（`https://pi.dev/packages`）
+- pi 官方插件商店：原生目录可直接安装，保留内置浏览器查看原站（`https://pi.dev/packages`）
 
 ### 项目
 - 多项目管理：侧栏切换工作目录（agent 子进程随目录重启）
@@ -117,7 +117,7 @@ src/
             ├── ToolCallItem.tsx  # 工具调用卡片
             ├── Composer.tsx      # 输入区（发送/停止/转向提示）
             ├── ModelPicker.tsx   # 模型 + 思考级别选择器
-            ├── PluginStoreModal.tsx # 内置 pi 官方插件目录
+            ├── PluginStoreModal.tsx # pi 插件目录 / 直接安装 / 内置浏览器
             └── StatusBar.tsx
 ```
 

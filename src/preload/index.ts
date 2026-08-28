@@ -4,6 +4,8 @@ import type {
   AgentStatus,
   BranchInfo,
   PionApi,
+  PluginCatalogItem,
+  PluginInstallResult,
   ProjectMeta,
   SessionInfo,
   SessionMeta,
@@ -43,6 +45,9 @@ const api: PionApi = {
 
   // commands, modes, model & thinking
   getCommands: () => ipcRenderer.invoke('pion:agent-commands') as Promise<SlashCommandInfo[]>,
+  getPluginCatalog: () => ipcRenderer.invoke('pion:plugins-catalog') as Promise<PluginCatalogItem[]>,
+  getInstalledPlugins: () => ipcRenderer.invoke('pion:plugins-installed') as Promise<string[]>,
+  installPlugin: (source) => ipcRenderer.invoke('pion:plugins-install', source) as Promise<PluginInstallResult>,
   setMode: (mode: AgentMode) => ipcRenderer.invoke('pion:agent-set-mode', mode),
   getAvailableModels: () => ipcRenderer.invoke('pion:agent-models'),
   getSkills: () => ipcRenderer.invoke('pion:agent-skills') as Promise<SkillInfo[]>,

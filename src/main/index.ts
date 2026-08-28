@@ -2,10 +2,12 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { AgentBridge } from './agent-bridge'
+import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
 import type { ProjectMeta } from '../shared/types'
 
 const bridge = new AgentBridge()
+const plugins = new PluginManager()
 const projects = new ProjectStore()
 
 let projectsPush = (list: ProjectMeta[]): void => {
@@ -124,6 +126,11 @@ function registerIpc(): void {
   ipcMain.handle('pion:agent-set-thinking', (_event, level: string) =>
     bridge.setThinkingLevel(level)
   )
+
+  // plugin store --------------------------------------------------------------
+  ipcMain.handle('pion:plugins-catalog', () => plugins.getCatalog())
+  ipcMain.handle('pion:plugins-installed', () => plugins.getInstalled())
+  ipcMain.handle('pion:plugins-install', (_event, source: string) => plugins.install(source))
 
   // agent settings ----------------------------------------------------------------
   ipcMain.handle('pion:agent-set-auto-compaction', (_event, enabled: boolean) =>

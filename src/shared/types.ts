@@ -203,6 +203,21 @@ export interface SkillInfo {
   description?: string
 }
 
+export interface PluginCatalogItem {
+  name: string
+  description: string
+  type: string
+  source: string
+  packageUrl: string
+  npmUrl?: string
+  downloads?: number
+}
+
+export interface PluginInstallResult {
+  source: string
+  output: string
+}
+
 export type SlashCommandSource = 'extension' | 'prompt' | 'skill'
 
 export interface SlashCommandInfo {
@@ -294,6 +309,9 @@ export interface PionApi {
   getAvailableModels(): Promise<ModelOption[]>
   getSkills(): Promise<SkillInfo[]>
   getCommands(): Promise<SlashCommandInfo[]>
+  getPluginCatalog(): Promise<PluginCatalogItem[]>
+  getInstalledPlugins(): Promise<string[]>
+  installPlugin(source: string): Promise<PluginInstallResult>
   setMode(mode: AgentMode): Promise<void>
   setModel(provider: string, modelId: string): Promise<void>
   getThinkingLevels(): Promise<string[]>

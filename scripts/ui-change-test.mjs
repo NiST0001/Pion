@@ -167,6 +167,16 @@ await evaluate(`document.querySelector('.sidebar-plugin-store')?.click()`)
 await sleep(300)
 await check('插件商店以内置面板打开', `!!document.querySelector('.plugin-store-modal') && !!document.querySelector('.plugin-store-webview')`)
 await check('插件商店加载官方目录', `document.querySelector('.plugin-store-webview')?.getAttribute('src') === 'https://pi.dev/packages'`)
+for (let i = 0; i < 20; i++) {
+  await sleep(300)
+  if (await evaluate(`document.querySelectorAll('.plugin-install-button').length > 0 || !!document.querySelector('.plugin-store-error')`)) break
+}
+await check('插件商店提供直接安装入口', `!!document.querySelector('.plugin-store-manual') && document.querySelectorAll('.plugin-install-button').length > 0`)
+await evaluate(`document.querySelector('.plugin-store-view-toggle')?.click()`)
+await sleep(120)
+await check('插件商店可切换内置浏览器', `document.querySelector('.plugin-store-browser:not(.is-hidden)') !== null`)
+await evaluate(`document.querySelector('.plugin-store-view-toggle')?.click()`)
+await sleep(120)
 await evaluate(`document.querySelector('.plugin-store-modal .icon-button:last-child')?.click()`)
 await sleep(150)
 await check('插件商店面板可关闭', `!document.querySelector('.plugin-store-modal')`)
