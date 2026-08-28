@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { ReactElement } from 'react'
-import { Check, ChevronDown, ChevronRight, Circle, ListTodo } from 'lucide-react'
+import { Check, ChevronDown, Circle, ListTodo } from 'lucide-react'
 
 interface TaskTarget {
   id: string
@@ -29,23 +29,16 @@ export function TaskPanel(): ReactElement {
 
   return (
     <section className={`task-panel${expanded ? ' expanded' : ' collapsed'}`}>
-      <div className="task-panel-head">
-        <button
-          type="button"
-          className="task-panel-toggle"
-          aria-expanded={expanded}
-          aria-controls="task-target-list"
-          onClick={() => setExpanded((value) => !value)}
-        >
-          <ListTodo size={15} />
-          <span className="task-panel-title">任务目标</span>
-          <span className="task-panel-count">{completed}/{tasks.length}</span>
-          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </button>
-        <span className="task-panel-caption">工作计划</span>
-      </div>
+      <div className="task-panel-card">
+        <div className="task-panel-head">
+          <div className="task-panel-summary">
+            <ListTodo size={15} />
+            <span className="task-panel-title">任务目标</span>
+            <span className="task-panel-count">{completed}/{tasks.length}</span>
+          </div>
+          <span className="task-panel-caption">工作计划</span>
+        </div>
 
-      {expanded && (
         <div id="task-target-list" className="task-panel-list" role="list" aria-label="任务目标列表">
           {tasks.map((task, index) => (
             <div
@@ -71,7 +64,18 @@ export function TaskPanel(): ReactElement {
             </div>
           ))}
         </div>
-      )}
+      </div>
+
+      <button
+        type="button"
+        className={`task-panel-toggle${expanded ? ' expanded' : ' collapsed'}`}
+        aria-label={expanded ? '收起任务目标' : '展开任务目标'}
+        aria-expanded={expanded}
+        aria-controls="task-target-list"
+        onClick={() => setExpanded((value) => !value)}
+      >
+        {expanded ? <ChevronDown size={15} /> : <ListTodo size={15} />}
+      </button>
     </section>
   )
 }
