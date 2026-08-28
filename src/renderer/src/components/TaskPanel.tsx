@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { ReactElement } from 'react'
-import { ArrowUp, Check, Circle, ListTodo } from 'lucide-react'
+import { ArrowDown, Check, Circle, ListTodo } from 'lucide-react'
 
 interface TaskTarget {
   id: string
@@ -39,30 +39,32 @@ export function TaskPanel(): ReactElement {
           <span className="task-panel-caption">工作计划</span>
         </div>
 
-        <div id="task-target-list" className="task-panel-list" role="list" aria-label="任务目标列表">
-          {tasks.map((task, index) => (
-            <div
-              key={task.id}
-              className={`task-item${task.done ? ' done' : ''}`}
-              role="listitem"
-              data-task-index={index + 1}
-            >
-              <button
-                type="button"
-                className="task-check"
-                aria-label={task.done ? `标记任务未完成：${task.title}` : `标记任务完成：${task.title}`}
-                onClick={() => {
-                  setTasks((current) => current.map((item) => (
-                    item.id === task.id ? { ...item, done: !item.done } : item
-                  )))
-                }}
+        <div className="task-panel-list-shell">
+          <div id="task-target-list" className="task-panel-list" role="list" aria-label="任务目标列表">
+            {tasks.map((task, index) => (
+              <div
+                key={task.id}
+                className={`task-item${task.done ? ' done' : ''}`}
+                role="listitem"
+                data-task-index={index + 1}
               >
-                {task.done ? <Check size={12} /> : <Circle size={11} />}
-              </button>
-              <span className="task-index">{String(index + 1).padStart(2, '0')}</span>
-              <span className="task-title" title={task.title}>{task.title}</span>
-            </div>
-          ))}
+                <button
+                  type="button"
+                  className="task-check"
+                  aria-label={task.done ? `标记任务未完成：${task.title}` : `标记任务完成：${task.title}`}
+                  onClick={() => {
+                    setTasks((current) => current.map((item) => (
+                      item.id === task.id ? { ...item, done: !item.done } : item
+                    )))
+                  }}
+                >
+                  {task.done ? <Check size={12} /> : <Circle size={11} />}
+                </button>
+                <span className="task-index">{String(index + 1).padStart(2, '0')}</span>
+                <span className="task-title" title={task.title}>{task.title}</span>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -74,7 +76,7 @@ export function TaskPanel(): ReactElement {
         aria-controls="task-target-list"
         onClick={() => setExpanded((value) => !value)}
       >
-        <ArrowUp size={18} className="task-panel-toggle-icon" />
+        <ArrowDown size={18} className="task-panel-toggle-icon" />
       </button>
     </section>
   )
