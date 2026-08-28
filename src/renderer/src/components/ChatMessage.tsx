@@ -34,7 +34,7 @@ export function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactE
   }
 
   return (
-    <div className={`row row-assistant${item.historical ? ' history-reveal' : ''}`}>
+    <div className={`row row-assistant${item.historical ? ' history-reveal' : ''}${item.streaming ? ' streaming-reveal' : ''}`}>
       <div className="avatar avatar-assistant">π</div>
       <div className="bubble bubble-assistant">
         {item.thinking !== '' && (
