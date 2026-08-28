@@ -351,6 +351,7 @@ export class AgentBridge {
     try {
       const infos = await SessionManager.list(dir)
       return infos.map((info) => ({
+        projectCwd: resolve(dir),
         path: info.path,
         id: info.id,
         name: info.name,

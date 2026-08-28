@@ -3806,3 +3806,119 @@ body {
     padding-bottom: 11px;
   }
 }
+
+/* project folders ----------------------------------------------------------- */
+
+.project-folder {
+  margin-bottom: 3px;
+}
+
+.project-folder-head {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  gap: 6px;
+  padding: 5px 5px;
+  border-radius: 8px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.project-folder-head:hover,
+.project-folder.active > .project-folder-head {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.project-folder-toggle,
+.project-folder-new,
+.project-folder-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 5px;
+  color: var(--fg-faint);
+}
+
+.project-folder-toggle {
+  width: 17px;
+  height: 20px;
+}
+
+.project-folder-toggle:hover,
+.project-folder-new:hover,
+.project-folder-remove:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.project-folder-icon {
+  flex-shrink: 0;
+  color: var(--accent-strong);
+}
+
+.project-folder-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.project-folder-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.project-folder-new,
+.project-folder-remove {
+  width: 22px;
+  height: 22px;
+  opacity: 0.38;
+}
+
+.project-folder-head:hover .project-folder-new,
+.project-folder-head:hover .project-folder-remove,
+.project-folder.active .project-folder-new {
+  opacity: 1;
+}
+
+.project-folder-remove:hover {
+  color: var(--danger);
+}
+
+.project-folder-sessions {
+  margin: 0 0 5px 15px;
+  padding: 3px 0 2px 9px;
+  border-left: 1px solid var(--border);
+}
+
+.project-folder-sessions .side-session {
+  padding: 6px 8px;
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.project-folder-sessions .side-session:hover {
+  background: var(--bg-hover);
+}
+
+.project-folder-sessions .side-session.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.project-folder-empty {
+  padding: 5px 8px 6px;
+  color: var(--fg-faint);
+  font-size: 11px;
+}

@@ -63,6 +63,7 @@ export interface AgentState {
   status: AgentStatus
   session: SessionInfo | null
   sessions: SessionMeta[]
+  sessionsByProject: Record<string, SessionMeta[]>
   tree: { tree: TreeNodeLite[]; leafId: string | null } | null
   projects: ProjectMeta[]
   models: ModelOption[]
@@ -76,6 +77,7 @@ const initialState: AgentState = {
   status: { phase: 'stopped' },
   session: null,
   sessions: [],
+  sessionsByProject: {},
   tree: null,
   projects: [],
   models: [],
@@ -89,6 +91,7 @@ type Action =
   | { type: 'status'; status: AgentStatus }
   | { type: 'session'; session: SessionInfo | null }
   | { type: 'sessions'; sessions: SessionMeta[] }
+  | { type: 'projectSessions'; sessionsByProject: Record<string, SessionMeta[]> }
   | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
   | { type: 'projects'; projects: ProjectMeta[] }
   | { type: 'models'; models: ModelOption[] }
@@ -219,12 +222,27 @@ function reducer(state: AgentState, action: Action): AgentState {
     }
     case 'session':
       return { ...state, session: action.session }
-    case 'sessions':
-      return { ...state, sessions: action.sessions }
+    case 'sessions': {
+      const projectCwd = action.sessions[0]?.projectCwd ?? state.status.cwd
+      return {
+        ...state,
+        sessions: action.sessions,
+        sessionsByProject: projectCwd
+          ? { ...state.sessionsByProject, [projectCwd]: action.sessions }
+          : state.sessionsByProject
+      }
+    }
+    case 'projectSessions':
+      return { ...state, sessionsByProject: action.sessionsByProject }
     case 'tree':
       return { ...state, tree: action.tree }
-    case 'projects':
-      return { ...state, projects: action.projects }
+    case 'projects': {
+      const projectCwds = new Set(action.projects.map((project) => project.cwd))
+      const sessionsByProject = Object.fromEntries(
+        Object.entries(state.sessionsByProject).filter(([cwd]) => projectCwds.has(cwd))
+      )
+      return { ...state, projects: action.projects, sessionsByProject }
+    }
     case 'models':
       return { ...state, models: action.models }
     case 'thinkingLevels':
@@ -473,6 +491,31 @@ export function useAgent() {
     ]
     return () => offs.forEach((off) => off())
   }, [api])
+
+  // Load every project's sessions so the sidebar can render a folder tree
+  // instead of showing only sessions from the active working directory.
+  useEffect(() => {
+    if (!api) return
+    let cancelled = false
+    const projectList = state.projects
+    if (projectList.length === 0) {
+      dispatch({ type: 'projectSessions', sessionsByProject: {} })
+      return () => {
+        cancelled = true
+      }
+    }
+
+    void Promise.all(
+      projectList.map(async (project) => [project.cwd, await api.listSessions(project.cwd)] as const)
+    ).then((entries) => {
+      if (cancelled) return
+      dispatch({ type: 'projectSessions', sessionsByProject: Object.fromEntries(entries) })
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [api, state.projects])
 
   /** Rebuild the timeline from the active session's entries. */
   const reloadTimeline = useCallback(async () => {

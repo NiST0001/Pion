@@ -149,6 +149,8 @@ export interface ProjectMeta {
 }
 
 export interface SessionMeta {
+  /** Project working directory that owns this session. */
+  projectCwd?: string
   /** Absolute path of the .jsonl file */
   path: string
   id: string

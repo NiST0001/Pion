@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactElement } from 'react'
 import {
@@ -140,17 +140,46 @@ export function SidebarToolbar({
 
 export function ProjectList({
   projects,
+  sessionsByProject,
+  searchQuery,
   activeCwd,
+  activePath,
   onSelect,
   onAdd,
-  onRemove
+  onRemove,
+  onNewSession,
+  onSelectSession,
+  onDelete,
+  onCopy,
+  getForkMessages,
+  onFork
 }: {
   projects: ProjectMeta[]
+  sessionsByProject: Record<string, SessionMeta[]>
+  searchQuery: string
   activeCwd?: string
+  activePath?: string
   onSelect: (cwd: string) => void
   onAdd: () => void
   onRemove: (cwd: string) => void
+  onNewSession: (cwd: string) => void
+  onSelectSession: (cwd: string, path: string) => void
+  onDelete: (cwd: string, path: string) => Promise<void>
+  onCopy: (cwd: string, path: string) => Promise<void>
+  getForkMessages: (cwd: string, path: string) => Promise<ForkMessageOption[]>
+  onFork: (cwd: string, path: string, entryId: string) => Promise<string>
 }): ReactElement {
+  const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
+  const visibleProjects = projects
+    .map((project) => {
+      const sessions = sessionsByProject[project.cwd] ?? []
+      const visibleSessions = normalizedQuery
+        ? sessions.filter((session) => sessionMatchesQuery(session, normalizedQuery))
+        : sessions
+      return { project, sessions: visibleSessions }
+    })
+    .filter(({ sessions }) => !normalizedQuery || sessions.length > 0)
+
   return (
     <Section
       title="项目"
@@ -161,30 +190,130 @@ export function ProjectList({
         </button>
       }
     >
-      {projects.map((project) => (
-        <div
+      {visibleProjects.length === 0 && (
+        <div className="side-empty">{normalizedQuery ? '没有匹配的会话' : '暂无项目'}</div>
+      )}
+      {visibleProjects.map(({ project, sessions }) => (
+        <ProjectFolder
           key={project.cwd}
-          className={`side-item${project.cwd === activeCwd ? ' active' : ''}`}
-          onClick={() => onSelect(project.cwd)}
-          title={project.cwd}
-        >
-          <Folder size={14} className="side-item-icon" />
-          <span className="side-item-label">{project.name}</span>
-          {projects.length > 1 && (
-            <button
-              className="side-item-remove"
-              title="从列表移除"
-              onClick={(e) => {
-                e.stopPropagation()
-                onRemove(project.cwd)
-              }}
-            >
-              <Trash2 size={12} />
-            </button>
-          )}
-        </div>
+          project={project}
+          sessions={sessions}
+          activeCwd={activeCwd}
+          activePath={activePath}
+          searchActive={Boolean(normalizedQuery)}
+          canRemove={projects.length > 1}
+          onSelect={onSelect}
+          onRemove={onRemove}
+          onNewSession={onNewSession}
+          onSelectSession={onSelectSession}
+          onDelete={onDelete}
+          onCopy={onCopy}
+          getForkMessages={getForkMessages}
+          onFork={onFork}
+        />
       ))}
     </Section>
+  )
+}
+
+function ProjectFolder({
+  project,
+  sessions,
+  activeCwd,
+  activePath,
+  searchActive,
+  canRemove,
+  onSelect,
+  onRemove,
+  onNewSession,
+  onSelectSession,
+  onDelete,
+  onCopy,
+  getForkMessages,
+  onFork
+}: {
+  project: ProjectMeta
+  sessions: SessionMeta[]
+  activeCwd?: string
+  activePath?: string
+  searchActive: boolean
+  canRemove: boolean
+  onSelect: (cwd: string) => void
+  onRemove: (cwd: string) => void
+  onNewSession: (cwd: string) => void
+  onSelectSession: (cwd: string, path: string) => void
+  onDelete: (cwd: string, path: string) => Promise<void>
+  onCopy: (cwd: string, path: string) => Promise<void>
+  getForkMessages: (cwd: string, path: string) => Promise<ForkMessageOption[]>
+  onFork: (cwd: string, path: string, entryId: string) => Promise<string>
+}): ReactElement {
+  const [open, setOpen] = useState(true)
+  const expanded = open || searchActive
+
+  return (
+    <div className={`project-folder${project.cwd === activeCwd ? ' active' : ''}`}>
+      <div
+        className="project-folder-head"
+        onClick={() => onSelect(project.cwd)}
+        title={project.cwd}
+      >
+        <button
+          type="button"
+          className="project-folder-toggle"
+          aria-label={expanded ? '收起项目会话' : '展开项目会话'}
+          onClick={(event) => {
+            event.stopPropagation()
+            setOpen((value) => !value)
+          }}
+        >
+          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </button>
+        <Folder size={14} className="project-folder-icon" />
+        <span className="project-folder-name">{project.name}</span>
+        <span className="project-folder-count">{sessions.length}</span>
+        <button
+          type="button"
+          className="project-folder-new"
+          title="在此项目中新建会话"
+          onClick={(event) => {
+            event.stopPropagation()
+            onNewSession(project.cwd)
+          }}
+        >
+          <MessageSquarePlus size={12} />
+        </button>
+        {canRemove && (
+          <button
+            type="button"
+            className="project-folder-remove"
+            title="从列表移除"
+            onClick={(event) => {
+              event.stopPropagation()
+              onRemove(project.cwd)
+            }}
+          >
+            <Trash2 size={12} />
+          </button>
+        )}
+      </div>
+      {expanded && (
+        <div className="project-folder-sessions">
+          {sessions.length === 0 ? (
+            <div className="project-folder-empty">暂无会话</div>
+          ) : (
+            <SessionItems
+              sessions={sessions}
+              activePath={activePath}
+              onSelect={(path) => onSelectSession(project.cwd, path)}
+              onDelete={(path) => onDelete(project.cwd, path)}
+              onCopy={(path) => onCopy(project.cwd, path)}
+              getForkMessages={(path) => getForkMessages(project.cwd, path)}
+              onFork={(path, entryId) => onFork(project.cwd, path, entryId)}
+            />
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -200,6 +329,92 @@ function formatTime(mtime: number): string {
     return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
   }
   return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+}
+
+function sessionMatchesQuery(session: SessionMeta, query: string): boolean {
+  const haystack = [session.name, session.preview, session.path]
+    .filter(Boolean)
+    .join(' ')
+    .toLocaleLowerCase()
+  return haystack.includes(query)
+}
+
+interface SessionItemActions {
+  activePath?: string
+  onSelect: (path: string) => void
+  onDelete: (path: string) => Promise<void>
+  onCopy: (path: string) => Promise<void>
+  getForkMessages: (path: string) => Promise<ForkMessageOption[]>
+  onFork: (path: string, entryId: string) => Promise<string>
+}
+
+function SessionItems({
+  sessions,
+  activePath,
+  onSelect,
+  onDelete,
+  onCopy,
+  getForkMessages,
+  onFork
+}: { sessions: SessionMeta[] } & SessionItemActions): ReactElement {
+  const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(null)
+
+  useEffect(() => {
+    if (contextMenu && !sessions.some((session) => session.path === contextMenu.session.path)) {
+      setContextMenu(null)
+    }
+  }, [sessions, contextMenu])
+
+  const openContextMenu = (event: React.MouseEvent<HTMLDivElement>, session: SessionMeta): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    const width = 246
+    const height = 340
+    setContextMenu({
+      session,
+      x: Math.min(event.clientX, Math.max(8, window.innerWidth - width)),
+      y: Math.min(event.clientY, Math.max(8, window.innerHeight - height))
+    })
+  }
+
+  return (
+    <>
+      {sessions.map((session) => (
+        <div
+          key={session.path}
+          className={`side-item side-session${session.path === activePath ? ' active' : ''}`}
+          onClick={() => {
+            setContextMenu(null)
+            onSelect(session.path)
+          }}
+          onContextMenu={(event) => openContextMenu(event, session)}
+          title={`${session.path}\n右键查看更多操作`}
+        >
+          <div className="side-session-main">
+            <span className="side-item-label">
+              {session.name || session.preview || '未命名会话'}
+            </span>
+            <span className="side-session-meta">
+              {formatTime(session.mtime)} · {session.messageCount} 条消息
+            </span>
+          </div>
+        </div>
+      ))}
+      {contextMenu && createPortal(
+        <SessionContextMenu
+          session={contextMenu.session}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          onDelete={onDelete}
+          onCopy={onCopy}
+          getForkMessages={getForkMessages}
+          onFork={onFork}
+        />,
+        document.body
+      )}
+    </>
+  )
 }
 
 export function SessionList({
@@ -223,87 +438,34 @@ export function SessionList({
   getForkMessages: (path: string) => Promise<ForkMessageOption[]>
   onFork: (path: string, entryId: string) => Promise<string>
 }): ReactElement {
-  const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(null)
   const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
-  const visibleSessions = useMemo(() => {
-    if (!normalizedQuery) return sessions
-    return sessions.filter((session) => {
-      const haystack = [session.name, session.preview, session.path]
-        .filter(Boolean)
-        .join(' ')
-        .toLocaleLowerCase()
-      return haystack.includes(normalizedQuery)
-    })
-  }, [normalizedQuery, sessions])
-
-  useEffect(() => {
-    if (contextMenu && !sessions.some((session) => session.path === contextMenu.session.path)) {
-      setContextMenu(null)
-    }
-  }, [sessions, contextMenu])
-
-  const openContextMenu = (event: React.MouseEvent<HTMLDivElement>, session: SessionMeta): void => {
-    event.preventDefault()
-    event.stopPropagation()
-    const width = 246
-    const height = 340
-    setContextMenu({
-      session,
-      x: Math.min(event.clientX, Math.max(8, window.innerWidth - width)),
-      y: Math.min(event.clientY, Math.max(8, window.innerHeight - height))
-    })
-  }
+  const visibleSessions = normalizedQuery
+    ? sessions.filter((session) => sessionMatchesQuery(session, normalizedQuery))
+    : sessions
 
   return (
-    <>
-      <Section
-        title="会话"
-        count={normalizedQuery ? visibleSessions.length : sessions.length}
-        action={
-          <button className="icon-button" title="新建会话" onClick={onNew}>
-            <MessageSquarePlus size={14} />
-          </button>
-        }
-      >
-        {visibleSessions.length === 0 && (
-          <div className="side-empty">{normalizedQuery ? '没有匹配的会话' : '暂无会话'}</div>
-        )}
-        {visibleSessions.map((session) => (
-          <div
-            key={session.path}
-            className={`side-item side-session${session.path === activePath ? ' active' : ''}`}
-            onClick={() => {
-              setContextMenu(null)
-              onSelect(session.path)
-            }}
-            onContextMenu={(event) => openContextMenu(event, session)}
-            title={`${session.path}\n右键查看更多操作`}
-          >
-            <div className="side-session-main">
-              <span className="side-item-label">
-                {session.name || session.preview || '未命名会话'}
-              </span>
-              <span className="side-session-meta">
-                {formatTime(session.mtime)} · {session.messageCount} 条消息
-              </span>
-            </div>
-          </div>
-        ))}
-      </Section>
-      {contextMenu && createPortal(
-        <SessionContextMenu
-          session={contextMenu.session}
-          x={contextMenu.x}
-          y={contextMenu.y}
-          onClose={() => setContextMenu(null)}
-          onDelete={onDelete}
-          onCopy={onCopy}
-          getForkMessages={getForkMessages}
-          onFork={onFork}
-        />,
-        document.body
+    <Section
+      title="会话"
+      count={normalizedQuery ? visibleSessions.length : sessions.length}
+      action={
+        <button className="icon-button" title="新建会话" onClick={onNew}>
+          <MessageSquarePlus size={14} />
+        </button>
+      }
+    >
+      {visibleSessions.length === 0 && (
+        <div className="side-empty">{normalizedQuery ? '没有匹配的会话' : '暂无会话'}</div>
       )}
-    </>
+      <SessionItems
+        sessions={visibleSessions}
+        activePath={activePath}
+        onSelect={onSelect}
+        onDelete={onDelete}
+        onCopy={onCopy}
+        getForkMessages={getForkMessages}
+        onFork={onFork}
+      />
+    </Section>
   )
 }
 

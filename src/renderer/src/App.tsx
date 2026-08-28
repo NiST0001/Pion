@@ -6,7 +6,7 @@ import type { FileChange } from './hooks/useAgent'
 import { ChatMessage } from './components/ChatMessage'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
-import { ProjectList, SessionList, BranchTree, ChangeList, SidebarToolbar } from './components/Sidebar'
+import { ProjectList, BranchTree, ChangeList, SidebarToolbar } from './components/Sidebar'
 import { ChangesDrawer } from './components/ChangesDrawer'
 import { ReviewPanel } from './components/ReviewPanel'
 import { ModelPicker, ThinkingPicker } from './components/ModelPicker'
@@ -78,6 +78,63 @@ export function App(): ReactElement {
     [actions, state.status.cwd]
   )
 
+  const activateProject = useCallback(
+    async (cwd: string) => {
+      if (cwd !== state.status.cwd) await actions.start(cwd)
+    },
+    [actions, state.status.cwd]
+  )
+
+  const handleNewSession = useCallback(
+    async (cwd?: string) => {
+      if (cwd) await activateProject(cwd)
+      await actions.newSession()
+    },
+    [actions, activateProject]
+  )
+
+  const handleSelectSession = useCallback(
+    async (cwd: string, path: string) => {
+      await activateProject(cwd)
+      await actions.switchSession(path)
+    },
+    [actions, activateProject]
+  )
+
+  const handleDeleteSession = useCallback(
+    async (cwd: string, path: string) => {
+      await activateProject(cwd)
+      await actions.deleteSession(path)
+    },
+    [actions, activateProject]
+  )
+
+  const handleCopySession = useCallback(
+    async (cwd: string, path: string) => {
+      await activateProject(cwd)
+      await actions.copySession(path)
+    },
+    [actions, activateProject]
+  )
+
+  const handleGetForkMessages = useCallback(
+    async (cwd: string, path: string) => {
+      await activateProject(cwd)
+      return actions.getSessionForkMessages(path)
+    },
+    [actions, activateProject]
+  )
+
+  const handleForkSession = useCallback(
+    async (cwd: string, path: string, entryId: string) => {
+      await activateProject(cwd)
+      const text = await actions.forkSession(path, entryId)
+      if (text) setPrefill(text)
+      return text
+    },
+    [actions, activateProject]
+  )
+
   const changes = useMemo(() => deriveChanges(state.timeline), [state.timeline])
 
   const handleToggleReview = useCallback(() => {
@@ -113,29 +170,23 @@ export function App(): ReactElement {
             <SidebarToolbar
               searchQuery={sessionQuery}
               onSearch={setSessionQuery}
-              onNewSession={() => void actions.newSession()}
+              onNewSession={() => void handleNewSession()}
             />
             <ProjectList
               projects={state.projects}
+              sessionsByProject={state.sessionsByProject}
+              searchQuery={sessionQuery}
               activeCwd={state.status.cwd}
+              activePath={state.session?.sessionFile}
               onSelect={(cwd) => void handleSelectProject(cwd)}
               onAdd={() => void handleAddProject()}
               onRemove={(cwd) => void actions.removeProject(cwd)}
-            />
-            <SessionList
-              sessions={state.sessions}
-              searchQuery={sessionQuery}
-              activePath={state.session?.sessionFile}
-              onSelect={(path) => void actions.switchSession(path)}
-              onNew={() => void actions.newSession()}
-              onDelete={(path) => actions.deleteSession(path)}
-              onCopy={(path) => actions.copySession(path)}
-              getForkMessages={(path) => actions.getSessionForkMessages(path)}
-              onFork={async (path, entryId) => {
-                const text = await actions.forkSession(path, entryId)
-                if (text) setPrefill(text)
-                return text
-              }}
+              onNewSession={(cwd) => void handleNewSession(cwd)}
+              onSelectSession={(cwd, path) => void handleSelectSession(cwd, path)}
+              onDelete={handleDeleteSession}
+              onCopy={handleCopySession}
+              getForkMessages={handleGetForkMessages}
+              onFork={handleForkSession}
             />
             <BranchTree
               tree={state.tree?.tree ?? null}
