@@ -17,6 +17,7 @@ interface TitleBarProps {
   sessionName?: string
   maximized: boolean
   sidebarOpen: boolean
+  sidebarWidth: number
   reviewOpen: boolean
   onToggleSidebar: () => void
   onToggleReview: () => void
@@ -28,6 +29,7 @@ export function TitleBar({
   sessionName,
   maximized,
   sidebarOpen,
+  sidebarWidth,
   reviewOpen,
   onToggleSidebar,
   onToggleReview
@@ -35,7 +37,7 @@ export function TitleBar({
   const title = [shorten(cwd ?? ''), sessionName].filter(Boolean).join(' · ')
   return (
     <header className="titlebar">
-      <div className="titlebar-brand">
+      <div className="titlebar-brand" style={{ width: sidebarWidth }}>
         <button
           type="button"
           className="titlebar-panel-btn"

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactElement } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { FolderOpen, Settings, Sparkles } from 'lucide-react'
 import { useAgent, deriveChanges } from './hooks/useAgent'
 import type { FileChange } from './hooks/useAgent'
@@ -14,6 +14,23 @@ import { ModelPicker, ThinkingPicker } from './components/ModelPicker'
 import { TitleBar } from './components/TitleBar'
 import { SettingsModal } from './components/SettingsModal'
 
+type ResizeTarget = 'sidebar' | 'review'
+
+interface PanelResizeState {
+  target: ResizeTarget
+  startX: number
+  startWidth: number
+}
+
+const MIN_SIDEBAR_WIDTH = 220
+const MAX_SIDEBAR_WIDTH = 440
+const MIN_REVIEW_WIDTH = 300
+const MAX_REVIEW_WIDTH = 560
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max)
+}
+
 export function App(): ReactElement {
   const { state, actions, hasBridge } = useAgent()
   const [prefill, setPrefill] = useState('')
@@ -22,14 +39,57 @@ export function App(): ReactElement {
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [reviewOpen, setReviewOpen] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(276)
+  const [reviewWidth, setReviewWidth] = useState(390)
   const [sessionQuery, setSessionQuery] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  const panelResizeRef = useRef<PanelResizeState | null>(null)
 
   // bootstrap: pick the most recent project (or home) and start the agent
   useEffect(() => {
     if (!hasBridge) return
     void actions.bootstrap()
   }, [hasBridge, actions])
+
+  // Resize either side panel with its vertical drag handle.
+  const handleResizeStart = useCallback(
+    (target: ResizeTarget, event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault()
+      panelResizeRef.current = {
+        target,
+        startX: event.clientX,
+        startWidth: target === 'sidebar' ? sidebarWidth : reviewWidth
+      }
+      document.body.classList.add('pion-resizing-panels')
+    },
+    [reviewWidth, sidebarWidth]
+  )
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent): void => {
+      const resize = panelResizeRef.current
+      if (!resize) return
+      const delta = event.clientX - resize.startX
+      if (resize.target === 'sidebar') {
+        setSidebarWidth(clamp(resize.startWidth + delta, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH))
+      } else {
+        setReviewWidth(clamp(resize.startWidth - delta, MIN_REVIEW_WIDTH, MAX_REVIEW_WIDTH))
+      }
+    }
+    const stopResize = (): void => {
+      panelResizeRef.current = null
+      document.body.classList.remove('pion-resizing-panels')
+    }
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', stopResize)
+    window.addEventListener('pointercancel', stopResize)
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', stopResize)
+      window.removeEventListener('pointercancel', stopResize)
+      document.body.classList.remove('pion-resizing-panels')
+    }
+  }, [])
 
   // window maximize state (frameless window)
   useEffect(() => {
@@ -166,13 +226,14 @@ export function App(): ReactElement {
         sessionName={state.session?.sessionName}
         maximized={maximized}
         sidebarOpen={sidebarOpen}
+        sidebarWidth={sidebarWidth}
         reviewOpen={reviewOpen}
         onToggleSidebar={() => setSidebarOpen((open) => !open)}
         onToggleReview={handleToggleReview}
       />
 
       <div className="app-body">
-        {sidebarOpen && <aside className="sidebar">
+        {sidebarOpen && <aside className="sidebar" style={{ width: sidebarWidth }}>
           <div className="sidebar-scroll">
             <SidebarToolbar
               searchQuery={sessionQuery}
@@ -208,6 +269,13 @@ export function App(): ReactElement {
               <span>设置</span>
             </button>
           </div>
+          <div
+            className="sidebar-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整会话栏宽度"
+            onPointerDown={(event) => handleResizeStart('sidebar', event)}
+          />
         </aside>}
 
         <div className="main">
@@ -280,8 +348,10 @@ export function App(): ReactElement {
           <ReviewPanel
             changes={changes}
             selectedChange={drawerChange}
+            width={reviewWidth}
             onSelect={setDrawerChange}
             onClose={handleToggleReview}
+            onResizeStart={(event) => handleResizeStart('review', event)}
           />
         )}
       </div>

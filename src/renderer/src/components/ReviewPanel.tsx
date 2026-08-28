@@ -1,4 +1,4 @@
-import type { ReactElement } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { FileDiff, FilePenLine, FilePlus2, X } from 'lucide-react'
 import type { FileChange } from '../hooks/useAgent'
 import { DiffView } from './DiffView'
@@ -6,22 +6,33 @@ import { DiffView } from './DiffView'
 interface ReviewPanelProps {
   changes: FileChange[]
   selectedChange: FileChange | null
+  width: number
   onSelect: (change: FileChange) => void
   onClose: () => void
+  onResizeStart: (event: ReactPointerEvent<HTMLDivElement>) => void
 }
 
 export function ReviewPanel({
   changes,
   selectedChange,
+  width,
   onSelect,
-  onClose
+  onClose,
+  onResizeStart
 }: ReviewPanelProps): ReactElement {
   const selected = selectedChange
     ? changes.find((change) => change.path === selectedChange.path) ?? selectedChange
     : null
 
   return (
-    <aside className="review-panel">
+    <aside className="review-panel" style={{ width, flexBasis: width }}>
+      <div
+        className="review-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整审查栏宽度"
+        onPointerDown={onResizeStart}
+      />
       <header className="review-panel-head">
         <div className="review-panel-title">
           <div className="review-panel-kicker">WORKSPACE</div>
