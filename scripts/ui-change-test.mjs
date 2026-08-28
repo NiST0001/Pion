@@ -87,6 +87,7 @@ await check('左上角按钮可重新打开会话栏', `!!document.querySelector
 await evaluate(`document.querySelector('.titlebar-review-btn')?.click()`)
 await sleep(200)
 await check('右上角按钮可打开文件审查栏', `!!document.querySelector('.review-panel')`)
+await check('审查栏为左 diff 右文件布局', `(() => { const body = document.querySelector('.review-panel-body'); const detail = document.querySelector('.review-detail')?.getBoundingClientRect(); const files = document.querySelector('.review-files')?.getBoundingClientRect(); return !!body && !!detail && !!files && getComputedStyle(body).flexDirection === 'row' && detail.left < files.left && files.width > 0; })()`)
 await evaluate(`document.querySelector('.titlebar-review-btn')?.click()`)
 await sleep(150)
 await check('右上角按钮可关闭文件审查栏', `!document.querySelector('.review-panel')`)

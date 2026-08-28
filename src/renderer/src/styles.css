@@ -2960,16 +2960,19 @@ button {
 .review-panel-body {
   display: flex;
   flex: 1;
-  flex-direction: column;
+  flex-direction: row;
   min-height: 0;
 }
 
 .review-files {
-  flex: 0 1 auto;
-  max-height: 39%;
+  order: 2;
+  flex: 0 0 40%;
+  min-width: 0;
+  max-height: none;
   padding: 11px 9px 10px;
   overflow-y: auto;
-  border-bottom: 1px solid var(--border-soft);
+  border-bottom: 0;
+  border-left: 1px solid var(--border-soft);
 }
 
 .review-section-head {
@@ -3057,9 +3060,11 @@ button {
 }
 
 .review-detail {
+  order: 1;
   display: flex;
   flex: 1;
   flex-direction: column;
+  min-width: 0;
   min-height: 0;
 }
 
