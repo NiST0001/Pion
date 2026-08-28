@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 import type {
   AgentStatus,
+  ForkMessageOption,
   ModelOption,
   ProjectMeta,
   SessionInfo,
@@ -554,6 +555,43 @@ export function useAgent() {
     [api, reloadTimeline]
   )
 
+  const deleteSession = useCallback(
+    async (sessionPath: string) => {
+      if (!api) return
+      const result = await api.deleteSession(sessionPath)
+      if (result.activeSessionChanged) await reloadTimeline()
+    },
+    [api, reloadTimeline]
+  )
+
+  const copySession = useCallback(
+    async (sessionPath: string) => {
+      if (!api) return
+      const result = await api.copySession(sessionPath)
+      if (!result.cancelled) await reloadTimeline()
+    },
+    [api, reloadTimeline]
+  )
+
+  const getSessionForkMessages = useCallback(
+    async (sessionPath: string): Promise<ForkMessageOption[]> => {
+      if (!api) return []
+      return api.getSessionForkMessages(sessionPath)
+    },
+    [api]
+  )
+
+  const forkSession = useCallback(
+    async (sessionPath: string, entryId: string): Promise<string> => {
+      if (!api) return ''
+      const result = await api.forkSession(sessionPath, entryId)
+      if (result.cancelled) return ''
+      await reloadTimeline()
+      return result.text
+    },
+    [api, reloadTimeline]
+  )
+
   const addProject = useCallback(
     async (cwd: string) => {
       if (!api) return
@@ -637,6 +675,10 @@ export function useAgent() {
       newSession,
       forkAt,
       switchSession,
+      deleteSession,
+      copySession,
+      getSessionForkMessages,
+      forkSession,
       addProject,
       removeProject,
       setModel,
@@ -657,6 +699,10 @@ export function useAgent() {
       newSession,
       forkAt,
       switchSession,
+      deleteSession,
+      copySession,
+      getSessionForkMessages,
+      forkSession,
       addProject,
       removeProject,
       setModel,

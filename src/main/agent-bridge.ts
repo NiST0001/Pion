@@ -1,4 +1,5 @@
-import { join } from 'node:path'
+import { resolve, join } from 'node:path'
+import { unlink } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
 import {
   RpcClient,
@@ -8,6 +9,8 @@ import {
 import type { SessionEntry, SessionTreeNode } from '@earendil-works/pi-coding-agent'
 import type {
   AgentStatus,
+  DeleteSessionResult,
+  ForkMessageOption,
   ModelOption,
   SessionInfo,
   SessionMeta,
@@ -157,6 +160,74 @@ export class AgentBridge {
     if (!this.client) throw new Error('agent 未启动')
     const result = await this.client.switchSession(sessionPath)
     if (!result.cancelled) await this.refresh()
+  }
+
+  /** Resolve a session path against the sessions visible for the active cwd. */
+  private async resolveListedSession(sessionPath: string): Promise<string> {
+    const cwd = this.status.cwd
+    if (!cwd) throw new Error('没有活动工作目录')
+    const requested = resolve(sessionPath)
+    const sessions = await SessionManager.list(cwd)
+    const match = sessions.find((session) => resolve(session.path) === requested)
+    if (!match) throw new Error('会话不存在，或不属于当前项目')
+    return resolve(match.path)
+  }
+
+  /** Switch to a listed session without refreshing the renderer mid-operation. */
+  private async activateSession(sessionPath: string): Promise<boolean> {
+    if (!this.client) throw new Error('agent 未启动')
+    const target = await this.resolveListedSession(sessionPath)
+    const state = await this.client.getState()
+    if (state.sessionFile && resolve(state.sessionFile) === target) return true
+    const result = await this.client.switchSession(target)
+    return !result.cancelled
+  }
+
+  async deleteSession(sessionPath: string): Promise<DeleteSessionResult> {
+    if (!this.client) throw new Error('agent 未启动')
+    const target = await this.resolveListedSession(sessionPath)
+    const state = await this.client.getState()
+    const active = Boolean(state.sessionFile && resolve(state.sessionFile) === target)
+
+    // The RPC process may still append to its active file. Move it to a fresh
+    // session first, then remove the old file.
+    if (active) {
+      const result = await this.client.newSession()
+      if (result.cancelled) return { activeSessionChanged: false, cancelled: true }
+    }
+
+    await unlink(target)
+    await this.refresh()
+    return { activeSessionChanged: active }
+  }
+
+  async copySession(sessionPath: string): Promise<{ cancelled: boolean }> {
+    if (!this.client) throw new Error('agent 未启动')
+    if (!(await this.activateSession(sessionPath))) return { cancelled: true }
+    const result = await this.client.clone()
+    await this.refresh()
+    return result
+  }
+
+  async getSessionForkMessages(sessionPath: string): Promise<ForkMessageOption[]> {
+    const target = await this.resolveListedSession(sessionPath)
+    const manager = SessionManager.open(target)
+    return manager.getEntries().flatMap((entry) => {
+      if (entry.type !== 'message' || entry.message.role !== 'user') return []
+      const text = messageText(entry.message as unknown as WireMessage)
+      return text ? [{ entryId: entry.id, text }] : []
+    })
+  }
+
+  async forkSession(
+    sessionPath: string,
+    entryId: string
+  ): Promise<{ text: string; cancelled: boolean }> {
+    if (!this.client) throw new Error('agent 未启动')
+    if (!(await this.activateSession(sessionPath))) return { text: '', cancelled: true }
+    const result = await this.client.fork(entryId)
+    if (!result.cancelled) await this.refresh()
+    return result
   }
 
   async getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null> {

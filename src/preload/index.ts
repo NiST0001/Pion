@@ -27,6 +27,12 @@ const api: PionApi = {
   newSession: () => ipcRenderer.invoke('pion:agent-new-session'),
   forkAt: (entryId) => ipcRenderer.invoke('pion:agent-fork', entryId),
   switchSession: (sessionPath) => ipcRenderer.invoke('pion:agent-switch-session', sessionPath),
+  deleteSession: (sessionPath) => ipcRenderer.invoke('pion:agent-delete-session', sessionPath),
+  copySession: (sessionPath) => ipcRenderer.invoke('pion:agent-copy-session', sessionPath),
+  getSessionForkMessages: (sessionPath) =>
+    ipcRenderer.invoke('pion:agent-session-fork-messages', sessionPath),
+  forkSession: (sessionPath, entryId) =>
+    ipcRenderer.invoke('pion:agent-fork-session', sessionPath, entryId),
   getEntries: () => ipcRenderer.invoke('pion:agent-entries'),
   getTree: () => ipcRenderer.invoke('pion:agent-tree'),
 

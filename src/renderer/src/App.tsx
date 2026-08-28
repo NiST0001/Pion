@@ -110,6 +110,14 @@ export function App(): ReactElement {
               activePath={state.session?.sessionFile}
               onSelect={(path) => void actions.switchSession(path)}
               onNew={() => void actions.newSession()}
+              onDelete={(path) => actions.deleteSession(path)}
+              onCopy={(path) => actions.copySession(path)}
+              getForkMessages={(path) => actions.getSessionForkMessages(path)}
+              onFork={async (path, entryId) => {
+                const text = await actions.forkSession(path, entryId)
+                if (text) setPrefill(text)
+                return text
+              }}
             />
             <BranchTree
               tree={state.tree?.tree ?? null}

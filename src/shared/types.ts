@@ -160,6 +160,17 @@ export interface SessionMeta {
   messageCount: number
 }
 
+export interface ForkMessageOption {
+  entryId: string
+  text: string
+}
+
+export interface DeleteSessionResult {
+  /** Whether the deleted session was active and a fresh session was created. */
+  activeSessionChanged: boolean
+  cancelled?: boolean
+}
+
 export interface ModelOption {
   provider: string
   id: string
@@ -231,6 +242,14 @@ export interface PionApi {
   forkAt(entryId: string): Promise<{ text: string; cancelled: boolean }>
   /** Switch to another session file. */
   switchSession(sessionPath: string): Promise<void>
+  /** Delete a persisted session file. */
+  deleteSession(sessionPath: string): Promise<DeleteSessionResult>
+  /** Copy the selected session's active branch into a new session. */
+  copySession(sessionPath: string): Promise<{ cancelled: boolean }>
+  /** List user messages that can be used as fork points. */
+  getSessionForkMessages(sessionPath: string): Promise<ForkMessageOption[]>
+  /** Create a new session by forking before a selected user message. */
+  forkSession(sessionPath: string, entryId: string): Promise<{ text: string; cancelled: boolean }>
   /** Full entry list of the active session (for timeline rebuild). */
   getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null>
   /** Flattened branch tree of the active session. */

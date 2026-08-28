@@ -98,6 +98,25 @@ await evaluate(`window.pion.toggleMaximizeWindow()`)
 await sleep(600)
 await check('最大化切换存活', `!!document.querySelector('.titlebar')`)
 
+// --- 4. 会话右键菜单 ---
+for (let i = 0; i < 20; i++) {
+  await sleep(300)
+  if (await evaluate(`document.querySelectorAll('.side-session').length > 0`)) break
+}
+await check('会话项存在', `document.querySelectorAll('.side-session').length > 0`)
+await evaluate(`document.querySelector('.side-session')?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 120, clientY: 160 }))`)
+await sleep(300)
+await check('右键菜单打开', `!!document.querySelector('.context-menu')`)
+await check('菜单含复制会话', `Array.from(document.querySelectorAll('.context-menu-item')).some(e => e.textContent?.includes('从会话复制'))`)
+await check('菜单含分支会话', `Array.from(document.querySelectorAll('.context-menu-item')).some(e => e.textContent?.includes('从会话分支'))`)
+await check('菜单含删除会话', `Array.from(document.querySelectorAll('.context-menu-item')).some(e => e.textContent?.includes('删除会话'))`)
+await evaluate(`Array.from(document.querySelectorAll('.context-menu-item')).find(e => e.textContent?.includes('从会话分支'))?.click()`)
+await sleep(500)
+await check('分支菜单展开', `!!document.querySelector('.context-submenu')`)
+await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+await sleep(200)
+await check('右键菜单可关闭', `!document.querySelector('.context-menu')`)
+
 ws.close()
 child.kill('SIGTERM')
 console.log(`\n${ok} 项通过`)

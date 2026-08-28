@@ -1,16 +1,24 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReactElement } from 'react'
 import {
   ChevronDown,
   ChevronRight,
+  Copy,
   FileDiff,
   Folder,
   FolderPlus,
   GitBranch,
+  Loader2,
   MessageSquarePlus,
   Trash2
 } from 'lucide-react'
-import type { ProjectMeta, SessionMeta, TreeNodeLite } from '../../../shared/types'
+import type {
+  ForkMessageOption,
+  ProjectMeta,
+  SessionMeta,
+  TreeNodeLite
+} from '../../../shared/types'
 import type { FileChange } from '../hooks/useAgent'
 
 // ---------------------------------------------------------------------------
@@ -118,42 +126,239 @@ export function SessionList({
   sessions,
   activePath,
   onSelect,
-  onNew
+  onNew,
+  onDelete,
+  onCopy,
+  getForkMessages,
+  onFork
 }: {
   sessions: SessionMeta[]
   activePath?: string
   onSelect: (path: string) => void
   onNew: () => void
+  onDelete: (path: string) => Promise<void>
+  onCopy: (path: string) => Promise<void>
+  getForkMessages: (path: string) => Promise<ForkMessageOption[]>
+  onFork: (path: string, entryId: string) => Promise<string>
 }): ReactElement {
+  const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(null)
+
+  useEffect(() => {
+    if (contextMenu && !sessions.some((session) => session.path === contextMenu.session.path)) {
+      setContextMenu(null)
+    }
+  }, [sessions, contextMenu])
+
+  const openContextMenu = (event: React.MouseEvent<HTMLDivElement>, session: SessionMeta): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    const width = 246
+    const height = 340
+    setContextMenu({
+      session,
+      x: Math.min(event.clientX, Math.max(8, window.innerWidth - width)),
+      y: Math.min(event.clientY, Math.max(8, window.innerHeight - height))
+    })
+  }
+
   return (
-    <Section
-      title="会话"
-      count={sessions.length}
-      action={
-        <button className="icon-button" title="新建会话" onClick={onNew}>
-          <MessageSquarePlus size={14} />
-        </button>
-      }
-    >
-      {sessions.length === 0 && <div className="side-empty">暂无会话</div>}
-      {sessions.map((session) => (
-        <div
-          key={session.path}
-          className={`side-item side-session${session.path === activePath ? ' active' : ''}`}
-          onClick={() => onSelect(session.path)}
-          title={session.path}
-        >
-          <div className="side-session-main">
-            <span className="side-item-label">
-              {session.name || session.preview || '未命名会话'}
-            </span>
-            <span className="side-session-meta">
-              {formatTime(session.mtime)} · {session.messageCount} 条消息
-            </span>
+    <>
+      <Section
+        title="会话"
+        count={sessions.length}
+        action={
+          <button className="icon-button" title="新建会话" onClick={onNew}>
+            <MessageSquarePlus size={14} />
+          </button>
+        }
+      >
+        {sessions.length === 0 && <div className="side-empty">暂无会话</div>}
+        {sessions.map((session) => (
+          <div
+            key={session.path}
+            className={`side-item side-session${session.path === activePath ? ' active' : ''}`}
+            onClick={() => {
+              setContextMenu(null)
+              onSelect(session.path)
+            }}
+            onContextMenu={(event) => openContextMenu(event, session)}
+            title={`${session.path}\n右键查看更多操作`}
+          >
+            <div className="side-session-main">
+              <span className="side-item-label">
+                {session.name || session.preview || '未命名会话'}
+              </span>
+              <span className="side-session-meta">
+                {formatTime(session.mtime)} · {session.messageCount} 条消息
+              </span>
+            </div>
           </div>
+        ))}
+      </Section>
+      {contextMenu && createPortal(
+        <SessionContextMenu
+          session={contextMenu.session}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          onDelete={onDelete}
+          onCopy={onCopy}
+          getForkMessages={getForkMessages}
+          onFork={onFork}
+        />,
+        document.body
+      )}
+    </>
+  )
+}
+
+interface SessionContextMenuState {
+  session: SessionMeta
+  x: number
+  y: number
+}
+
+function SessionContextMenu({
+  session,
+  x,
+  y,
+  onClose,
+  onDelete,
+  onCopy,
+  getForkMessages,
+  onFork
+}: SessionContextMenuState & {
+  onClose: () => void
+  onDelete: (path: string) => Promise<void>
+  onCopy: (path: string) => Promise<void>
+  getForkMessages: (path: string) => Promise<ForkMessageOption[]>
+  onFork: (path: string, entryId: string) => Promise<string>
+}): ReactElement {
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [branchOpen, setBranchOpen] = useState(false)
+  const [forkMessages, setForkMessages] = useState<ForkMessageOption[] | null>(null)
+  const [loadingForks, setLoadingForks] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const handlePointerDown = (event: MouseEvent): void => {
+      if (!menuRef.current?.contains(event.target as Node)) onClose()
+    }
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose()
+    }
+    const handleResize = (): void => onClose()
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('resize', handleResize)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('resize', handleResize)
+    }
+  }, [onClose])
+
+  const runAction = async (action: () => Promise<unknown>): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      await action()
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setBusy(false)
+    }
+  }
+
+  const loadForkMessages = async (): Promise<void> => {
+    if (busy || loadingForks) return
+    if (forkMessages !== null) {
+      setBranchOpen((open) => !open)
+      return
+    }
+    setBranchOpen(true)
+    setLoadingForks(true)
+    setError('')
+    try {
+      setForkMessages(await getForkMessages(session.path))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoadingForks(false)
+    }
+  }
+
+  const title = session.name || session.preview || '未命名会话'
+
+  return (
+    <div
+      ref={menuRef}
+      className="context-menu"
+      style={{ left: x, top: y }}
+      role="menu"
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <div className="context-menu-header" title={session.path}>
+        <span>{title}</span>
+        <small>{session.messageCount} 条消息</small>
+      </div>
+      <div className="context-menu-divider" />
+      <button
+        className="context-menu-item"
+        disabled={busy}
+        onClick={() => void runAction(() => onCopy(session.path))}
+      >
+        <Copy size={14} />
+        <span>从会话复制</span>
+      </button>
+      <button
+        className={`context-menu-item${branchOpen ? ' active' : ''}`}
+        disabled={busy}
+        aria-expanded={branchOpen}
+        onClick={() => void loadForkMessages()}
+      >
+        <GitBranch size={14} />
+        <span>从会话分支</span>
+        {loadingForks ? <Loader2 size={13} className="spin" /> : <ChevronRight size={13} />}
+      </button>
+      {branchOpen && (
+        <div className="context-submenu">
+          {forkMessages === null && loadingForks && (
+            <div className="context-menu-empty"><Loader2 size={13} className="spin" /> 正在读取分支点…</div>
+          )}
+          {forkMessages?.length === 0 && (
+            <div className="context-menu-empty">没有可用的用户消息</div>
+          )}
+          {forkMessages?.map((message, index) => (
+            <button
+              key={message.entryId}
+              className="context-fork-item"
+              disabled={busy}
+              title={message.text}
+              onClick={() => void runAction(() => onFork(session.path, message.entryId))}
+            >
+              <span className="context-fork-index">{index + 1}</span>
+              <span>{message.text.replace(/\s+/g, ' ').slice(0, 110)}</span>
+            </button>
+          ))}
         </div>
-      ))}
-    </Section>
+      )}
+      <div className="context-menu-divider" />
+      <button
+        className="context-menu-item context-menu-danger"
+        disabled={busy}
+        onClick={() => {
+          if (window.confirm(`确定删除会话“${title}”？此操作不可撤销。`)) {
+            void runAction(() => onDelete(session.path))
+          }
+        }}
+      >
+        <Trash2 size={14} />
+        <span>删除会话</span>
+      </button>
+      {error && <div className="context-menu-error">{error}</div>}
+    </div>
   )
 }
 

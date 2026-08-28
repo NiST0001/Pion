@@ -94,6 +94,18 @@ function registerIpc(): void {
   ipcMain.handle('pion:agent-switch-session', (_event, sessionPath: string) =>
     bridge.switchSession(sessionPath)
   )
+  ipcMain.handle('pion:agent-delete-session', (_event, sessionPath: string) =>
+    bridge.deleteSession(sessionPath)
+  )
+  ipcMain.handle('pion:agent-copy-session', (_event, sessionPath: string) =>
+    bridge.copySession(sessionPath)
+  )
+  ipcMain.handle('pion:agent-session-fork-messages', (_event, sessionPath: string) =>
+    bridge.getSessionForkMessages(sessionPath)
+  )
+  ipcMain.handle('pion:agent-fork-session', (_event, sessionPath: string, entryId: string) =>
+    bridge.forkSession(sessionPath, entryId)
+  )
   ipcMain.handle('pion:agent-entries', () => bridge.getEntries())
   ipcMain.handle('pion:agent-tree', () => bridge.getTree())
   ipcMain.handle('pion:agent-sessions', (_event, cwd?: string) => bridge.listSessions(cwd))
