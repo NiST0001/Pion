@@ -4091,9 +4091,9 @@ body {
 .task-item {
   display: flex;
   align-items: center;
-  height: 33px;
-  gap: 8px;
-  padding: 3px 8px 3px 5px;
+  height: 28px;
+  gap: 7px;
+  padding: 2px 8px 2px 5px;
   border-radius: 8px;
   color: var(--fg-dim);
   transition: background 0.12s ease, color 0.12s ease;
@@ -4108,8 +4108,8 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 21px;
-  height: 21px;
+  width: 19px;
+  height: 19px;
   flex-shrink: 0;
   border: 1px solid var(--border);
   border-radius: 50%;
@@ -4130,11 +4130,11 @@ body {
 }
 
 .task-index {
-  width: 19px;
+  width: 18px;
   flex-shrink: 0;
   color: var(--fg-faint);
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: 8.5px;
   opacity: 0.75;
 }
 
@@ -4143,7 +4143,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
 .task-item.done .task-title {
@@ -4178,7 +4178,7 @@ body {
 }
 
 .task-panel.expanded {
-  height: 316px;
+  height: 272px;
   margin-bottom: 7px;
 }
 
@@ -4193,7 +4193,7 @@ body {
   right: 0;
   bottom: -22px;
   left: 0;
-  height: 54px;
+  height: 50px;
   overflow: hidden;
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -4207,13 +4207,15 @@ body {
 
 .task-panel.expanded .task-panel-card {
   bottom: 0;
-  height: 309px;
+  height: 265px;
   opacity: 1;
   transform: translateY(0) scaleY(1);
 }
 
 .task-panel-head {
-  min-height: 42px;
+  min-height: 38px;
+  padding-top: 4px;
+  padding-bottom: 4px;
   border-radius: 15px 15px 0 0;
 }
 
@@ -4282,6 +4284,9 @@ body {
 }
 
 .task-panel-list {
+  height: 226px;
+  padding-top: 4px;
+  padding-bottom: 12px;
   transition: opacity 0.2s ease 0.08s, transform 0.38s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -4299,11 +4304,15 @@ body {
 
 @media (max-width: 700px) {
   .task-panel.expanded {
-    height: 298px;
+    height: 260px;
   }
 
   .task-panel.expanded .task-panel-card {
-    height: 291px;
+    height: 253px;
+  }
+
+  .task-panel-list {
+    height: 214px;
   }
 }
 
