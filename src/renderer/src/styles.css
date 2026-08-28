@@ -4235,7 +4235,7 @@ body {
 .task-panel-toggle {
   position: absolute;
   z-index: 5;
-  top: -22px;
+  top: -48px;
   left: 50%;
   display: inline-flex;
   align-items: center;
@@ -4261,7 +4261,7 @@ body {
 
 .task-panel.collapsed .task-panel-toggle {
   top: auto;
-  bottom: -22px;
+  bottom: 0;
 }
 
 .task-panel.collapsed .task-panel-toggle:hover {
