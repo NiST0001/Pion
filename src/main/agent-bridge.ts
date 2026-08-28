@@ -1,5 +1,7 @@
-import { resolve, join } from 'node:path'
-import { unlink } from 'node:fs/promises'
+import { basename, dirname, resolve, join } from 'node:path'
+import { access, mkdir, unlink } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { BrowserWindow } from 'electron'
 import {
   RpcClient,
@@ -9,6 +11,7 @@ import {
 import type { SessionEntry, SessionTreeNode } from '@earendil-works/pi-coding-agent'
 import type {
   AgentStatus,
+  BranchInfo,
   DeleteSessionResult,
   ForkMessageOption,
   ModelOption,
@@ -20,6 +23,8 @@ import type {
   WireMessage
 } from '../shared/types'
 import { messageText } from '../shared/types'
+
+const execFileAsync = promisify(execFile)
 
 const EVENT_CHANNEL = 'pion:agent-event'
 const STATUS_CHANNEL = 'pion:agent-status'
@@ -37,6 +42,43 @@ const STATE_REFRESH_EVENTS = new Set([
 interface PushedTree {
   tree: TreeNodeLite[]
   leafId: string | null
+}
+
+interface GitWorktreeRecord {
+  path: string
+  branch?: string
+}
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024
+  })
+  return String(stdout).trim()
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function parseGitWorktrees(output: string): GitWorktreeRecord[] {
+  const records: GitWorktreeRecord[] = []
+  let current: GitWorktreeRecord | null = null
+  for (const line of output.split(/\r?\n/)) {
+    if (line.startsWith('worktree ')) {
+      if (current) records.push(current)
+      current = { path: line.slice('worktree '.length) }
+    } else if (current && line.startsWith('branch ')) {
+      current.branch = line.slice('branch '.length).replace(/^refs\/heads\//, '')
+    }
+  }
+  if (current) records.push(current)
+  return records
 }
 
 /**
@@ -357,6 +399,55 @@ export class AgentBridge {
     if (!this.client) throw new Error('agent 未启动')
     await this.client.setFollowUpMode(mode)
     await this.refresh()
+  }
+
+  // ---------------------------------------------------------------- git branches / worktrees
+
+  async listBranches(cwd: string): Promise<BranchInfo[]> {
+    const requestedCwd = resolve(cwd)
+    try {
+      const root = resolve(await runGit(requestedCwd, ['rev-parse', '--show-toplevel']))
+      const records = parseGitWorktrees(await runGit(root, ['worktree', 'list', '--porcelain']))
+      const mainRecord = records.find((record) => resolve(record.path) === root)
+      const currentBranch = mainRecord?.branch ?? await runGit(root, ['branch', '--show-current']).catch(() => '')
+      const branches = records.map((record) => {
+        const worktreeCwd = resolve(record.path)
+        const isMain = worktreeCwd === root
+        const gitBranch = record.branch ?? (isMain ? currentBranch : undefined)
+        return {
+          name: isMain ? (gitBranch || 'main') : (gitBranch || basename(worktreeCwd)),
+          cwd: worktreeCwd,
+          gitBranch: gitBranch || undefined,
+          isMain
+        }
+      })
+      if (branches.some((branch) => branch.isMain)) return branches
+      return [{ name: currentBranch || 'main', cwd: root, gitBranch: currentBranch || undefined, isMain: true }]
+    } catch {
+      return [{ name: 'main', cwd: requestedCwd, isMain: true }]
+    }
+  }
+
+  async createBranch(cwd: string, branchName: string): Promise<BranchInfo> {
+    const name = branchName.trim()
+    if (!name) throw new Error('分支名称不能为空')
+    const root = resolve(await runGit(resolve(cwd), ['rev-parse', '--show-toplevel']))
+    await runGit(root, ['check-ref-format', '--branch', name])
+
+    const worktreeRoot = join(dirname(root), '.pion-worktrees')
+    await mkdir(worktreeRoot, { recursive: true })
+    const safeName = name.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'branch'
+    const stem = `${basename(root)}-${safeName}`
+    let worktreeCwd = join(worktreeRoot, stem)
+    let suffix = 2
+    while (await pathExists(worktreeCwd)) {
+      worktreeCwd = join(worktreeRoot, `${stem}-${suffix}`)
+      suffix += 1
+    }
+
+    await runGit(root, ['worktree', 'add', '-b', name, worktreeCwd])
+    const branch = (await this.listBranches(root)).find((item) => item.cwd === resolve(worktreeCwd))
+    return branch ?? { name, cwd: resolve(worktreeCwd), gitBranch: name, isMain: false }
   }
 
   // ---------------------------------------------------------------- sessions list

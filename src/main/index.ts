@@ -156,6 +156,8 @@ function registerIpc(): void {
 
   // projects ----------------------------------------------------------------------
   ipcMain.handle('pion:projects-list', () => projects.list())
+  ipcMain.handle('pion:branches-list', (_event, cwd: string) => bridge.listBranches(cwd))
+  ipcMain.handle('pion:branch-create', (_event, cwd: string, name: string) => bridge.createBranch(cwd, name))
   ipcMain.handle('pion:projects-add', (_event, cwd: string) => {
     projects.touch(cwd)
     pushProjects()

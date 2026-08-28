@@ -17,6 +17,7 @@ import {
   Wrench
 } from 'lucide-react'
 import type {
+  BranchInfo,
   ForkMessageOption,
   ProjectMeta,
   SessionMeta,
@@ -114,9 +115,16 @@ export function SidebarToolbar({
 // Projects
 // ---------------------------------------------------------------------------
 
+interface ProjectBranchView {
+  branch: BranchInfo
+  sessions: SessionMeta[]
+  allSessions: SessionMeta[]
+}
+
 export function ProjectList({
   projects,
   sessionsByProject,
+  branchesByProject,
   searchQuery,
   activeCwd,
   activePath,
@@ -124,6 +132,7 @@ export function ProjectList({
   onAdd,
   onRemove,
   onNewSession,
+  onNewBranch,
   onReorder,
   onSelectSession,
   onDelete,
@@ -133,6 +142,7 @@ export function ProjectList({
 }: {
   projects: ProjectMeta[]
   sessionsByProject: Record<string, SessionMeta[]>
+  branchesByProject: Record<string, BranchInfo[]>
   searchQuery: string
   activeCwd?: string
   activePath?: string
@@ -140,6 +150,7 @@ export function ProjectList({
   onAdd: () => void
   onRemove: (cwd: string) => void
   onNewSession: (cwd: string) => void
+  onNewBranch: (cwd: string) => void
   onReorder: (cwd: string, paths: string[]) => void
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
@@ -150,13 +161,21 @@ export function ProjectList({
   const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
   const visibleProjects = projects
     .map((project) => {
-      const sessions = sessionsByProject[project.cwd] ?? []
-      const visibleSessions = normalizedQuery
-        ? sessions.filter((session) => sessionMatchesQuery(session, normalizedQuery))
-        : sessions
-      return { project, sessions: visibleSessions, allSessions: sessions }
+      const branches = branchesByProject[project.cwd] ?? [{
+        name: 'main',
+        cwd: project.cwd,
+        isMain: true
+      }]
+      const branchViews: ProjectBranchView[] = branches.map((branch) => {
+        const allSessions = sessionsByProject[branch.cwd] ?? []
+        const sessions = normalizedQuery
+          ? allSessions.filter((session) => sessionMatchesQuery(session, normalizedQuery))
+          : allSessions
+        return { branch, sessions, allSessions }
+      })
+      return { project, branches: branchViews }
     })
-    .filter(({ sessions }) => !normalizedQuery || sessions.length > 0)
+    .filter(({ branches }) => !normalizedQuery || branches.some(({ sessions }) => sessions.length > 0))
 
   return (
     <Section
@@ -171,11 +190,11 @@ export function ProjectList({
       {visibleProjects.length === 0 && (
         <div className="side-empty">{normalizedQuery ? '没有匹配的会话' : '暂无项目'}</div>
       )}
-      {visibleProjects.map(({ project, sessions, allSessions }) => (
+      {visibleProjects.map(({ project, branches }) => (
         <ProjectFolder
           key={project.cwd}
           project={project}
-          sessions={sessions}
+          branches={branches}
           activeCwd={activeCwd}
           activePath={activePath}
           searchActive={Boolean(normalizedQuery)}
@@ -183,7 +202,7 @@ export function ProjectList({
           onSelect={onSelect}
           onRemove={onRemove}
           onNewSession={onNewSession}
-          allSessions={allSessions}
+          onNewBranch={onNewBranch}
           onReorder={onReorder}
           onSelectSession={onSelectSession}
           onDelete={onDelete}
@@ -197,7 +216,7 @@ export function ProjectList({
 }
 
 function ProjectBranch({
-  projectCwd,
+  branch,
   sessions,
   allSessions,
   activePath,
@@ -209,7 +228,7 @@ function ProjectBranch({
   getForkMessages,
   onFork
 }: {
-  projectCwd: string
+  branch: BranchInfo
   sessions: SessionMeta[]
   allSessions: SessionMeta[]
   activePath?: string
@@ -232,32 +251,32 @@ function ProjectBranch({
       visibleIndex += 1
       return replacement ?? session
     })
-    onReorder(projectCwd, orderedAll.map((session) => session.path))
+    onReorder(branch.cwd, orderedAll.map((session) => session.path))
   }
 
   return (
     <div className="project-branch">
       <div
-        className="project-branch-head"
-        title="main · Pion 会话分组，不会创建 Git worktree"
+        className={`project-branch-head${sessions.some((session) => session.path === activePath) ? ' active' : ''}`}
+        title={`${branch.name} · Git worktree：${branch.cwd}`}
       >
         <button
           type="button"
           className="project-branch-toggle"
           aria-expanded={open}
-          aria-label={open ? '收起 main 分支' : '展开 main 分支'}
+          aria-label={open ? `收起 ${branch.name} 分支` : `展开 ${branch.name} 分支`}
           onClick={() => setOpen((value) => !value)}
         >
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </button>
         <GitBranch size={13} className="project-branch-icon" />
-        <span className="project-branch-name">main</span>
+        <span className="project-branch-name">{branch.name}</span>
         <span className="project-branch-count">{sessions.length}</span>
         <button
           type="button"
           className="project-branch-new"
-          title="在 main 分支中新建会话"
-          onClick={() => onNewSession(projectCwd)}
+          title={`在 ${branch.name} 分支中新建会话`}
+          onClick={() => onNewSession(branch.cwd)}
         >
           <MessageSquarePlus size={13} />
         </button>
@@ -270,12 +289,12 @@ function ProjectBranch({
             <SessionItems
               sessions={sessions}
               activePath={activePath}
-              onSelect={(path) => onSelectSession(projectCwd, path)}
+              onSelect={(path) => onSelectSession(branch.cwd, path)}
               onReorder={handleReorder}
-              onDelete={(path) => onDelete(projectCwd, path)}
-              onCopy={(path) => onCopy(projectCwd, path)}
-              getForkMessages={(path) => getForkMessages(projectCwd, path)}
-              onFork={(path, entryId) => onFork(projectCwd, path, entryId)}
+              onDelete={(path) => onDelete(branch.cwd, path)}
+              onCopy={(path) => onCopy(branch.cwd, path)}
+              getForkMessages={(path) => getForkMessages(branch.cwd, path)}
+              onFork={(path, entryId) => onFork(branch.cwd, path, entryId)}
             />
           )}
         </div>
@@ -286,8 +305,7 @@ function ProjectBranch({
 
 function ProjectFolder({
   project,
-  sessions,
-  allSessions,
+  branches,
   activeCwd,
   activePath,
   searchActive,
@@ -295,6 +313,7 @@ function ProjectFolder({
   onSelect,
   onRemove,
   onNewSession,
+  onNewBranch,
   onReorder,
   onSelectSession,
   onDelete,
@@ -303,8 +322,7 @@ function ProjectFolder({
   onFork
 }: {
   project: ProjectMeta
-  sessions: SessionMeta[]
-  allSessions: SessionMeta[]
+  branches: ProjectBranchView[]
   activeCwd?: string
   activePath?: string
   searchActive: boolean
@@ -312,6 +330,7 @@ function ProjectFolder({
   onSelect: (cwd: string) => void
   onRemove: (cwd: string) => void
   onNewSession: (cwd: string) => void
+  onNewBranch: (cwd: string) => void
   onReorder: (cwd: string, paths: string[]) => void
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
@@ -321,9 +340,10 @@ function ProjectFolder({
 }): ReactElement {
   const [open, setOpen] = useState(true)
   const expanded = open || searchActive
+  const active = branches.some(({ branch }) => branch.cwd === activeCwd)
 
   return (
-    <div className={`project-folder${project.cwd === activeCwd ? ' active' : ''}`}>
+    <div className={`project-folder${active ? ' active' : ''}`}>
       <div
         className="project-folder-head"
         onClick={() => onSelect(project.cwd)}
@@ -342,7 +362,20 @@ function ProjectFolder({
         </button>
         <Folder size={14} className="project-folder-icon" />
         <span className="project-folder-name">{project.name}</span>
-        <span className="project-folder-count">1</span>
+        <span className="project-folder-count">{branches.length}</span>
+        <button
+          type="button"
+          className="project-folder-new-branch"
+          title="新建 Git 分支 worktree"
+          aria-label={`在 ${project.name} 下新建 Git 分支`}
+          onClick={(event) => {
+            event.stopPropagation()
+            onNewBranch(project.cwd)
+          }}
+        >
+          <GitBranch size={12} />
+          <span className="project-folder-new-branch-plus">+</span>
+        </button>
         {canRemove && (
           <button
             type="button"
@@ -359,19 +392,22 @@ function ProjectFolder({
       </div>
       {expanded && (
         <div className="project-folder-branches">
-          <ProjectBranch
-            projectCwd={project.cwd}
-            sessions={sessions}
-            allSessions={allSessions}
-            activePath={activePath}
-            onNewSession={onNewSession}
-            onReorder={onReorder}
-            onSelectSession={onSelectSession}
-            onDelete={onDelete}
-            onCopy={onCopy}
-            getForkMessages={getForkMessages}
-            onFork={onFork}
-          />
+          {branches.map(({ branch, sessions, allSessions }) => (
+            <ProjectBranch
+              key={branch.cwd}
+              branch={branch}
+              sessions={sessions}
+              allSessions={allSessions}
+              activePath={activePath}
+              onNewSession={onNewSession}
+              onReorder={onReorder}
+              onSelectSession={onSelectSession}
+              onDelete={onDelete}
+              onCopy={onCopy}
+              getForkMessages={getForkMessages}
+              onFork={onFork}
+            />
+          ))}
         </div>
       )}
     </div>

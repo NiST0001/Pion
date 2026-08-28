@@ -156,6 +156,19 @@ export function App(): ReactElement {
     [actions, activateProject]
   )
 
+  const handleNewBranch = useCallback(
+    async (cwd: string) => {
+      const name = window.prompt('新建 Git 分支', 'feature/new-branch')?.trim()
+      if (!name) return
+      try {
+        await actions.createBranch(cwd, name)
+      } catch (err) {
+        window.alert(`创建分支失败：${err instanceof Error ? err.message : String(err)}`)
+      }
+    },
+    [actions]
+  )
+
   const handleSelectSession = useCallback(
     async (cwd: string, path: string) => {
       await activateProject(cwd)
@@ -246,6 +259,7 @@ export function App(): ReactElement {
             <ProjectList
               projects={state.projects}
               sessionsByProject={state.sessionsByProject}
+              branchesByProject={state.branchesByProject}
               searchQuery={sessionQuery}
               activeCwd={state.status.cwd}
               activePath={state.session?.sessionFile}
@@ -253,6 +267,7 @@ export function App(): ReactElement {
               onAdd={() => void handleAddProject()}
               onRemove={(cwd) => void actions.removeProject(cwd)}
               onNewSession={(cwd) => void handleNewSession(cwd)}
+              onNewBranch={(cwd) => void handleNewBranch(cwd)}
               onReorder={(cwd, paths) => actions.reorderSessions(cwd, paths)}
               onSelectSession={(cwd, path) => void handleSelectSession(cwd, path)}
               onDelete={handleDeleteSession}

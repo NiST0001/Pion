@@ -196,6 +196,7 @@ for (let i = 0; i < 20; i++) {
 await check('会话项存在', `document.querySelectorAll('.side-session').length > 0`)
 await check('左侧会话栏已移除变更', `!document.querySelector('.side-change') && !Array.from(document.querySelectorAll('.side-section-title')).some(e => e.textContent?.trim() === '变更')`)
 await check('项目下默认存在 main 分支', `document.querySelectorAll('.project-folder').length > 0 && document.querySelectorAll('.project-branch-name').length > 0 && Array.from(document.querySelectorAll('.project-branch-name')).every(e => e.textContent?.trim() === 'main')`)
+await check('项目右侧提供新建分支按钮', `document.querySelectorAll('.project-folder-new-branch').length === document.querySelectorAll('.project-folder').length && Array.from(document.querySelectorAll('.project-folder-new-branch')).every(e => e.getAttribute('title')?.includes('Git 分支'))`)
 await check('分支提供新建会话按钮', `document.querySelectorAll('.project-branch-new').length > 0 && !document.querySelector('.project-folder-new')`)
 await check('会话嵌套在分支下', `document.querySelectorAll('.project-branch-sessions .side-session').length > 0`)
 await check('会话项可拖拽排序', `Array.from(document.querySelectorAll('.project-branch-sessions .side-session')).every(e => e.draggable && !!e.querySelector('.side-session-drag'))`)

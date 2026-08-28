@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 import type {
   AgentStatus,
+  BranchInfo,
   ForkMessageOption,
   ModelOption,
   ProjectMeta,
@@ -132,6 +133,7 @@ export interface AgentState {
   session: SessionInfo | null
   sessions: SessionMeta[]
   sessionsByProject: Record<string, SessionMeta[]>
+  branchesByProject: Record<string, BranchInfo[]>
   tree: { tree: TreeNodeLite[]; leafId: string | null } | null
   projects: ProjectMeta[]
   models: ModelOption[]
@@ -146,6 +148,7 @@ const initialState: AgentState = {
   session: null,
   sessions: [],
   sessionsByProject: {},
+  branchesByProject: {},
   tree: null,
   projects: [],
   models: [],
@@ -160,6 +163,7 @@ type Action =
   | { type: 'session'; session: SessionInfo | null }
   | { type: 'sessions'; sessions: SessionMeta[] }
   | { type: 'projectSessions'; sessionsByProject: Record<string, SessionMeta[]> }
+  | { type: 'branches'; cwd: string; branches: BranchInfo[] }
   | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
   | { type: 'projects'; projects: ProjectMeta[] }
   | { type: 'reorderSessions'; cwd: string; paths: string[] }
@@ -303,6 +307,8 @@ function reducer(state: AgentState, action: Action): AgentState {
     }
     case 'projectSessions':
       return { ...state, sessionsByProject: action.sessionsByProject }
+    case 'branches':
+      return { ...state, branchesByProject: { ...state.branchesByProject, [action.cwd]: action.branches } }
     case 'reorderSessions': {
       const current = state.sessionsByProject[action.cwd] ?? []
       const ordered = reorderSessionsByPaths(current, action.paths)
@@ -319,7 +325,10 @@ function reducer(state: AgentState, action: Action): AgentState {
       const sessionsByProject = Object.fromEntries(
         Object.entries(state.sessionsByProject).filter(([cwd]) => projectCwds.has(cwd))
       )
-      return { ...state, projects: action.projects, sessionsByProject }
+      const branchesByProject = Object.fromEntries(
+        Object.entries(state.branchesByProject).filter(([cwd]) => projectCwds.has(cwd))
+      )
+      return { ...state, projects: action.projects, sessionsByProject, branchesByProject }
     }
     case 'models':
       return { ...state, models: action.models }
@@ -570,8 +579,25 @@ export function useAgent() {
     return () => offs.forEach((off) => off())
   }, [api])
 
-  // Load every project's sessions so the sidebar can render a folder tree
-  // instead of showing only sessions from the active working directory.
+  // Load each project's Git worktrees so the sidebar can render
+  // Project -> Branch -> Session instead of a flat project list.
+  useEffect(() => {
+    if (!api || state.projects.length === 0) return
+    let cancelled = false
+    void Promise.all(
+      state.projects.map(async (project) => [project.cwd, await api.listBranches(project.cwd)] as const)
+    ).then((entries) => {
+      if (cancelled) return
+      for (const [cwd, branches] of entries) {
+        dispatch({ type: 'branches', cwd, branches })
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [api, state.projects])
+
+  // Load every branch worktree's sessions so the sidebar can render a folder tree.
   useEffect(() => {
     if (!api) return
     let cancelled = false
@@ -583,8 +609,12 @@ export function useAgent() {
       }
     }
 
+    const branches = projectList.flatMap((project) => (
+      state.branchesByProject[project.cwd] ?? [{ name: 'main', cwd: project.cwd, isMain: true }]
+    ))
+    const branchCwds = [...new Set(branches.map((branch) => branch.cwd))]
     void Promise.all(
-      projectList.map(async (project) => [project.cwd, orderSessions(await api.listSessions(project.cwd))] as const)
+      branchCwds.map(async (cwd) => [cwd, orderSessions(await api.listSessions(cwd))] as const)
     ).then((entries) => {
       if (cancelled) return
       dispatch({ type: 'projectSessions', sessionsByProject: Object.fromEntries(entries) })
@@ -593,7 +623,7 @@ export function useAgent() {
     return () => {
       cancelled = true
     }
-  }, [api, state.projects])
+  }, [api, state.projects, state.branchesByProject])
 
   /** Rebuild the timeline from the active session's entries. */
   const reloadTimeline = useCallback(async () => {
@@ -735,6 +765,17 @@ export function useAgent() {
     [api]
   )
 
+  const createBranch = useCallback(
+    async (cwd: string, name: string): Promise<BranchInfo> => {
+      if (!api) throw new Error('preload 桥未加载')
+      const branch = await api.createBranch(cwd, name)
+      const branches = await api.listBranches(cwd)
+      dispatch({ type: 'branches', cwd, branches })
+      return branch
+    },
+    [api]
+  )
+
   const removeProject = useCallback(
     async (cwd: string) => {
       if (!api) return
@@ -816,6 +857,7 @@ export function useAgent() {
       getSessionForkMessages,
       forkSession,
       addProject,
+      createBranch,
       removeProject,
       setModel,
       setThinkingLevel,
@@ -842,6 +884,7 @@ export function useAgent() {
       getSessionForkMessages,
       forkSession,
       addProject,
+      createBranch,
       removeProject,
       setModel,
       setThinkingLevel,

@@ -148,6 +148,17 @@ export interface ProjectMeta {
   lastUsedAt: number
 }
 
+export interface BranchInfo {
+  /** Display name of the Git branch. */
+  name: string
+  /** Worktree directory used by this branch. */
+  cwd: string
+  /** Underlying Git branch name, when available. */
+  gitBranch?: string
+  /** Whether this is the project's primary worktree. */
+  isMain: boolean
+}
+
 export interface SessionMeta {
   /** Project working directory that owns this session. */
   projectCwd?: string
@@ -284,6 +295,8 @@ export interface PionApi {
 
   // projects ----------------------------------------------------------------
   listProjects(): Promise<ProjectMeta[]>
+  listBranches(cwd: string): Promise<BranchInfo[]>
+  createBranch(cwd: string, name: string): Promise<BranchInfo>
   addProject(cwd: string): Promise<ProjectMeta[]>
   removeProject(cwd: string): Promise<ProjectMeta[]>
   /** List sessions recorded for a working directory. */

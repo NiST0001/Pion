@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentStatus,
+  BranchInfo,
   PionApi,
   ProjectMeta,
   SessionInfo,
@@ -62,6 +63,8 @@ const api: PionApi = {
 
   // projects
   listProjects: () => ipcRenderer.invoke('pion:projects-list'),
+  listBranches: (cwd) => ipcRenderer.invoke('pion:branches-list', cwd) as Promise<BranchInfo[]>,
+  createBranch: (cwd, name) => ipcRenderer.invoke('pion:branch-create', cwd, name) as Promise<BranchInfo>,
   addProject: (cwd) => ipcRenderer.invoke('pion:projects-add', cwd),
   removeProject: (cwd) => ipcRenderer.invoke('pion:projects-remove', cwd),
   listSessions: (cwd) => ipcRenderer.invoke('pion:agent-sessions', cwd),
