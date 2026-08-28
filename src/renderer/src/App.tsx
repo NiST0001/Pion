@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
-import { FolderOpen, Sparkles } from 'lucide-react'
+import { FolderOpen, Settings, Sparkles } from 'lucide-react'
 import { useAgent, deriveChanges } from './hooks/useAgent'
 import type { FileChange } from './hooks/useAgent'
 import { ChatMessage } from './components/ChatMessage'
@@ -93,7 +93,6 @@ export function App(): ReactElement {
         phase={state.status.phase}
         sessionName={state.session?.sessionName}
         maximized={maximized}
-        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <div className="app-body">
@@ -118,6 +117,12 @@ export function App(): ReactElement {
               onFork={(id) => void handleFork(id)}
             />
             <ChangeList changes={changes} onSelect={(change) => setDrawerChange(change)} />
+          </div>
+          <div className="sidebar-footer">
+            <button className="sidebar-settings" onClick={() => setSettingsOpen(true)}>
+              <Settings size={14} />
+              <span>设置</span>
+            </button>
           </div>
         </aside>
 

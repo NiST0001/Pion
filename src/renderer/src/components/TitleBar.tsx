@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react'
-import { Maximize2, Minimize2, Minus, Settings, X } from 'lucide-react'
+import { Maximize2, Minimize2, Minus, X } from 'lucide-react'
 import type { AgentPhase } from '../../../shared/types'
 
 interface TitleBarProps {
@@ -7,15 +7,13 @@ interface TitleBarProps {
   phase: AgentPhase
   sessionName?: string
   maximized: boolean
-  onOpenSettings: () => void
 }
 
 export function TitleBar({
   cwd,
   phase,
   sessionName,
-  maximized,
-  onOpenSettings
+  maximized
 }: TitleBarProps): ReactElement {
   const title = [shorten(cwd ?? ''), sessionName].filter(Boolean).join(' · ')
   return (
@@ -29,10 +27,6 @@ export function TitleBar({
         {title || 'Pion'}
       </div>
       <div className="titlebar-right">
-        <button className="titlebar-btn" title="设置" onClick={onOpenSettings}>
-          <Settings size={14} />
-        </button>
-        <span className="titlebar-sep" />
         <button
           className="titlebar-btn"
           title="最小化"

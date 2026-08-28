@@ -32,7 +32,13 @@ export function ModelPicker({
 
   return (
     <div className={`picker${compact ? ' picker-compact' : ''}`} ref={ref}>
-      <button className="picker-trigger" onClick={() => setOpen((v) => !v)} title="切换模型">
+      <button
+        type="button"
+        className="picker-trigger"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        title="切换模型"
+      >
         <span className="picker-value">{current?.id ?? currentModelId ?? '模型'}</span>
         <ChevronDown size={13} />
       </button>
@@ -43,6 +49,7 @@ export function ModelPicker({
               <div className="picker-group-title">{provider}</div>
               {group.map((model) => (
                 <button
+                  type="button"
                   key={`${model.provider}/${model.id}`}
                   className={`picker-option${model.id === currentModelId ? ' selected' : ''}`}
                   onClick={() => {

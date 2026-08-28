@@ -58,26 +58,33 @@ for (let i = 0; i < 40; i++) {
 // --- 1. 无边框标题栏 ---
 await check('标题栏存在', `!!document.querySelector('.titlebar')`)
 await check('旧 header 已移除', `!document.querySelector('.app-header')`)
-await check('窗口控制三键（最小/最大/关闭）', `document.querySelectorAll('.titlebar-btn').length >= 4`)
+await check('窗口控制三键（最小/最大/关闭）', `document.querySelectorAll('.titlebar-btn').length >= 3`)
 await check('关闭按钮样式', `!!document.querySelector('.titlebar-close')`)
 await check('标题栏含品牌', `document.querySelector('.titlebar-brand .brand-name')?.textContent === 'Pion'`)
 
-// --- 2. 模型选择器在输入区下方 ---
+// --- 2. 模型选择器与输入框融为一体 ---
 for (let i = 0; i < 20; i++) {
   await sleep(500)
-  if (await evaluate(`document.querySelectorAll('.composer-controls .thinking-segment').length > 0`)) break
+  if (await evaluate(`document.querySelectorAll('.composer-inline-controls .thinking-segment').length > 0`)) break
 }
-await check('composer 控制行存在', `!!document.querySelector('.composer-controls')`)
-await check('模型选择器在控制行内', `!!document.querySelector('.composer-controls .picker')`)
-await check('模型选择器显示当前模型', `(document.querySelector('.composer-controls .picker-value')?.textContent ?? '').length > 0`)
-await check('思考级别在控制行内', `document.querySelectorAll('.composer-controls .thinking-segment').length > 0`)
+await check('composer 输入框存在', `!!document.querySelector('.composer-row textarea')`)
+await check('模型选择器嵌入输入框', `!!document.querySelector('.composer-row .composer-inline-controls .picker')`)
+await check('模型选择器显示当前模型', `(document.querySelector('.composer-inline-controls .picker-value')?.textContent ?? '').length > 0`)
+await check('模型选择器可打开', `(() => { document.querySelector('.composer-inline-controls .picker-trigger')?.click(); return true })()`)
+await sleep(300)
+await check('模型菜单已显示', `!!document.querySelector('.composer-inline-controls .picker-menu')`)
+await check('模型选项可见', `document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
+await check('思考级别嵌入输入框', `document.querySelectorAll('.composer-inline-controls .thinking-segment').length > 0`)
+await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
+await check('旧控制行已移除', `!document.querySelector('.composer-controls')`)
 await check('header 中无模型选择器', `!document.querySelector('.app-header .picker')`)
 
-// --- 3. 设置面板 ---
+// --- 3. 设置面板入口位于左下角 ---
 await check('设置面板默认关闭', `!document.querySelector('.settings-modal, .modal')`)
-await evaluate(`document.querySelector('.titlebar-btn').click()`)
+await check('设置入口位于左侧栏底部', `!!document.querySelector('.sidebar-footer .sidebar-settings')`)
+await evaluate(`document.querySelector('.sidebar-footer .sidebar-settings')?.click()`)
 await sleep(400)
-await check('点击设置后面板打开', `!!document.querySelector('.modal')`)
+await check('点击左下角设置后面板打开', `!!document.querySelector('.modal')`)
 await check('面板含会话/行为/外观区块', `Array.from(document.querySelectorAll('.settings-section-title')).map(e => e.textContent).join(',').length > 0`)
 await check('开关组件渲染', `document.querySelectorAll('.modal .toggle').length >= 2`)
 await check('分段控件渲染', `document.querySelectorAll('.modal .segmented').length >= 2`)
