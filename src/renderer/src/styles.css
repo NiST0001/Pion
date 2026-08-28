@@ -14,7 +14,7 @@
   --fg: #e6e9ef;
   --fg-dim: #9aa3b2;
   --fg-faint: #6b7382;
-  /* Claude-style dark palette: warm charcoal with terracotta accent. */
+  /* 陶土深色全局视觉：暖炭黑背景与陶土色强调。 */
   --accent: #d97757;
   --accent-rgb: 217, 119, 87;
   --accent-strong: #ee9b7d;
@@ -33,7 +33,7 @@
   --sidebar-w: 264px;
 }
 
-:root[data-theme='claude-light'] {
+:root[data-theme='terracotta-light'] {
   color-scheme: light;
   --bg: #f7f5f2;
   --bg-elev: #fffdfa;
@@ -2484,51 +2484,6 @@ button {
 
 /* appearance page */
 
-.appearance-section {
-  margin-bottom: 12px;
-}
-
-.accent-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.accent-choice {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 9px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--fg-dim);
-  font-size: 12px;
-  text-align: left;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
-}
-
-.accent-choice:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
-}
-
-.accent-choice.active {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent-strong);
-}
-
-.accent-dot {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 23px;
-  height: 23px;
-  border-radius: 7px;
-  color: #10131a;
-  flex-shrink: 0;
-}
-
 .appearance-preview-card {
   margin-bottom: 12px;
   padding: 14px 16px;
@@ -2564,10 +2519,15 @@ button {
   font-size: 12px;
 }
 
+.preview-brand-mark {
+  color: var(--accent);
+}
+
 .preview-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
+  background: var(--accent);
 }
 
 .preview-body {
@@ -2618,6 +2578,7 @@ button {
   width: 20px;
   height: 20px;
   border-radius: 6px;
+  background: var(--accent);
   color: #10131a;
   font-size: 13px;
   font-weight: 700;
@@ -2800,10 +2761,6 @@ button {
   .diagnostics-grid {
     grid-template-columns: 1fr;
   }
-
-  .accent-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 /* collapsed provider rows --------------------------------------------------- */
@@ -2851,7 +2808,7 @@ button {
   color: var(--accent-strong);
 }
 
-/* Claude theme cards -------------------------------------------------------- */
+/* 陶土主题卡片 ------------------------------------------------------------- */
 
 .theme-grid {
   display: grid;
@@ -2892,12 +2849,12 @@ button {
   border-radius: 7px;
 }
 
-.theme-card-preview.claude-dark {
+.theme-card-preview.terracotta-dark {
   background: #211f1d;
   border-color: #3b3733;
 }
 
-.theme-card-preview.claude-light {
+.theme-card-preview.terracotta-light {
   background: #f7f5f2;
   border-color: #ded8d1;
 }
@@ -2911,12 +2868,12 @@ button {
   border-bottom: 1px solid;
 }
 
-.claude-dark .theme-card-top {
+.terracotta-dark .theme-card-top {
   background: #292623;
   border-color: #3b3733;
 }
 
-.claude-light .theme-card-top {
+.terracotta-light .theme-card-top {
   background: #fffdfa;
   border-color: #e5dfd9;
 }
@@ -2950,11 +2907,11 @@ button {
   width: 38%;
 }
 
-.claude-dark .theme-card-line {
+.terracotta-dark .theme-card-line {
   background: #49443f;
 }
 
-.claude-light .theme-card-line {
+.terracotta-light .theme-card-line {
   background: #d9d2ca;
 }
 

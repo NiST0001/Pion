@@ -17,7 +17,7 @@ import {
   X
 } from 'lucide-react'
 import type { ModelOption, SessionInfo } from '../../../shared/types'
-import { ACCENTS, currentAccent, currentTheme, saveAccent, saveTheme, THEMES } from '../utils/theme'
+import { currentTheme, saveTheme, THEMES } from '../utils/theme'
 import type { ThemeId } from '../utils/theme'
 import pkg from '../../../../package.json'
 
@@ -62,7 +62,6 @@ export function SettingsModal({
   const [exporting, setExporting] = useState(false)
   const [autoRetry, setAutoRetry] = useState(true)
   const [selectedTheme, setSelectedTheme] = useState<ThemeId>(currentTheme())
-  const [selectedAccent, setSelectedAccent] = useState(currentAccent())
   const [stderr, setStderr] = useState('')
   const [modelBusy, setModelBusy] = useState('')
   const [modelError, setModelError] = useState('')
@@ -94,7 +93,6 @@ export function SettingsModal({
       setNameSaved(false)
       setExportPath('')
       setSelectedTheme(currentTheme())
-      setSelectedAccent(currentAccent())
       setModelError('')
     }
   }, [open, session?.sessionName])
@@ -343,7 +341,7 @@ export function SettingsModal({
                 <PageHeading
                   kicker="APPEARANCE"
                   title="外观"
-                  description="选择 Claude 风格的深浅外观，并调整 Pion 的强调色。所有更改会立即应用。"
+                  description="选择陶土深色或浅色外观，主题会统一调整工作台的整体视觉。所有更改会立即应用。"
                 />
                 <div className="settings-section theme-section">
                   <div className="settings-section-title">工作台主题</div>
@@ -376,49 +374,28 @@ export function SettingsModal({
                     ))}
                   </div>
                 </div>
-                <div className="settings-section appearance-section">
-                  <div className="settings-section-title">主题色</div>
-                  <div className="accent-grid">
-                    {ACCENTS.map((accent) => (
-                      <button
-                        type="button"
-                        key={accent.value}
-                        className={`accent-choice${selectedAccent === accent.value ? ' active' : ''}`}
-                        onClick={() => {
-                          setSelectedAccent(accent.value)
-                          saveAccent(accent.value)
-                        }}
-                      >
-                        <span className="accent-dot" style={{ background: accent.value }}>
-                          {selectedAccent === accent.value && <Check size={13} />}
-                        </span>
-                        <span>{accent.name}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
                 <div className="appearance-preview-card">
                   <div className="settings-section-title">实时预览</div>
                   <div className="appearance-preview">
                     <div className="preview-toolbar">
-                      <span className="preview-brand"><span style={{ color: selectedAccent }}>π⁺</span> Pion</span>
-                      <span className="preview-dot" style={{ background: selectedAccent }} />
+                      <span className="preview-brand"><span className="preview-brand-mark">π⁺</span> Pion</span>
+                      <span className="preview-dot" />
                     </div>
                     <div className="preview-body">
                       <div className="preview-line preview-line-short" />
                       <div className="preview-line" />
-                      <div className="preview-bubble" style={{ borderColor: `${selectedAccent}66` }}>
-                        已选择「{ACCENTS.find((accent) => accent.value === selectedAccent)?.name ?? '蓝'}」主题色
+                      <div className="preview-bubble">
+                        陶土主题全局视觉预览
                       </div>
                     </div>
                     <div className="preview-input">
                       <span>描述任务…</span>
-                      <span className="preview-send" style={{ background: selectedAccent }}>↑</span>
+                      <span className="preview-send">↑</span>
                     </div>
                   </div>
                 </div>
                 <div className="settings-note">
-                  <Palette size={14} /> Claude 风格主题与主题色仅保存在本机，不会上传或写入项目文件。
+                  <Palette size={14} /> 陶土主题会统一调整全局视觉，仅保存在本机，不会上传或写入项目文件。
                 </div>
               </section>
             )}

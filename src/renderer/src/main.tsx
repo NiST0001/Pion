@@ -1,11 +1,10 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
-import { loadAccent, loadTheme } from './utils/theme'
+import { loadTheme } from './utils/theme'
 import './styles.css'
 
 loadTheme()
-loadAccent()
 
 const container = document.getElementById('root')
 if (!container) throw new Error('#root not found')
