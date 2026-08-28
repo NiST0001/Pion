@@ -9,6 +9,7 @@ interface TaskTarget {
 }
 
 const TASK_STORAGE_PREFIX = 'pion:session-tasks:'
+const TASK_PANEL_STATE_PREFIX = 'pion:session-task-panel-state:'
 
 function createDefaultTasks(): TaskTarget[] {
   return [
@@ -60,15 +61,44 @@ function saveTasks(sessionKey: string, tasks: TaskTarget[]): void {
   }
 }
 
+function taskPanelStateKey(sessionKey: string): string {
+  return `${TASK_PANEL_STATE_PREFIX}${encodeURIComponent(sessionKey)}`
+}
+
+function loadExpanded(sessionKey: string): boolean {
+  if (typeof window === 'undefined') return true
+  try {
+    const raw = window.localStorage.getItem(taskPanelStateKey(sessionKey))
+    if (raw === null) return true
+    const saved = JSON.parse(raw) as unknown
+    return typeof saved === 'boolean' ? saved : true
+  } catch {
+    return true
+  }
+}
+
+function saveExpanded(sessionKey: string, expanded: boolean): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(taskPanelStateKey(sessionKey), JSON.stringify(expanded))
+  } catch {
+    // Panel state persistence is best effort and should never block the chat UI.
+  }
+}
+
 /** Compact, expandable work-plan surface docked above the composer. */
 export function TaskPanel({ sessionKey }: { sessionKey: string }): ReactElement {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(() => loadExpanded(sessionKey))
   const [tasks, setTasks] = useState(() => loadTasks(sessionKey))
   const completed = tasks.filter((task) => task.done).length
 
   useEffect(() => {
     saveTasks(sessionKey, tasks)
   }, [sessionKey, tasks])
+
+  useEffect(() => {
+    saveExpanded(sessionKey, expanded)
+  }, [sessionKey, expanded])
 
   return (
     <section
