@@ -111,6 +111,19 @@ export interface WireEntry {
   [key: string]: unknown
 }
 
+/** A bounded history window. Older windows are requested only when needed. */
+export interface SessionEntriesPage {
+  /** Entries in [start, end), ordered from oldest to newest. */
+  entries: WireEntry[]
+  /** Tool results for calls in the page, including results outside its bounds. */
+  toolResults: WireEntry[]
+  start: number
+  end: number
+  total: number
+  leafId: string | null
+  mode: AgentMode
+}
+
 /** Flattened tree node for the branch view. */
 export interface TreeNodeLite {
   id: string
@@ -300,8 +313,10 @@ export interface PionApi {
   getSessionForkMessages(sessionPath: string): Promise<ForkMessageOption[]>
   /** Create a new session by forking before a selected user message. */
   forkSession(sessionPath: string, entryId: string): Promise<{ text: string; cancelled: boolean }>
-  /** Full entry list of the active session (for timeline rebuild). */
+  /** Full entry list of the active session (kept for diagnostics/compatibility). */
   getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null>
+  /** Load a bounded history window; omit before for the newest window. */
+  getEntriesPage(before?: number, limit?: number): Promise<SessionEntriesPage | null>
   /** Flattened branch tree of the active session. */
   getTree(): Promise<{ tree: TreeNodeLite[]; leafId: string | null } | null>
 

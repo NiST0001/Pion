@@ -310,10 +310,36 @@ let nextId = 1
 
 const INITIAL_HISTORY_ITEMS = 10
 const HISTORY_ENTRY_CHUNK_SIZE = 80
-const HISTORY_CHUNK_DELAY_MS = 24
+const INITIAL_HISTORY_PAGE_SIZE = 160
+const MAX_TIMELINE_CACHE = 10
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
+interface TimelineCacheEntry {
+  items: TimelineItem[]
+  mode: AgentMode
+  pendingEntries: WireEntry[]
+  apiBefore: number
+  toolResults: WireEntry[]
+  complete: boolean
+}
+
+interface HistoryCursor extends TimelineCacheEntry {
+  path: string
+  loading: boolean
+  loadId: number
+}
+
+function storeTimelineCache(
+  cache: Map<string, TimelineCacheEntry>,
+  path: string,
+  entry: TimelineCacheEntry
+): void {
+  cache.delete(path)
+  cache.set(path, entry)
+  while (cache.size > MAX_TIMELINE_CACHE) {
+    const oldest = cache.keys().next().value
+    if (typeof oldest !== 'string') break
+    cache.delete(oldest)
+  }
 }
 
 function reducer(state: AgentState, action: Action): AgentState {
@@ -626,19 +652,6 @@ function initialEntryStart(entries: WireEntry[]): number {
   return start
 }
 
-function modeFromEntries(entries: WireEntry[]): AgentMode {
-  let mode: AgentMode = 'build'
-  for (const entry of entries) {
-    if (entry.type !== 'custom' || entry.customType !== 'plan-mode-state') continue
-    const data = entry.data
-    const enabled = data && typeof data === 'object'
-      ? (data as Record<string, unknown>).enabled
-      : undefined
-    if (typeof enabled === 'boolean') mode = enabled ? 'plan' : 'build'
-  }
-  return mode
-}
-
 function entriesToTimeline(
   entries: WireEntry[],
   toolResults: Map<string, HistoricalToolResult> = collectToolResults(entries)
@@ -706,6 +719,46 @@ export function useAgent() {
   const api = typeof window !== 'undefined' ? window.pion : undefined
   const bootstrapped = useRef(false)
   const timelineLoadId = useRef(0)
+  const timelineCache = useRef(new Map<string, TimelineCacheEntry>())
+  const historyCursor = useRef<HistoryCursor | null>(null)
+  const timelineOwnerPath = useRef<string | undefined>(undefined)
+  const expectedTimeline = useRef<{ path: string; items: TimelineItem[] } | null>(null)
+
+  const showTimeline = useCallback((path: string, items: TimelineItem[], mode: AgentMode): void => {
+    timelineOwnerPath.current = path
+    expectedTimeline.current = { path, items }
+    dispatch({ type: 'loadEntries', items, mode })
+  }, [])
+
+  const restoreCachedTimeline = useCallback((path: string, cached: TimelineCacheEntry): void => {
+    const loadId = ++timelineLoadId.current
+    const cursor: HistoryCursor | null = cached.complete
+      ? null
+      : { path, ...cached, loading: false, loadId }
+    historyCursor.current = cursor
+    showTimeline(path, cached.items, cached.mode)
+  }, [showTimeline])
+
+  // Keep a loaded session's rendered timeline in memory. Switching back to a
+  // retained backend should restore this snapshot instead of transferring and
+  // parsing the complete JSONL file again.
+  useEffect(() => {
+    const expected = expectedTimeline.current
+    if (expected && (expected.path !== timelineOwnerPath.current || state.timeline !== expected.items)) return
+    if (expected) expectedTimeline.current = null
+
+    const path = timelineOwnerPath.current
+    if (!path) return
+    const cached = timelineCache.current.get(path)
+    if (!cached) return
+    const cursor = historyCursor.current
+    if (cursor?.path === path) cursor.items = state.timeline
+    storeTimelineCache(timelineCache.current, path, {
+      ...cached,
+      items: state.timeline,
+      mode: state.mode
+    })
+  }, [state.mode, state.timeline])
 
   useEffect(() => {
     if (!api) return
@@ -766,29 +819,86 @@ export function useAgent() {
     }
   }, [api, state.projects, state.branchesByProject])
 
-  /** Rebuild the timeline progressively, showing the newest viewport first. */
-  const reloadTimeline = useCallback(async () => {
+  /** Load only the newest history window; older windows are fetched on demand. */
+  const reloadTimeline = useCallback(async (sessionPath?: string): Promise<void> => {
     if (!api) return
     const loadId = ++timelineLoadId.current
-    const result = await api.getEntries()
-    if (!result || loadId !== timelineLoadId.current) return
+    historyCursor.current = null
+    const path = sessionPath ?? timelineOwnerPath.current ?? (await api.getState())?.sessionFile
+    const page = await api.getEntriesPage(undefined, INITIAL_HISTORY_PAGE_SIZE)
+    if (!page || loadId !== timelineLoadId.current) return
 
-    // Only parse the newest entries before the first paint. Older messages are
-    // converted in entry-sized chunks so large sessions do not block the UI.
-    const toolResults = collectToolResults(result.entries)
-    const initialStart = initialEntryStart(result.entries)
-    const initialItems = entriesToTimeline(result.entries.slice(initialStart), toolResults)
-    const mode = modeFromEntries(result.entries)
-    dispatch({ type: 'loadEntries', items: initialItems, mode })
+    const toolResults = collectToolResults([...page.entries, ...page.toolResults])
+    const relativeStart = page.start === 0 ? 0 : initialEntryStart(page.entries)
+    const initialItems = entriesToTimeline(page.entries.slice(relativeStart), toolResults)
+    const cursor: HistoryCursor = {
+      path: path ?? '',
+      items: initialItems,
+      mode: page.mode,
+      pendingEntries: page.start === 0 ? [] : page.entries.slice(0, relativeStart),
+      apiBefore: page.start,
+      toolResults: page.toolResults,
+      complete: page.start === 0,
+      loading: false,
+      loadId
+    }
 
-    for (let end = initialStart; end > 0; end -= HISTORY_ENTRY_CHUNK_SIZE) {
-      await wait(HISTORY_CHUNK_DELAY_MS)
-      if (loadId !== timelineLoadId.current) return
-      const start = Math.max(0, end - HISTORY_ENTRY_CHUNK_SIZE)
-      dispatch({
-        type: 'prependEntries',
-        items: entriesToTimeline(result.entries.slice(start, end), toolResults)
+    if (path) {
+      storeTimelineCache(timelineCache.current, path, {
+        items: cursor.items,
+        mode: cursor.mode,
+        pendingEntries: cursor.pendingEntries,
+        apiBefore: cursor.apiBefore,
+        toolResults: cursor.toolResults,
+        complete: cursor.complete
       })
+      historyCursor.current = cursor.complete ? null : cursor
+      showTimeline(path, cursor.items, cursor.mode)
+    } else {
+      dispatch({ type: 'loadEntries', items: cursor.items, mode: cursor.mode })
+    }
+  }, [api, showTimeline])
+
+  /** Fetch and prepend the next older history window when the user reaches the top. */
+  const loadOlder = useCallback(async (): Promise<void> => {
+    if (!api) return
+    const cursor = historyCursor.current
+    if (!cursor || cursor.loading || cursor.complete) return
+    cursor.loading = true
+    const loadId = cursor.loadId
+    try {
+      let entries: WireEntry[]
+      let toolResults = cursor.toolResults
+      if (cursor.pendingEntries.length > 0) {
+        const end = cursor.pendingEntries.length
+        const start = Math.max(0, end - HISTORY_ENTRY_CHUNK_SIZE)
+        entries = cursor.pendingEntries.slice(start, end)
+        cursor.pendingEntries = cursor.pendingEntries.slice(0, start)
+      } else {
+        const page = await api.getEntriesPage(cursor.apiBefore, HISTORY_ENTRY_CHUNK_SIZE)
+        if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+        entries = page.entries
+        toolResults = page.toolResults
+        cursor.toolResults = toolResults
+        cursor.apiBefore = page.start
+      }
+      if (loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+
+      const items = entriesToTimeline(entries, collectToolResults([...entries, ...toolResults]))
+      cursor.items = [...items, ...cursor.items]
+      cursor.complete = cursor.pendingEntries.length === 0 && cursor.apiBefore === 0
+      if (items.length > 0) dispatch({ type: 'prependEntries', items })
+      storeTimelineCache(timelineCache.current, cursor.path, {
+        items: cursor.items,
+        mode: cursor.mode,
+        pendingEntries: cursor.pendingEntries,
+        apiBefore: cursor.apiBefore,
+        toolResults: cursor.toolResults,
+        complete: cursor.complete
+      })
+      if (cursor.complete) historyCursor.current = null
+    } finally {
+      if (historyCursor.current === cursor) cursor.loading = false
     }
   }, [api])
 
@@ -807,6 +917,10 @@ export function useAgent() {
   const start = useCallback(
     async (cwd: string) => {
       if (!api) return
+      ++timelineLoadId.current
+      historyCursor.current = null
+      timelineOwnerPath.current = undefined
+      expectedTimeline.current = null
       dispatch({ type: 'status', status: { phase: 'starting', cwd } })
       dispatch({ type: 'clearTimeline' })
       await api.startAgent(cwd)
@@ -853,6 +967,10 @@ export function useAgent() {
 
   const newSession = useCallback(async () => {
     if (!api) return
+    ++timelineLoadId.current
+    historyCursor.current = null
+    timelineOwnerPath.current = undefined
+    expectedTimeline.current = null
     await api.newSession()
     dispatch({ type: 'clearTimeline' })
   }, [api])
@@ -863,6 +981,8 @@ export function useAgent() {
       if (!api) return ''
       const result = await api.forkAt(entryId)
       if (!result.cancelled) {
+        timelineOwnerPath.current = undefined
+        historyCursor.current = null
         await reloadTimeline()
         return result.text
       }
@@ -874,13 +994,25 @@ export function useAgent() {
   const switchSession = useCallback(
     async (sessionPath: string): Promise<{ cancelled: boolean }> => {
       if (!api) return { cancelled: true }
+      const cached = timelineCache.current.get(sessionPath)
+      if (cached) {
+        restoreCachedTimeline(sessionPath, cached)
+      } else {
+        ++timelineLoadId.current
+        historyCursor.current = null
+        timelineOwnerPath.current = sessionPath
+        expectedTimeline.current = null
+      }
       const result = await api.switchSession(sessionPath)
       if (!result.cancelled) {
-        await Promise.all([reloadTimeline(), refreshModels()])
+        await Promise.all([
+          cached ? Promise.resolve() : reloadTimeline(sessionPath),
+          refreshModels()
+        ])
       }
       return result
     },
-    [api, refreshModels, reloadTimeline]
+    [api, refreshModels, reloadTimeline, restoreCachedTimeline]
   )
 
   const reorderSessions = useCallback((cwd: string, paths: string[]) => {
@@ -891,6 +1023,11 @@ export function useAgent() {
   const deleteSession = useCallback(
     async (sessionPath: string) => {
       if (!api) return
+      timelineCache.current.delete(sessionPath)
+      if (timelineOwnerPath.current === sessionPath) {
+        timelineOwnerPath.current = undefined
+        historyCursor.current = null
+      }
       const result = await api.deleteSession(sessionPath)
       if (result.activeSessionChanged) await reloadTimeline()
     },
@@ -901,7 +1038,11 @@ export function useAgent() {
     async (sessionPath: string) => {
       if (!api) return
       const result = await api.copySession(sessionPath)
-      if (!result.cancelled) await reloadTimeline()
+      if (!result.cancelled) {
+        timelineOwnerPath.current = undefined
+        historyCursor.current = null
+        await reloadTimeline()
+      }
     },
     [api, reloadTimeline]
   )
@@ -919,6 +1060,8 @@ export function useAgent() {
       if (!api) return ''
       const result = await api.forkSession(sessionPath, entryId)
       if (result.cancelled) return ''
+      timelineOwnerPath.current = undefined
+      historyCursor.current = null
       await reloadTimeline()
       return result.text
     },
@@ -1023,6 +1166,7 @@ export function useAgent() {
     () => ({
       bootstrap,
       start,
+      loadOlder,
       send,
       queue,
       abort,
@@ -1051,6 +1195,7 @@ export function useAgent() {
     [
       bootstrap,
       start,
+      loadOlder,
       send,
       queue,
       abort,

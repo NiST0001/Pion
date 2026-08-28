@@ -61,6 +61,7 @@ await sleep(80)
 await evaluate(`document.querySelector('.send-button')?.click()`)
 await sleep(1200)
 await check('发送任务后启动后端', `!!document.querySelector('.dot-running')`)
+await check('会话历史按窗口读取', `(async()=>{const page=await window.pion.getEntriesPage(undefined, 2); return !!page && page.entries.length <= 2 && page.total >= page.entries.length})()`)
 
 // --- 1. 无边框标题栏 ---
 await check('标题栏存在', `!!document.querySelector('.titlebar')`)

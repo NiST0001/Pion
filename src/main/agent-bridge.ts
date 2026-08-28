@@ -17,6 +17,7 @@ import type {
   DeleteSessionResult,
   ForkMessageOption,
   ModelOption,
+  SessionEntriesPage,
   SessionInfo,
   SessionMeta,
   SkillInfo,
@@ -25,7 +26,7 @@ import type {
   WireEntry,
   WireMessage
 } from '../shared/types'
-import { messageText } from '../shared/types'
+import { messageText, messageToolCalls } from '../shared/types'
 
 const execFileAsync = promisify(execFile)
 
@@ -82,6 +83,43 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+function sessionMode(entries: SessionEntry[]): AgentMode {
+  let mode: AgentMode = 'build'
+  for (const entry of entries) {
+    if (entry.type !== 'custom') continue
+    const record = entry as unknown as Record<string, unknown>
+    if (record.customType !== 'plan-mode-state') continue
+    const data = record.data
+    const enabled = data && typeof data === 'object'
+      ? (data as Record<string, unknown>).enabled
+      : undefined
+    if (typeof enabled === 'boolean') mode = enabled ? 'plan' : 'build'
+  }
+  return mode
+}
+
+function toolCallIds(entries: SessionEntry[]): Set<string> {
+  const ids = new Set<string>()
+  for (const entry of entries) {
+    if (entry.type !== 'message' || entry.message.role !== 'assistant') continue
+    for (const call of messageToolCalls(entry.message as unknown as WireMessage)) {
+      if (typeof call.id === 'string') ids.add(call.id)
+    }
+  }
+  return ids
+}
+
+function isToolResult(entry: SessionEntry): boolean {
+  const record = entry as unknown as { type?: string; message?: WireMessage }
+  return record.type === 'message' && record.message?.role === 'toolResult'
+}
+
+function toolResultId(entry: SessionEntry): string | undefined {
+  if (!isToolResult(entry)) return undefined
+  const record = entry as unknown as { message?: Record<string, unknown> }
+  return typeof record.message?.toolCallId === 'string' ? record.message.toolCallId : undefined
 }
 
 function parseGitWorktrees(output: string): GitWorktreeRecord[] {
@@ -163,7 +201,7 @@ export class AgentBridge {
     this.activeSessionPath = undefined
     this.activeKey = this.newSessionKey(normalizedCwd)
     this.setStatus({ phase: 'ready', error: undefined, cwd: normalizedCwd })
-    void this.refresh()
+    void this.pushSessionInfo()
   }
 
   private newSessionKey(cwd: string): string {
@@ -203,7 +241,8 @@ export class AgentBridge {
       if (type === 'agent_start') this.setActiveBackendStatus()
       this.win?.webContents.send(EVENT_CHANNEL, event)
       if (typeof type === 'string' && STATE_REFRESH_EVENTS.has(type)) {
-        void this.refresh()
+        void this.pushSessionInfo()
+        void this.refreshSidebarSessions()
       }
       if (type === 'agent_start' || type === 'message_start') {
         void this.syncBackendSession(backend)
@@ -238,7 +277,8 @@ export class AgentBridge {
         backend.phase = 'running'
         console.log('[pion] agent subprocess running, session:', sessionPath ?? key)
         if (this.activeKey === key) this.setActiveBackendStatus()
-        void this.refresh()
+        void this.pushSessionInfo()
+        void this.refreshSidebarSessions()
       })
       .catch((error: unknown) => {
         backend.phase = 'error'
@@ -285,6 +325,24 @@ export class AgentBridge {
     })
     this.backendPoolQueue = start.then(() => undefined, () => undefined)
     return start
+  }
+
+  private async waitForActiveBackend(): Promise<BackendRecord | null> {
+    const key = this.activeKey
+    if (!key) return null
+    const backend = this.backends.get(key)
+    try {
+      if (backend) {
+        await backend.startPromise
+        return this.activeKey === key ? backend : null
+      }
+      const pending = this.backendStarts.get(key)
+      if (!pending) return null
+      await pending
+      return this.activeKey === key ? this.backends.get(key) ?? null : null
+    } catch {
+      return null
+    }
   }
 
   private async ensureActiveBackend(): Promise<BackendRecord> {
@@ -404,7 +462,7 @@ export class AgentBridge {
     this.activeSessionPath = undefined
     this.activeKey = this.newSessionKey(this.activeCwd)
     this.setStatus({ phase: 'ready', error: undefined, cwd: this.activeCwd })
-    await this.refresh()
+    await this.pushSessionInfo()
   }
 
   private openSessionManager(sessionPath: string): SessionManager {
@@ -455,7 +513,8 @@ export class AgentBridge {
     const manager = this.openSessionManager(target)
     const result = this.createForkedSession(manager, entryId)
     this.activateLogicalSession(result.path, manager.getCwd())
-    await this.refresh()
+    await this.pushSessionInfo()
+    void this.refreshSidebarSessions()
     return { text: result.text, cancelled: false }
   }
 
@@ -464,8 +523,18 @@ export class AgentBridge {
     const target = await this.resolveListedSession(sessionPath)
     const manager = this.openSessionManager(target)
     this.activateLogicalSession(target, manager.getCwd() || this.activeCwd)
-    await this.ensureActiveBackend()
-    await this.refresh()
+    // Activate the logical session synchronously, then warm its backend in the
+    // background. The renderer can read the cached SessionManager immediately
+    // instead of waiting for a fresh pi subprocess to boot.
+    void this.ensureActiveBackend()
+      .then(async () => {
+        if (this.activeSessionPath !== target) return
+        await this.pushSessionInfo()
+        void this.refreshSidebarSessions()
+      })
+      .catch(() => {
+        // The status event contains the startup error for the active session.
+      })
     return { cancelled: false }
   }
 
@@ -514,7 +583,8 @@ export class AgentBridge {
       this.activeKey = this.newSessionKey(this.activeCwd ?? this.status.cwd ?? dirname(target))
       this.setStatus({ phase: 'ready', error: undefined, cwd: this.activeCwd })
     }
-    await this.refresh()
+    await this.pushSessionInfo()
+    void this.refreshSidebarSessions()
     return { activeSessionChanged: active }
   }
 
@@ -527,7 +597,8 @@ export class AgentBridge {
     const path = manager.createBranchedSession(leafId)
     if (!path) return { cancelled: true }
     this.activateLogicalSession(path, manager.getCwd())
-    await this.refresh()
+    await this.pushSessionInfo()
+    void this.refreshSidebarSessions()
     return { cancelled: false }
   }
 
@@ -550,24 +621,61 @@ export class AgentBridge {
     const manager = this.openSessionManager(target)
     const result = this.createForkedSession(manager, entryId)
     this.activateLogicalSession(result.path, manager.getCwd())
-    await this.refresh()
+    await this.pushSessionInfo()
+    void this.refreshSidebarSessions()
     return { text: result.text, cancelled: false }
   }
 
-  async getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null> {
+  private async getActiveEntries(): Promise<{ entries: SessionEntry[]; leafId: string | null } | null> {
     const backend = this.getActiveBackend()
     try {
+      const sessionPath = this.activeSessionPath ?? backend?.sessionPath
+      if (sessionPath) {
+        const manager = this.openSessionManager(sessionPath)
+        return { entries: manager.getEntries(), leafId: manager.getLeafId() }
+      }
       if (backend) {
         const { entries, leafId } = await backend.client.getEntries()
-        return { entries: entries.map(toWireEntry), leafId }
-      }
-      if (this.activeSessionPath) {
-        const manager = this.openSessionManager(this.activeSessionPath)
-        return { entries: manager.getEntries().map(toWireEntry), leafId: manager.getLeafId() }
+        return { entries, leafId }
       }
       return { entries: [], leafId: null }
     } catch {
       return null
+    }
+  }
+
+  async getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null> {
+    const result = await this.getActiveEntries()
+    return result
+      ? { entries: result.entries.map(toWireEntry), leafId: result.leafId }
+      : null
+  }
+
+  async getEntriesPage(before?: number, limit = 160): Promise<SessionEntriesPage | null> {
+    const result = await this.getActiveEntries()
+    if (!result) return null
+
+    const total = result.entries.length
+    const end = typeof before === 'number' && Number.isFinite(before)
+      ? Math.min(Math.max(Math.trunc(before), 0), total)
+      : total
+    const pageSize = Math.min(Math.max(Math.trunc(limit) || 160, 1), 240)
+    const start = Math.max(0, end - pageSize)
+    const entries = result.entries.slice(start, end)
+    const callIds = toolCallIds(entries)
+    const toolResults = result.entries.filter((entry) => {
+      const id = toolResultId(entry)
+      return id !== undefined && callIds.has(id)
+    })
+
+    return {
+      entries: entries.map(toWireEntry),
+      toolResults: toolResults.map(toWireEntry),
+      start,
+      end,
+      total,
+      leafId: result.leafId,
+      mode: sessionMode(result.entries)
     }
   }
 
@@ -591,9 +699,10 @@ export class AgentBridge {
   // ---------------------------------------------------------------- commands & modes
 
   async getCommands(): Promise<SlashCommandInfo[]> {
-    if (!this.client) return []
+    const backend = await this.waitForActiveBackend()
+    if (!backend) return []
     try {
-      const commands = await this.client.getCommands()
+      const commands = await backend.client.getCommands()
       return commands.map(({ name, description, source }) => ({ name, description, source }))
     } catch {
       return []
@@ -618,9 +727,10 @@ export class AgentBridge {
   // ---------------------------------------------------------------- models
 
   async getModels(): Promise<ModelOption[]> {
-    if (!this.client) return []
+    const backend = await this.waitForActiveBackend()
+    if (!backend) return []
     try {
-      const models = await this.client.getAvailableModels()
+      const models = await backend.client.getAvailableModels()
       return models.map((m) => ({
         provider: m.provider,
         id: m.id,
@@ -639,9 +749,10 @@ export class AgentBridge {
   }
 
   async getSkills(): Promise<SkillInfo[]> {
-    if (!this.client) return []
+    const backend = await this.waitForActiveBackend()
+    if (!backend) return []
     try {
-      const commands = await this.client.getCommands()
+      const commands = await backend.client.getCommands()
       return commands
         .filter((command) => command.source === 'skill')
         .map((command) => ({
@@ -654,9 +765,10 @@ export class AgentBridge {
   }
 
   async getThinkingLevels(): Promise<string[]> {
-    if (!this.client) return []
+    const backend = await this.waitForActiveBackend()
+    if (!backend) return []
     try {
-      return await this.client.getAvailableThinkingLevels()
+      return await backend.client.getAvailableThinkingLevels()
     } catch {
       return []
     }
@@ -827,6 +939,16 @@ export class AgentBridge {
       messageCount: state.messageCount,
       pendingMessageCount: state.pendingMessageCount
     }
+  }
+
+  private async pushSessionInfo(): Promise<void> {
+    const info = await this.getSessionInfo()
+    this.win?.webContents.send(STATE_CHANNEL, info)
+  }
+
+  private async refreshSidebarSessions(): Promise<void> {
+    const sessions = await this.listSessions()
+    this.win?.webContents.send(SESSIONS_CHANNEL, sessions)
   }
 
   /** Push state + session list + branch tree to the renderer. */

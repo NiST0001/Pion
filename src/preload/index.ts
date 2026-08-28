@@ -7,6 +7,7 @@ import type {
   PluginCatalogItem,
   PluginInstallResult,
   ProjectMeta,
+  SessionEntriesPage,
   SessionInfo,
   SessionMeta,
   SkillInfo,
@@ -41,6 +42,8 @@ const api: PionApi = {
   forkSession: (sessionPath, entryId) =>
     ipcRenderer.invoke('pion:agent-fork-session', sessionPath, entryId),
   getEntries: () => ipcRenderer.invoke('pion:agent-entries'),
+  getEntriesPage: (before, limit) =>
+    ipcRenderer.invoke('pion:agent-entries-page', before, limit) as Promise<SessionEntriesPage | null>,
   getTree: () => ipcRenderer.invoke('pion:agent-tree'),
 
   // commands, modes, model & thinking

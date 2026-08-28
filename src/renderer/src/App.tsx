@@ -139,6 +139,11 @@ export function App(): ReactElement {
     previousTimelineHeight.current = el.scrollHeight
   }, [lastGrow, lastItemId, state.timelineMutation, timelineLength])
 
+  const handleTimelineScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (el && el.scrollTop <= 96) void actions.loadOlder()
+  }, [actions])
+
   const handleFork = useCallback(
     async (entryId: string) => {
       const text = await actions.forkAt(entryId)
@@ -359,7 +364,7 @@ export function App(): ReactElement {
             </div>
           )}
 
-          <main className="chat-scroll" ref={scrollRef}>
+          <main className="chat-scroll" ref={scrollRef} onScroll={handleTimelineScroll}>
             {state.timeline.length === 0 ? (
               <EmptyState
                 cwd={state.status.cwd}

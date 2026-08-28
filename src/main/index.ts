@@ -111,6 +111,9 @@ function registerIpc(): void {
     bridge.forkSession(sessionPath, entryId)
   )
   ipcMain.handle('pion:agent-entries', () => bridge.getEntries())
+  ipcMain.handle('pion:agent-entries-page', (_event, before?: number, limit?: number) =>
+    bridge.getEntriesPage(before, limit)
+  )
   ipcMain.handle('pion:agent-tree', () => bridge.getTree())
   ipcMain.handle('pion:agent-sessions', (_event, cwd?: string) => bridge.listSessions(cwd))
 
