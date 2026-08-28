@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactElement } from 'react'
 import {
@@ -11,7 +11,10 @@ import {
   GitBranch,
   Loader2,
   MessageSquarePlus,
-  Trash2
+  Search,
+  Sparkles,
+  Trash2,
+  Wrench
 } from 'lucide-react'
 import type {
   ForkMessageOption,
@@ -51,6 +54,83 @@ function Section({
       </div>
       {open && <div className="side-section-body">{children}</div>}
     </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Quick actions
+// ---------------------------------------------------------------------------
+
+export function SidebarToolbar({
+  searchQuery,
+  onSearch,
+  onNewSession
+}: {
+  searchQuery: string
+  onSearch: (value: string) => void
+  onNewSession: () => void
+}): ReactElement {
+  const [toolsOpen, setToolsOpen] = useState(false)
+
+  return (
+    <div className="sidebar-toolbar">
+      <div className="sidebar-quick-actions">
+        <button
+          type="button"
+          className="sidebar-new-session"
+          onClick={onNewSession}
+          title="新建会话"
+        >
+          <MessageSquarePlus size={15} />
+          <span>新建会话</span>
+        </button>
+        <button
+          type="button"
+          className={`sidebar-tools-button${toolsOpen ? ' active' : ''}`}
+          aria-expanded={toolsOpen}
+          onClick={() => setToolsOpen((open) => !open)}
+          title="技能与工具"
+        >
+          <Wrench size={14} />
+          <span>技能与工具</span>
+          <ChevronDown size={13} className="sidebar-tools-chevron" />
+        </button>
+      </div>
+
+      {toolsOpen && (
+        <div className="sidebar-tools-panel" role="region" aria-label="技能与工具">
+          <div className="sidebar-tools-panel-head">
+            <Sparkles size={13} />
+            <span>当前工作区能力</span>
+          </div>
+          <div className="sidebar-tool-row">
+            <FileDiff size={13} />
+            <span>
+              <strong>文件与终端</strong>
+              <small>读取、编辑文件和运行命令</small>
+            </span>
+          </div>
+          <div className="sidebar-tool-row">
+            <GitBranch size={13} />
+            <span>
+              <strong>会话工作流</strong>
+              <small>分支、压缩和导出会话</small>
+            </span>
+          </div>
+        </div>
+      )}
+
+      <label className="sidebar-search">
+        <Search size={14} aria-hidden="true" />
+        <input
+          type="search"
+          value={searchQuery}
+          aria-label="搜索会话"
+          placeholder="搜索会话"
+          onChange={(event) => onSearch(event.target.value)}
+        />
+      </label>
+    </div>
   )
 }
 
@@ -124,6 +204,7 @@ function formatTime(mtime: number): string {
 
 export function SessionList({
   sessions,
+  searchQuery,
   activePath,
   onSelect,
   onNew,
@@ -133,6 +214,7 @@ export function SessionList({
   onFork
 }: {
   sessions: SessionMeta[]
+  searchQuery: string
   activePath?: string
   onSelect: (path: string) => void
   onNew: () => void
@@ -142,6 +224,17 @@ export function SessionList({
   onFork: (path: string, entryId: string) => Promise<string>
 }): ReactElement {
   const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(null)
+  const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
+  const visibleSessions = useMemo(() => {
+    if (!normalizedQuery) return sessions
+    return sessions.filter((session) => {
+      const haystack = [session.name, session.preview, session.path]
+        .filter(Boolean)
+        .join(' ')
+        .toLocaleLowerCase()
+      return haystack.includes(normalizedQuery)
+    })
+  }, [normalizedQuery, sessions])
 
   useEffect(() => {
     if (contextMenu && !sessions.some((session) => session.path === contextMenu.session.path)) {
@@ -165,15 +258,17 @@ export function SessionList({
     <>
       <Section
         title="会话"
-        count={sessions.length}
+        count={normalizedQuery ? visibleSessions.length : sessions.length}
         action={
           <button className="icon-button" title="新建会话" onClick={onNew}>
             <MessageSquarePlus size={14} />
           </button>
         }
       >
-        {sessions.length === 0 && <div className="side-empty">暂无会话</div>}
-        {sessions.map((session) => (
+        {visibleSessions.length === 0 && (
+          <div className="side-empty">{normalizedQuery ? '没有匹配的会话' : '暂无会话'}</div>
+        )}
+        {visibleSessions.map((session) => (
           <div
             key={session.path}
             className={`side-item side-session${session.path === activePath ? ' active' : ''}`}

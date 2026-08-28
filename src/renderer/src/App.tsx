@@ -6,7 +6,7 @@ import type { FileChange } from './hooks/useAgent'
 import { ChatMessage } from './components/ChatMessage'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
-import { ProjectList, SessionList, BranchTree, ChangeList } from './components/Sidebar'
+import { ProjectList, SessionList, BranchTree, ChangeList, SidebarToolbar } from './components/Sidebar'
 import { ChangesDrawer } from './components/ChangesDrawer'
 import { ReviewPanel } from './components/ReviewPanel'
 import { ModelPicker, ThinkingPicker } from './components/ModelPicker'
@@ -21,6 +21,7 @@ export function App(): ReactElement {
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [reviewOpen, setReviewOpen] = useState(false)
+  const [sessionQuery, setSessionQuery] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // bootstrap: pick the most recent project (or home) and start the agent
@@ -109,6 +110,11 @@ export function App(): ReactElement {
       <div className="app-body">
         {sidebarOpen && <aside className="sidebar">
           <div className="sidebar-scroll">
+            <SidebarToolbar
+              searchQuery={sessionQuery}
+              onSearch={setSessionQuery}
+              onNewSession={() => void actions.newSession()}
+            />
             <ProjectList
               projects={state.projects}
               activeCwd={state.status.cwd}
@@ -118,6 +124,7 @@ export function App(): ReactElement {
             />
             <SessionList
               sessions={state.sessions}
+              searchQuery={sessionQuery}
               activePath={state.session?.sessionFile}
               onSelect={(path) => void actions.switchSession(path)}
               onNew={() => void actions.newSession()}
