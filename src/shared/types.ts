@@ -10,7 +10,8 @@
 // Agent lifecycle
 // ---------------------------------------------------------------------------
 
-export type AgentPhase = 'stopped' | 'starting' | 'running' | 'error'
+/** ready means a workspace/session is selected but its backend is not started. */
+export type AgentPhase = 'stopped' | 'ready' | 'starting' | 'running' | 'error'
 
 export type AgentMode = 'build' | 'plan'
 
@@ -256,7 +257,7 @@ export function contentToolCalls(content: WireContentPart[]): WireToolCall[] {
 
 export interface PionApi {
   // agent lifecycle ---------------------------------------------------------
-  /** Start the pi agent RPC subprocess in the given working directory. */
+  /** Select a working directory; its session backend starts on first send. */
   startAgent(cwd: string): Promise<void>
   /** Stop the agent subprocess. */
   stopAgent(): Promise<void>

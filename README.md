@@ -23,8 +23,8 @@
                                                     └───────────────────┘
 ```
 
-- **主进程** `src/main/`：`AgentBridge` 持有 `RpcClient`，以子进程方式驱动 pi agent（`--mode rpc`），
-  转发 `JsonAgentSessionEvent`、维护会话列表/分支树；`ProjectStore` 持久化项目列表（userData/projects.json）。
+- **主进程** `src/main/`：`AgentBridge` 按会话管理多个 `RpcClient`，以子进程方式驱动 pi agent（`--mode rpc`），
+  转发当前会话的 `JsonAgentSessionEvent`、维护会话列表/分支树；`ProjectStore` 持久化项目列表（userData/projects.json）。
 - **预加载** `src/preload/`：`contextBridge` 暴露类型化的 `window.pion` API（`src/shared/types.ts` 为三方契约）。
 - **渲染进程** `src/renderer/`：React 工作台界面。
 
@@ -45,6 +45,7 @@
 
 ### 会话与分支
 - 会话列表：按项目目录扫描 `~/.pi/agent/sessions/`，点击切换（时间线整条重建）
+- 切换会话不启动/重启后端；首次发送任务时才为当前会话懒启动独立 RPC 后端，已启动会话各自保持进程
 - 分支树：可视化当前会话的树结构，任意用户消息处可「分叉」
   （fork 后时间线回到分叉点，输入框自动预填原消息）
 - 新建会话；RPC 子进程每次启动为新会话，落盘懒持久化（空会话不产生文件）

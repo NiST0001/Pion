@@ -670,6 +670,11 @@ button {
   box-shadow: 0 0 6px var(--ok);
 }
 
+.dot-ready {
+  background: var(--ok);
+  opacity: 0.55;
+}
+
 .dot-starting {
   background: var(--warn);
   animation: blink 1s infinite;

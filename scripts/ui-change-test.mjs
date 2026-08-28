@@ -52,8 +52,15 @@ const check = async (name, expr) => {
 // 等待 agent 运行
 for (let i = 0; i < 40; i++) {
   await sleep(500)
-  if (await evaluate(`document.querySelector('.dot-running') !== null`)) break
+  if (await evaluate(`document.querySelector('.dot-running, .dot-ready') !== null`)) break
 }
+
+await check('启动时后端未启动', `!!document.querySelector('.dot-ready')`)
+await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, '/plan exit'); input?.dispatchEvent(new Event('input', { bubbles: true })); input?.focus(); return true })()`)
+await sleep(80)
+await evaluate(`document.querySelector('.send-button')?.click()`)
+await sleep(1200)
+await check('发送任务后启动后端', `!!document.querySelector('.dot-running')`)
 
 // --- 1. 无边框标题栏 ---
 await check('标题栏存在', `!!document.querySelector('.titlebar')`)
@@ -111,6 +118,7 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`!!document.querySelector('.composer-inline-controls .thinking-trigger')`)) break
 }
 await check('composer 输入框存在', `!!document.querySelector('.composer-row textarea')`)
+await check('当前会话后端已复用', `!!document.querySelector('.dot-running')`)
 await check('输入框宽度已扩大', `getComputedStyle(document.querySelector('.composer-row')).maxWidth === '1600px'`)
 await check('输入框高度已缩短', `(() => { const height = document.querySelector('.composer-row')?.getBoundingClientRect().height ?? 0; return height >= 85 && height < 120; })()`)
 await check('任务面板已移除', `!document.querySelector('.task-panel')`)

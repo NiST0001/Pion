@@ -17,12 +17,14 @@ export function ModelPicker({
   models,
   currentModelId,
   onSelect,
-  compact = false
+  compact = false,
+  disabled = false
 }: {
   models: ModelOption[]
   currentModelId?: string
   onSelect: (provider: string, modelId: string) => void
   compact?: boolean
+  disabled?: boolean
 }): ReactElement {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -36,6 +38,7 @@ export function ModelPicker({
         type="button"
         className="picker-trigger"
         aria-expanded={open}
+        disabled={disabled}
         onClick={() => setOpen((v) => !v)}
         title="切换模型"
       >
@@ -79,11 +82,13 @@ export function ModelPicker({
 export function ThinkingPicker({
   levels,
   current,
-  onSelect
+  onSelect,
+  disabled = false
 }: {
   levels: string[]
   current?: string
   onSelect: (level: string) => void
+  disabled?: boolean
 }): ReactElement | null {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -99,6 +104,7 @@ export function ThinkingPicker({
         className="thinking-trigger"
         aria-haspopup="listbox"
         aria-expanded={open}
+        disabled={disabled}
         title="切换思考等级"
         onClick={() => setOpen((value) => !value)}
       >

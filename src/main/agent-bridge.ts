@@ -1,4 +1,5 @@
 import { basename, dirname, resolve, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { access, mkdir, unlink } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -52,6 +53,18 @@ interface GitWorktreeRecord {
   branch?: string
 }
 
+type BackendPhase = 'starting' | 'running' | 'error'
+
+interface BackendRecord {
+  key: string
+  cwd: string
+  sessionPath?: string
+  client: RpcClient
+  phase: BackendPhase
+  modePrimed?: AgentMode
+  startPromise: Promise<void>
+}
+
 async function runGit(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
@@ -85,17 +98,33 @@ function parseGitWorktrees(output: string): GitWorktreeRecord[] {
 }
 
 /**
- * Owns the pi agent RPC subprocess.
+ * Owns the per-session pi agent RPC subprocesses.
  *
  * pi runs headless (`node dist/cli.js --mode rpc`) and speaks JSON lines on
- * stdin/stdout; `RpcClient` handles the framing. This bridge forwards every
- * event to the renderer and keeps derived state (session list, branch tree)
- * in sync.
+ * stdin/stdout; `RpcClient` handles the framing. Backends are created lazily
+ * on the first prompt for a session and remain alive while another session is
+ * selected. Only the active backend's events are forwarded to the renderer.
  */
 export class AgentBridge {
-  private client: RpcClient | null = null
+  private readonly backends = new Map<string, BackendRecord>()
+  private readonly backendStarts = new Map<string, Promise<BackendRecord>>()
+  private readonly backendKeysBySessionPath = new Map<string, string>()
+  private readonly desiredModes = new Map<string, AgentMode>()
+  private readonly sessionManagers = new Map<string, SessionManager>()
+  private activeKey: string | null = null
+  private activeCwd: string | undefined
+  private activeSessionPath: string | undefined
   private win: BrowserWindow | null = null
   private status: AgentStatus = { phase: 'stopped' }
+
+  private getActiveBackend(): BackendRecord | null {
+    return this.activeKey ? this.backends.get(this.activeKey) ?? null : null
+  }
+
+  /** Compatibility accessor for methods that operate on the selected session. */
+  private get client(): RpcClient | null {
+    return this.getActiveBackend()?.client ?? null
+  }
 
   bind(win: BrowserWindow): void {
     this.win = win
@@ -118,80 +147,196 @@ export class AgentBridge {
 
   // ---------------------------------------------------------------- lifecycle
 
+  /** Select a workspace only. Its agent process is started lazily on first send. */
   async start(cwd: string): Promise<void> {
-    if (this.client) {
-      if (this.status.cwd === cwd) return
-      await this.stop()
+    const normalizedCwd = resolve(cwd)
+    if (this.activeCwd === normalizedCwd && this.activeKey) return
+    this.activeCwd = normalizedCwd
+    this.activeSessionPath = undefined
+    this.activeKey = this.newSessionKey(normalizedCwd)
+    this.setStatus({ phase: 'ready', error: undefined, cwd: normalizedCwd })
+    void this.refresh()
+  }
+
+  private newSessionKey(cwd: string): string {
+    return `new:${resolve(cwd)}:${randomUUID()}`
+  }
+
+  private backendArgs(sessionPath?: string): Promise<string[]> {
+    return pathExists(PLAN_EXTENSION_PATH).then((hasPlanExtension) => {
+      if (!hasPlanExtension) {
+        console.warn('[pion] plan mode extension not found:', PLAN_EXTENSION_PATH)
+      }
+      return [
+        ...(hasPlanExtension ? ['--extension', PLAN_EXTENSION_PATH] : []),
+        ...(sessionPath ? ['--session', sessionPath] : [])
+      ]
+    })
+  }
+
+  private setActiveBackendStatus(): void {
+    const backend = this.getActiveBackend()
+    if (!backend) {
+      this.setStatus({ phase: 'ready', error: undefined, cwd: this.activeCwd })
+      return
     }
+    this.setStatus({
+      phase: backend.phase,
+      error: backend.phase === 'error' ? this.status.error : undefined,
+      cwd: backend.cwd
+    })
+  }
 
-    this.setStatus({ phase: 'starting', error: undefined, cwd })
-
-    // RpcClient spawns `node <cliPath> --mode rpc`; the path must be absolute.
-    const cliPath = join(getPackageDir(), 'dist', 'cli.js')
-    const args = (await pathExists(PLAN_EXTENSION_PATH))
-      ? ['--extension', PLAN_EXTENSION_PATH]
-      : []
-    if (args.length === 0) {
-      console.warn('[pion] plan mode extension not found:', PLAN_EXTENSION_PATH)
-    }
-    const client = new RpcClient({ cliPath, cwd, args })
-
-    client.onEvent((event) => {
-      this.win?.webContents.send(EVENT_CHANNEL, event)
+  private attachBackendEvents(backend: BackendRecord): void {
+    backend.client.onEvent((event) => {
       const type = (event as { type?: string }).type
+      if (type === 'agent_start') backend.phase = 'running'
+      if (this.activeKey !== backend.key) return
+      if (type === 'agent_start') this.setActiveBackendStatus()
+      this.win?.webContents.send(EVENT_CHANNEL, event)
       if (typeof type === 'string' && STATE_REFRESH_EVENTS.has(type)) {
         void this.refresh()
       }
+      if (type === 'agent_start' || type === 'message_start') {
+        void this.syncBackendSession(backend)
+      }
     })
+  }
 
-    this.client = client
-    try {
-      await client.start()
-      console.log('[pion] agent subprocess running, cwd:', cwd)
-      this.setStatus({ phase: 'running' })
-      // The renderer requests timeline/model data in parallel. Do not make
-      // startup wait for the secondary sidebar refresh to finish.
-      void this.refresh()
-    } catch (err) {
-      this.client = null
-      const message = err instanceof Error ? err.message : String(err)
-      this.setStatus({ phase: 'error', error: message })
+  private async createBackend(
+    key: string,
+    cwd: string,
+    sessionPath?: string
+  ): Promise<BackendRecord> {
+    const cliPath = join(getPackageDir(), 'dist', 'cli.js')
+    const args = await this.backendArgs(sessionPath)
+    const client = new RpcClient({ cliPath, cwd, args })
+    const backend = {
+      key,
+      cwd,
+      sessionPath,
+      client,
+      phase: 'starting' as BackendPhase,
+      startPromise: Promise.resolve()
     }
+    this.backends.set(key, backend)
+    if (sessionPath) this.backendKeysBySessionPath.set(resolve(sessionPath), key)
+    this.attachBackendEvents(backend)
+    if (this.activeKey === key) this.setActiveBackendStatus()
+
+    const startPromise = client.start()
+      .then(() => {
+        backend.phase = 'running'
+        console.log('[pion] agent subprocess running, session:', sessionPath ?? key)
+        if (this.activeKey === key) this.setActiveBackendStatus()
+        void this.refresh()
+      })
+      .catch((error: unknown) => {
+        backend.phase = 'error'
+        this.backends.delete(key)
+        if (sessionPath) this.backendKeysBySessionPath.delete(resolve(sessionPath))
+        if (this.activeKey === key) {
+          const message = error instanceof Error ? error.message : String(error)
+          this.setStatus({ phase: 'error', error: message, cwd })
+        }
+        throw error
+      })
+    backend.startPromise = startPromise
+    await startPromise
+    return backend
+  }
+
+  private async ensureActiveBackend(): Promise<BackendRecord> {
+    const cwd = this.activeCwd ?? this.status.cwd
+    if (!cwd) throw new Error('没有活动工作目录')
+    if (!this.activeKey) {
+      this.activeCwd = resolve(cwd)
+      this.activeKey = this.newSessionKey(this.activeCwd)
+    }
+    const activeCwd = this.activeCwd ?? resolve(cwd)
+    this.activeCwd = activeCwd
+    let backend = this.backends.get(this.activeKey)
+    if (!backend) {
+      const key = this.activeKey
+      const inFlight = this.backendStarts.get(key)
+      if (inFlight) {
+        backend = await inFlight
+      } else {
+        this.setStatus({ phase: 'starting', error: undefined, cwd: activeCwd })
+        const start = this.createBackend(key, activeCwd, this.activeSessionPath)
+        this.backendStarts.set(key, start)
+        try {
+          backend = await start
+        } finally {
+          if (this.backendStarts.get(key) === start) this.backendStarts.delete(key)
+        }
+      }
+    } else {
+      await backend.startPromise
+      if (this.activeKey === backend.key) this.setActiveBackendStatus()
+    }
+    return backend
+  }
+
+  private async syncBackendSession(backend: BackendRecord): Promise<void> {
+    const state = await backend.client.getState().catch(() => null)
+    const sessionPath = state?.sessionFile
+    if (!sessionPath) return
+    const normalizedPath = resolve(sessionPath)
+    backend.sessionPath = normalizedPath
+    this.sessionManagers.delete(normalizedPath)
+    this.backendKeysBySessionPath.set(normalizedPath, backend.key)
+    if (this.activeKey === backend.key) this.activeSessionPath = normalizedPath
   }
 
   async stop(): Promise<void> {
-    const client = this.client
-    this.client = null
-    if (client) {
+    const backends = [...this.backends.values()]
+    this.backends.clear()
+    this.backendKeysBySessionPath.clear()
+    this.activeKey = null
+    this.activeCwd = undefined
+    this.activeSessionPath = undefined
+    await Promise.all(backends.map(async ({ client }) => {
       try {
         await client.stop()
       } catch {
         // the subprocess may already be gone; nothing to recover
       }
-    }
-    this.setStatus({ phase: 'stopped' })
+    }))
+    this.setStatus({ phase: 'stopped', cwd: undefined })
   }
 
-  /** Prompt when idle, steer when mid-run. */
+  /** Prompt when idle, steer when mid-run. Starts only this session's backend. */
   async send(message: string): Promise<void> {
-    if (!this.client) throw new Error('agent 未启动')
-    const state = await this.client.getState().catch(() => null)
+    const backend = await this.ensureActiveBackend()
+    const state = await backend.client.getState().catch(() => null)
     if (state?.isStreaming) {
-      await this.client.steer(message)
+      await backend.client.steer(message)
     } else {
-      await this.client.prompt(message)
+      await this.applyDesiredMode(backend)
+      await backend.client.prompt(message)
     }
+    await this.syncBackendSession(backend)
   }
 
-  /** Queue a follow-up while running; fall back to a prompt when idle. */
+  /** Queue a follow-up while running; starts this session's backend if needed. */
   async queue(message: string): Promise<void> {
-    if (!this.client) throw new Error('agent 未启动')
-    const state = await this.client.getState().catch(() => null)
+    const backend = await this.ensureActiveBackend()
+    const state = await backend.client.getState().catch(() => null)
     if (state?.isStreaming) {
-      await this.client.followUp(message)
+      await backend.client.followUp(message)
     } else {
-      await this.client.prompt(message)
+      await this.applyDesiredMode(backend)
+      await backend.client.prompt(message)
     }
+    await this.syncBackendSession(backend)
+  }
+
+  private async applyDesiredMode(backend: BackendRecord): Promise<void> {
+    const desired = this.desiredModes.get(backend.key) ?? 'build'
+    if (backend.modePrimed === desired) return
+    await backend.client.prompt(desired === 'plan' ? '/plan start' : '/plan exit')
+    backend.modePrimed = desired
   }
 
   async abort(): Promise<void> {
@@ -205,32 +350,79 @@ export class AgentBridge {
   // ---------------------------------------------------------------- sessions
 
   async newSession(): Promise<void> {
-    if (!this.client) throw new Error('agent 未启动')
-    const result = await this.client.newSession()
-    if (!result.cancelled) await this.refresh()
+    const cwd = this.activeCwd ?? this.status.cwd
+    if (!cwd) throw new Error('没有活动工作目录')
+    this.activeCwd = resolve(cwd)
+    this.activeSessionPath = undefined
+    this.activeKey = this.newSessionKey(this.activeCwd)
+    this.setStatus({ phase: 'ready', error: undefined, cwd: this.activeCwd })
+    await this.refresh()
   }
 
-  /**
-   * Fork the session right before a user message entry.
-   * Resolves with that message's text (to prefill the composer).
-   */
+  private openSessionManager(sessionPath: string): SessionManager {
+    const target = resolve(sessionPath)
+    const cached = this.sessionManagers.get(target)
+    if (cached) return cached
+    const manager = SessionManager.open(target)
+    this.sessionManagers.set(target, manager)
+    return manager
+  }
+
+  private activateLogicalSession(sessionPath: string, cwd?: string): void {
+    const target = resolve(sessionPath)
+    this.activeSessionPath = target
+    this.activeKey = this.backendKeysBySessionPath.get(target) ?? target
+    this.activeCwd = resolve(cwd ?? this.activeCwd ?? this.status.cwd ?? dirname(target))
+    this.setActiveBackendStatus()
+  }
+
+  private createEmptyChildSession(manager: SessionManager, parentSession: string): string {
+    const child = SessionManager.create(manager.getCwd(), manager.getSessionDir())
+    child.newSession({ parentSession })
+    const path = child.getSessionFile()
+    if (!path) throw new Error('无法创建新的会话文件')
+    return resolve(path)
+  }
+
+  private createForkedSession(manager: SessionManager, entryId: string): { path: string; text: string } {
+    const entry = manager.getEntry(entryId)
+    if (!entry || entry.type !== 'message' || entry.message.role !== 'user') {
+      throw new Error('无效的分叉消息')
+    }
+    const text = messageText(entry.message as unknown as WireMessage)
+    const currentPath = manager.getSessionFile()
+    if (!currentPath) throw new Error('当前会话尚未持久化')
+    const path = entry.parentId
+      ? manager.createBranchedSession(entry.parentId)
+      : this.createEmptyChildSession(manager, currentPath)
+    if (!path) throw new Error('无法创建分支会话')
+    return { path: resolve(path), text }
+  }
+
+  /** Fork the selected session without starting or switching a backend. */
   async forkAt(entryId: string): Promise<{ text: string; cancelled: boolean }> {
-    if (!this.client) throw new Error('agent 未启动')
-    const result = await this.client.fork(entryId)
-    if (!result.cancelled) await this.refresh()
-    return { text: result.text, cancelled: result.cancelled }
+    if (!this.activeSessionPath) throw new Error('当前会话尚未持久化')
+    const target = resolve(this.activeSessionPath)
+    this.sessionManagers.delete(target)
+    const manager = this.openSessionManager(target)
+    const result = this.createForkedSession(manager, entryId)
+    this.activateLogicalSession(result.path, manager.getCwd())
+    await this.refresh()
+    return { text: result.text, cancelled: false }
   }
 
+  /** Selecting a session only changes the active session pointer. */
   async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
-    if (!this.client) throw new Error('agent 未启动')
-    const result = await this.client.switchSession(sessionPath)
-    if (!result.cancelled) void this.refreshSessionInfo()
-    return { cancelled: result.cancelled }
+    const target = await this.resolveListedSession(sessionPath)
+    const manager = this.openSessionManager(target)
+    this.activateLogicalSession(target, manager.getCwd() || this.activeCwd)
+    void this.refreshSessionInfo()
+    return { cancelled: false }
   }
 
   /** Resolve a session path against the sessions visible for the active cwd. */
   private async resolveListedSession(sessionPath: string): Promise<string> {
-    const cwd = this.status.cwd
+    const cwd = this.activeCwd ?? this.status.cwd
     if (!cwd) throw new Error('没有活动工作目录')
     const requested = resolve(sessionPath)
     const sessions = await SessionManager.list(cwd)
@@ -239,45 +431,51 @@ export class AgentBridge {
     return resolve(match.path)
   }
 
-  /** Switch to a listed session without refreshing the renderer mid-operation. */
-  private async activateSession(sessionPath: string): Promise<boolean> {
-    if (!this.client) throw new Error('agent 未启动')
-    const target = await this.resolveListedSession(sessionPath)
-    const state = await this.client.getState()
-    if (state.sessionFile && resolve(state.sessionFile) === target) return true
-    const result = await this.client.switchSession(target)
-    return !result.cancelled
+  private async stopBackend(key: string): Promise<void> {
+    const backend = this.backends.get(key)
+    if (!backend) return
+    this.backends.delete(key)
+    if (backend.sessionPath) this.backendKeysBySessionPath.delete(resolve(backend.sessionPath))
+    try {
+      await backend.client.stop()
+    } catch {
+      // the subprocess may already be gone; nothing to recover
+    }
   }
 
   async deleteSession(sessionPath: string): Promise<DeleteSessionResult> {
-    if (!this.client) throw new Error('agent 未启动')
     const target = await this.resolveListedSession(sessionPath)
-    const state = await this.client.getState()
-    const active = Boolean(state.sessionFile && resolve(state.sessionFile) === target)
-
-    // The RPC process may still append to its active file. Move it to a fresh
-    // session first, then remove the old file.
-    if (active) {
-      const result = await this.client.newSession()
-      if (result.cancelled) return { activeSessionChanged: false, cancelled: true }
-    }
+    const backendKey = this.backendKeysBySessionPath.get(target) ?? target
+    await this.stopBackend(backendKey)
+    const active = this.activeSessionPath === target
 
     await unlink(target)
+    this.sessionManagers.delete(target)
+    if (active) {
+      this.activeSessionPath = undefined
+      this.activeKey = this.newSessionKey(this.activeCwd ?? this.status.cwd ?? dirname(target))
+      this.setStatus({ phase: 'ready', error: undefined, cwd: this.activeCwd })
+    }
     await this.refresh()
     return { activeSessionChanged: active }
   }
 
   async copySession(sessionPath: string): Promise<{ cancelled: boolean }> {
-    if (!this.client) throw new Error('agent 未启动')
-    if (!(await this.activateSession(sessionPath))) return { cancelled: true }
-    const result = await this.client.clone()
+    const target = await this.resolveListedSession(sessionPath)
+    this.sessionManagers.delete(target)
+    const manager = this.openSessionManager(target)
+    const leafId = manager.getLeafId()
+    if (!leafId) return { cancelled: true }
+    const path = manager.createBranchedSession(leafId)
+    if (!path) return { cancelled: true }
+    this.activateLogicalSession(path, manager.getCwd())
     await this.refresh()
-    return result
+    return { cancelled: false }
   }
 
   async getSessionForkMessages(sessionPath: string): Promise<ForkMessageOption[]> {
     const target = await this.resolveListedSession(sessionPath)
-    const manager = SessionManager.open(target)
+    const manager = this.openSessionManager(target)
     return manager.getEntries().flatMap((entry) => {
       if (entry.type !== 'message' || entry.message.role !== 'user') return []
       const text = messageText(entry.message as unknown as WireMessage)
@@ -289,28 +487,44 @@ export class AgentBridge {
     sessionPath: string,
     entryId: string
   ): Promise<{ text: string; cancelled: boolean }> {
-    if (!this.client) throw new Error('agent 未启动')
-    if (!(await this.activateSession(sessionPath))) return { text: '', cancelled: true }
-    const result = await this.client.fork(entryId)
-    if (!result.cancelled) await this.refresh()
-    return result
+    const target = await this.resolveListedSession(sessionPath)
+    this.sessionManagers.delete(target)
+    const manager = this.openSessionManager(target)
+    const result = this.createForkedSession(manager, entryId)
+    this.activateLogicalSession(result.path, manager.getCwd())
+    await this.refresh()
+    return { text: result.text, cancelled: false }
   }
 
   async getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null> {
-    if (!this.client) return null
+    const backend = this.getActiveBackend()
     try {
-      const { entries, leafId } = await this.client.getEntries()
-      return { entries: entries.map(toWireEntry), leafId }
+      if (backend) {
+        const { entries, leafId } = await backend.client.getEntries()
+        return { entries: entries.map(toWireEntry), leafId }
+      }
+      if (this.activeSessionPath) {
+        const manager = this.openSessionManager(this.activeSessionPath)
+        return { entries: manager.getEntries().map(toWireEntry), leafId: manager.getLeafId() }
+      }
+      return { entries: [], leafId: null }
     } catch {
       return null
     }
   }
 
   async getTree(): Promise<PushedTree | null> {
-    if (!this.client) return null
+    const backend = this.getActiveBackend()
     try {
-      const { tree, leafId } = await this.client.getTree()
-      return { tree: tree.map(toTreeNodeLite), leafId }
+      const result = backend
+        ? await backend.client.getTree()
+        : this.activeSessionPath
+          ? (() => {
+              const manager = this.openSessionManager(this.activeSessionPath as string)
+              return { tree: manager.getTree(), leafId: manager.getLeafId() }
+            })()
+          : { tree: [], leafId: null }
+      return { tree: result.tree.map(toTreeNodeLite), leafId: result.leafId }
     } catch {
       return null
     }
@@ -329,12 +543,18 @@ export class AgentBridge {
   }
 
   async setMode(mode: AgentMode): Promise<void> {
-    if (!this.client) throw new Error('agent 未启动')
-    const commands = await this.client.getCommands()
+    const key = this.activeKey
+    if (!key) throw new Error('没有活动会话')
+    this.desiredModes.set(key, mode)
+    const backend = this.getActiveBackend()
+    if (!backend) return
+    await backend.startPromise
+    const commands = await backend.client.getCommands()
     if (!commands.some((command) => command.name === 'plan')) {
       throw new Error('计划模式扩展未加载')
     }
-    await this.client.prompt(mode === 'plan' ? '/plan start' : '/plan exit')
+    await backend.client.prompt(mode === 'plan' ? '/plan start' : '/plan exit')
+    backend.modePrimed = mode
   }
 
   // ---------------------------------------------------------------- models
@@ -508,17 +728,30 @@ export class AgentBridge {
   // ---------------------------------------------------------------- state
 
   async getSessionInfo(): Promise<SessionInfo | null> {
-    if (!this.client) return null
+    const backend = this.getActiveBackend()
     try {
-      return await this.toSessionInfo()
+      if (backend) return await this.toSessionInfo(backend.client)
+      if (!this.activeSessionPath) return null
+      const manager = this.openSessionManager(this.activeSessionPath)
+      const context = manager.buildSessionContext()
+      return {
+        provider: context.model?.provider,
+        model: context.model?.modelId,
+        modelId: context.model?.modelId,
+        thinkingLevel: context.thinkingLevel,
+        isStreaming: false,
+        sessionFile: manager.getSessionFile(),
+        sessionId: manager.getSessionId(),
+        sessionName: manager.getSessionName(),
+        messageCount: context.messages.length,
+        pendingMessageCount: 0
+      }
     } catch {
       return null
     }
   }
 
-  private async toSessionInfo(): Promise<SessionInfo | null> {
-    const client = this.client
-    if (!client) return null
+  private async toSessionInfo(client: RpcClient): Promise<SessionInfo | null> {
     const state = await client.getState()
     const model = state.model as { provider?: string; id?: string; name?: string } | undefined
     return {

@@ -375,7 +375,7 @@ export function App(): ReactElement {
                     <ChatMessage
                       key={item.id}
                       item={item}
-                      canFork={state.status.phase === 'running'}
+                      canFork={state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
                       onFork={(id) => void handleFork(id)}
                     />
                   )
@@ -388,7 +388,7 @@ export function App(): ReactElement {
             <Composer
               busy={state.busy}
               queued={state.queued}
-              disabled={state.status.phase !== 'running'}
+              disabled={!state.status.cwd || state.status.phase === 'starting' || state.status.phase === 'error'}
               prefill={prefill}
               history={messageHistory}
               commands={state.commands}
@@ -400,11 +400,13 @@ export function App(): ReactElement {
                     compact
                     models={state.models}
                     currentModelId={state.session?.modelId}
+                    disabled={state.status.phase !== 'running'}
                     onSelect={(provider, modelId) => void actions.setModel(provider, modelId)}
                   />
                   <ThinkingPicker
                     levels={state.thinkingLevels}
                     current={state.session?.thinkingLevel}
+                    disabled={state.status.phase !== 'running'}
                     onSelect={(level) => void actions.setThinkingLevel(level)}
                   />
                 </>

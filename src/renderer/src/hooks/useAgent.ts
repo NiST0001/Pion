@@ -320,19 +320,26 @@ function reducer(state: AgentState, action: Action): AgentState {
   switch (action.type) {
     case 'status': {
       const dead = action.status.phase === 'stopped' || action.status.phase === 'error'
+      const ready = action.status.phase === 'ready'
       return {
         ...state,
         status: action.status,
-        busy: dead ? false : state.busy,
-        session: dead ? null : state.session,
+        busy: dead || ready ? false : state.busy,
+        session: dead || ready ? null : state.session,
         sessions: dead ? [] : state.sessions,
-        tree: dead ? null : state.tree,
-        commands: dead ? [] : state.commands,
-        mode: dead ? 'build' : state.mode
+        tree: dead || ready ? null : state.tree,
+        models: ready ? [] : state.models,
+        thinkingLevels: ready ? [] : state.thinkingLevels,
+        commands: dead || ready ? [] : state.commands,
+        mode: dead || ready ? 'build' : state.mode
       }
     }
     case 'session':
-      return { ...state, session: action.session }
+      return {
+        ...state,
+        session: action.session,
+        busy: action.session?.isStreaming ?? false
+      }
     case 'sessions': {
       const projectCwd = action.sessions[0]?.projectCwd ?? state.status.cwd
       const previous = projectCwd ? state.sessionsByProject[projectCwd] ?? [] : []
@@ -815,16 +822,18 @@ export function useAgent() {
     async (message: string) => {
       if (!api || message.trim() === '') return
       await api.send(message.trim())
+      await refreshModels()
     },
-    [api]
+    [api, refreshModels]
   )
 
   const queue = useCallback(
     async (message: string) => {
       if (!api || message.trim() === '') return
       await api.queue(message.trim())
+      await refreshModels()
     },
-    [api]
+    [api, refreshModels]
   )
 
   const abort = useCallback(async () => {
