@@ -6,6 +6,7 @@ import type { FileChange } from './hooks/useAgent'
 import { ChatMessage } from './components/ChatMessage'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
+import { TaskPanel } from './components/TaskPanel'
 import { ProjectList, BranchTree, ChangeList, SidebarToolbar } from './components/Sidebar'
 import { ChangesDrawer } from './components/ChangesDrawer'
 import { ReviewPanel } from './components/ReviewPanel'
@@ -245,31 +246,34 @@ export function App(): ReactElement {
             )}
           </main>
 
-          <Composer
-            busy={state.busy}
-            queued={state.queued}
-            disabled={state.status.phase !== 'running'}
-            prefill={prefill}
-            history={messageHistory}
-            controls={
-              <>
-                <ModelPicker
-                  compact
-                  models={state.models}
-                  currentModelId={state.session?.modelId}
-                  onSelect={(provider, modelId) => void actions.setModel(provider, modelId)}
-                />
-                <ThinkingPicker
-                  levels={state.thinkingLevels}
-                  current={state.session?.thinkingLevel}
-                  onSelect={(level) => void actions.setThinkingLevel(level)}
-                />
-              </>
-            }
-            onSend={(text) => void actions.send(text)}
-            onQueue={(text) => void actions.queue(text)}
-            onAbort={() => void actions.abort()}
-          />
+          <div className="composer-dock">
+            <TaskPanel />
+            <Composer
+              busy={state.busy}
+              queued={state.queued}
+              disabled={state.status.phase !== 'running'}
+              prefill={prefill}
+              history={messageHistory}
+              controls={
+                <>
+                  <ModelPicker
+                    compact
+                    models={state.models}
+                    currentModelId={state.session?.modelId}
+                    onSelect={(provider, modelId) => void actions.setModel(provider, modelId)}
+                  />
+                  <ThinkingPicker
+                    levels={state.thinkingLevels}
+                    current={state.session?.thinkingLevel}
+                    onSelect={(level) => void actions.setThinkingLevel(level)}
+                  />
+                </>
+              }
+              onSend={(text) => void actions.send(text)}
+              onQueue={(text) => void actions.queue(text)}
+              onAbort={() => void actions.abort()}
+            />
+          </div>
         </div>
 
         {reviewOpen && (
