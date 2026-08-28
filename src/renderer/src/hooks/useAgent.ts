@@ -865,10 +865,12 @@ export function useAgent() {
     async (sessionPath: string): Promise<{ cancelled: boolean }> => {
       if (!api) return { cancelled: true }
       const result = await api.switchSession(sessionPath)
-      if (!result.cancelled) await reloadTimeline()
+      if (!result.cancelled) {
+        await Promise.all([reloadTimeline(), refreshModels()])
+      }
       return result
     },
-    [api, reloadTimeline]
+    [api, refreshModels, reloadTimeline]
   )
 
   const reorderSessions = useCallback((cwd: string, paths: string[]) => {

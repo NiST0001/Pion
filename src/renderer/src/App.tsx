@@ -201,7 +201,11 @@ export function App(): ReactElement {
 
   const handleSelectSession = useCallback(
     async (cwd: string, path: string) => {
-      if (cwd === state.status.cwd && path === state.session?.sessionFile) {
+      if (
+        cwd === state.status.cwd &&
+        path === state.session?.sessionFile &&
+        (state.status.phase === 'running' || state.status.phase === 'starting')
+      ) {
         setPendingSession(null)
         return
       }

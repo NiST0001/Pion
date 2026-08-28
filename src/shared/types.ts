@@ -10,7 +10,7 @@
 // Agent lifecycle
 // ---------------------------------------------------------------------------
 
-/** ready means a workspace/session is selected but its backend is not started. */
+/** ready means a workspace/session is selected but its backend is not running. */
 export type AgentPhase = 'stopped' | 'ready' | 'starting' | 'running' | 'error'
 
 export type AgentMode = 'build' | 'plan'
@@ -257,11 +257,11 @@ export function contentToolCalls(content: WireContentPart[]): WireToolCall[] {
 
 export interface PionApi {
   // agent lifecycle ---------------------------------------------------------
-  /** Select a working directory; its session backend starts on first send. */
+  /** Select a working directory; session backends load when selected. */
   startAgent(cwd: string): Promise<void>
-  /** Stop the agent subprocess. */
+  /** Stop all retained agent subprocesses. */
   stopAgent(): Promise<void>
-  /** Send directly: prompt when idle or steer when the agent is busy. */
+  /** Send directly: prompt when idle or steer when the selected backend is busy. */
   send(message: string): Promise<void>
   /** Queue a follow-up message for after the current run. */
   queue(message: string): Promise<void>
@@ -269,13 +269,13 @@ export interface PionApi {
   abort(): Promise<void>
 
   // session management ------------------------------------------------------
-  /** Current session info, or null when the agent is not running. */
+  /** Current session info, or null when no session is selected. */
   getState(): Promise<SessionInfo | null>
   /** Start a fresh session in the same cwd. */
   newSession(): Promise<void>
   /** Fork the session at an entry; resolves with the message text at the fork point. */
   forkAt(entryId: string): Promise<{ text: string; cancelled: boolean }>
-  /** Switch to another session file. */
+  /** Switch to another session file and load/reuse its backend. */
   switchSession(sessionPath: string): Promise<{ cancelled: boolean }>
   /** Delete a persisted session file. */
   deleteSession(sessionPath: string): Promise<DeleteSessionResult>

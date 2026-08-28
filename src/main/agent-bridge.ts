@@ -35,6 +35,7 @@ const STATE_CHANNEL = 'pion:agent-state'
 const SESSIONS_CHANNEL = 'pion:agent-sessions'
 const TREE_CHANNEL = 'pion:agent-tree'
 const PLAN_EXTENSION_PATH = resolve(__dirname, '../../node_modules/@narumitw/pi-plan-mode/dist/index.ts')
+const MAX_SESSION_BACKENDS = 10
 
 /** Events after which derived state (model/session/tree) is re-pushed. */
 const STATE_REFRESH_EVENTS = new Set([
@@ -101,13 +102,17 @@ function parseGitWorktrees(output: string): GitWorktreeRecord[] {
  * Owns the per-session pi agent RPC subprocesses.
  *
  * pi runs headless (`node dist/cli.js --mode rpc`) and speaks JSON lines on
- * stdin/stdout; `RpcClient` handles the framing. Backends are created lazily
- * on the first prompt for a session and remain alive while another session is
- * selected. Only the active backend's events are forwarded to the renderer.
+ * stdin/stdout; `RpcClient` handles the framing. A session backend is loaded
+ * when its session is selected and remains alive while another session is
+ * selected. At most ten backends are retained; the oldest is evicted before
+ * loading an eleventh. Only the active backend's events are forwarded.
  */
 export class AgentBridge {
   private readonly backends = new Map<string, BackendRecord>()
+  private readonly backendOrder: string[] = []
   private readonly backendStarts = new Map<string, Promise<BackendRecord>>()
+  private backendPoolQueue: Promise<void> = Promise.resolve()
+  private stopping = false
   private readonly backendKeysBySessionPath = new Map<string, string>()
   private readonly desiredModes = new Map<string, AgentMode>()
   private readonly sessionManagers = new Map<string, SessionManager>()
@@ -147,8 +152,9 @@ export class AgentBridge {
 
   // ---------------------------------------------------------------- lifecycle
 
-  /** Select a workspace only. Its agent process is started lazily on first send. */
+  /** Select a workspace; an individual session backend loads when selected. */
   async start(cwd: string): Promise<void> {
+    this.stopping = false
     const normalizedCwd = resolve(cwd)
     if (this.activeCwd === normalizedCwd && this.activeKey) return
     this.activeCwd = normalizedCwd
@@ -220,6 +226,7 @@ export class AgentBridge {
       startPromise: Promise.resolve()
     }
     this.backends.set(key, backend)
+    this.backendOrder.push(key)
     if (sessionPath) this.backendKeysBySessionPath.set(resolve(sessionPath), key)
     this.attachBackendEvents(backend)
     if (this.activeKey === key) this.setActiveBackendStatus()
@@ -234,7 +241,10 @@ export class AgentBridge {
       .catch((error: unknown) => {
         backend.phase = 'error'
         this.backends.delete(key)
-        if (sessionPath) this.backendKeysBySessionPath.delete(resolve(sessionPath))
+        this.removeBackendFromOrder(key)
+        if (sessionPath && this.backendKeysBySessionPath.get(resolve(sessionPath)) === key) {
+          this.backendKeysBySessionPath.delete(resolve(sessionPath))
+        }
         if (this.activeKey === key) {
           const message = error instanceof Error ? error.message : String(error)
           this.setStatus({ phase: 'error', error: message, cwd })
@@ -246,7 +256,37 @@ export class AgentBridge {
     return backend
   }
 
+  private removeBackendFromOrder(key: string): void {
+    const index = this.backendOrder.indexOf(key)
+    if (index >= 0) this.backendOrder.splice(index, 1)
+  }
+
+  /** Stop the oldest retained backend before opening another one. */
+  private async evictOldestBackend(excludeKey?: string): Promise<void> {
+    while (this.backends.size >= MAX_SESSION_BACKENDS) {
+      const victim = this.backendOrder.find((key) => key !== excludeKey && this.backends.has(key))
+      if (!victim) throw new Error('无法为新的会话后端腾出空间')
+      console.log('[pion] evicting oldest session backend:', victim)
+      await this.stopBackend(victim)
+    }
+  }
+
+  /** Serialize starts so concurrent session selections cannot exceed the pool limit. */
+  private startBackendWithLimit(
+    key: string,
+    cwd: string,
+    sessionPath?: string
+  ): Promise<BackendRecord> {
+    const start = this.backendPoolQueue.then(() => {
+      if (this.stopping) throw new Error('agent 正在停止')
+      return this.evictOldestBackend(key).then(() => this.createBackend(key, cwd, sessionPath))
+    })
+    this.backendPoolQueue = start.then(() => undefined, () => undefined)
+    return start
+  }
+
   private async ensureActiveBackend(): Promise<BackendRecord> {
+    if (this.stopping) throw new Error('agent 正在停止')
     const cwd = this.activeCwd ?? this.status.cwd
     if (!cwd) throw new Error('没有活动工作目录')
     if (!this.activeKey) {
@@ -263,7 +303,7 @@ export class AgentBridge {
         backend = await inFlight
       } else {
         this.setStatus({ phase: 'starting', error: undefined, cwd: activeCwd })
-        const start = this.createBackend(key, activeCwd, this.activeSessionPath)
+        const start = this.startBackendWithLimit(key, activeCwd, this.activeSessionPath)
         this.backendStarts.set(key, start)
         try {
           backend = await start
@@ -290,9 +330,15 @@ export class AgentBridge {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true
+    const pendingStarts = [...this.backendStarts.values()]
+    await Promise.allSettled(pendingStarts)
     const backends = [...this.backends.values()]
     this.backends.clear()
+    this.backendStarts.clear()
+    this.backendOrder.length = 0
     this.backendKeysBySessionPath.clear()
+    this.backendPoolQueue = Promise.resolve()
     this.activeKey = null
     this.activeCwd = undefined
     this.activeSessionPath = undefined
@@ -411,12 +457,13 @@ export class AgentBridge {
     return { text: result.text, cancelled: false }
   }
 
-  /** Selecting a session only changes the active session pointer. */
+  /** Select a session and load its backend once, reusing it on later visits. */
   async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
     const target = await this.resolveListedSession(sessionPath)
     const manager = this.openSessionManager(target)
     this.activateLogicalSession(target, manager.getCwd() || this.activeCwd)
-    void this.refreshSessionInfo()
+    await this.ensureActiveBackend()
+    await this.refresh()
     return { cancelled: false }
   }
 
@@ -435,7 +482,10 @@ export class AgentBridge {
     const backend = this.backends.get(key)
     if (!backend) return
     this.backends.delete(key)
-    if (backend.sessionPath) this.backendKeysBySessionPath.delete(resolve(backend.sessionPath))
+    this.removeBackendFromOrder(key)
+    if (backend.sessionPath && this.backendKeysBySessionPath.get(resolve(backend.sessionPath)) === key) {
+      this.backendKeysBySessionPath.delete(resolve(backend.sessionPath))
+    }
     try {
       await backend.client.stop()
     } catch {
@@ -769,11 +819,6 @@ export class AgentBridge {
       messageCount: state.messageCount,
       pendingMessageCount: state.pendingMessageCount
     }
-  }
-
-  /** Push only the active session state after a session switch. */
-  private async refreshSessionInfo(): Promise<void> {
-    this.win?.webContents.send(STATE_CHANNEL, await this.getSessionInfo())
   }
 
   /** Push state + session list + branch tree to the renderer. */
