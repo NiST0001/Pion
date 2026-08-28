@@ -113,7 +113,7 @@ await check('展开按钮悬浮在任务卡片上方', `(() => { const button = 
 await check('任务卡片具有抽出动画', `getComputedStyle(document.querySelector('.task-panel-card')).transitionProperty.includes('height') && getComputedStyle(document.querySelector('.task-panel-card')).transitionDuration !== '0s'`)
 await check('任务面板显示七条并露出第八条', `(() => { const list = document.querySelector('.task-panel-list')?.getBoundingClientRect(); const items = document.querySelectorAll('.task-item'); if (!list || items.length < 8) return false; const eighth = items[7].getBoundingClientRect(); return eighth.top < list.bottom && eighth.bottom > list.bottom && (document.querySelector('.task-panel-list')?.scrollHeight ?? 0) > (document.querySelector('.task-panel-list')?.clientHeight ?? 0); })()`)
 await check('任务面板位于输入框上方', `(() => { const panel = document.querySelector('.task-panel'); const composer = document.querySelector('.composer'); return !!panel && !!composer && Boolean(panel.compareDocumentPosition(composer) & Node.DOCUMENT_POSITION_FOLLOWING); })()`)
-await check('第八条使用底部渐变遮罩', `getComputedStyle(document.querySelector('.task-panel-list'), '::after').backgroundImage.includes('gradient')`)
+await check('任务列表底部区域使用渐变遮罩', `(() => { const style = getComputedStyle(document.querySelector('.task-panel-list'), '::after'); return style.backgroundImage.includes('gradient') && Number.parseFloat(style.height) >= 60; })()`)
 await evaluate(`(() => { const list = document.querySelector('.task-panel-list'); if (!list) return false; list.scrollTop = list.scrollHeight; return true })()`)
 await sleep(80)
 await check('任务面板可滚轮查看后续任务', `(() => { const list = document.querySelector('.task-panel-list'); return !!list && list.scrollTop > 0 && list.scrollTop + list.clientHeight >= list.scrollHeight; })()`)
