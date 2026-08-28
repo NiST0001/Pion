@@ -136,6 +136,12 @@ export function App(): ReactElement {
   )
 
   const changes = useMemo(() => deriveChanges(state.timeline), [state.timeline])
+  const messageHistory = useMemo(
+    () => state.timeline.flatMap((item) => (
+      item.kind === 'user' && item.text.trim() ? [item.text] : []
+    )),
+    [state.timeline]
+  )
 
   const handleToggleReview = useCallback(() => {
     setReviewOpen((open) => !open)
@@ -244,6 +250,7 @@ export function App(): ReactElement {
             queued={state.queued}
             disabled={state.status.phase !== 'running'}
             prefill={prefill}
+            history={messageHistory}
             controls={
               <>
                 <ModelPicker
@@ -329,6 +336,7 @@ function EmptyState({
           <FolderOpen size={11} /> 侧栏管理项目
         </span>
         <span>Enter 发送</span>
+        <span>↑↓ 编辑历史</span>
         <span>消息可分叉</span>
         <span>设置 ⚙ 调整行为</span>
       </div>
