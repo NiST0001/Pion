@@ -9,6 +9,7 @@ import { Composer } from './components/Composer'
 import { StatusBar } from './components/StatusBar'
 import { ProjectList, SessionList, BranchTree, ChangeList } from './components/Sidebar'
 import { ChangesDrawer } from './components/ChangesDrawer'
+import { ReviewPanel } from './components/ReviewPanel'
 import { ModelPicker, ThinkingPicker } from './components/ModelPicker'
 import { TitleBar } from './components/TitleBar'
 import { SettingsModal } from './components/SettingsModal'
@@ -19,6 +20,8 @@ export function App(): ReactElement {
   const [drawerChange, setDrawerChange] = useState<FileChange | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [maximized, setMaximized] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [reviewOpen, setReviewOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // bootstrap: pick the most recent project (or home) and start the agent
@@ -77,6 +80,11 @@ export function App(): ReactElement {
 
   const changes = useMemo(() => deriveChanges(state.timeline), [state.timeline])
 
+  const handleToggleReview = useCallback(() => {
+    setReviewOpen((open) => !open)
+    setDrawerChange(null)
+  }, [])
+
   if (!hasBridge) {
     return (
       <div className="boot-error">
@@ -93,10 +101,14 @@ export function App(): ReactElement {
         phase={state.status.phase}
         sessionName={state.session?.sessionName}
         maximized={maximized}
+        sidebarOpen={sidebarOpen}
+        reviewOpen={reviewOpen}
+        onToggleSidebar={() => setSidebarOpen((open) => !open)}
+        onToggleReview={handleToggleReview}
       />
 
       <div className="app-body">
-        <aside className="sidebar">
+        {sidebarOpen && <aside className="sidebar">
           <div className="sidebar-scroll">
             <ProjectList
               projects={state.projects}
@@ -132,7 +144,7 @@ export function App(): ReactElement {
               <span>设置</span>
             </button>
           </div>
-        </aside>
+        </aside>}
 
         <div className="main">
           {state.status.phase === 'error' && (
@@ -195,6 +207,15 @@ export function App(): ReactElement {
           />
           <StatusBar status={state.status} session={state.session} />
         </div>
+
+        {reviewOpen && (
+          <ReviewPanel
+            changes={changes}
+            selectedChange={drawerChange}
+            onSelect={setDrawerChange}
+            onClose={handleToggleReview}
+          />
+        )}
       </div>
 
       <SettingsModal
@@ -213,7 +234,10 @@ export function App(): ReactElement {
           setFollowUpMode: actions.setFollowUpMode
         }}
       />
-      <ChangesDrawer change={drawerChange} onClose={() => setDrawerChange(null)} />
+      <ChangesDrawer
+        change={reviewOpen ? null : drawerChange}
+        onClose={() => setDrawerChange(null)}
+      />
     </div>
   )
 }

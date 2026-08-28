@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 import {
   Bot,
   Check,
+  ChevronDown,
   Cpu,
   Download,
   FileText,
@@ -16,7 +17,8 @@ import {
   X
 } from 'lucide-react'
 import type { ModelOption, SessionInfo } from '../../../shared/types'
-import { ACCENTS, currentAccent, saveAccent } from '../utils/theme'
+import { ACCENTS, currentAccent, currentTheme, saveAccent, saveTheme, THEMES } from '../utils/theme'
+import type { ThemeId } from '../utils/theme'
 import pkg from '../../../../package.json'
 
 export interface SettingsActions {
@@ -59,6 +61,7 @@ export function SettingsModal({
   const [exportPath, setExportPath] = useState('')
   const [exporting, setExporting] = useState(false)
   const [autoRetry, setAutoRetry] = useState(true)
+  const [selectedTheme, setSelectedTheme] = useState<ThemeId>(currentTheme())
   const [selectedAccent, setSelectedAccent] = useState(currentAccent())
   const [stderr, setStderr] = useState('')
   const [modelBusy, setModelBusy] = useState('')
@@ -90,6 +93,7 @@ export function SettingsModal({
       setName(session?.sessionName ?? '')
       setNameSaved(false)
       setExportPath('')
+      setSelectedTheme(currentTheme())
       setSelectedAccent(currentAccent())
       setModelError('')
     }
@@ -339,8 +343,39 @@ export function SettingsModal({
                 <PageHeading
                   kicker="APPEARANCE"
                   title="外观"
-                  description="调整 Pion 的强调色。选择会立即应用并保存在本机。"
+                  description="选择 Claude 风格的深浅外观，并调整 Pion 的强调色。所有更改会立即应用。"
                 />
+                <div className="settings-section theme-section">
+                  <div className="settings-section-title">工作台主题</div>
+                  <div className="theme-grid">
+                    {THEMES.map((theme) => (
+                      <button
+                        type="button"
+                        key={theme.id}
+                        className={`theme-choice${selectedTheme === theme.id ? ' active' : ''}`}
+                        aria-pressed={selectedTheme === theme.id}
+                        onClick={() => {
+                          setSelectedTheme(theme.id)
+                          saveTheme(theme.id)
+                        }}
+                      >
+                        <span className={`theme-card-preview ${theme.id}`}>
+                          <span className="theme-card-top"><i /><i /><i /></span>
+                          <span className="theme-card-content">
+                            <i className="theme-card-line short" />
+                            <i className="theme-card-line" />
+                            <i className="theme-card-pill" />
+                          </span>
+                        </span>
+                        <span className="theme-choice-copy">
+                          <strong>{theme.name}</strong>
+                          <small>{theme.description}</small>
+                        </span>
+                        {selectedTheme === theme.id && <Check size={15} className="theme-choice-check" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div className="settings-section appearance-section">
                   <div className="settings-section-title">主题色</div>
                   <div className="accent-grid">
@@ -383,7 +418,7 @@ export function SettingsModal({
                   </div>
                 </div>
                 <div className="settings-note">
-                  <Palette size={14} /> 当前仅提供深色工作台主题；主题色不会上传或写入项目文件。
+                  <Palette size={14} /> Claude 风格主题与主题色仅保存在本机，不会上传或写入项目文件。
                 </div>
               </section>
             )}
@@ -508,6 +543,17 @@ function ModelsPage({
   error: string
   onSelect: (provider: string, modelId: string) => void
 }): ReactElement {
+  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
+
+  const toggleProvider = (provider: string): void => {
+    setExpandedProviders((current) => {
+      const next = new Set(current)
+      if (next.has(provider)) next.delete(provider)
+      else next.add(provider)
+      return next
+    })
+  }
+
   return (
     <section className="settings-page models-page">
       <PageHeading
@@ -533,17 +579,26 @@ function ModelsPage({
         <div className="models-empty">暂无可用模型，请确认 pi agent 配置和认证状态。</div>
       ) : (
         <div className="provider-list">
-          {groups.map((group) => (
+          {groups.map((group) => {
+            const expanded = expandedProviders.has(group.provider)
+            return (
             <div className="provider-card" key={group.provider}>
-              <div className="provider-card-head">
+              <button
+                type="button"
+                className={`provider-card-head${expanded ? ' expanded' : ''}`}
+                aria-expanded={expanded}
+                onClick={() => toggleProvider(group.provider)}
+              >
                 <span className="provider-mark">{providerInitial(group.provider)}</span>
-                <div className="provider-copy">
+                <span className="provider-copy">
                   <strong>{formatProvider(group.provider)}</strong>
                   <code>{group.provider}</code>
-                </div>
+                </span>
+                <span className="provider-status">已配置</span>
                 <span className="provider-count">{group.models.length} 个模型</span>
-              </div>
-              <div className="model-grid">
+                <ChevronDown size={14} className="provider-chevron" />
+              </button>
+              {expanded && <div className="model-grid">
                 {group.models.map((model) => {
                   const selected = model.provider === session?.provider && model.id === session?.modelId
                   const key = `${model.provider}/${model.id}`
@@ -568,9 +623,10 @@ function ModelsPage({
                     </button>
                   )
                 })}
-              </div>
+              </div>}
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </section>

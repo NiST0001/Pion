@@ -3,6 +3,19 @@
  * 存储 localStorage('pion:accent')，通过覆盖 CSS 变量生效。
  */
 
+export type ThemeId = 'claude-dark' | 'claude-light'
+
+export interface ThemeOption {
+  id: ThemeId
+  name: string
+  description: string
+}
+
+export const THEMES: ThemeOption[] = [
+  { id: 'claude-dark', name: 'Claude 深色', description: '暖黑背景，低干扰长时间工作' },
+  { id: 'claude-light', name: 'Claude 浅色', description: '暖白纸张感，适合明亮环境' }
+]
+
 export interface AccentOption {
   name: string
   value: string
@@ -18,6 +31,7 @@ export const ACCENTS: AccentOption[] = [
 ]
 
 const STORAGE_KEY = 'pion:accent'
+const THEME_STORAGE_KEY = 'pion:theme'
 
 function clamp255(value: number): number {
   return Math.max(0, Math.min(255, Math.round(value)))
@@ -32,19 +46,44 @@ function lighten(hex: string, amount: number): string {
   return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0')}`
 }
 
-function withAlpha(hex: string, alpha: number): string {
+function rgbValues(hex: string): string {
   const n = Number.parseInt(hex.slice(1), 16)
   const r = (n >> 16) & 0xff
   const g = (n >> 8) & 0xff
   const b = n & 0xff
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+  return `${r}, ${g}, ${b}`
+}
+
+function withAlpha(hex: string, alpha: number): string {
+  return `rgba(${rgbValues(hex)}, ${alpha})`
 }
 
 export function applyAccent(hex: string): void {
   const root = document.documentElement
   root.style.setProperty('--accent', hex)
+  root.style.setProperty('--accent-rgb', rgbValues(hex))
   root.style.setProperty('--accent-strong', lighten(hex, 0.14))
   root.style.setProperty('--accent-soft', withAlpha(hex, 0.13))
+}
+
+export function currentTheme(): ThemeId {
+  const stored = localStorage.getItem(THEME_STORAGE_KEY)
+  return stored === 'claude-light' || stored === 'claude-dark' ? stored : 'claude-dark'
+}
+
+export function applyTheme(theme: ThemeId): void {
+  document.documentElement.dataset.theme = theme
+  document.documentElement.style.colorScheme = theme === 'claude-light' ? 'light' : 'dark'
+}
+
+export function saveTheme(theme: ThemeId): void {
+  localStorage.setItem(THEME_STORAGE_KEY, theme)
+  applyTheme(theme)
+}
+
+/** 启动时恢复已保存的主题。 */
+export function loadTheme(): void {
+  applyTheme(currentTheme())
 }
 
 export function currentAccent(): string {

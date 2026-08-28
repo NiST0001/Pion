@@ -1,9 +1,10 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App'
-import { loadAccent } from './utils/theme'
+import { loadAccent, loadTheme } from './utils/theme'
 import './styles.css'
 
+loadTheme()
 loadAccent()
 
 const container = document.getElementById('root')
