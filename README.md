@@ -57,8 +57,10 @@
 ## 开发
 
 ```bash
-npm install        # 首次安装（会下载 Electron 二进制）
-npm run dev        # 开发模式（渲染进程 HMR + 主进程热重建）
+./dev.sh                 # 推荐入口：自动处理环境变量/依赖体检，见 ./dev.sh --help
+./dev.sh --x11           # 经 XWayland 运行（规避 wayland+vulkan 告警）
+./dev.sh --debug-port 9333  # 附带 CDP 调试端口（配 scripts/gui-inspect.mjs）
+
 npm run build      # 产物输出到 out/
 npm run start      # 运行构建产物（preview 模式）
 npm run typecheck  # 主进程 + 渲染进程 TS 类型检查
@@ -68,6 +70,9 @@ node scripts/rpc-smoke.mjs       # RPC 基础链路（不经 GUI）
 node scripts/rpc-smoke-full.mjs [cwd]  # 会话/条目/树/模型/分叉全链路
 node scripts/gui-cdp-test.mjs node_modules/electron/dist/electron .  # GUI 端到端（CDP 驱动真实界面+真实对话）
 ```
+
+> 注：pi RPC 子进程启动后会把进程标题改写为 `pi`（`process.title`），
+> `ps`/`pgrep` 按 `cli.js --mode rpc` 检索会扑空，检查存活请用 `pgrep -x pi`。
 
 ## 环境要求与坑位说明
 
