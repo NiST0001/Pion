@@ -205,6 +205,7 @@ await evaluate(`(() => {
   const items = list ? [...list.querySelectorAll('.side-session')] : []
   if (items.length < 2 || typeof DataTransfer === 'undefined' || typeof DragEvent === 'undefined') return false
   window.__pionSessionOrderBefore = items.map((item) => item.dataset.sessionPath)
+  window.__pionActiveSessionBefore = items.find((item) => item.classList.contains('active'))?.dataset.sessionPath ?? null
   const data = new DataTransfer()
   items[0].dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: data }))
   items[1].dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: data }))
@@ -214,8 +215,8 @@ await evaluate(`(() => {
 })()`)
 await sleep(180)
 await check('拖拽后会话顺序可改变', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && before.length >= 2 && after[0] === before[1] && after[1] === before[0]; })()`)
-await evaluate(`(() => { const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); list?.querySelectorAll('.side-session')[1]?.click(); return true })()`)
-await sleep(450)
+await evaluate(`(() => { const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const target = [...(list?.querySelectorAll('.side-session') ?? [])].find((item) => item.dataset.sessionPath !== window.__pionActiveSessionBefore); target?.click(); return Boolean(target); })()`)
+await sleep(1200)
 await check('激活会话不会自动置顶', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && after[0] === before[1] && after[1] === before[0]; })()`)
 await evaluate(`(() => {
   const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2)

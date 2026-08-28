@@ -45,17 +45,28 @@ function writeSessionOrderMap(map: SessionOrderMap): void {
   }
 }
 
-function orderSessions(sessions: SessionMeta[]): SessionMeta[] {
+function orderSessions(sessions: SessionMeta[], previous: SessionMeta[] = []): SessionMeta[] {
   if (sessions.length <= 1) return sessions
   const projectCwd = sessions[0]?.projectCwd
   if (!projectCwd) return sessions
 
   const currentPaths = new Set(sessions.map((session) => session.path))
   const saved = readSessionOrderMap()[projectCwd] ?? []
-  const orderedPaths = [
-    ...saved.filter((path) => currentPaths.has(path)),
-    ...sessions.map((session) => session.path).filter((path) => !saved.includes(path))
-  ]
+  const orderedPaths: string[] = []
+  const seen = new Set<string>()
+  for (const path of [...saved, ...previous.map((session) => session.path)]) {
+    if (currentPaths.has(path) && !seen.has(path)) {
+      seen.add(path)
+      orderedPaths.push(path)
+    }
+  }
+  for (const path of sessions.map((session) => session.path)) {
+    if (!seen.has(path)) {
+      seen.add(path)
+      orderedPaths.push(path)
+    }
+  }
+
   const map = new Map(sessions.map((session) => [session.path, session]))
   const ordered = orderedPaths.flatMap((path) => {
     const session = map.get(path)
@@ -297,16 +308,25 @@ function reducer(state: AgentState, action: Action): AgentState {
       return { ...state, session: action.session }
     case 'sessions': {
       const projectCwd = action.sessions[0]?.projectCwd ?? state.status.cwd
+      const previous = projectCwd ? state.sessionsByProject[projectCwd] ?? [] : []
+      const sessions = orderSessions(action.sessions, previous)
       return {
         ...state,
-        sessions: action.sessions,
+        sessions,
         sessionsByProject: projectCwd
-          ? { ...state.sessionsByProject, [projectCwd]: action.sessions }
+          ? { ...state.sessionsByProject, [projectCwd]: sessions }
           : state.sessionsByProject
       }
     }
-    case 'projectSessions':
-      return { ...state, sessionsByProject: action.sessionsByProject }
+    case 'projectSessions': {
+      const sessionsByProject = Object.fromEntries(
+        Object.entries(action.sessionsByProject).map(([cwd, sessions]) => [
+          cwd,
+          orderSessions(sessions, state.sessionsByProject[cwd] ?? [])
+        ])
+      )
+      return { ...state, sessionsByProject }
+    }
     case 'branches':
       return { ...state, branchesByProject: { ...state.branchesByProject, [action.cwd]: action.branches } }
     case 'reorderSessions': {
@@ -571,7 +591,7 @@ export function useAgent() {
     const offs = [
       api.onStatus((status) => dispatch({ type: 'status', status })),
       api.onState((session) => dispatch({ type: 'session', session })),
-      api.onSessions((sessions) => dispatch({ type: 'sessions', sessions: orderSessions(sessions) })),
+      api.onSessions((sessions) => dispatch({ type: 'sessions', sessions })),
       api.onTree((tree) => dispatch({ type: 'tree', tree })),
       api.onProjects((projects) => dispatch({ type: 'projects', projects })),
       api.onEvent((event) => dispatch({ type: 'event', event }))
@@ -614,7 +634,7 @@ export function useAgent() {
     ))
     const branchCwds = [...new Set(branches.map((branch) => branch.cwd))]
     void Promise.all(
-      branchCwds.map(async (cwd) => [cwd, orderSessions(await api.listSessions(cwd))] as const)
+      branchCwds.map(async (cwd) => [cwd, await api.listSessions(cwd)] as const)
     ).then((entries) => {
       if (cancelled) return
       dispatch({ type: 'projectSessions', sessionsByProject: Object.fromEntries(entries) })
