@@ -6,7 +6,6 @@ import type { FileChange } from './hooks/useAgent'
 import { ChatMessage } from './components/ChatMessage'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
-import { TaskPanel } from './components/TaskPanel'
 import { ProjectList, SidebarToolbar } from './components/Sidebar'
 import { ChangesDrawer } from './components/ChangesDrawer'
 import { ReviewPanel } from './components/ReviewPanel'
@@ -222,7 +221,6 @@ export function App(): ReactElement {
   )
 
   const changes = useMemo(() => deriveChanges(state.timeline), [state.timeline])
-  const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
   const messageHistory = useMemo(
     () => state.timeline.flatMap((item) => (
       item.kind === 'user' && item.text.trim() ? [item.text] : []
@@ -347,7 +345,6 @@ export function App(): ReactElement {
           </main>
 
           <div className="composer-dock">
-            <TaskPanel key={taskSessionKey} sessionKey={taskSessionKey} />
             <Composer
               busy={state.busy}
               queued={state.queued}
