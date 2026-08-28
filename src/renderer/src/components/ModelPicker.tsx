@@ -85,21 +85,46 @@ export function ThinkingPicker({
   current?: string
   onSelect: (level: string) => void
 }): ReactElement | null {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useOutsideClose(ref, () => setOpen(false))
+
   if (levels.length === 0) return null
+  const selected = current && levels.includes(current) ? current : levels[0]
+
   return (
-    <div className="thinking-picker" title="思考级别">
-      <Brain size={13} />
-      <div className="thinking-segments">
-        {levels.map((level) => (
-          <button
-            key={level}
-            className={`thinking-segment${level === current ? ' active' : ''}`}
-            onClick={() => onSelect(level)}
-          >
-            {level}
-          </button>
-        ))}
-      </div>
+    <div className="thinking-picker picker" ref={ref}>
+      <button
+        type="button"
+        className="thinking-trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title="切换思考等级"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Brain size={13} />
+        <span className="thinking-value">{selected}</span>
+        <ChevronDown size={12} />
+      </button>
+      {open && (
+        <div className="thinking-menu picker-menu" role="listbox" aria-label="思考等级">
+          {levels.map((level) => (
+            <button
+              type="button"
+              key={level}
+              className={`thinking-option${level === selected ? ' selected' : ''}`}
+              role="option"
+              aria-selected={level === selected}
+              onClick={() => {
+                onSelect(level)
+                setOpen(false)
+              }}
+            >
+              {level}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

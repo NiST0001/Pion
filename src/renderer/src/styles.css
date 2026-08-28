@@ -782,42 +782,62 @@ button {
 }
 
 .thinking-picker {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
-  color: var(--fg-faint);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  padding: 3px 6px 3px 8px;
 }
 
-.thinking-picker > svg {
+.thinking-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 92px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.thinking-trigger > svg:first-child {
   color: var(--purple);
 }
 
-.thinking-segments {
-  display: flex;
-  gap: 2px;
-}
-
-.thinking-segment {
-  font-size: 11px;
-  font-family: var(--mono);
+.thinking-trigger > svg:last-child {
+  margin-left: auto;
   color: var(--fg-faint);
-  padding: 2px 7px;
-  border-radius: 4px;
-  transition: all 0.1s ease;
 }
 
-.thinking-segment:hover {
-  color: var(--fg);
+.thinking-trigger:hover,
+.thinking-trigger[aria-expanded='true'] {
+  border-color: rgba(var(--accent-rgb), 0.45);
   background: var(--bg-hover);
+  color: var(--fg);
 }
 
-.thinking-segment.active {
-  color: var(--accent-strong);
+.thinking-menu {
+  min-width: 132px;
+}
+
+.thinking-option {
+  display: block;
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: left;
+  transition: background 0.1s ease, color 0.1s ease;
+}
+
+.thinking-option:hover,
+.thinking-option.selected {
   background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 
 /* ==========================================================================

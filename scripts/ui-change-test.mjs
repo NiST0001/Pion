@@ -108,7 +108,7 @@ await check('右上角按钮可关闭文件审查栏', `!document.querySelector(
 // --- 2. 模型选择器与输入框融为一体 ---
 for (let i = 0; i < 20; i++) {
   await sleep(500)
-  if (await evaluate(`document.querySelectorAll('.composer-inline-controls .thinking-segment').length > 0`)) break
+  if (await evaluate(`!!document.querySelector('.composer-inline-controls .thinking-trigger')`)) break
 }
 await check('composer 输入框存在', `!!document.querySelector('.composer-row textarea')`)
 await check('任务面板绑定当前会话', `Boolean(document.querySelector('.task-panel')?.dataset.sessionKey)`)
@@ -157,8 +157,12 @@ await check('模型选择器可打开', `(() => { document.querySelector('.compo
 await sleep(300)
 await check('模型菜单已显示', `!!document.querySelector('.composer-inline-controls .picker-menu')`)
 await check('模型选项可见', `document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
-await check('思考级别嵌入输入框', `document.querySelectorAll('.composer-inline-controls .thinking-segment').length > 0`)
-await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
+await check('思考级别嵌入输入框', `!!document.querySelector('.composer-inline-controls .thinking-trigger') && !document.querySelector('.composer-inline-controls .thinking-segment')`)
+await check('思考等级为下拉框', `document.querySelector('.thinking-trigger')?.getAttribute('aria-haspopup') === 'listbox'`)
+await evaluate(`document.querySelector('.composer-inline-controls .thinking-trigger')?.click()`)
+await sleep(150)
+await check('思考等级菜单可打开', `!!document.querySelector('.thinking-menu') && document.querySelectorAll('.thinking-option').length > 0`)
+await evaluate(`document.querySelector('.composer-inline-controls .thinking-trigger')?.click()`)
 await check('旧控制行已移除', `!document.querySelector('.composer-controls')`)
 await check('header 中无模型选择器', `!document.querySelector('.app-header .picker')`)
 
