@@ -69,8 +69,11 @@ interface BackendRecord {
   client: RpcClient
   phase: BackendPhase
   modePrimed?: AgentMode
+  completionState?: 'completed' | 'aborted'
   startPromise: Promise<void>
 }
+
+type SessionCompletedListener = (info: { cwd: string; sessionPath?: string }) => void
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -100,6 +103,7 @@ export class AgentBridge {
   private readonly backendKeysBySessionPath = new Map<string, string>()
   private readonly desiredModes = new Map<string, AgentMode>()
   private readonly sessionManagers = new Map<string, SessionManager>()
+  private readonly sessionCompletedListeners = new Set<SessionCompletedListener>()
   private activeKey: string | null = null
   private activeCwd: string | undefined
   private activeSessionPath: string | undefined
@@ -127,6 +131,11 @@ export class AgentBridge {
 
   getStatus(): AgentStatus {
     return this.status
+  }
+
+  onSessionCompleted(listener: SessionCompletedListener): () => void {
+    this.sessionCompletedListeners.add(listener)
+    return () => this.sessionCompletedListeners.delete(listener)
   }
 
   private setStatus(patch: Partial<AgentStatus>): void {
@@ -180,7 +189,34 @@ export class AgentBridge {
   private attachBackendEvents(backend: BackendRecord): void {
     backend.client.onEvent((event) => {
       const type = (event as { type?: string }).type
-      if (type === 'agent_start') backend.phase = 'running'
+      if (type === 'agent_start') {
+        backend.phase = 'running'
+        backend.completionState = undefined
+      }
+      if (type === 'agent_end') {
+        const endEvent = event as {
+          messages?: Array<{ role?: string; stopReason?: string }>
+          willRetry?: boolean
+        }
+        if (!endEvent.willRetry) {
+          const assistant = [...(endEvent.messages ?? [])]
+            .reverse()
+            .find((message) => message.role === 'assistant')
+          backend.completionState = assistant?.stopReason === 'aborted' ? 'aborted' : 'completed'
+        }
+      }
+      if (type === 'agent_settled') {
+        if (backend.completionState === 'completed') {
+          for (const listener of this.sessionCompletedListeners) {
+            try {
+              listener({ cwd: backend.cwd, sessionPath: backend.sessionPath })
+            } catch (error) {
+              console.error('[pion] session completion listener failed:', error)
+            }
+          }
+        }
+        backend.completionState = undefined
+      }
       if (this.activeKey !== backend.key) return
       if (type === 'agent_start') this.setActiveBackendStatus()
       this.win?.webContents.send(EVENT_CHANNEL, event)

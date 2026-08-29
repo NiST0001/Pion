@@ -48,6 +48,10 @@ export const IPC = {
   AgentSetSteeringMode: 'pion:agent-set-steering-mode',
   AgentSetFollowUpMode: 'pion:agent-set-follow-up-mode',
 
+  // app settings
+  GetCompletionNotifications: 'pion:get-completion-notifications',
+  SetCompletionNotifications: 'pion:set-completion-notifications',
+
   // plugin store
   PluginsCatalog: 'pion:plugins-catalog',
   PluginsInstalled: 'pion:plugins-installed',

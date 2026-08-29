@@ -1,7 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
-import { join } from 'node:path'
+import { app, BrowserWindow, dialog, ipcMain, Notification } from 'electron'
+import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { AgentBridge } from './agent-bridge'
+import { AppSettings } from './app-settings'
 import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
@@ -10,6 +11,31 @@ import type { ProjectMeta } from '../shared/types'
 const bridge = new AgentBridge()
 const plugins = new PluginManager()
 const projects = new ProjectStore()
+const appSettings = new AppSettings()
+let completionNotificationsEnabled = true
+
+function showSessionCompletionNotification({ cwd }: { cwd: string; sessionPath?: string }): void {
+  if (!completionNotificationsEnabled || !Notification.isSupported()) return
+  const projectName = basename(cwd) || '当前项目'
+  try {
+    const notification = new Notification({
+      title: 'Pion · 输出完成',
+      body: `${projectName} 会话输出已完成`
+    })
+    notification.on('click', () => {
+      const win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed())
+      if (!win) return
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    })
+    notification.show()
+  } catch (error) {
+    console.error('[pion] failed to show session completion notification:', error)
+  }
+}
+
+bridge.onSessionCompleted(showSessionCompletionNotification)
 
 let projectsPush = (list: ProjectMeta[]): void => {
   // replaced once a window exists
@@ -136,6 +162,17 @@ function registerIpc(): void {
   ipcMain.handle(IPC.PluginsInstalled, () => plugins.getInstalled())
   ipcMain.handle(IPC.PluginsInstall, (_event, source: string) => plugins.install(source))
 
+  // app settings ------------------------------------------------------------------
+  ipcMain.handle(IPC.GetCompletionNotifications, () => completionNotificationsEnabled)
+  ipcMain.handle(IPC.SetCompletionNotifications, async (_event, enabled: boolean) => {
+    completionNotificationsEnabled = enabled === true
+    try {
+      await appSettings.setCompletionNotificationsEnabled(completionNotificationsEnabled)
+    } catch (error) {
+      console.error('[pion] failed to persist notification setting:', error)
+    }
+  })
+
   // agent settings ----------------------------------------------------------------
   ipcMain.handle(IPC.AgentSetAutoCompaction, (_event, enabled: boolean) =>
     bridge.setAutoCompaction(enabled)
@@ -194,7 +231,9 @@ function registerIpc(): void {
   ipcMain.handle(IPC.DefaultWorkspace, () => homedir())
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await appSettings.load()
+  completionNotificationsEnabled = appSettings.completionNotificationsEnabled
   registerIpc()
   createWindow()
 

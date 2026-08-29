@@ -42,6 +42,7 @@ export function App(): ReactElement {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [pluginStoreOpen, setPluginStoreOpen] = useState(false)
+  const [completionNotificationsEnabled, setCompletionNotificationsEnabled] = useState(true)
   const [branchDialogCwd, setBranchDialogCwd] = useState<string | null>(null)
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -60,6 +61,31 @@ export function App(): ReactElement {
     if (!hasBridge) return
     void actions.bootstrap()
   }, [hasBridge, actions])
+
+  useEffect(() => {
+    if (!hasBridge) return
+    let active = true
+    void window.pion.getCompletionNotificationsEnabled()
+      .then((enabled) => {
+        if (active) setCompletionNotificationsEnabled(enabled)
+      })
+      .catch((error: unknown) => {
+        console.error('[pion] failed to load notification setting:', error)
+      })
+    return () => {
+      active = false
+    }
+  }, [hasBridge])
+
+  const handleCompletionNotificationsChange = useCallback(async (enabled: boolean): Promise<void> => {
+    if (!hasBridge) return
+    try {
+      await window.pion.setCompletionNotificationsEnabled(enabled)
+      setCompletionNotificationsEnabled(enabled)
+    } catch (error) {
+      console.error('[pion] failed to update notification setting:', error)
+    }
+  }, [hasBridge])
 
   // Resize either side panel with its vertical drag handle.
   const handleResizeStart = useCallback(
@@ -500,6 +526,8 @@ export function App(): ReactElement {
         open={settingsOpen}
         session={state.session}
         models={state.models}
+        completionNotificationsEnabled={completionNotificationsEnabled}
+        onCompletionNotificationsChange={(enabled) => void handleCompletionNotificationsChange(enabled)}
         onClose={() => setSettingsOpen(false)}
         actions={{
           setModel: actions.setModel,

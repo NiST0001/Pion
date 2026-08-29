@@ -36,6 +36,8 @@ interface SettingsModalProps {
   open: boolean
   session: SessionInfo | null
   models: ModelOption[]
+  completionNotificationsEnabled: boolean
+  onCompletionNotificationsChange: (enabled: boolean) => void
   onClose: () => void
   actions: SettingsActions
 }
@@ -51,6 +53,8 @@ export function SettingsModal({
   open,
   session,
   models,
+  completionNotificationsEnabled,
+  onCompletionNotificationsChange,
   onClose,
   actions
 }: SettingsModalProps): ReactElement | null {
@@ -310,6 +314,20 @@ export function SettingsModal({
                         { value: 'one-at-a-time', label: '逐条' }
                       ]}
                       onChange={(value) => void actions.setFollowUpMode(value as 'all' | 'one-at-a-time')}
+                    />
+                  </div>
+                </div>
+
+                <div className="settings-section">
+                  <div className="settings-section-title">通知</div>
+                  <div className="setting-row" data-setting="completion-notifications">
+                    <div>
+                      <div className="setting-label">会话完成通知</div>
+                      <div className="setting-desc">agent 输出完成后发送系统通知</div>
+                    </div>
+                    <Toggle
+                      on={completionNotificationsEnabled}
+                      onChange={onCompletionNotificationsChange}
                     />
                   </div>
                 </div>

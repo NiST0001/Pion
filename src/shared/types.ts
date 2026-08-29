@@ -360,6 +360,10 @@ export interface PionApi {
   setSteeringMode(mode: 'all' | 'one-at-a-time'): Promise<void>
   setFollowUpMode(mode: 'all' | 'one-at-a-time'): Promise<void>
 
+  // app settings -------------------------------------------------------------
+  getCompletionNotificationsEnabled(): Promise<boolean>
+  setCompletionNotificationsEnabled(enabled: boolean): Promise<void>
+
   // projects ----------------------------------------------------------------
   listProjects(): Promise<ProjectMeta[]>
   listBranches(cwd: string): Promise<BranchInfo[]>

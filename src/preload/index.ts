@@ -70,6 +70,10 @@ const api: PionApi = {
   setSteeringMode: (mode) => ipcRenderer.invoke(IPC.AgentSetSteeringMode, mode),
   setFollowUpMode: (mode) => ipcRenderer.invoke(IPC.AgentSetFollowUpMode, mode),
 
+  // app settings
+  getCompletionNotificationsEnabled: () => ipcRenderer.invoke(IPC.GetCompletionNotifications) as Promise<boolean>,
+  setCompletionNotificationsEnabled: (enabled) => ipcRenderer.invoke(IPC.SetCompletionNotifications, enabled),
+
   // window
   minimizeWindow: () => ipcRenderer.send(IPC.WindowControl, 'minimize'),
   toggleMaximizeWindow: () => ipcRenderer.send(IPC.WindowControl, 'toggle-maximize'),
