@@ -842,22 +842,37 @@ export class AgentBridge {
   }
 
   private async pushSessionInfo(): Promise<void> {
+    const activeKey = this.activeKey
+    const activeSessionPath = this.activeSessionPath
     const info = await this.getSessionInfo()
+    if (this.activeKey !== activeKey || this.activeSessionPath !== activeSessionPath) return
     this.win?.webContents.send(STATE_CHANNEL, info)
   }
 
   private async refreshSidebarSessions(): Promise<void> {
-    const sessions = await this.listSessions()
+    const cwd = this.status.cwd
+    const sessions = await this.listSessions(cwd)
+    if (this.status.cwd !== cwd) return
     this.win?.webContents.send(SESSIONS_CHANNEL, sessions)
   }
 
   /** Push state + session list + branch tree to the renderer. */
   private async refresh(): Promise<void> {
+    const activeKey = this.activeKey
+    const activeSessionPath = this.activeSessionPath
+    const activeCwd = this.activeCwd
     const [info, sessions, tree] = await Promise.all([
       this.getSessionInfo(),
       this.listSessions(),
       this.getTree()
     ])
+    // A slow response from the previous backend must never overwrite the
+    // state of a session selected while the refresh was in flight.
+    if (
+      this.activeKey !== activeKey ||
+      this.activeSessionPath !== activeSessionPath ||
+      this.activeCwd !== activeCwd
+    ) return
     this.win?.webContents.send(STATE_CHANNEL, info)
     this.win?.webContents.send(SESSIONS_CHANNEL, sessions)
     this.win?.webContents.send(TREE_CHANNEL, tree)

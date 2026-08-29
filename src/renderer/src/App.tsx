@@ -49,7 +49,7 @@ export function App(): ReactElement {
   const [reviewWidth, setReviewWidth] = useState(390)
   const [sessionQuery, setSessionQuery] = useState('')
   const [newSessionCwd, setNewSessionCwd] = useState('')
-  const [pendingSession, setPendingSession] = useState<{ cwd: string; path: string } | null>(null)
+  const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const panelResizeRef = useRef<PanelResizeState | null>(null)
   const sessionSelectionId = useRef(0)
@@ -119,14 +119,9 @@ export function App(): ReactElement {
     })
   }, [state.projects, state.status.cwd])
 
-  // Keep sidebar selection independent from the slower session replay. Once
-  // the agent reports the target session, the optimistic selection is cleared.
-  useEffect(() => {
-    if (!pendingSession) return
-    if (state.status.cwd === pendingSession.cwd && state.session?.sessionFile === pendingSession.path) {
-      setPendingSession(null)
-    }
-  }, [pendingSession, state.session?.sessionFile, state.status.cwd])
+  // Keep the user's selected row authoritative while the slower backend
+  // switch and its state refreshes complete. Older state responses must not
+  // make the sidebar highlight jump back to the previous session.
 
   // auto-scroll while the conversation grows
   const timelineLength = state.timeline.length
@@ -174,6 +169,7 @@ export function App(): ReactElement {
 
   const handleFork = useCallback(
     async (entryId: string) => {
+      setSelectedSession(null)
       const text = await actions.forkAt(entryId)
       if (text) setPrefill(`${text}`)
     },
@@ -192,7 +188,7 @@ export function App(): ReactElement {
     async (cwd: string) => {
       setNewSessionCwd(cwd)
       sessionSelectionId.current += 1
-      setPendingSession(null)
+      setSelectedSession(null)
       if (cwd === state.status.cwd) return
       await actions.start(cwd)
     },
@@ -210,7 +206,7 @@ export function App(): ReactElement {
     async (cwd?: string) => {
       const targetCwd = cwd ?? (newSessionCwd || state.status.cwd)
       sessionSelectionId.current += 1
-      setPendingSession(null)
+      setSelectedSession(null)
       if (targetCwd) {
         setNewSessionCwd(targetCwd)
         await activateProject(targetCwd)
@@ -244,38 +240,40 @@ export function App(): ReactElement {
         path === state.session?.sessionFile &&
         (state.status.phase === 'running' || state.status.phase === 'starting')
       ) {
-        setPendingSession(null)
+        setSelectedSession(null)
         return
       }
       const requestId = ++sessionSelectionId.current
-      const previousSelection = pendingSession
+      const previousSelection = selectedSession
       setNewSessionCwd(cwd)
-      setPendingSession({ cwd, path })
+      setSelectedSession({ cwd, path })
       try {
         await activateProject(cwd)
         const result = await actions.switchSession(path)
         if (result.cancelled && requestId === sessionSelectionId.current) {
-          setPendingSession(previousSelection)
+          setSelectedSession(previousSelection)
           return
         }
       } catch (error) {
-        if (requestId === sessionSelectionId.current) setPendingSession(previousSelection)
+        if (requestId === sessionSelectionId.current) setSelectedSession(previousSelection)
         console.error('[pion] 切换会话失败', error)
       }
     },
-    [actions, activateProject, pendingSession, state.session?.sessionFile, state.status.cwd]
+    [actions, activateProject, selectedSession, state.session?.sessionFile, state.status.cwd]
   )
 
   const handleDeleteSession = useCallback(
     async (cwd: string, path: string) => {
+      if (selectedSession?.path === path) setSelectedSession(null)
       await activateProject(cwd)
       await actions.deleteSession(path)
     },
-    [actions, activateProject]
+    [actions, activateProject, selectedSession?.path]
   )
 
   const handleCopySession = useCallback(
     async (cwd: string, path: string) => {
+      setSelectedSession(null)
       await activateProject(cwd)
       await actions.copySession(path)
     },
@@ -292,6 +290,7 @@ export function App(): ReactElement {
 
   const handleForkSession = useCallback(
     async (cwd: string, path: string, entryId: string) => {
+      setSelectedSession(null)
       await activateProject(cwd)
       const text = await actions.forkSession(path, entryId)
       if (text) setPrefill(text)
@@ -313,8 +312,8 @@ export function App(): ReactElement {
     setDrawerChange(null)
   }, [])
 
-  const activeCwd = pendingSession?.cwd ?? state.status.cwd
-  const activePath = pendingSession?.path ?? state.session?.sessionFile
+  const activeCwd = selectedSession?.cwd ?? state.status.cwd
+  const activePath = selectedSession?.path ?? state.session?.sessionFile
 
   if (!hasBridge) {
     return (
