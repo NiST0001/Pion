@@ -1,6 +1,6 @@
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { FileDiff, FilePenLine, FilePlus2, X } from 'lucide-react'
-import type { FileChange } from '../hooks/useAgent'
+import type { FileChange } from '../agent/types'
 import { DiffView } from './DiffView'
 
 interface ReviewPanelProps {

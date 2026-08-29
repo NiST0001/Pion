@@ -40,14 +40,13 @@
 - pi 官方插件商店：原生目录可直接安装，保留内置浏览器查看原站（`https://pi.dev/packages`）
 
 ### 项目
-- 多项目管理：侧栏切换工作目录（agent 子进程随目录重启）
+- 多项目管理：侧栏切换工作目录，后台池跨项目与 worktree 共享
 - 项目列表持久化，激活项目不会自动改变用户排序
 
 ### 会话与分支
-- 会话列表：按项目目录扫描 `~/.pi/agent/sessions/`，点击切换（时间线整条重建）
-- 点击会话时加载一次独立 RPC 后端，切换会话不重启已加载后端；全局（跨项目/工作树）最多保留 10 个，超过后按最早加载顺序淘汰
-- 分支树：可视化当前会话的树结构，任意用户消息处可「分叉」
-  （fork 后时间线回到分叉点，输入框自动预填原消息）
+- 会话列表：按项目目录扫描 `~/.pi/agent/sessions/`，点击后优先显示最新历史，滚到顶部再按需加载更早内容
+- 已加载会话的时间线按路径缓存；切换会话不重复传输/解析历史，后端也不重启；全局（跨项目/工作树）最多保留 10 个，超过后按最早加载顺序淘汰
+- 会话支持复制与从任意用户消息处分叉（fork）；fork 后时间线回到分叉点，输入框自动预填原消息
 - 新建会话；RPC 子进程每次启动为新会话，落盘懒持久化（空会话不产生文件）
 
 ### 审查
@@ -97,19 +96,29 @@ node scripts/gui-cdp-test.mjs node_modules/electron/dist/electron .  # GUI 端�
 src/
 ├── main/                 # Electron 主进程
 │   ├── index.ts          # 窗口创建 + IPC 注册
-│   ├── agent-bridge.ts   # RpcClient 生命周期、事件转发、会话/模型桥接
+│   ├── agent-bridge.ts   # RpcClient 生命周期、后台池、会话与模型桥接
+│   ├── git.ts            # Git 分支与 worktree 操作
+│   ├── wire.ts           # pi SDK -> renderer wire 映射
+│   ├── plugin-manager.ts # 官方插件目录与 pi install
 │   └── projects.ts       # 项目列表持久化
 ├── preload/
 │   └── index.ts          # contextBridge -> window.pion
 ├── shared/
-│   └── types.ts          # IPC 契约（主/预加载/渲染共享，SDK 无关）
+│   ├── types.ts          # IPC 契约（主/预加载/渲染共享，SDK 无关）
+│   └── ipc.ts            # IPC 频道一事实来源
 └── renderer/
     ├── index.html
     └── src/
         ├── App.tsx               # 三栏布局装配
-        ├── hooks/useAgent.ts     # 事件 -> 时间线 reducer、会话/项目/模型状态
+        ├── agent/                # Agent 状态、时间线回放/缓存、会话排序
+        │   ├── types.ts
+        │   ├── reducer.ts
+        │   ├── timeline.ts
+        │   └── sessionOrder.ts
+        ├── hooks/useAgent.ts     # IPC 订阅与 actions 组装
         └── components/
-            ├── Sidebar.tsx       # 项目/会话/分支树/变更列表
+            ├── Sidebar.tsx       # 项目/分支工作树
+            ├── SessionList.tsx   # 会话条目、拖拽与右键操作
             ├── ChangesDrawer.tsx # 变更 Diff 抽屉
             ├── ChatMessage.tsx   # 消息气泡（Markdown、fork 按钮）
             ├── Markdown.tsx      # react-markdown + 高亮 + 复制

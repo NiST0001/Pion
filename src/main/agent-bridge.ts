@@ -1,15 +1,14 @@
-import { basename, dirname, resolve, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { access, mkdir, unlink } from 'node:fs/promises'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import { access, unlink } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
 import {
   RpcClient,
   SessionManager,
   getPackageDir
 } from '@earendil-works/pi-coding-agent'
-import type { SessionEntry, SessionTreeNode } from '@earendil-works/pi-coding-agent'
+import type { SessionEntry } from '@earendil-works/pi-coding-agent'
+import { IPC_EVENTS } from '../shared/ipc'
 import type {
   AgentMode,
   AgentStatus,
@@ -26,15 +25,21 @@ import type {
   WireEntry,
   WireMessage
 } from '../shared/types'
-import { messageText, messageToolCalls } from '../shared/types'
+import { messageText } from '../shared/types'
+import { createWorktreeBranch, listBranchInfos } from './git'
+import {
+  filterToolResults,
+  sessionMode,
+  toTreeNodeLite,
+  toWireEntry,
+  toolCallIds
+} from './wire'
 
-const execFileAsync = promisify(execFile)
-
-const EVENT_CHANNEL = 'pion:agent-event'
-const STATUS_CHANNEL = 'pion:agent-status'
-const STATE_CHANNEL = 'pion:agent-state'
-const SESSIONS_CHANNEL = 'pion:agent-sessions'
-const TREE_CHANNEL = 'pion:agent-tree'
+const EVENT_CHANNEL = IPC_EVENTS.AgentEvent
+const STATUS_CHANNEL = IPC_EVENTS.AgentStatus
+const STATE_CHANNEL = IPC_EVENTS.AgentState
+const SESSIONS_CHANNEL = IPC_EVENTS.AgentSessions
+const TREE_CHANNEL = IPC_EVENTS.AgentTree
 const PLAN_EXTENSION_PATH = resolve(__dirname, '../../node_modules/@narumitw/pi-plan-mode/dist/index.ts')
 /** Global pool size shared by every project and worktree. */
 const MAX_RETAINED_BACKENDS = 10
@@ -51,11 +56,6 @@ interface PushedTree {
   leafId: string | null
 }
 
-interface GitWorktreeRecord {
-  path: string
-  branch?: string
-}
-
 type BackendPhase = 'starting' | 'running' | 'error'
 
 interface BackendRecord {
@@ -68,14 +68,6 @@ interface BackendRecord {
   startPromise: Promise<void>
 }
 
-async function runGit(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
-    encoding: 'utf8',
-    maxBuffer: 4 * 1024 * 1024
-  })
-  return String(stdout).trim()
-}
-
 async function pathExists(path: string): Promise<boolean> {
   try {
     await access(path)
@@ -83,58 +75,6 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false
   }
-}
-
-function sessionMode(entries: SessionEntry[]): AgentMode {
-  let mode: AgentMode = 'build'
-  for (const entry of entries) {
-    if (entry.type !== 'custom') continue
-    const record = entry as unknown as Record<string, unknown>
-    if (record.customType !== 'plan-mode-state') continue
-    const data = record.data
-    const enabled = data && typeof data === 'object'
-      ? (data as Record<string, unknown>).enabled
-      : undefined
-    if (typeof enabled === 'boolean') mode = enabled ? 'plan' : 'build'
-  }
-  return mode
-}
-
-function toolCallIds(entries: SessionEntry[]): Set<string> {
-  const ids = new Set<string>()
-  for (const entry of entries) {
-    if (entry.type !== 'message' || entry.message.role !== 'assistant') continue
-    for (const call of messageToolCalls(entry.message as unknown as WireMessage)) {
-      if (typeof call.id === 'string') ids.add(call.id)
-    }
-  }
-  return ids
-}
-
-function isToolResult(entry: SessionEntry): boolean {
-  const record = entry as unknown as { type?: string; message?: WireMessage }
-  return record.type === 'message' && record.message?.role === 'toolResult'
-}
-
-function toolResultId(entry: SessionEntry): string | undefined {
-  if (!isToolResult(entry)) return undefined
-  const record = entry as unknown as { message?: Record<string, unknown> }
-  return typeof record.message?.toolCallId === 'string' ? record.message.toolCallId : undefined
-}
-
-function parseGitWorktrees(output: string): GitWorktreeRecord[] {
-  const records: GitWorktreeRecord[] = []
-  let current: GitWorktreeRecord | null = null
-  for (const line of output.split(/\r?\n/)) {
-    if (line.startsWith('worktree ')) {
-      if (current) records.push(current)
-      current = { path: line.slice('worktree '.length) }
-    } else if (current && line.startsWith('branch ')) {
-      current.branch = line.slice('branch '.length).replace(/^refs\/heads\//, '')
-    }
-  }
-  if (current) records.push(current)
-  return records
 }
 
 /**
@@ -662,11 +602,7 @@ export class AgentBridge {
     const pageSize = Math.min(Math.max(Math.trunc(limit) || 160, 1), 240)
     const start = Math.max(0, end - pageSize)
     const entries = result.entries.slice(start, end)
-    const callIds = toolCallIds(entries)
-    const toolResults = result.entries.filter((entry) => {
-      const id = toolResultId(entry)
-      return id !== undefined && callIds.has(id)
-    })
+    const toolResults = filterToolResults(result.entries, toolCallIds(entries))
 
     return {
       entries: entries.map(toWireEntry),
@@ -827,50 +763,11 @@ export class AgentBridge {
   // ---------------------------------------------------------------- git branches / worktrees
 
   async listBranches(cwd: string): Promise<BranchInfo[]> {
-    const requestedCwd = resolve(cwd)
-    try {
-      const root = resolve(await runGit(requestedCwd, ['rev-parse', '--show-toplevel']))
-      const records = parseGitWorktrees(await runGit(root, ['worktree', 'list', '--porcelain']))
-      const mainRecord = records.find((record) => resolve(record.path) === root)
-      const currentBranch = mainRecord?.branch ?? await runGit(root, ['branch', '--show-current']).catch(() => '')
-      const branches = records.map((record) => {
-        const worktreeCwd = resolve(record.path)
-        const isMain = worktreeCwd === root
-        const gitBranch = record.branch ?? (isMain ? currentBranch : undefined)
-        return {
-          name: isMain ? (gitBranch || 'main') : (gitBranch || basename(worktreeCwd)),
-          cwd: worktreeCwd,
-          gitBranch: gitBranch || undefined,
-          isMain
-        }
-      })
-      if (branches.some((branch) => branch.isMain)) return branches
-      return [{ name: currentBranch || 'main', cwd: root, gitBranch: currentBranch || undefined, isMain: true }]
-    } catch {
-      return [{ name: 'main', cwd: requestedCwd, isMain: true }]
-    }
+    return listBranchInfos(cwd)
   }
 
   async createBranch(cwd: string, branchName: string): Promise<BranchInfo> {
-    const name = branchName.trim()
-    if (!name) throw new Error('分支名称不能为空')
-    const root = resolve(await runGit(resolve(cwd), ['rev-parse', '--show-toplevel']))
-    await runGit(root, ['check-ref-format', '--branch', name])
-
-    const worktreeRoot = join(dirname(root), '.pion-worktrees')
-    await mkdir(worktreeRoot, { recursive: true })
-    const safeName = name.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'branch'
-    const stem = `${basename(root)}-${safeName}`
-    let worktreeCwd = join(worktreeRoot, stem)
-    let suffix = 2
-    while (await pathExists(worktreeCwd)) {
-      worktreeCwd = join(worktreeRoot, `${stem}-${suffix}`)
-      suffix += 1
-    }
-
-    await runGit(root, ['worktree', 'add', '-b', name, worktreeCwd])
-    const branch = (await this.listBranches(root)).find((item) => item.cwd === resolve(worktreeCwd))
-    return branch ?? { name, cwd: resolve(worktreeCwd), gitBranch: name, isMain: false }
+    return createWorktreeBranch(cwd, branchName)
   }
 
   // ---------------------------------------------------------------- sessions list
@@ -961,58 +858,5 @@ export class AgentBridge {
     this.win?.webContents.send(STATE_CHANNEL, info)
     this.win?.webContents.send(SESSIONS_CHANNEL, sessions)
     this.win?.webContents.send(TREE_CHANNEL, tree)
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Mapping helpers (SDK shapes -> wire shapes)
-// ---------------------------------------------------------------------------
-
-function toWireEntry(entry: SessionEntry): WireEntry {
-  const wire: WireEntry = {
-    type: entry.type,
-    id: entry.id,
-    parentId: entry.parentId,
-    timestamp: entry.timestamp
-  }
-  const record = entry as unknown as Record<string, unknown>
-  if (entry.type === 'message') {
-    wire.message = record.message as WireMessage
-  } else if (entry.type === 'compaction') {
-    wire.summary = record.summary as string
-  } else if (entry.type === 'custom') {
-    if (typeof record.customType === 'string') wire.customType = record.customType
-    wire.data = record.data
-  }
-  return wire
-}
-
-function toTreeNodeLite(node: SessionTreeNode): TreeNodeLite {
-  const entry = node.entry as unknown as Record<string, unknown>
-  const message = entry.message as WireMessage | undefined
-  let kind: TreeNodeLite['kind'] = 'other'
-  let snippet = ''
-  if (message?.role === 'user') {
-    kind = 'user'
-    snippet = messageText(message).replace(/\s+/g, ' ').slice(0, 90)
-  } else if (message?.role === 'assistant') {
-    kind = 'assistant'
-    snippet = messageText(message).replace(/\s+/g, ' ').slice(0, 70)
-  } else if (node.entry.type === 'compaction') {
-    kind = 'compaction'
-    snippet = '上下文压缩点'
-  } else if (node.entry.type === 'branch_summary') {
-    kind = 'other'
-    snippet = '分支摘要'
-  } else {
-    snippet = node.entry.type
-  }
-  return {
-    id: node.entry.id,
-    parentId: node.entry.parentId,
-    kind,
-    snippet: snippet || '(空)',
-    label: node.label,
-    children: node.children.map(toTreeNodeLite)
   }
 }

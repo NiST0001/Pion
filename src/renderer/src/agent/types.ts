@@ -1,0 +1,125 @@
+/**
+ * Agent 状态模型：时间线条目、变更列表与全局 AgentState。
+ *
+ * 该文件只描述数据形状（以及 reducer 的初始状态与 Action 联合类型），
+ * 状态迁移逻辑在 agent/reducer.ts，条目解析在 agent/timeline.ts。
+ */
+import type {
+  AgentMode,
+  AgentStatus,
+  BranchInfo,
+  ModelOption,
+  ProjectMeta,
+  SessionInfo,
+  SessionMeta,
+  SlashCommandInfo,
+  TreeNodeLite,
+  WireEventInput
+} from '../../../shared/types'
+
+// ---------------------------------------------------------------------------
+// Timeline items
+// ---------------------------------------------------------------------------
+
+export interface ToolItem {
+  id: string
+  name: string
+  status: 'running' | 'done' | 'error'
+  isError: boolean
+  /** Target file for fs tools */
+  path?: string
+  /** Bash / powershell command */
+  command?: string
+  /** Edit tool: display diff */
+  diff?: string
+  /** Write tool: file content from args */
+  writeContent?: string
+  /** Generic textual output */
+  outputText?: string
+}
+
+export type TimelineItem =
+  | { kind: 'user'; id: number; entryId?: string; text: string; historical?: boolean }
+  | {
+      kind: 'assistant'
+      id: number
+      entryId?: string
+      text: string
+      thinking: string
+      streaming: boolean
+      error?: string
+      historical?: boolean
+    }
+  | { kind: 'tool'; id: number; tool: ToolItem; historical?: boolean }
+  | { kind: 'compaction'; id: number; summary: string; historical?: boolean }
+
+// ---------------------------------------------------------------------------
+// Changes (review panel)
+// ---------------------------------------------------------------------------
+
+export interface FileChange {
+  path: string
+  kind: 'edit' | 'write'
+  diff?: string
+  content?: string
+  additions: number
+  deletions: number
+}
+
+// ---------------------------------------------------------------------------
+// Global agent state
+// ---------------------------------------------------------------------------
+
+export interface AgentState {
+  status: AgentStatus
+  session: SessionInfo | null
+  sessions: SessionMeta[]
+  sessionsByProject: Record<string, SessionMeta[]>
+  branchesByProject: Record<string, BranchInfo[]>
+  tree: { tree: TreeNodeLite[]; leafId: string | null } | null
+  projects: ProjectMeta[]
+  models: ModelOption[]
+  thinkingLevels: string[]
+  commands: SlashCommandInfo[]
+  mode: AgentMode
+  timeline: TimelineItem[]
+  timelineMutation: 'replace' | 'prepend' | 'append' | null
+  busy: boolean
+  queued: { steering: number; followUp: number }
+}
+
+export const initialState: AgentState = {
+  status: { phase: 'stopped' },
+  session: null,
+  sessions: [],
+  sessionsByProject: {},
+  branchesByProject: {},
+  tree: null,
+  projects: [],
+  models: [],
+  thinkingLevels: [],
+  commands: [],
+  mode: 'build',
+  timeline: [],
+  timelineMutation: null,
+  busy: false,
+  queued: { steering: 0, followUp: 0 }
+}
+
+export type Action =
+  | { type: 'status'; status: AgentStatus }
+  | { type: 'session'; session: SessionInfo | null }
+  | { type: 'sessions'; sessions: SessionMeta[] }
+  | { type: 'projectSessions'; sessionsByProject: Record<string, SessionMeta[]> }
+  | { type: 'branches'; cwd: string; branches: BranchInfo[] }
+  | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
+  | { type: 'projects'; projects: ProjectMeta[] }
+  | { type: 'reorderSessions'; cwd: string; paths: string[] }
+  | { type: 'models'; models: ModelOption[] }
+  | { type: 'thinkingLevels'; levels: string[] }
+  | { type: 'commands'; commands: SlashCommandInfo[] }
+  | { type: 'mode'; mode: AgentMode }
+  | { type: 'event'; event: WireEventInput }
+  | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode }
+  | { type: 'prependEntries'; items: TimelineItem[] }
+  | { type: 'clearTimeline' }

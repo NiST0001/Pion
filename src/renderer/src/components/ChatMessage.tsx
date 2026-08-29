@@ -1,6 +1,6 @@
 import type { ReactElement } from 'react'
 import { GitBranch } from 'lucide-react'
-import type { TimelineItem } from '../hooks/useAgent'
+import type { TimelineItem } from '../agent/types'
 import { Markdown } from './Markdown'
 
 interface ChatMessageProps {

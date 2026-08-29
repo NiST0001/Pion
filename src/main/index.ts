@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { AgentBridge } from './agent-bridge'
 import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
+import { IPC, IPC_EVENTS } from '../shared/ipc'
 import type { ProjectMeta } from '../shared/types'
 
 const bridge = new AgentBridge()
@@ -40,13 +41,13 @@ function createWindow(): void {
   })
 
   const push = (list: ProjectMeta[]): void => {
-    if (!win.isDestroyed()) win.webContents.send('pion:projects', list)
+    if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.Projects, list)
   }
   projectsPush = push
   push(projects.list())
 
   const pushMaximized = (): void => {
-    if (!win.isDestroyed()) win.webContents.send('pion:window-state', win.isMaximized())
+    if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.WindowState, win.isMaximized())
   }
   win.on('maximize', pushMaximized)
   win.on('unmaximize', pushMaximized)
@@ -78,86 +79,85 @@ function createWindow(): void {
 
 function registerIpc(): void {
   // agent lifecycle -----------------------------------------------------------
-  ipcMain.handle('pion:agent-start', async (_event, cwd: string) => {
+  ipcMain.handle(IPC.AgentStart, async (_event, cwd: string) => {
     const result = await bridge.start(cwd)
     projects.touch(cwd)
     pushProjects()
     return result
   })
-  ipcMain.handle('pion:agent-stop', () => bridge.stop())
-  ipcMain.handle('pion:agent-send', (_event, message: string) => bridge.send(message))
-  ipcMain.handle('pion:agent-queue', (_event, message: string) => bridge.queue(message))
-  ipcMain.handle('pion:agent-abort', () => bridge.abort())
-  ipcMain.handle('pion:agent-state', () => bridge.getSessionInfo())
-  ipcMain.handle('pion:agent-stderr', () => bridge.getStderr())
-  ipcMain.handle('pion:agent-status', () => bridge.getStatus())
+  ipcMain.handle(IPC.AgentStop, () => bridge.stop())
+  ipcMain.handle(IPC.AgentSend, (_event, message: string) => bridge.send(message))
+  ipcMain.handle(IPC.AgentQueue, (_event, message: string) => bridge.queue(message))
+  ipcMain.handle(IPC.AgentAbort, () => bridge.abort())
+  ipcMain.handle(IPC.AgentState, () => bridge.getSessionInfo())
+  ipcMain.handle(IPC.AgentStderr, () => bridge.getStderr())
 
   // session management ----------------------------------------------------------
-  ipcMain.handle('pion:agent-new-session', () => bridge.newSession())
-  ipcMain.handle('pion:agent-fork', (_event, entryId: string) => bridge.forkAt(entryId))
-  ipcMain.handle('pion:agent-switch-session', (_event, sessionPath: string) =>
+  ipcMain.handle(IPC.AgentNewSession, () => bridge.newSession())
+  ipcMain.handle(IPC.AgentFork, (_event, entryId: string) => bridge.forkAt(entryId))
+  ipcMain.handle(IPC.AgentSwitchSession, (_event, sessionPath: string) =>
     bridge.switchSession(sessionPath)
   )
-  ipcMain.handle('pion:agent-delete-session', (_event, sessionPath: string) =>
+  ipcMain.handle(IPC.AgentDeleteSession, (_event, sessionPath: string) =>
     bridge.deleteSession(sessionPath)
   )
-  ipcMain.handle('pion:agent-copy-session', (_event, sessionPath: string) =>
+  ipcMain.handle(IPC.AgentCopySession, (_event, sessionPath: string) =>
     bridge.copySession(sessionPath)
   )
-  ipcMain.handle('pion:agent-session-fork-messages', (_event, sessionPath: string) =>
+  ipcMain.handle(IPC.AgentSessionForkMessages, (_event, sessionPath: string) =>
     bridge.getSessionForkMessages(sessionPath)
   )
-  ipcMain.handle('pion:agent-fork-session', (_event, sessionPath: string, entryId: string) =>
+  ipcMain.handle(IPC.AgentForkSession, (_event, sessionPath: string, entryId: string) =>
     bridge.forkSession(sessionPath, entryId)
   )
-  ipcMain.handle('pion:agent-entries', () => bridge.getEntries())
-  ipcMain.handle('pion:agent-entries-page', (_event, before?: number, limit?: number) =>
+  ipcMain.handle(IPC.AgentEntries, () => bridge.getEntries())
+  ipcMain.handle(IPC.AgentEntriesPage, (_event, before?: number, limit?: number) =>
     bridge.getEntriesPage(before, limit)
   )
-  ipcMain.handle('pion:agent-tree', () => bridge.getTree())
-  ipcMain.handle('pion:agent-sessions', (_event, cwd?: string) => bridge.listSessions(cwd))
+  ipcMain.handle(IPC.AgentTree, () => bridge.getTree())
+  ipcMain.handle(IPC.AgentSessions, (_event, cwd?: string) => bridge.listSessions(cwd))
 
   // commands, modes, model & thinking -------------------------------------------
-  ipcMain.handle('pion:agent-commands', () => bridge.getCommands())
-  ipcMain.handle('pion:agent-set-mode', (_event, mode: 'build' | 'plan') => bridge.setMode(mode))
-  ipcMain.handle('pion:agent-models', () => bridge.getModels())
-  ipcMain.handle('pion:agent-skills', () => bridge.getSkills())
-  ipcMain.handle('pion:agent-set-model', (_event, provider: string, modelId: string) =>
+  ipcMain.handle(IPC.AgentCommands, () => bridge.getCommands())
+  ipcMain.handle(IPC.AgentSetMode, (_event, mode: 'build' | 'plan') => bridge.setMode(mode))
+  ipcMain.handle(IPC.AgentModels, () => bridge.getModels())
+  ipcMain.handle(IPC.AgentSkills, () => bridge.getSkills())
+  ipcMain.handle(IPC.AgentSetModel, (_event, provider: string, modelId: string) =>
     bridge.setModel(provider, modelId)
   )
-  ipcMain.handle('pion:agent-thinking-levels', () => bridge.getThinkingLevels())
-  ipcMain.handle('pion:agent-set-thinking', (_event, level: string) =>
+  ipcMain.handle(IPC.AgentThinkingLevels, () => bridge.getThinkingLevels())
+  ipcMain.handle(IPC.AgentSetThinking, (_event, level: string) =>
     bridge.setThinkingLevel(level)
   )
 
   // plugin store --------------------------------------------------------------
-  ipcMain.handle('pion:plugins-catalog', () => plugins.getCatalog())
-  ipcMain.handle('pion:plugins-installed', () => plugins.getInstalled())
-  ipcMain.handle('pion:plugins-install', (_event, source: string) => plugins.install(source))
+  ipcMain.handle(IPC.PluginsCatalog, () => plugins.getCatalog())
+  ipcMain.handle(IPC.PluginsInstalled, () => plugins.getInstalled())
+  ipcMain.handle(IPC.PluginsInstall, (_event, source: string) => plugins.install(source))
 
   // agent settings ----------------------------------------------------------------
-  ipcMain.handle('pion:agent-set-auto-compaction', (_event, enabled: boolean) =>
+  ipcMain.handle(IPC.AgentSetAutoCompaction, (_event, enabled: boolean) =>
     bridge.setAutoCompaction(enabled)
   )
-  ipcMain.handle('pion:agent-set-auto-retry', (_event, enabled: boolean) =>
+  ipcMain.handle(IPC.AgentSetAutoRetry, (_event, enabled: boolean) =>
     bridge.setAutoRetry(enabled)
   )
-  ipcMain.handle('pion:agent-compact', () => bridge.compactNow())
-  ipcMain.handle('pion:agent-export-html', () => bridge.exportSessionHtml())
-  ipcMain.handle('pion:agent-rename-session', (_event, name: string) => bridge.renameSession(name))
-  ipcMain.handle('pion:agent-set-steering-mode', (_event, mode: 'all' | 'one-at-a-time') =>
+  ipcMain.handle(IPC.AgentCompact, () => bridge.compactNow())
+  ipcMain.handle(IPC.AgentExportHtml, () => bridge.exportSessionHtml())
+  ipcMain.handle(IPC.AgentRenameSession, (_event, name: string) => bridge.renameSession(name))
+  ipcMain.handle(IPC.AgentSetSteeringMode, (_event, mode: 'all' | 'one-at-a-time') =>
     bridge.setSteeringMode(mode)
   )
-  ipcMain.handle('pion:agent-set-follow-up-mode', (_event, mode: 'all' | 'one-at-a-time') =>
+  ipcMain.handle(IPC.AgentSetFollowUpMode, (_event, mode: 'all' | 'one-at-a-time') =>
     bridge.setFollowUpMode(mode)
   )
 
   // window ----------------------------------------------------------------------
-  ipcMain.handle('pion:window-state', (event) => {
+  ipcMain.handle(IPC.WindowState, (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     return win?.isMaximized() ?? false
   })
-  ipcMain.on('pion:window-control', (event, action: string) => {
+  ipcMain.on(IPC.WindowControl, (event, action: string) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win || win.isDestroyed()) return
     if (action === 'minimize') win.minimize()
@@ -168,29 +168,29 @@ function registerIpc(): void {
   })
 
   // projects ----------------------------------------------------------------------
-  ipcMain.handle('pion:projects-list', () => projects.list())
-  ipcMain.handle('pion:branches-list', (_event, cwd: string) => bridge.listBranches(cwd))
-  ipcMain.handle('pion:branch-create', (_event, cwd: string, name: string) => bridge.createBranch(cwd, name))
-  ipcMain.handle('pion:projects-add', (_event, cwd: string) => {
+  ipcMain.handle(IPC.ProjectsList, () => projects.list())
+  ipcMain.handle(IPC.BranchesList, (_event, cwd: string) => bridge.listBranches(cwd))
+  ipcMain.handle(IPC.BranchCreate, (_event, cwd: string, name: string) => bridge.createBranch(cwd, name))
+  ipcMain.handle(IPC.ProjectsAdd, (_event, cwd: string) => {
     projects.touch(cwd)
     pushProjects()
     return projects.list()
   })
-  ipcMain.handle('pion:projects-remove', (_event, cwd: string) => {
+  ipcMain.handle(IPC.ProjectsRemove, (_event, cwd: string) => {
     projects.remove(cwd)
     pushProjects()
     return projects.list()
   })
 
   // misc --------------------------------------------------------------------------
-  ipcMain.handle('pion:pick-workspace', async () => {
+  ipcMain.handle(IPC.PickWorkspace, async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],
       title: '选择工作目录'
     })
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
-  ipcMain.handle('pion:default-workspace', () => homedir())
+  ipcMain.handle(IPC.DefaultWorkspace, () => homedir())
 }
 
 app.whenReady().then(() => {

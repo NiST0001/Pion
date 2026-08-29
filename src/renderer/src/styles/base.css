@@ -1,0 +1,127 @@
+/* ==========================================================================
+   Pion · 陶土视觉系统
+   暖纸张、低对比度层级和克制的陶土色强调，贯穿整个工作台。
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+  --bg: #262624;
+  --bg-elev: #1f1f1d;
+  --bg-input: #34322f;
+  --bg-hover: #373532;
+  --bg-active: #463b34;
+  --border: #403d38;
+  --border-soft: #302f2b;
+  --fg: #eeeae4;
+  --fg-dim: #b6afa7;
+  --fg-faint: #847d75;
+  /* 陶土深色：暖炭黑背景与柔和橙棕强调。 */
+  --accent: #d97757;
+  --accent-rgb: 217, 119, 87;
+  --accent-strong: #e59072;
+  --accent-soft: rgba(217, 119, 87, 0.16);
+  --user-bubble: #44362f;
+  --danger: #e28b7d;
+  --danger-rgb: 226, 139, 125;
+  --ok: #a2bd8d;
+  --ok-rgb: 162, 189, 141;
+  --warn: #e1b36f;
+  --purple: #c5a8c2;
+  --cyan: #94b9bd;
+  --code-bg: #211f1c;
+  --code-fg: #ddd6cd;
+  --radius: 11px;
+  --radius-sm: 7px;
+  --mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  --shadow-pop: 0 16px 44px rgba(0, 0, 0, 0.34);
+  --sidebar-w: 276px;
+}
+
+:root[data-theme='terracotta-light'] {
+  color-scheme: light;
+  --bg: #fbfaf8;
+  --bg-elev: #f2f0ec;
+  --bg-input: #eeece8;
+  --bg-hover: #e8e4de;
+  --bg-active: #ded7cf;
+  --border: #d8d1c8;
+  --border-soft: #e7e2dc;
+  --fg: #2f2b28;
+  --fg-dim: #706961;
+  --fg-faint: #999189;
+  --accent: #c96748;
+  --accent-rgb: 201, 103, 72;
+  --accent-strong: #aa5138;
+  --accent-soft: rgba(201, 103, 72, 0.14);
+  --user-bubble: #eee6de;
+  --danger: #b65348;
+  --danger-rgb: 182, 83, 72;
+  --ok: #64885f;
+  --ok-rgb: 100, 136, 95;
+  --warn: #a36f2b;
+  --purple: #80699b;
+  --cyan: #477d86;
+  --code-bg: #f0ede8;
+  --code-fg: #48423c;
+  --shadow-pop: 0 18px 46px rgba(76, 57, 43, 0.16);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  background: none;
+  border: none;
+  color: inherit;
+}
+
+::selection {
+  background: rgba(var(--accent-rgb), 0.3);
+}
+
+/* ==========================================================================
+   App layout (frameless: titlebar + body[sidebar + main])
+   ========================================================================== */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg);
+}
+

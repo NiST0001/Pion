@@ -1,0 +1,113 @@
+/* ==========================================================================
+   Titlebar (frameless window chrome)
+   ========================================================================== */
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 6px 0 14px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border-soft);
+  -webkit-app-region: drag;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: var(--sidebar-w);
+  flex-shrink: 0;
+}
+
+.titlebar-panel-btn {
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  margin-right: 1px;
+  border-radius: var(--radius-sm);
+  color: var(--fg-faint);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.titlebar-panel-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.brand-mark {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.5px;
+}
+
+.brand-name {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.4px;
+  color: var(--fg);
+}
+
+.titlebar-brand .dot {
+  margin-left: auto;
+}
+
+.titlebar-path {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.titlebar-btn {
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  color: var(--fg-dim);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.titlebar-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.titlebar-close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+.titlebar-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.titlebar-review-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+

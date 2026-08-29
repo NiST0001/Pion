@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import type { ReactElement } from 'react'
 import { FilePenLine, FilePlus2, X } from 'lucide-react'
-import type { FileChange } from '../hooks/useAgent'
+import type { FileChange } from '../agent/types'
 import { DiffView } from './DiffView'
 
 export function ChangesDrawer({

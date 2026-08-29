@@ -11,8 +11,8 @@ import {
   Wrench,
   XCircle
 } from 'lucide-react'
-import type { ToolItem } from '../hooks/useAgent'
-import { diffStats } from '../hooks/useAgent'
+import type { ToolItem } from '../agent/types'
+import { diffStats } from '../agent/timeline'
 import { DiffView } from './DiffView'
 
 const TOOL_LABELS: Record<string, string> = {

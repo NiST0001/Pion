@@ -1,0 +1,309 @@
+import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import type { ReactElement } from 'react'
+import {
+  ChevronRight,
+  Copy,
+  GitBranch,
+  GripVertical,
+  Loader2,
+  Trash2
+} from 'lucide-react'
+import type { ForkMessageOption, SessionMeta } from '../../../shared/types'
+
+export function sessionMatchesQuery(session: SessionMeta, query: string): boolean {
+  const haystack = [session.name, session.preview, session.path]
+    .filter(Boolean)
+    .join(' ')
+    .toLocaleLowerCase()
+  return haystack.includes(query)
+}
+
+function formatTime(mtime: number): string {
+  const date = new Date(mtime)
+  const now = new Date()
+  const sameDay = date.toDateString() === now.toDateString()
+  if (sameDay) {
+    return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  }
+  return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+}
+
+interface SessionItemActions {
+  activePath?: string
+  onSelect: (path: string) => void
+  onReorder: (sessions: SessionMeta[]) => void
+  onDelete: (path: string) => Promise<void>
+  onCopy: (path: string) => Promise<void>
+  getForkMessages: (path: string) => Promise<ForkMessageOption[]>
+  onFork: (path: string, entryId: string) => Promise<string>
+}
+
+export function SessionItems({
+  sessions,
+  activePath,
+  onSelect,
+  onReorder,
+  onDelete,
+  onCopy,
+  getForkMessages,
+  onFork
+}: { sessions: SessionMeta[] } & SessionItemActions): ReactElement {
+  const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(null)
+  const [draggedPath, setDraggedPath] = useState<string | null>(null)
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (contextMenu && !sessions.some((session) => session.path === contextMenu.session.path)) {
+      setContextMenu(null)
+    }
+  }, [sessions, contextMenu])
+
+  const openContextMenu = (event: React.MouseEvent<HTMLDivElement>, session: SessionMeta): void => {
+    event.preventDefault()
+    event.stopPropagation()
+    const width = 246
+    const height = 340
+    setContextMenu({
+      session,
+      x: Math.min(event.clientX, Math.max(8, window.innerWidth - width)),
+      y: Math.min(event.clientY, Math.max(8, window.innerHeight - height))
+    })
+  }
+
+  const clearDragState = (): void => {
+    setDraggedPath(null)
+    setDragOverPath(null)
+  }
+
+  const handleDragStart = (event: React.DragEvent<HTMLDivElement>, session: SessionMeta): void => {
+    setDraggedPath(session.path)
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', session.path)
+  }
+
+  const handleDrop = (event: React.DragEvent<HTMLDivElement>, targetPath: string): void => {
+    event.preventDefault()
+    const sourcePath = event.dataTransfer.getData('text/plain') || draggedPath
+    if (!sourcePath || sourcePath === targetPath) {
+      clearDragState()
+      return
+    }
+    const fromIndex = sessions.findIndex((session) => session.path === sourcePath)
+    const toIndex = sessions.findIndex((session) => session.path === targetPath)
+    if (fromIndex < 0 || toIndex < 0) {
+      clearDragState()
+      return
+    }
+    const reordered = [...sessions]
+    const [moved] = reordered.splice(fromIndex, 1)
+    reordered.splice(toIndex, 0, moved)
+    onReorder(reordered)
+    clearDragState()
+  }
+
+  return (
+    <>
+      {sessions.map((session) => (
+        <div
+          key={session.path}
+          data-session-path={session.path}
+          className={`side-item side-session${session.path === activePath ? ' active' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
+          draggable
+          onDragStart={(event) => handleDragStart(event, session)}
+          onDragOver={(event) => {
+            event.preventDefault()
+            event.dataTransfer.dropEffect = 'move'
+            if (session.path !== draggedPath) setDragOverPath(session.path)
+          }}
+          onDragLeave={() => {
+            if (session.path === dragOverPath) setDragOverPath(null)
+          }}
+          onDrop={(event) => handleDrop(event, session.path)}
+          onDragEnd={clearDragState}
+          onClick={() => {
+            setContextMenu(null)
+            onSelect(session.path)
+          }}
+          onContextMenu={(event) => openContextMenu(event, session)}
+          title={`${session.path}\n拖拽调整顺序 · 右键查看更多操作`}
+        >
+          <div className="side-session-content">
+            <GripVertical size={13} className="side-session-drag" aria-hidden="true" />
+            <div className="side-session-main">
+              <span className="side-item-label">
+                {session.name || session.preview || '未命名会话'}
+              </span>
+              <span className="side-session-meta">
+                {formatTime(session.mtime)} · {session.messageCount} 条消息
+              </span>
+            </div>
+          </div>
+        </div>
+      ))}
+      {contextMenu && createPortal(
+        <SessionContextMenu
+          session={contextMenu.session}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+          onDelete={onDelete}
+          onCopy={onCopy}
+          getForkMessages={getForkMessages}
+          onFork={onFork}
+        />,
+        document.body
+      )}
+    </>
+  )
+}
+
+interface SessionContextMenuState {
+  session: SessionMeta
+  x: number
+  y: number
+}
+
+function SessionContextMenu({
+  session,
+  x,
+  y,
+  onClose,
+  onDelete,
+  onCopy,
+  getForkMessages,
+  onFork
+}: SessionContextMenuState & {
+  onClose: () => void
+  onDelete: (path: string) => Promise<void>
+  onCopy: (path: string) => Promise<void>
+  getForkMessages: (path: string) => Promise<ForkMessageOption[]>
+  onFork: (path: string, entryId: string) => Promise<string>
+}): ReactElement {
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [branchOpen, setBranchOpen] = useState(false)
+  const [forkMessages, setForkMessages] = useState<ForkMessageOption[] | null>(null)
+  const [loadingForks, setLoadingForks] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const handlePointerDown = (event: MouseEvent): void => {
+      if (!menuRef.current?.contains(event.target as Node)) onClose()
+    }
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose()
+    }
+    const handleResize = (): void => onClose()
+    document.addEventListener('mousedown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('resize', handleResize)
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('resize', handleResize)
+    }
+  }, [onClose])
+
+  const runAction = async (action: () => Promise<unknown>): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      await action()
+      onClose()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      setBusy(false)
+    }
+  }
+
+  const loadForkMessages = async (): Promise<void> => {
+    if (busy || loadingForks) return
+    if (forkMessages !== null) {
+      setBranchOpen((open) => !open)
+      return
+    }
+    setBranchOpen(true)
+    setLoadingForks(true)
+    setError('')
+    try {
+      setForkMessages(await getForkMessages(session.path))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoadingForks(false)
+    }
+  }
+
+  const title = session.name || session.preview || '未命名会话'
+
+  return (
+    <div
+      ref={menuRef}
+      className="context-menu"
+      style={{ left: x, top: y }}
+      role="menu"
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      <div className="context-menu-header" title={session.path}>
+        <span>{title}</span>
+        <small>{session.messageCount} 条消息</small>
+      </div>
+      <div className="context-menu-divider" />
+      <button
+        className="context-menu-item"
+        disabled={busy}
+        onClick={() => void runAction(() => onCopy(session.path))}
+      >
+        <Copy size={14} />
+        <span>从会话复制</span>
+      </button>
+      <button
+        className={`context-menu-item${branchOpen ? ' active' : ''}`}
+        disabled={busy}
+        aria-expanded={branchOpen}
+        onClick={() => void loadForkMessages()}
+      >
+        <GitBranch size={14} />
+        <span>从会话分支</span>
+        {loadingForks ? <Loader2 size={13} className="spin" /> : <ChevronRight size={13} />}
+      </button>
+      {branchOpen && (
+        <div className="context-submenu">
+          {forkMessages === null && loadingForks && (
+            <div className="context-menu-empty"><Loader2 size={13} className="spin" /> 正在读取分支点…</div>
+          )}
+          {forkMessages?.length === 0 && (
+            <div className="context-menu-empty">没有可用的用户消息</div>
+          )}
+          {forkMessages?.map((message, index) => (
+            <button
+              key={message.entryId}
+              className="context-fork-item"
+              disabled={busy}
+              title={message.text}
+              onClick={() => void runAction(() => onFork(session.path, message.entryId))}
+            >
+              <span className="context-fork-index">{index + 1}</span>
+              <span>{message.text.replace(/\s+/g, ' ').slice(0, 110)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="context-menu-divider" />
+      <button
+        className="context-menu-item context-menu-danger"
+        disabled={busy}
+        onClick={() => {
+          if (window.confirm(`确定删除会话“${title}”？此操作不可撤销。`)) {
+            void runAction(() => onDelete(session.path))
+          }
+        }}
+      >
+        <Trash2 size={14} />
+        <span>删除会话</span>
+      </button>
+      {error && <div className="context-menu-error">{error}</div>}
+    </div>
+  )
+}
