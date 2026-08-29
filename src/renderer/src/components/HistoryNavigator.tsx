@@ -7,10 +7,10 @@ import type {
 } from '../../../shared/types'
 
 const MAX_MARKERS = 180
-/** Gaussian falloff: how many neighbours the hover wave reaches. */
-const WAVE_SIGMA = 2.4
+/** Radius (in bars) the hover wave reaches; beyond it bars keep their base width. */
+const WAVE_RADIUS = 6
 /** Peak extra width applied to the bar under the cursor. */
-const WAVE_BOOST = 1.25
+const WAVE_BOOST = 1.5
 
 function sampleLandmarks(
   landmarks: HistoryLandmark[],
@@ -30,11 +30,13 @@ function sampleLandmarks(
   return [...sampled.values()].sort((a, b) => a.entryIndex - b.entryIndex)
 }
 
-/** Dock-magnification style falloff: closest bar grows most, distant bars stay put. */
+/** Concave (∩) falloff: a round peak whose drop accelerates toward the edge. */
 function waveScale(markerIndex: number, hoverIndex: number | null): number {
   if (hoverIndex === null) return 1
   const distance = Math.abs(markerIndex - hoverIndex)
-  return 1 + WAVE_BOOST * Math.exp(-(distance * distance) / (2 * WAVE_SIGMA * WAVE_SIGMA))
+  if (distance >= WAVE_RADIUS) return 1
+  const cosine = Math.cos((distance / WAVE_RADIUS) * (Math.PI / 2))
+  return 1 + WAVE_BOOST * cosine * cosine
 }
 
 function formatLandmarkTime(timestamp: string): string {

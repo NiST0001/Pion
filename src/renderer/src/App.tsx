@@ -18,7 +18,6 @@ import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
 import { BranchCreateModal } from './components/BranchCreateModal'
 import { FavoriteSessions, ProjectList, SidebarToolbar } from './components/Sidebar'
-import { ChangesDrawer } from './components/ChangesDrawer'
 import { ReviewPanel } from './components/ReviewPanel'
 import { ModelPicker, ThinkingPicker } from './components/ModelPicker'
 import { TitleBar } from './components/TitleBar'
@@ -54,7 +53,7 @@ function clamp(value: number, min: number, max: number): number {
 export function App(): ReactElement {
   const { state, actions, hasBridge } = useAgent()
   const [prefill, setPrefill] = useState('')
-  const [drawerChange, setDrawerChange] = useState<FileChange | null>(null)
+  const [reviewChange, setReviewChange] = useState<FileChange | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [pluginStoreOpen, setPluginStoreOpen] = useState(false)
@@ -71,7 +70,7 @@ export function App(): ReactElement {
   const [branchDialogCwd, setBranchDialogCwd] = useState<string | null>(null)
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [reviewOpen, setReviewOpen] = useState(false)
+  const [reviewOpen, setReviewOpen] = useState(true)
   const [rollbackBusy, setRollbackBusy] = useState(false)
   const [rollbackError, setRollbackError] = useState('')
   const [sidebarWidth, setSidebarWidth] = useState(276)
@@ -618,21 +617,22 @@ export function App(): ReactElement {
 
   const handleToggleReview = useCallback(() => {
     setReviewOpen((open) => !open)
-    setDrawerChange(null)
+    setReviewChange(null)
   }, [])
 
   const handleReviewLatestChanges = useCallback(() => {
     setReviewOpen(true)
-    setDrawerChange(latestRunChanges[0] ?? null)
+    setReviewChange(latestRunChanges[0] ?? null)
   }, [latestRunChanges])
 
   const handleSelectInlineChange = useCallback((change: FileChange) => {
-    setDrawerChange(change)
+    setReviewOpen(true)
+    setReviewChange(change)
   }, [])
 
   useEffect(() => {
     setRollbackError('')
-    if (state.runCheckpoint?.state === 'rolled-back') setDrawerChange(null)
+    if (state.runCheckpoint?.state === 'rolled-back') setReviewChange(null)
   }, [state.runCheckpoint?.id, state.runCheckpoint?.state])
 
   const handleRollbackRun = useCallback(async (): Promise<void> => {
@@ -646,7 +646,7 @@ export function App(): ReactElement {
     setRollbackError('')
     try {
       await actions.rollbackRunCheckpoint()
-      setDrawerChange(null)
+      setReviewChange(null)
     } catch (error) {
       setRollbackError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -868,13 +868,13 @@ export function App(): ReactElement {
         {reviewOpen && (
           <ReviewPanel
             changes={changes}
-            selectedChange={drawerChange}
+            selectedChange={reviewChange}
             checkpoint={state.runCheckpoint}
             agentBusy={state.busy}
             rollbackBusy={rollbackBusy}
             rollbackError={rollbackError}
             width={reviewWidth}
-            onSelect={setDrawerChange}
+            onSelect={setReviewChange}
             onRollback={() => void handleRollbackRun()}
             onClose={handleToggleReview}
             onResizeStart={(event) => handleResizeStart('review', event)}
@@ -932,10 +932,6 @@ export function App(): ReactElement {
           setSteeringMode: actions.setSteeringMode,
           setFollowUpMode: actions.setFollowUpMode
         }}
-      />
-      <ChangesDrawer
-        change={reviewOpen ? null : drawerChange}
-        onClose={() => setDrawerChange(null)}
       />
     </div>
   )

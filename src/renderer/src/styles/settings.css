@@ -1735,7 +1735,7 @@
   flex: 0 0 min(390px, 34vw);
   flex-direction: column;
   min-width: 310px;
-  background: var(--bg-elev);
+  background: var(--bg);
   border-left: 1px solid var(--border-soft);
 }
 

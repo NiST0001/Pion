@@ -119,7 +119,6 @@ body,
 /* Large surfaces ---------------------------------------------------------- */
 
 .modal-backdrop,
-.drawer-backdrop,
 .tool-permission-backdrop {
   animation: pion-fade-in var(--motion-normal) ease both;
 }
@@ -127,10 +126,6 @@ body,
 .modal-backdrop > .modal,
 .tool-permission-modal {
   animation: pion-pop-in var(--motion-normal) var(--motion-ease-out) both;
-}
-
-.drawer {
-  animation: pion-slide-in-right var(--motion-slow) var(--motion-ease-out) both;
 }
 
 .sidebar {

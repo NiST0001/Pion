@@ -1,64 +1,6 @@
 /* ==========================================================================
-   Changes drawer
+   File previews shared by the review panel
    ========================================================================== */
-
-.drawer-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.45);
-  z-index: 100;
-  display: flex;
-  justify-content: flex-end;
-  animation: fade 0.15s ease;
-}
-
-@keyframes fade {
-  from {
-    opacity: 0;
-  }
-}
-
-.drawer {
-  width: min(560px, 60vw);
-  background: var(--bg-elev);
-  border-left: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  animation: slide-in 0.18s ease;
-}
-
-@keyframes slide-in {
-  from {
-    transform: translateX(24px);
-    opacity: 0.4;
-  }
-}
-
-.drawer-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border-soft);
-  color: var(--fg-dim);
-}
-
-.drawer-title {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--fg);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.drawer-body {
-  flex: 1;
-  overflow: auto;
-  padding: 12px;
-}
 
 .file-preview {
   font-family: var(--mono);
@@ -68,4 +10,3 @@
   white-space: pre-wrap;
   word-break: break-all;
 }
-
