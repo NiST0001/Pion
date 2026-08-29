@@ -8,7 +8,7 @@ import { ChatMessage } from './components/ChatMessage'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
 import { BranchCreateModal } from './components/BranchCreateModal'
-import { ProjectList, SidebarToolbar } from './components/Sidebar'
+import { FavoriteSessions, ProjectList, SidebarToolbar } from './components/Sidebar'
 import { ChangesDrawer } from './components/ChangesDrawer'
 import { ReviewPanel } from './components/ReviewPanel'
 import { ModelPicker, ThinkingPicker } from './components/ModelPicker'
@@ -19,6 +19,7 @@ import { PluginStoreModal } from './components/PluginStoreModal'
 import { ProjectPicker } from './components/ProjectPicker'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
 import type { SessionPreviewDensity } from './utils/sessionPreview'
+import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
 
 type ResizeTarget = 'sidebar' | 'review'
 
@@ -52,6 +53,7 @@ export function App(): ReactElement {
   const [sidebarWidth, setSidebarWidth] = useState(276)
   const [reviewWidth, setReviewWidth] = useState(390)
   const [sessionQuery, setSessionQuery] = useState('')
+  const [favoriteSessionPaths, setFavoriteSessionPaths] = useState<string[]>(readFavoriteSessionPaths)
   const [sessionPreviewDensity, setSessionPreviewDensity] = useState<SessionPreviewDensity>(readSessionPreviewDensity)
   const [newSessionCwd, setNewSessionCwd] = useState('')
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
@@ -94,6 +96,22 @@ export function App(): ReactElement {
   const handleSessionPreviewDensityChange = useCallback((density: SessionPreviewDensity): void => {
     setSessionPreviewDensity(density)
     saveSessionPreviewDensity(density)
+  }, [])
+
+  useEffect(() => {
+    saveFavoriteSessionPaths(favoriteSessionPaths)
+  }, [favoriteSessionPaths])
+
+  const favoritePathSet = useMemo(() => new Set(favoriteSessionPaths), [favoriteSessionPaths])
+  const favoriteSessions = useMemo(() => {
+    const sessions = Object.values(state.sessionsByProject).flat()
+    return orderFavoriteSessions(sessions, favoriteSessionPaths)
+  }, [favoriteSessionPaths, state.sessionsByProject])
+
+  const handleToggleFavorite = useCallback((path: string): void => {
+    setFavoriteSessionPaths((current) => current.includes(path)
+      ? current.filter((favoritePath) => favoritePath !== path)
+      : [...current, path])
   }, [])
 
   // Resize either side panel with its vertical drag handle.
@@ -309,6 +327,9 @@ export function App(): ReactElement {
   const handleDeleteSession = useCallback(
     async (cwd: string, path: string) => {
       if (selectedSession?.path === path) setSelectedSession(null)
+      setFavoriteSessionPaths((current) => current.includes(path)
+        ? current.filter((favoritePath) => favoritePath !== path)
+        : current)
       await activateProject(cwd)
       await actions.deleteSession(path)
     },
@@ -391,6 +412,19 @@ export function App(): ReactElement {
               onNewSession={() => void handleNewSession(newSessionCwd || undefined)}
               onOpenCapabilities={() => setCapabilitiesOpen(true)}
             />
+            <FavoriteSessions
+              sessions={favoriteSessions}
+              searchQuery={sessionQuery}
+              previewDensity={sessionPreviewDensity}
+              activePath={activePath}
+              favoritePaths={favoritePathSet}
+              onToggleFavorite={handleToggleFavorite}
+              onSelectSession={(session) => void handleSelectSession(session.projectCwd ?? state.status.cwd ?? '', session.path)}
+              onDelete={(session) => handleDeleteSession(session.projectCwd ?? state.status.cwd ?? '', session.path)}
+              onCopy={(session) => handleCopySession(session.projectCwd ?? state.status.cwd ?? '', session.path)}
+              getForkMessages={(session) => handleGetForkMessages(session.projectCwd ?? state.status.cwd ?? '', session.path)}
+              onFork={(session, entryId) => handleForkSession(session.projectCwd ?? state.status.cwd ?? '', session.path, entryId)}
+            />
             <ProjectList
               projects={state.projects}
               sessionsByProject={state.sessionsByProject}
@@ -410,6 +444,8 @@ export function App(): ReactElement {
               onCopy={handleCopySession}
               getForkMessages={handleGetForkMessages}
               onFork={handleForkSession}
+              favoritePaths={favoritePathSet}
+              onToggleFavorite={handleToggleFavorite}
             />
           </div>
           <div className="sidebar-footer">

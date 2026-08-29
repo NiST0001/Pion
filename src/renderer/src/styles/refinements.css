@@ -1749,6 +1749,39 @@ body {
   gap: 6px;
 }
 
+.side-session-main {
+  flex: 1;
+}
+
+.side-session-favorite {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin-top: -2px;
+  border-radius: 6px;
+  color: var(--fg-faint);
+  opacity: 0;
+  transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+}
+
+.side-session:hover .side-session-favorite,
+.side-session-favorite:focus-visible,
+.side-session-favorite.active {
+  opacity: 1;
+}
+
+.side-session-favorite:hover {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.side-session:not(.reorderable) {
+  cursor: pointer;
+}
+
 .side-session-drag {
   flex-shrink: 0;
   margin-top: 2px;

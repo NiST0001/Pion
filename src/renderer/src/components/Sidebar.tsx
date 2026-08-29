@@ -107,6 +107,78 @@ export function SidebarToolbar({
 }
 
 // ---------------------------------------------------------------------------
+// Favorites
+// ---------------------------------------------------------------------------
+
+export function FavoriteSessions({
+  sessions,
+  searchQuery,
+  activePath,
+  previewDensity,
+  favoritePaths,
+  onToggleFavorite,
+  onSelectSession,
+  onDelete,
+  onCopy,
+  getForkMessages,
+  onFork
+}: {
+  sessions: SessionMeta[]
+  searchQuery: string
+  activePath?: string
+  previewDensity: SessionPreviewDensity
+  favoritePaths: ReadonlySet<string>
+  onToggleFavorite: (path: string) => void
+  onSelectSession: (session: SessionMeta) => void
+  onDelete: (session: SessionMeta) => Promise<void>
+  onCopy: (session: SessionMeta) => Promise<void>
+  getForkMessages: (session: SessionMeta) => Promise<ForkMessageOption[]>
+  onFork: (session: SessionMeta, entryId: string) => Promise<string>
+}): ReactElement {
+  const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
+  const visibleSessions = normalizedQuery
+    ? sessions.filter((session) => sessionMatchesQuery(session, normalizedQuery))
+    : sessions
+  const findSession = (path: string): SessionMeta | undefined => sessions.find((session) => session.path === path)
+
+  return (
+    <Section title="收藏" count={visibleSessions.length}>
+      {visibleSessions.length === 0 ? (
+        <div className="side-empty">{normalizedQuery ? '没有匹配的收藏会话' : '暂无收藏的会话'}</div>
+      ) : (
+        <SessionItems
+          sessions={visibleSessions}
+          activePath={activePath}
+          previewDensity={previewDensity}
+          favoritePaths={favoritePaths}
+          onToggleFavorite={onToggleFavorite}
+          onSelect={(path) => {
+            const session = findSession(path)
+            if (session) onSelectSession(session)
+          }}
+          onDelete={(path) => {
+            const session = findSession(path)
+            return session ? onDelete(session) : Promise.resolve()
+          }}
+          onCopy={(path) => {
+            const session = findSession(path)
+            return session ? onCopy(session) : Promise.resolve()
+          }}
+          getForkMessages={(path) => {
+            const session = findSession(path)
+            return session ? getForkMessages(session) : Promise.resolve([])
+          }}
+          onFork={(path, entryId) => {
+            const session = findSession(path)
+            return session ? onFork(session, entryId) : Promise.resolve('')
+          }}
+        />
+      )}
+    </Section>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Projects
 // ---------------------------------------------------------------------------
 
@@ -134,7 +206,9 @@ export function ProjectList({
   onDelete,
   onCopy,
   getForkMessages,
-  onFork
+  onFork,
+  favoritePaths,
+  onToggleFavorite
 }: {
   projects: ProjectMeta[]
   sessionsByProject: Record<string, SessionMeta[]>
@@ -154,6 +228,8 @@ export function ProjectList({
   onCopy: (cwd: string, path: string) => Promise<void>
   getForkMessages: (cwd: string, path: string) => Promise<ForkMessageOption[]>
   onFork: (cwd: string, path: string, entryId: string) => Promise<string>
+  favoritePaths: ReadonlySet<string>
+  onToggleFavorite: (path: string) => void
 }): ReactElement {
   const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
   const visibleProjects = projects
@@ -207,6 +283,8 @@ export function ProjectList({
           onCopy={onCopy}
           getForkMessages={getForkMessages}
           onFork={onFork}
+          favoritePaths={favoritePaths}
+          onToggleFavorite={onToggleFavorite}
         />
       ))}
     </Section>
@@ -225,7 +303,9 @@ function ProjectBranch({
   onDelete,
   onCopy,
   getForkMessages,
-  onFork
+  onFork,
+  favoritePaths,
+  onToggleFavorite
 }: {
   branch: BranchInfo
   sessions: SessionMeta[]
@@ -239,6 +319,8 @@ function ProjectBranch({
   onCopy: (cwd: string, path: string) => Promise<void>
   getForkMessages: (cwd: string, path: string) => Promise<ForkMessageOption[]>
   onFork: (cwd: string, path: string, entryId: string) => Promise<string>
+  favoritePaths: ReadonlySet<string>
+  onToggleFavorite: (path: string) => void
 }): ReactElement {
   const [open, setOpen] = useState(true)
 
@@ -290,6 +372,8 @@ function ProjectBranch({
               sessions={sessions}
               activePath={activePath}
               previewDensity={previewDensity}
+              favoritePaths={favoritePaths}
+              onToggleFavorite={onToggleFavorite}
               onSelect={(path) => onSelectSession(branch.cwd, path)}
               onReorder={handleReorder}
               onDelete={(path) => onDelete(branch.cwd, path)}
@@ -321,7 +405,9 @@ function ProjectFolder({
   onDelete,
   onCopy,
   getForkMessages,
-  onFork
+  onFork,
+  favoritePaths,
+  onToggleFavorite
 }: {
   project: ProjectMeta
   branches: ProjectBranchView[]
@@ -340,6 +426,8 @@ function ProjectFolder({
   onCopy: (cwd: string, path: string) => Promise<void>
   getForkMessages: (cwd: string, path: string) => Promise<ForkMessageOption[]>
   onFork: (cwd: string, path: string, entryId: string) => Promise<string>
+  favoritePaths: ReadonlySet<string>
+  onToggleFavorite: (path: string) => void
 }): ReactElement {
   const [open, setOpen] = useState(true)
   const expanded = open || searchActive
@@ -410,6 +498,8 @@ function ProjectFolder({
               onCopy={onCopy}
               getForkMessages={getForkMessages}
               onFork={onFork}
+              favoritePaths={favoritePaths}
+              onToggleFavorite={onToggleFavorite}
             />
           ))}
         </div>

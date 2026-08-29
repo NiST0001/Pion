@@ -7,6 +7,7 @@ import {
   GitBranch,
   GripVertical,
   Loader2,
+  Star,
   Trash2
 } from 'lucide-react'
 import type { ForkMessageOption, SessionMeta } from '../../../shared/types'
@@ -33,11 +34,13 @@ function formatTime(mtime: number): string {
 interface SessionItemActions {
   activePath?: string
   onSelect: (path: string) => void
-  onReorder: (sessions: SessionMeta[]) => void
+  onReorder?: (sessions: SessionMeta[]) => void
   onDelete: (path: string) => Promise<void>
   onCopy: (path: string) => Promise<void>
   getForkMessages: (path: string) => Promise<ForkMessageOption[]>
   onFork: (path: string, entryId: string) => Promise<string>
+  favoritePaths: ReadonlySet<string>
+  onToggleFavorite: (path: string) => void
 }
 
 export function SessionItems({
@@ -49,7 +52,9 @@ export function SessionItems({
   onDelete,
   onCopy,
   getForkMessages,
-  onFork
+  onFork,
+  favoritePaths,
+  onToggleFavorite
 }: { sessions: SessionMeta[]; previewDensity: SessionPreviewDensity } & SessionItemActions): ReactElement {
   const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(null)
   const [draggedPath, setDraggedPath] = useState<string | null>(null)
@@ -65,7 +70,7 @@ export function SessionItems({
     event.preventDefault()
     event.stopPropagation()
     const width = 246
-    const height = 340
+    const height = 390
     setContextMenu({
       session,
       x: Math.min(event.clientX, Math.max(8, window.innerWidth - width)),
@@ -100,7 +105,7 @@ export function SessionItems({
     const reordered = [...sessions]
     const [moved] = reordered.splice(fromIndex, 1)
     reordered.splice(toIndex, 0, moved)
-    onReorder(reordered)
+    onReorder?.(reordered)
     clearDragState()
   }
 
@@ -110,10 +115,13 @@ export function SessionItems({
         <div
           key={session.path}
           data-session-path={session.path}
-          className={`side-item side-session side-session-${previewDensity}${session.path === activePath ? ' active' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
-          draggable
-          onDragStart={(event) => handleDragStart(event, session)}
+          className={`side-item side-session side-session-${previewDensity}${onReorder ? ' reorderable' : ''}${session.path === activePath ? ' active' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
+          draggable={Boolean(onReorder)}
+          onDragStart={(event) => {
+            if (onReorder) handleDragStart(event, session)
+          }}
           onDragOver={(event) => {
+            if (!onReorder) return
             event.preventDefault()
             event.dataTransfer.dropEffect = 'move'
             if (session.path !== draggedPath) setDragOverPath(session.path)
@@ -128,10 +136,10 @@ export function SessionItems({
             onSelect(session.path)
           }}
           onContextMenu={(event) => openContextMenu(event, session)}
-          title={`${session.path}\n拖拽调整顺序 · 右键查看更多操作`}
+          title={`${session.path}\n${onReorder ? '拖拽调整顺序 · ' : ''}点击星标收藏 · 右键查看更多操作`}
         >
           <div className="side-session-content">
-            <GripVertical size={13} className="side-session-drag" aria-hidden="true" />
+            {onReorder && <GripVertical size={13} className="side-session-drag" aria-hidden="true" />}
             <div className="side-session-main">
               <span className="side-item-label">
                 {session.name || session.preview || '未命名会话'}
@@ -145,6 +153,19 @@ export function SessionItems({
                 </span>
               )}
             </div>
+            <button
+              type="button"
+              className={`side-session-favorite${favoritePaths.has(session.path) ? ' active' : ''}`}
+              aria-label={favoritePaths.has(session.path) ? '取消收藏会话' : '收藏会话'}
+              aria-pressed={favoritePaths.has(session.path)}
+              title={favoritePaths.has(session.path) ? '取消收藏' : '收藏会话'}
+              onClick={(event) => {
+                event.stopPropagation()
+                onToggleFavorite(session.path)
+              }}
+            >
+              <Star size={13} fill={favoritePaths.has(session.path) ? 'currentColor' : 'none'} />
+            </button>
           </div>
         </div>
       ))}
@@ -158,6 +179,8 @@ export function SessionItems({
           onCopy={onCopy}
           getForkMessages={getForkMessages}
           onFork={onFork}
+          favorite={favoritePaths.has(contextMenu.session.path)}
+          onToggleFavorite={onToggleFavorite}
         />,
         document.body
       )}
@@ -179,13 +202,17 @@ function SessionContextMenu({
   onDelete,
   onCopy,
   getForkMessages,
-  onFork
+  onFork,
+  favorite,
+  onToggleFavorite
 }: SessionContextMenuState & {
   onClose: () => void
   onDelete: (path: string) => Promise<void>
   onCopy: (path: string) => Promise<void>
   getForkMessages: (path: string) => Promise<ForkMessageOption[]>
   onFork: (path: string, entryId: string) => Promise<string>
+  favorite: boolean
+  onToggleFavorite: (path: string) => void
 }): ReactElement {
   const menuRef = useRef<HTMLDivElement>(null)
   const [branchOpen, setBranchOpen] = useState(false)
@@ -257,6 +284,17 @@ function SessionContextMenu({
         <small>{session.messageCount} 条消息</small>
       </div>
       <div className="context-menu-divider" />
+      <button
+        className="context-menu-item"
+        disabled={busy}
+        onClick={() => {
+          onToggleFavorite(session.path)
+          onClose()
+        }}
+      >
+        <Star size={14} fill={favorite ? 'currentColor' : 'none'} />
+        <span>{favorite ? '取消收藏' : '收藏会话'}</span>
+      </button>
       <button
         className="context-menu-item"
         disabled={busy}
