@@ -272,7 +272,7 @@ export function SettingsModal({
             )}
 
             {page === 'session' && (
-              <section className="settings-page">
+              <section key="session" className="settings-page">
                 <PageHeading
                   kicker="SESSION"
                   title="会话"
@@ -415,7 +415,7 @@ export function SettingsModal({
             )}
 
             {page === 'security' && (
-              <section className="settings-page security-page">
+              <section key="security" className="settings-page security-page">
                 <PageHeading
                   kicker="SECURITY"
                   title="安全与信任"
@@ -497,7 +497,7 @@ export function SettingsModal({
             )}
 
             {page === 'appearance' && (
-              <section className="settings-page">
+              <section key="appearance" className="settings-page">
                 <PageHeading
                   kicker="APPEARANCE"
                   title="外观"
@@ -561,7 +561,7 @@ export function SettingsModal({
             )}
 
             {page === 'about' && (
-              <section className="settings-page about-page">
+              <section key="about" className="settings-page about-page">
                 <PageHeading
                   kicker="ABOUT"
                   title="关于 Pion"
@@ -592,7 +592,7 @@ export function SettingsModal({
             )}
 
             {page === 'diagnostics' && (
-              <section className="settings-page">
+              <section key="diagnostics" className="settings-page">
                 <PageHeading
                   kicker="DIAGNOSTICS"
                   title="诊断"

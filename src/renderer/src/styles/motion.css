@@ -1,0 +1,261 @@
+/* ==========================================================================
+   Pion motion system
+   Short, restrained transitions for interactive UI. Restored conversation
+   history intentionally remains static; only live streaming output animates.
+   ========================================================================== */
+
+:root {
+  --motion-fast: 110ms;
+  --motion-normal: 180ms;
+  --motion-slow: 260ms;
+  --motion-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@keyframes pion-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pion-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(7px) scale(0.975);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pion-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pion-slide-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pion-slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pion-slide-in-down {
+  from {
+    opacity: 0;
+    transform: translateY(-7px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pion-reveal-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pion-expand-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scaleY(0.975);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Theme changes ----------------------------------------------------------- */
+
+html,
+body,
+.app,
+.titlebar,
+.sidebar,
+.main,
+.chat-stage,
+.composer-dock,
+.composer-row,
+.review-panel,
+.modal,
+.context-menu,
+.tool-permission-modal {
+  transition:
+    background-color var(--motion-normal) var(--motion-ease-standard),
+    border-color var(--motion-normal) var(--motion-ease-standard),
+    color var(--motion-normal) var(--motion-ease-standard),
+    box-shadow var(--motion-normal) var(--motion-ease-standard);
+}
+
+/* Large surfaces ---------------------------------------------------------- */
+
+.modal-backdrop,
+.drawer-backdrop,
+.tool-permission-backdrop {
+  animation: pion-fade-in var(--motion-normal) ease both;
+}
+
+.modal-backdrop > .modal,
+.tool-permission-modal {
+  animation: pion-pop-in var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.drawer {
+  animation: pion-slide-in-right var(--motion-slow) var(--motion-ease-out) both;
+}
+
+.sidebar {
+  animation: pion-slide-in-left var(--motion-slow) var(--motion-ease-out) both;
+}
+
+.review-panel {
+  animation: pion-slide-in-right var(--motion-slow) var(--motion-ease-out) both;
+}
+
+.banner,
+.project-trust-banner {
+  animation: pion-slide-in-down var(--motion-normal) var(--motion-ease-out) both;
+}
+
+/* Menus and transient overlays ------------------------------------------- */
+
+.picker-menu,
+.composer-project-menu,
+.slash-command-menu,
+.context-menu,
+.context-submenu {
+  transform-origin: top center;
+  animation: pion-menu-in var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.history-navigator {
+  animation: pion-fade-in var(--motion-slow) ease both;
+}
+
+.history-navigator-preview {
+  animation: pion-pop-in var(--motion-fast) var(--motion-ease-out) both;
+}
+
+/* Pages and expandable content ------------------------------------------- */
+
+.settings-page,
+.capabilities-page,
+.plugin-store-grid,
+.model-grid,
+.review-detail,
+.review-files {
+  animation: pion-reveal-in var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.side-section-body,
+.project-folder-branches,
+.project-branch-sessions,
+.tool-body,
+.composer-attachments,
+.message-images,
+.plugin-store-notice,
+.plugin-store-state,
+.settings-inline-error,
+.context-menu-error {
+  transform-origin: top center;
+  animation: pion-expand-in var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.composer-attachment,
+.theme-choice,
+.provider-card,
+.capability-card,
+.plugin-card,
+.review-file-item {
+  transition:
+    transform var(--motion-fast) var(--motion-ease-out),
+    background-color var(--motion-fast) ease,
+    border-color var(--motion-fast) ease,
+    color var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
+}
+
+.composer-attachment {
+  animation: pion-reveal-in var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.empty-state {
+  animation: pion-reveal-in var(--motion-slow) var(--motion-ease-out) both;
+}
+
+/* Interaction feedback ---------------------------------------------------- */
+
+button:not(:disabled),
+[role='button'] {
+  transition:
+    transform var(--motion-fast) var(--motion-ease-out),
+    background-color var(--motion-fast) ease,
+    border-color var(--motion-fast) ease,
+    color var(--motion-fast) ease,
+    opacity var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
+}
+
+button:not(:disabled):active,
+[role='button']:active {
+  transform: translateY(1px) scale(0.985);
+}
+
+.project-folder-toggle svg,
+.project-branch-toggle svg,
+.side-section-toggle svg,
+.picker-trigger svg,
+.thinking-trigger svg,
+.composer-project-chevron,
+.provider-chevron,
+.context-menu-chevron {
+  transition: transform var(--motion-normal) var(--motion-ease-out);
+}
+
+/* Conversation history is restored as a stable snapshot. */
+.timeline > .row:not(.streaming-reveal),
+.timeline > .tool-call,
+.timeline > .compaction-marker {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

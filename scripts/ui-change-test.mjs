@@ -84,6 +84,7 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`!!document.querySelector('.project-trust-banner')`)) break
 }
 await check('未信任项目显示安全提示', `document.querySelector('.project-trust-banner')?.classList.contains('project-trust-untrusted') && document.querySelector('.project-trust-banner')?.textContent?.includes('不是沙箱')`)
+await check('安全提示使用克制入场动画', `getComputedStyle(document.querySelector('.project-trust-banner')).animationName === 'pion-slide-in-down'`)
 await check('未信任项目跳过本地 Pi 资源', `(async () => { const trust = await window.pion.getProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)}); return trust.requiresTrust && trust.decision === 'untrusted'; })()`)
 await evaluate(`document.querySelector('.project-trust-approve')?.click()`)
 for (let i = 0; i < 30; i++) {
@@ -197,6 +198,7 @@ for (let i = 0; i < 40; i++) {
 await check('冷会话历史无需等待后台启动', `(() => { const path = window.__pionHistoryLoadPath; const active = [...document.querySelectorAll('.project-branch-sessions .side-session')].find((row) => row.dataset.sessionPath === path); return !!path && active?.classList.contains('active') && !!document.querySelector('.timeline') && performance.now() - window.__pionHistoryLoadStarted < 3000 && !document.querySelector('.session-load-error'); })()`)
 await check('长会话最新页作为完整快照渲染', `(() => { const expected = window.__pionExpectedNewestItems; const actual = document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker').length; return expected > 0 && actual >= expected ? true : { expected, actual, path: window.__pionHistoryLoadPath }; })()`)
 await check('恢复历史不再播放分段渐变', `(() => { const items = [...document.querySelectorAll('.timeline > *')]; const bad = items.filter((item) => item.classList.contains('history-reveal') || item.classList.contains('streaming-reveal') || getComputedStyle(item).animationName !== 'none').map((item) => ({ className: item.className, animation: getComputedStyle(item).animationName })); return bad.length === 0 ? true : { bad: bad.slice(0, 8), total: items.length }; })()`)
+await check('动画系统支持减少动态效果', `(() => { try { return [...document.styleSheets].some((sheet) => [...sheet.cssRules].some((rule) => rule.cssText.includes('prefers-reduced-motion') && rule.cssText.includes('animation-duration'))); } catch { return false; } })()`)
 for (let i = 0; i < 30; i++) {
   await sleep(100)
   if (await evaluate(`document.querySelectorAll('.history-navigator-marker').length >= 2`)) break
@@ -237,6 +239,7 @@ await check('左上角按钮可关闭会话栏', `!document.querySelector('.side
 await evaluate(`document.querySelector('.titlebar-panel-btn')?.click()`)
 await sleep(150)
 await check('左上角按钮可重新打开会话栏', `!!document.querySelector('.sidebar')`)
+await check('侧栏打开使用滑入动画', `getComputedStyle(document.querySelector('.sidebar')).animationName === 'pion-slide-in-left'`)
 await evaluate(`document.querySelector('.titlebar-review-btn')?.click()`)
 await sleep(200)
 await check('右上角按钮可打开文件审查栏', `!!document.querySelector('.review-panel')`)
@@ -300,6 +303,7 @@ await check('模型选择器显示当前模型', `(document.querySelector('.comp
 await check('模型选择器可打开', `(() => { document.querySelector('.composer-inline-controls .picker-trigger')?.click(); return true })()`)
 await sleep(300)
 await check('模型菜单已显示', `!!document.querySelector('.composer-inline-controls .picker-menu')`)
+await check('选择菜单使用轻量展开动画', `getComputedStyle(document.querySelector('.composer-inline-controls .picker-menu')).animationName === 'pion-menu-in'`)
 await check('模型选项可见', `document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
 await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
 await check('构建/计划左侧有项目选择', `(() => { const picker = document.querySelector('.composer-inline-controls .composer-project-picker'); const trigger = picker?.querySelector('.composer-project-trigger'); const mode = document.querySelector('.composer-mode-picker'); return !!trigger && trigger.getAttribute('aria-label') === '新会话项目' && (trigger.textContent ?? '').includes('项目') && !!mode && Boolean(picker.compareDocumentPosition(mode) & Node.DOCUMENT_POSITION_FOLLOWING) && !picker?.querySelector('select') && !document.querySelector('.sidebar-new-session-project'); })()`)
@@ -359,6 +363,7 @@ await check('插件商店面板可关闭', `!document.querySelector('.plugin-sto
 await evaluate(`document.querySelector('.sidebar-footer .sidebar-settings')?.click()`)
 await sleep(400)
 await check('点击左下角设置后面板打开', `!!document.querySelector('.settings-modal')`)
+await check('设置面板使用缩放入场动画', `getComputedStyle(document.querySelector('.settings-modal')).animationName === 'pion-pop-in'`)
 await check('设置左侧导航渲染', `document.querySelectorAll('.settings-nav-item').length >= 5`)
 await check('模型提供商页渲染', `!!document.querySelector('.models-page') && document.querySelectorAll('.provider-card').length > 0`)
 await check('提供商模型默认折叠', `document.querySelectorAll('.provider-card .model-choice').length === 0`)
@@ -371,6 +376,7 @@ await check('再次点击可折叠模型', `document.querySelectorAll('.provider
 await evaluate(`Array.from(document.querySelectorAll('.settings-nav-item')).find(e => e.textContent?.includes('外观'))?.click()`)
 await sleep(200)
 await check('外观页可切换', `!!document.querySelector('.appearance-preview')`)
+await check('设置子页面切换带过渡', `getComputedStyle(document.querySelector('.settings-page')).animationName === 'pion-reveal-in'`)
 await check('不显示主题色设置', `!document.querySelector('.accent-grid, .accent-choice') && !Array.from(document.querySelectorAll('.settings-page *')).some(e => e.textContent?.trim() === '主题色')`)
 await check('陶土与 Codex 四套主题选项', `(() => { const labels = [...document.querySelectorAll('.theme-choice')].map((item) => item.textContent ?? ''); return labels.length === 4 && labels.some((label) => label.includes('陶土深色')) && labels.some((label) => label.includes('陶土浅色')) && labels.some((label) => label.includes('Codex 深色')) && labels.some((label) => label.includes('Codex 浅色')); })()`)
 await evaluate(`Array.from(document.querySelectorAll('.theme-choice')).find(e => e.textContent?.includes('Codex 深色'))?.click()`)

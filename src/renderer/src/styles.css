@@ -1,5 +1,5 @@
-/* Pion styles entry point. Keep refinements.css last: it is the intentional
-   terracotta cascade/override layer. */
+/* Pion styles entry point. Visual refinements resolve the palette cascade;
+   motion.css is last so interaction timing stays consistent across themes. */
 @import './styles/base.css';
 @import './styles/titlebar.css';
 @import './styles/sidebar.css';
@@ -11,3 +11,4 @@
 @import './styles/changes.css';
 @import './styles/chrome.css';
 @import './styles/refinements.css';
+@import './styles/motion.css';
