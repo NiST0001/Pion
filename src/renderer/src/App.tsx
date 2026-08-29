@@ -14,6 +14,7 @@ import type {
   ToolPermissionRules
 } from '../../shared/types'
 import { ChatMessage } from './components/ChatMessage'
+import { TaskPanel } from './components/TaskPanel'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
 import { BranchCreateModal } from './components/BranchCreateModal'
@@ -625,6 +626,7 @@ export function App(): ReactElement {
   const sessionChanges = useMemo(() => deriveChanges(state.timeline), [state.timeline])
   const latestRunChanges = useMemo(() => deriveLatestRunChanges(state.timeline), [state.timeline])
   const changes = state.runCheckpoint?.state === 'rolled-back' ? [] : sessionChanges
+  const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
   const messageHistory = useMemo(
     () => state.timeline.flatMap((item) => (
       item.kind === 'user' && item.text.trim() ? [item.text] : []
@@ -855,6 +857,7 @@ export function App(): ReactElement {
           </div>
 
           <div className="composer-dock">
+            <TaskPanel key={taskSessionKey} sessionKey={taskSessionKey} />
             <Composer
               busy={state.busy}
               queued={state.queued}

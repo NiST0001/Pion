@@ -206,12 +206,12 @@ for (let i = 0; i < 30; i++) {
 await check('恢复历史播放逐段淡入动画', `(() => { const items = [...document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker')]; const revealed = items.filter((item) => item.classList.contains('history-reveal')); const animated = revealed.filter((item) => getComputedStyle(item).animationName === 'history-item-reveal'); return revealed.length > 0 && animated.length === revealed.length ? true : { revealed: revealed.length, animated: animated.length, total: items.length }; })()`)
 await check('历史动画按屏幕空间级联', `(() => { const container = document.querySelector('.chat-scroll'); if (!container) return false; const ctop = container.getBoundingClientRect().top; const els = [...document.querySelectorAll('.timeline .history-reveal, .timeline .history-reveal-armed .markdown > *')]; const items = els.map((el) => ({ top: el.getBoundingClientRect().top - ctop, delay: parseFloat(getComputedStyle(el).animationDelay) || 0 })); if (items.length < 3) return { fail: 'too-few', count: items.length }; const sorted = [...items].sort((a, b) => a.top - b.top); let ordered = true; for (let i = 1; i < sorted.length; i++) { if (sorted[i].delay < sorted[i - 1].delay - 0.002) { ordered = false; break; } } const delays = new Set(items.map((item) => item.delay.toFixed(3))); return ordered && delays.size > 1 ? true : { ordered, delays: [...delays].slice(0, 8) }; })()`)
 await check('思考内容无大边框', `(() => { const pre = document.querySelector('.thinking pre'); const summary = document.querySelector('.thinking summary'); if (!summary) return true; const noOutline = getComputedStyle(summary).outlineStyle === 'none' || getComputedStyle(summary).outlineWidth === '0px'; if (!pre) return noOutline; const cs = getComputedStyle(pre); return noOutline && cs.borderTopWidth === '0px' && cs.backgroundColor === 'rgba(0, 0, 0, 0)'; })()`)
-await evaluate(`(() => { const el = document.querySelector('.chat-scroll'); window.__pionPrependCount = document.querySelectorAll('.timeline > *').length; if (el) { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); } return true; })()`)
+await evaluate(`(() => { const el = document.querySelector('.chat-scroll'); window.__pionFirstRowEl = document.querySelector('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker') ?? null; if (el) { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); } return true; })()`)
 for (let i = 0; i < 25; i++) {
   await sleep(100)
-  if (await evaluate(`document.querySelectorAll('.timeline > *').length !== window.__pionPrependCount`)) break
+  if (await evaluate(`(() => { const items = [...document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker')]; return items.indexOf(window.__pionFirstRowEl) > 0 })()`)) break
 }
-await check('分页追加的历史保持静态', `(() => { const items = [...document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker')]; const added = document.querySelectorAll('.timeline > *').length - window.__pionPrependCount; if (added <= 0) return true; const head = items.slice(0, added); return head.every((item) => !item.classList.contains('history-reveal') && getComputedStyle(item).animationName === 'none') ? true : { added, head: head.slice(0, 3).map((item) => item.className) }; })()`)
+await check('分页追加的历史保持静态', `(() => { const items = [...document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker')]; const firstIdx = items.indexOf(window.__pionFirstRowEl); if (!window.__pionFirstRowEl || firstIdx <= 0) return true; const prepended = items.slice(0, firstIdx); const bad = prepended.filter((item) => item.classList.contains('history-reveal') || getComputedStyle(item).animationName !== 'none'); return bad.length === 0 ? true : { count: prepended.length, bad: bad.slice(0, 3).map((item) => ({ cls: item.className.slice(0, 50), anim: getComputedStyle(item).animationName })) }; })()`)
 await check('动画系统支持减少动态效果', `(() => { try { return [...document.styleSheets].some((sheet) => [...sheet.cssRules].some((rule) => rule.cssText.includes('prefers-reduced-motion') && rule.cssText.includes('animation-duration'))); } catch { return false; } })()`)
 for (let i = 0; i < 30; i++) {
   await sleep(100)
@@ -294,6 +294,18 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`!!document.querySelector('.composer-inline-controls .thinking-trigger')`)) break
 }
 await check('composer 输入框存在', `!!document.querySelector('.composer-row textarea')`)
+await check('任务面板绑定当前会话', `Boolean(document.querySelector('.task-panel')?.dataset.sessionKey)`)
+await check('任务面板默认展开', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === 'true' && !!document.querySelector('.task-panel-list')`)
+await check('任务面板使用圆形切换按钮', `(() => { const button = document.querySelector('.task-panel-toggle'); const rect = button?.getBoundingClientRect(); return !!button && !!rect && rect.width >= 40 && Math.abs(rect.width - rect.height) < 1 && getComputedStyle(button).borderRadius === '50%'; })()`)
+await check('展开按钮悬浮在任务卡片上方', `(() => { const button = document.querySelector('.task-panel-toggle')?.getBoundingClientRect(); const card = document.querySelector('.task-panel-card')?.getBoundingClientRect(); return !!button && !!card && button.bottom <= card.top; })()`)
+await evaluate(`document.querySelector('.task-panel-toggle')?.click()`)
+await sleep(420)
+await check('任务面板可折叠', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === 'false' && document.querySelector('.task-panel')?.classList.contains('collapsed')`)
+await check('折叠态展开按钮也位于卡片上方', `(() => { const button = document.querySelector('.task-panel-toggle')?.getBoundingClientRect(); const card = document.querySelector('.task-panel-card')?.getBoundingClientRect(); return !!button && !!card && button.bottom <= card.top + 24; })()`)
+await evaluate(`document.querySelector('.task-panel-toggle')?.click()`)
+await sleep(420)
+await check('任务面板可重新展开', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === 'true'`)
+await check('任务面板折叠状态按会话持久化', `(() => { const key = document.querySelector('.task-panel')?.dataset.sessionKey; if (!key) return false; const raw = localStorage.getItem('pion:session-task-panel-state:' + encodeURIComponent(key)); return raw !== null; })()`)
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); if (!input || typeof DataTransfer === 'undefined' || typeof ClipboardEvent === 'undefined') return false; const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), (char) => char.charCodeAt(0)); const file = new File([bytes], 'pasted.png', { type: 'image/png' }); const transfer = new DataTransfer(); transfer.items.add(file); input.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: transfer })); return true })()`)
 await sleep(220)
 await check('粘贴图像显示待发送附件', `document.querySelectorAll('.composer-attachment').length === 1`)
@@ -304,7 +316,6 @@ await check('图像附件可移除', `document.querySelectorAll('.composer-attac
 await check('当前会话后端已复用', `(async () => Boolean((await window.pion.getState())?.sessionId))()`)
 await check('输入框宽度已扩大', `getComputedStyle(document.querySelector('.composer-row')).maxWidth === '1600px'`)
 await check('输入框高度已缩短', `(() => { const height = document.querySelector('.composer-row')?.getBoundingClientRect().height ?? 0; return height >= 85 && height < 120; })()`)
-await check('任务面板已移除', `!document.querySelector('.task-panel')`)
 await check('输入框含构建/计划模式切换', `document.querySelectorAll('.composer-mode-option[data-mode]').length === 2 && !!document.querySelector('.composer-mode-option[data-mode="build"]') && !!document.querySelector('.composer-mode-option[data-mode="plan"]')`)
 await evaluate(`document.querySelector('.composer-mode-option[data-mode="build"]')?.click()`)
 await sleep(250)

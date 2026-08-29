@@ -11,6 +11,7 @@
 @import './styles/permissions.css';
 @import './styles/changes.css';
 @import './styles/modified-files.css';
+@import './styles/task-panel.css';
 @import './styles/chrome.css';
 @import './styles/refinements.css';
 @import './styles/motion.css';
