@@ -197,8 +197,12 @@ for (let i = 0; i < 40; i++) {
 }
 await check('冷会话历史无需等待后台启动', `(() => { const path = window.__pionHistoryLoadPath; const active = [...document.querySelectorAll('.project-branch-sessions .side-session')].find((row) => row.dataset.sessionPath === path); return !!path && active?.classList.contains('active') && !!document.querySelector('.timeline') && performance.now() - window.__pionHistoryLoadStarted < 3000 && !document.querySelector('.session-load-error'); })()`)
 await check('长会话最新页作为完整快照渲染', `(() => { const expected = window.__pionExpectedNewestItems; const actual = document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker').length; return expected > 0 && actual >= expected ? true : { expected, actual, path: window.__pionHistoryLoadPath }; })()`)
+for (let i = 0; i < 30; i++) {
+  await sleep(100)
+  if (await evaluate(`(() => { const revealed = document.querySelectorAll('.timeline .history-reveal').length; const armed = document.querySelectorAll('.timeline .history-reveal-armed').length; return revealed > 0 && armed === revealed })()`)) break
+}
 await check('恢复历史播放逐段淡入动画', `(() => { const items = [...document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker')]; const revealed = items.filter((item) => item.classList.contains('history-reveal')); const animated = revealed.filter((item) => getComputedStyle(item).animationName === 'history-item-reveal'); return revealed.length > 0 && animated.length === revealed.length ? true : { revealed: revealed.length, animated: animated.length, total: items.length }; })()`)
-await check('历史动画按屏幕空间级联', `(() => { const container = document.querySelector('.chat-scroll'); if (!container) return false; const crect = container.getBoundingClientRect(); const rows = [...document.querySelectorAll('.timeline .history-reveal')].map((el) => ({ armed: el.classList.contains('history-reveal-armed'), top: el.getBoundingClientRect().top - crect.top, delay: parseFloat(getComputedStyle(el).animationDelay) || 0 })); if (rows.length < 2 || rows.some((row) => !row.armed)) return { fail: 'unarmed', count: rows.length }; const sorted = [...rows].sort((a, b) => a.top - b.top); let ordered = true; for (let i = 1; i < sorted.length; i++) { if (sorted[i].delay < sorted[i - 1].delay - 0.001) { ordered = false; break; } } const delays = new Set(rows.map((row) => row.delay.toFixed(3))); return ordered && delays.size > 1 ? true : { ordered, delays: [...delays].slice(0, 8) }; })()`)
+await check('历史动画按屏幕空间级联', `(() => { const container = document.querySelector('.chat-scroll'); if (!container) return false; const ctop = container.getBoundingClientRect().top; const els = [...document.querySelectorAll('.timeline .history-reveal, .timeline .history-reveal-armed .markdown > *')]; const items = els.map((el) => ({ top: el.getBoundingClientRect().top - ctop, delay: parseFloat(getComputedStyle(el).animationDelay) || 0 })); if (items.length < 3) return { fail: 'too-few', count: items.length }; const sorted = [...items].sort((a, b) => a.top - b.top); let ordered = true; for (let i = 1; i < sorted.length; i++) { if (sorted[i].delay < sorted[i - 1].delay - 0.002) { ordered = false; break; } } const delays = new Set(items.map((item) => item.delay.toFixed(3))); return ordered && delays.size > 1 ? true : { ordered, delays: [...delays].slice(0, 8) }; })()`)
 await evaluate(`(() => { const el = document.querySelector('.chat-scroll'); window.__pionPrependCount = document.querySelectorAll('.timeline > *').length; if (el) { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); } return true; })()`)
 for (let i = 0; i < 25; i++) {
   await sleep(100)
@@ -216,7 +220,8 @@ await sleep(100)
 await check('历史标记悬停显示消息预览', `!!document.querySelector('.history-navigator-preview strong')?.textContent?.trim() && document.querySelector('.history-navigator-preview small')?.textContent?.includes('条')`)
 await evaluate(`(() => { const markers = [...document.querySelectorAll('.history-navigator-marker')]; const mid = markers[Math.floor(markers.length / 2)]; mid?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true })()`)
 await sleep(120)
-await check('导航条悬停呈现波形放大', `(() => { const markers = [...document.querySelectorAll('.history-navigator-marker')]; const scale = (el) => { const m = /scaleX\\(([^)]+)\\)/.exec(el?.style?.transform || ''); return m ? parseFloat(m[1]) : 1; }; const mid = Math.floor(markers.length / 2); const center = scale(markers[mid]); const near = scale(markers[mid + 2] ?? markers[mid]); const far = scale(markers[Math.min(markers.length - 1, mid + 12)]); return markers.length > 8 && center > 1.8 && near < center && far <= near ? true : { count: markers.length, center, near, far }; })()`)
+await check('导航条间距适中', `(() => { const m = [...document.querySelectorAll('.history-navigator-marker')]; if (m.length < 10) return true; const tops = m.map((el) => el.getBoundingClientRect().top); let sum = 0; for (let i = 1; i < tops.length; i++) sum += tops[i] - tops[i - 1]; const avg = sum / (tops.length - 1); return (avg >= 10.5 && avg <= 16) ? true : { avg: Math.round(avg * 10) / 10, count: m.length }; })()`)
+await check('导航条悬停呈现波形放大', `(() => { const markers = [...document.querySelectorAll('.history-navigator-marker')]; const scale = (el) => { const m = /scaleX\\(([^)]+)\\)/.exec(el?.style?.transform || ''); return m ? parseFloat(m[1]) : 1; }; const mid = Math.floor(markers.length / 2); const center = scale(markers[mid]); const d1 = scale(markers[mid + 1] ?? markers[mid]); const near = scale(markers[mid + 2] ?? markers[mid]); const far = scale(markers[Math.min(markers.length - 1, mid + 12)]); return markers.length > 8 && center > 2.6 && center - d1 > 0.6 && near < d1 && far <= near ? true : { count: markers.length, center, d1, near, far }; })()`)
 for (let i = 0; i < 20; i++) {
   await sleep(80)
   if (await evaluate(`!!document.querySelector('.modified-files-card')`)) break
@@ -252,8 +257,8 @@ for (let i = 0; i < 20; i++) {
 await check('技能列表已渲染', `document.querySelectorAll('.skill-card').length > 0`)
 await check('技能卡片显示来源', `Array.from(document.querySelectorAll('.skill-card .capability-card-source')).some(e => e.textContent?.trim().length > 0)`)
 await evaluate(`document.querySelector('.capabilities-nav-item[data-page="tools"]')?.click()`)
-for (let i = 0; i < 20; i++) {
-  await sleep(80)
+for (let i = 0; i < 40; i++) {
+  await sleep(150)
   if (await evaluate(`document.querySelector('.capabilities-nav-item[data-page="tools"]')?.classList.contains('active') && document.querySelectorAll('.tool-card').length >= 4`)) break
 }
 await check('工具页可切换', `document.querySelector('.capabilities-nav-item[data-page="tools"]')?.classList.contains('active') && !!document.querySelector('.capabilities-page[data-page="tools"]') && document.querySelectorAll('.tool-card').length >= 4`)
@@ -442,6 +447,12 @@ await check('详细预览即时应用', `document.querySelectorAll('.side-sessio
 await evaluate(`document.querySelector('[data-setting="session-preview-density"] .segmented button:nth-child(2)')?.click()`)
 await sleep(120)
 await check('舒适预览可恢复', `document.querySelectorAll('.side-session-comfortable').length === document.querySelectorAll('.side-session').length`)
+await check('历史导航条间距设置可见', `(() => { const row = document.querySelector('[data-setting="history-nav-gap"]'); return !!row && !!row.querySelector('input[type="range"]') && row.querySelector('.setting-range-value')?.textContent?.includes('px'); })()`)
+await evaluate(`(() => { const input = document.querySelector('[data-setting="history-nav-gap"] input[type="range"]'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set; setter?.call(input, '4'); input?.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+await sleep(180)
+await check('导航条间距即时调小', `(() => { const m = [...document.querySelectorAll('.history-navigator-marker')]; if (m.length < 10) return true; const tops = m.map((el) => el.getBoundingClientRect().top); let sum = 0; for (let i = 1; i < tops.length; i++) sum += tops[i] - tops[i - 1]; const avg = sum / (tops.length - 1); return avg < 9 ? true : { avg: Math.round(avg * 10) / 10 }; })()`)
+await evaluate(`(() => { const input = document.querySelector('[data-setting="history-nav-gap"] input[type="range"]'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set; setter?.call(input, '10'); input?.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+await sleep(150)
 await check('会话完成通知设置可见', `(() => { const row = document.querySelector('[data-setting="completion-notifications"]'); return !!row && row.textContent?.includes('会话完成通知') && !!row.querySelector('[role="switch"]'); })()`)
 await evaluate(`(() => { const toggle = document.querySelector('[data-setting="completion-notifications"] [role="switch"]'); window.__pionNotificationStateBefore = toggle?.getAttribute('aria-checked'); toggle?.click(); return true })()`)
 await sleep(150)

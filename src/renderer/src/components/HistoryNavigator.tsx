@@ -8,9 +8,9 @@ import type {
 
 const MAX_MARKERS = 180
 /** Radius (in bars) the hover wave reaches; beyond it bars keep their base width. */
-const WAVE_RADIUS = 6
+const WAVE_RADIUS = 5
 /** Peak extra width applied to the bar under the cursor. */
-const WAVE_BOOST = 1.5
+const WAVE_BOOST = 2.6
 
 function sampleLandmarks(
   landmarks: HistoryLandmark[],
@@ -30,13 +30,14 @@ function sampleLandmarks(
   return [...sampled.values()].sort((a, b) => a.entryIndex - b.entryIndex)
 }
 
-/** Concave (∩) falloff: a round peak whose drop accelerates toward the edge. */
+/** Concave spike: the hovered bar stands far above its neighbours,
+    and the falloff accelerates away from the peak. */
 function waveScale(markerIndex: number, hoverIndex: number | null): number {
   if (hoverIndex === null) return 1
   const distance = Math.abs(markerIndex - hoverIndex)
   if (distance >= WAVE_RADIUS) return 1
-  const cosine = Math.cos((distance / WAVE_RADIUS) * (Math.PI / 2))
-  return 1 + WAVE_BOOST * cosine * cosine
+  const falloff = Math.pow(1 - distance / WAVE_RADIUS, 2.2)
+  return 1 + WAVE_BOOST * falloff
 }
 
 function formatLandmarkTime(timestamp: string): string {
@@ -54,6 +55,8 @@ interface HistoryNavigatorProps {
   index: SessionHistoryIndex | null
   activeEntryId?: string
   busy: boolean
+  /** Vertical gap between bars, px (user-adjustable in settings). */
+  gap?: number
   onJump: (landmark: HistoryLandmark) => void
 }
 
@@ -61,9 +64,11 @@ export function HistoryNavigator({
   index,
   activeEntryId,
   busy,
+  gap = 10,
   onJump
 }: HistoryNavigatorProps): ReactElement | null {
   const [preview, setPreview] = useState<HistoryLandmark | null>(null)
+  const [previewTop, setPreviewTop] = useState(50)
   const [hoverIndex, setHoverIndex] = useState<number | null>(null)
   const markers = useMemo(
     () => sampleLandmarks(index?.landmarks ?? [], activeEntryId),
@@ -71,11 +76,6 @@ export function HistoryNavigator({
   )
 
   if (!index || index.landmarks.length < 2) return null
-
-  const previewIndex = preview ? markers.findIndex((m) => m.entryId === preview.entryId) : -1
-  const previewFraction = previewIndex < 0 || markers.length <= 1
-    ? 0
-    : previewIndex / (markers.length - 1)
 
   const jumpNearest = (event: ReactMouseEvent<HTMLDivElement>): void => {
     if (busy || event.target !== event.currentTarget) return
@@ -93,6 +93,7 @@ export function HistoryNavigator({
       <div
         className="history-navigator-track"
         role="presentation"
+        style={{ gap: `${gap}px` }}
         onClick={jumpNearest}
         onMouseLeave={() => {
           setHoverIndex(null)
@@ -112,9 +113,16 @@ export function HistoryNavigator({
               style={{ transform: `scaleX(${scale.toFixed(3)})` }}
               aria-label={`跳到第 ${landmark.ordinal} 条历史消息：${landmark.snippet}`}
               disabled={busy}
-              onMouseEnter={() => {
+              onMouseEnter={(event) => {
                 setHoverIndex(markerIndex)
                 setPreview(landmark)
+                const track = event.currentTarget.parentElement
+                if (track) {
+                  const trackRect = track.getBoundingClientRect()
+                  const barRect = event.currentTarget.getBoundingClientRect()
+                  const center = barRect.top + barRect.height / 2 - trackRect.top
+                  setPreviewTop(Math.min(Math.max(center / Math.max(trackRect.height, 1), 0.08), 0.92))
+                }
               }}
               onFocus={() => {
                 setHoverIndex(markerIndex)
@@ -136,9 +144,7 @@ export function HistoryNavigator({
       {preview && (
         <div
           className="history-navigator-preview"
-          style={{
-            top: `${Math.min(Math.max(previewFraction, 0.08), 0.92) * 100}%`
-          } as CSSProperties}
+          style={{ top: `${previewTop * 100}%` } as CSSProperties}
           role="tooltip"
         >
           <strong>{preview.snippet}</strong>

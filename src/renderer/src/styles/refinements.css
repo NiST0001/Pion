@@ -731,7 +731,7 @@ body {
 .history-reveal.history-reveal-armed .markdown > * {
   opacity: 0;
   animation: history-text-reveal 560ms ease both;
-  animation-delay: calc(var(--history-row-delay, 0ms) + 40ms);
+  animation-delay: var(--history-row-delay, 0ms);
 }
 
 .streaming-reveal .markdown > * {

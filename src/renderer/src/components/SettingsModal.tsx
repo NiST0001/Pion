@@ -53,6 +53,8 @@ interface SettingsModalProps {
   onCompletionNotificationsChange: (enabled: boolean) => void
   sessionPreviewDensity: SessionPreviewDensity
   onSessionPreviewDensityChange: (density: SessionPreviewDensity) => void
+  historyNavGap: number
+  onHistoryNavGapChange: (gap: number) => void
   projectTrust: ProjectTrustInfo | null
   projectTrustBusy: boolean
   projectTrustError: string
@@ -84,6 +86,8 @@ export function SettingsModal({
   onCompletionNotificationsChange,
   sessionPreviewDensity,
   onSessionPreviewDensityChange,
+  historyNavGap,
+  onHistoryNavGapChange,
   projectTrust,
   projectTrustBusy,
   projectTrustError,
@@ -375,6 +379,24 @@ export function SettingsModal({
                       options={SESSION_PREVIEW_OPTIONS.map(({ value, label }) => ({ value, label }))}
                       onChange={(value) => onSessionPreviewDensityChange(value as SessionPreviewDensity)}
                     />
+                  </div>
+
+                  <div className="setting-row" data-setting="history-nav-gap">
+                    <div>
+                      <div className="setting-label">历史导航条间距</div>
+                      <div className="setting-desc">调整会话历史快速跳转条的疏密</div>
+                    </div>
+                    <div className="setting-range">
+                      <input
+                        type="range"
+                        min={2}
+                        max={16}
+                        step={1}
+                        value={historyNavGap}
+                        onChange={(event) => onHistoryNavGapChange(Number(event.target.value))}
+                      />
+                      <span className="setting-range-value">{historyNavGap}px</span>
+                    </div>
                   </div>
                 </div>
 

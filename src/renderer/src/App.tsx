@@ -78,6 +78,10 @@ export function App(): ReactElement {
   const [sessionQuery, setSessionQuery] = useState('')
   const [favoriteSessionPaths, setFavoriteSessionPaths] = useState<string[]>(readFavoriteSessionPaths)
   const [sessionPreviewDensity, setSessionPreviewDensity] = useState<SessionPreviewDensity>(readSessionPreviewDensity)
+  const [historyNavGap, setHistoryNavGap] = useState<number>(() => {
+    const raw = Number(localStorage.getItem('pion:history-nav-gap'))
+    return Number.isFinite(raw) && raw >= 2 && raw <= 16 ? raw : 10
+  })
   const [newSessionCwd, setNewSessionCwd] = useState('')
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
   const [visibleHistoryEntryId, setVisibleHistoryEntryId] = useState<string | undefined>()
@@ -172,6 +176,11 @@ export function App(): ReactElement {
   const handleSessionPreviewDensityChange = useCallback((density: SessionPreviewDensity): void => {
     setSessionPreviewDensity(density)
     saveSessionPreviewDensity(density)
+  }, [])
+
+  const handleHistoryNavGapChange = useCallback((gap: number): void => {
+    setHistoryNavGap(gap)
+    localStorage.setItem('pion:history-nav-gap', String(gap))
   }, [])
 
   const handleProjectTrustChange = useCallback(async (decision: boolean | null): Promise<void> => {
@@ -425,21 +434,39 @@ export function App(): ReactElement {
   }, [state.historyJump?.nonce])
 
   // Freshly loaded history reveals top-to-bottom in screen space: measure each
-  // restored row's viewport position after the scroll-to-bottom layout effect,
-  // then arm its animation with a matching delay. Paged/prepended rows never
-  // carry .history-reveal, so they stay static.
+  // restored row's viewport position in rAF (after scroll settles), then arm its
+  // animation with a matching delay. The frame is intentionally NOT cancelled on
+  // cleanup: timeline updates (pagination chains) re-run this effect rapidly and
+  // would otherwise starve the measurement forever. The fire-time query is
+  // idempotent — only rows that are not yet armed are measured.
   useLayoutEffect(() => {
     const container = scrollRef.current
     if (!container) return
-    const rows = container.querySelectorAll<HTMLElement>('.history-reveal:not(.history-reveal-armed)')
-    if (rows.length === 0) return
-    const rect = container.getBoundingClientRect()
-    const span = Math.max(rect.height, 1)
-    rows.forEach((row) => {
-      const ratio = Math.min(Math.max((row.getBoundingClientRect().top - rect.top) / span, 0), 1)
-      row.style.setProperty('--history-row-delay', `${Math.round(ratio * 380)}ms`)
-      row.classList.add('history-reveal-armed')
-    })
+    let attempts = 0
+    const arm = (): void => {
+      const rows = [...container.querySelectorAll<HTMLElement>('.history-reveal:not(.history-reveal-armed)')]
+      if (rows.length === 0) return
+      const rect = container.getBoundingClientRect()
+      const span = Math.max(rect.height, 1)
+      const ratios = rows.map((row) => Math.min(Math.max((row.getBoundingClientRect().top - rect.top) / span, 0), 1))
+      const suspicious = rows.length > 2 && ratios.every((ratio) => ratio === ratios[0])
+      if (suspicious && attempts < 5) {
+        attempts += 1
+        requestAnimationFrame(arm)
+        return
+      }
+      rows.forEach((row, index) => {
+        row.style.setProperty('--history-row-delay', `${Math.round(ratios[index] * 380)}ms`)
+        row.classList.add('history-reveal-armed')
+        // Blocks inside tall rows (a single message can exceed the viewport) get
+        // their own screen-space delay so the cascade flows through them too.
+        row.querySelectorAll<HTMLElement>('.markdown > *').forEach((child) => {
+          const childRatio = Math.min(Math.max((child.getBoundingClientRect().top - rect.top) / span, 0), 1)
+          child.style.setProperty('--history-row-delay', `${Math.round(childRatio * 380)}ms`)
+        })
+      })
+    }
+    requestAnimationFrame(arm)
   }, [state.timeline])
 
   useEffect(() => () => {
@@ -772,6 +799,7 @@ export function App(): ReactElement {
               index={state.historyIndex}
               activeEntryId={visibleHistoryEntryId}
               busy={state.timelineLoading || state.busy}
+              gap={historyNavGap}
               onJump={(landmark) => void actions.jumpToHistoryLandmark(landmark)}
             />
             <main className="chat-scroll" ref={scrollRef} onScroll={handleTimelineScroll}>
@@ -912,6 +940,8 @@ export function App(): ReactElement {
         onCompletionNotificationsChange={(enabled) => void handleCompletionNotificationsChange(enabled)}
         sessionPreviewDensity={sessionPreviewDensity}
         onSessionPreviewDensityChange={handleSessionPreviewDensityChange}
+        historyNavGap={historyNavGap}
+        onHistoryNavGapChange={handleHistoryNavGapChange}
         projectTrust={projectTrust}
         projectTrustBusy={projectTrustBusy || state.busy || state.status.phase === 'starting'}
         projectTrustError={projectTrustError}
