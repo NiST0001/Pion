@@ -243,10 +243,10 @@ button:not(:disabled):active,
   transition: transform var(--motion-normal) var(--motion-ease-out);
 }
 
-/* Conversation history is restored as a stable snapshot. */
-.timeline > .row:not(.streaming-reveal),
-.timeline > .tool-call,
-.timeline > .compaction-marker {
+/* Paged/prepended history stays static; freshly loaded windows use .history-reveal. */
+.timeline > .row:not(.streaming-reveal):not(.history-reveal),
+.timeline > .tool-call:not(.history-reveal),
+.timeline > .compaction-marker:not(.history-reveal) {
   animation: none;
 }
 

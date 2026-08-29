@@ -160,7 +160,8 @@ export function collectToolResults(entries: WireEntry[]): Map<string, Historical
 
 export function entriesToTimeline(
   entries: WireEntry[],
-  toolResults: Map<string, HistoricalToolResult> = collectToolResults(entries)
+  toolResults: Map<string, HistoricalToolResult> = collectToolResults(entries),
+  options: { reveal?: boolean } = {}
 ): TimelineItem[] {
   const items: TimelineItem[] = []
   for (const entry of entries) {
@@ -216,6 +217,10 @@ export function entriesToTimeline(
       }
       continue
     }
+  }
+  // Only freshly loaded windows replay the staggered fade; paged history stays static.
+  if (options.reveal !== false) {
+    for (const item of items) item.historical = true
   }
   return items
 }

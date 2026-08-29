@@ -768,9 +768,9 @@ export function App(): ReactElement {
                 <div className="timeline">
                   {state.timeline.map((item) =>
                     item.kind === 'tool' ? (
-                      <ToolCallItem key={item.id} tool={item.tool} />
+                      <ToolCallItem key={item.id} tool={item.tool} historical={item.historical} />
                     ) : item.kind === 'compaction' ? (
-                      <div key={item.id} className="compaction-marker">
+                      <div key={item.id} className={`compaction-marker${item.historical ? ' history-reveal' : ''}`}>
                         {item.summary}
                       </div>
                     ) : (

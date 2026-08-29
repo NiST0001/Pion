@@ -243,7 +243,8 @@ export function useAgent() {
 
         const items = entriesToTimeline(
           page.entries,
-          collectToolResults([...page.entries, ...page.toolResults])
+          collectToolResults([...page.entries, ...page.toolResults]),
+          { reveal: false }
         )
         cursor.items = [...items, ...cursor.items]
         cursor.complete = cursor.apiBefore === 0
@@ -292,7 +293,8 @@ export function useAgent() {
 
         const items = entriesToTimeline(
           page.entries,
-          collectToolResults([...page.entries, ...page.toolResults])
+          collectToolResults([...page.entries, ...page.toolResults]),
+          { reveal: false }
         )
         cursor.items = [...cursor.items, ...items]
         if (items.length > 0) dispatch({ type: 'appendEntries', items })

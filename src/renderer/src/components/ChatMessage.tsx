@@ -12,7 +12,7 @@ interface ChatMessageProps {
 export function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactElement | null {
   if (item.kind === 'user') {
     return (
-      <div className="row row-user" data-entry-id={item.entryId}>
+      <div className={`row row-user${item.historical ? ' history-reveal' : ''}`} data-entry-id={item.entryId}>
         <div className="bubble bubble-user">
           {item.text !== '' && <div className="bubble-content">{item.text}</div>}
           {item.images && item.images.length > 0 && (
@@ -43,7 +43,7 @@ export function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactE
   }
 
   return (
-    <div className={`row row-assistant${item.streaming ? ' streaming-reveal' : ''}`}>
+    <div className={`row row-assistant${item.historical ? ' history-reveal' : ''}${item.streaming ? ' streaming-reveal' : ''}`}>
       <div className="bubble bubble-assistant">
         {item.thinking !== '' && (
           <details className="thinking">

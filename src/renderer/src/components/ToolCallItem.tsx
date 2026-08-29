@@ -31,7 +31,7 @@ function truncate(text: string, max: number): string {
   return `${text.slice(0, max)}…`
 }
 
-export function ToolCallItem({ tool }: { tool: ToolItem }): ReactElement {
+export function ToolCallItem({ tool, historical }: { tool: ToolItem; historical?: boolean }): ReactElement {
   const [open, setOpen] = useState(false)
   const isEdit = tool.name === 'edit' && Boolean(tool.diff)
   const isWrite = tool.name === 'write'
@@ -41,7 +41,7 @@ export function ToolCallItem({ tool }: { tool: ToolItem }): ReactElement {
   const stats = tool.diff ? diffStats(tool.diff) : null
 
   return (
-    <div className={`tool-call tool-${tool.status}`}>
+    <div className={`tool-call tool-${tool.status}${historical ? ' history-reveal' : ''}`}>
       <button
         className="tool-head"
         onClick={() => setOpen((v) => !v)}

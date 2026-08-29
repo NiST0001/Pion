@@ -684,7 +684,7 @@ body {
   padding: 3px 5px;
 }
 
-@keyframes streaming-item-reveal {
+@keyframes history-item-reveal {
   from {
     opacity: 0;
     transform: translateY(5px);
@@ -695,7 +695,7 @@ body {
   }
 }
 
-@keyframes streaming-text-reveal {
+@keyframes history-text-reveal {
   from {
     opacity: 0;
   }
@@ -704,24 +704,47 @@ body {
   }
 }
 
-/* Restored history is a stable snapshot. Only newly streamed assistant output
-   animates; paged/prepended history must never replay staggered fades. */
+/* Freshly loaded history replays a staggered per-segment fade; paged/prepended
+   history stays static (entriesToTimeline reveal:false). Live streaming output
+   uses the same reveal through streaming-reveal. */
+.history-reveal,
 .streaming-reveal {
-  animation: streaming-item-reveal 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: history-item-reveal 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+.history-reveal .bubble-content,
+.history-reveal .thinking,
+.history-reveal .tool-head,
+.history-reveal .message-images,
 .streaming-reveal .thinking {
-  animation: streaming-text-reveal 520ms ease both;
+  animation: history-text-reveal 520ms ease both;
 }
 
+.history-reveal .markdown > *,
 .streaming-reveal .markdown > * {
   opacity: 0;
-  animation: streaming-text-reveal 560ms 70ms ease both;
+  animation: history-text-reveal 560ms ease both;
+  animation-delay: var(--history-text-delay, 70ms);
 }
 
+.history-reveal .markdown > :nth-child(1) { --history-text-delay: 0ms; }
+.history-reveal .markdown > :nth-child(2) { --history-text-delay: 80ms; }
+.history-reveal .markdown > :nth-child(3) { --history-text-delay: 160ms; }
+.history-reveal .markdown > :nth-child(4) { --history-text-delay: 240ms; }
+.history-reveal .markdown > :nth-child(5) { --history-text-delay: 320ms; }
+.history-reveal .markdown > :nth-child(6) { --history-text-delay: 400ms; }
+.history-reveal .markdown > :nth-child(7) { --history-text-delay: 480ms; }
+.history-reveal .markdown > :nth-child(8) { --history-text-delay: 560ms; }
+
 @media (prefers-reduced-motion: reduce) {
+  .history-reveal,
   .streaming-reveal,
+  .history-reveal .bubble-content,
+  .history-reveal .thinking,
+  .history-reveal .tool-head,
+  .history-reveal .message-images,
   .streaming-reveal .thinking,
+  .history-reveal .markdown > *,
   .streaming-reveal .markdown > * {
     opacity: 1;
     animation: none;
