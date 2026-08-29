@@ -5,6 +5,7 @@
 @import './styles/sidebar.css';
 @import './styles/composer.css';
 @import './styles/chat.css';
+@import './styles/history-navigator.css';
 @import './styles/settings.css';
 @import './styles/permissions.css';
 @import './styles/changes.css';

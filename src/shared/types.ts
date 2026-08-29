@@ -145,6 +145,23 @@ export interface SessionEntriesPage {
   mode: AgentMode
 }
 
+/** One user-message marker in the full persisted session history. */
+export interface HistoryLandmark {
+  entryId: string
+  /** Zero-based position in SessionManager.getEntries(). */
+  entryIndex: number
+  ordinal: number
+  snippet: string
+  responseSnippet?: string
+  timestamp: string
+}
+
+export interface SessionHistoryIndex {
+  sessionPath: string
+  totalEntries: number
+  landmarks: HistoryLandmark[]
+}
+
 /** Flattened tree node for the branch view. */
 export interface TreeNodeLite {
   id: string
@@ -418,6 +435,8 @@ export interface PionApi {
   forkSession(sessionPath: string, entryId: string): Promise<{ text: string; cancelled: boolean }>
   /** Full entry list of the active session (kept for diagnostics/compatibility). */
   getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null>
+  /** User-message landmarks spanning the full persisted session. */
+  getHistoryIndex(sessionPath?: string): Promise<SessionHistoryIndex | null>
   /** Load a bounded history window; omit before for the newest window. */
   getEntriesPage(
     before?: number,

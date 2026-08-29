@@ -27,6 +27,7 @@ import { SkillsToolsModal } from './components/SkillsToolsModal'
 import { PluginStoreModal } from './components/PluginStoreModal'
 import { ProjectPicker } from './components/ProjectPicker'
 import { ProjectTrustBanner } from './components/ProjectTrustBanner'
+import { HistoryNavigator } from './components/HistoryNavigator'
 import { ToolPermissionModal } from './components/ToolPermissionModal'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
 import type { SessionPreviewDensity } from './utils/sessionPreview'
@@ -79,10 +80,14 @@ export function App(): ReactElement {
   const [sessionPreviewDensity, setSessionPreviewDensity] = useState<SessionPreviewDensity>(readSessionPreviewDensity)
   const [newSessionCwd, setNewSessionCwd] = useState('')
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
+  const [visibleHistoryEntryId, setVisibleHistoryEntryId] = useState<string | undefined>()
   const newSessionInFlight = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const panelResizeRef = useRef<PanelResizeState | null>(null)
   const sessionSelectionId = useRef(0)
+  const historyScrollFrame = useRef<number | null>(null)
+  const highlightedHistoryRow = useRef<HTMLElement | null>(null)
+  const historyHighlightTimer = useRef<number | null>(null)
 
   // bootstrap: pick the most recent project (or home) and start the agent
   useEffect(() => {
@@ -349,19 +354,89 @@ export function App(): ReactElement {
     previousTimelineHeight.current = el.scrollHeight
   }, [lastGrow, lastItemId, state.timelineMutation, timelineLength])
 
-  // The newest-window load may fit entirely inside the viewport, leaving the
-  // container without a scrollbar (and therefore without scroll events). Keep
-  // pulling older history until the timeline can actually scroll.
+  const updateVisibleHistoryEntry = useCallback((): void => {
+    const container = scrollRef.current
+    if (!container) return
+    const rows = [...container.querySelectorAll<HTMLElement>('.row-user[data-entry-id]')]
+    if (rows.length === 0) {
+      setVisibleHistoryEntryId(undefined)
+      return
+    }
+    const rect = container.getBoundingClientRect()
+    const anchor = rect.top + Math.min(container.clientHeight * 0.38, 260)
+    const nearest = rows.reduce((best, row) => (
+      Math.abs(row.getBoundingClientRect().top - anchor)
+        < Math.abs(best.getBoundingClientRect().top - anchor)
+        ? row
+        : best
+    ))
+    setVisibleHistoryEntryId(nearest.dataset.entryId)
+  }, [])
+
+  const scheduleVisibleHistoryUpdate = useCallback((): void => {
+    if (historyScrollFrame.current !== null) return
+    historyScrollFrame.current = window.requestAnimationFrame(() => {
+      historyScrollFrame.current = null
+      updateVisibleHistoryEntry()
+    })
+  }, [updateVisibleHistoryEntry])
+
+  // A loaded window may fit entirely inside the viewport, leaving no scroll
+  // events to request the adjacent older/newer page.
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    if (el.scrollHeight <= el.clientHeight + 16) void actions.loadOlder()
-  }, [timelineLength, state.session?.sessionFile, actions])
+    if (el.scrollHeight <= el.clientHeight + 16) {
+      void actions.loadOlder()
+      void actions.loadNewer()
+    }
+    scheduleVisibleHistoryUpdate()
+  }, [timelineLength, state.session?.sessionFile, actions, scheduleVisibleHistoryUpdate])
+
+  useEffect(() => {
+    setVisibleHistoryEntryId(undefined)
+  }, [state.historyIndex?.sessionPath])
+
+  useLayoutEffect(() => {
+    const jump = state.historyJump
+    if (!jump) return
+    const frame = window.requestAnimationFrame(() => {
+      const container = scrollRef.current
+      const target = container
+        ? [...container.querySelectorAll<HTMLElement>('[data-entry-id]')]
+            .find((element) => element.dataset.entryId === jump.entryId)
+        : undefined
+      if (!target) return
+      target.scrollIntoView({ behavior: 'auto', block: 'center' })
+      highlightedHistoryRow.current?.classList.remove('history-jump-target')
+      target.classList.add('history-jump-target')
+      highlightedHistoryRow.current = target
+      setVisibleHistoryEntryId(jump.entryId)
+      if (historyHighlightTimer.current !== null) {
+        window.clearTimeout(historyHighlightTimer.current)
+      }
+      historyHighlightTimer.current = window.setTimeout(() => {
+        target.classList.remove('history-jump-target')
+        if (highlightedHistoryRow.current === target) highlightedHistoryRow.current = null
+        historyHighlightTimer.current = null
+      }, 1_600)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [state.historyJump?.nonce])
+
+  useEffect(() => () => {
+    if (historyScrollFrame.current !== null) window.cancelAnimationFrame(historyScrollFrame.current)
+    if (historyHighlightTimer.current !== null) window.clearTimeout(historyHighlightTimer.current)
+    highlightedHistoryRow.current?.classList.remove('history-jump-target')
+  }, [])
 
   const handleTimelineScroll = useCallback(() => {
     const el = scrollRef.current
-    if (el && el.scrollTop <= 96) void actions.loadOlder()
-  }, [actions])
+    if (!el) return
+    if (el.scrollTop <= 96) void actions.loadOlder()
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= 96) void actions.loadNewer()
+    scheduleVisibleHistoryUpdate()
+  }, [actions, scheduleVisibleHistoryUpdate])
 
   const handleFork = useCallback(
     async (entryId: string) => {
@@ -552,6 +627,7 @@ export function App(): ReactElement {
 
   const activeCwd = selectedSession?.cwd ?? state.status.cwd
   const activePath = selectedSession?.path ?? state.session?.sessionFile
+  const historyNavigatorVisible = (state.historyIndex?.landmarks.length ?? 0) >= 2
 
   if (!hasBridge) {
     return (
@@ -662,35 +738,43 @@ export function App(): ReactElement {
             onDecision={(decision) => void handleProjectTrustChange(decision)}
           />
 
-          <main className="chat-scroll" ref={scrollRef} onScroll={handleTimelineScroll}>
-            {state.timeline.length === 0 ? (
-              <EmptyState
-                cwd={state.status.cwd}
-                starting={state.status.phase === 'starting'}
-                loadingHistory={state.timelineLoading}
-                hasSessions={state.sessions.length > 1}
-              />
-            ) : (
-              <div className="timeline">
-                {state.timeline.map((item) =>
-                  item.kind === 'tool' ? (
-                    <ToolCallItem key={item.id} tool={item.tool} />
-                  ) : item.kind === 'compaction' ? (
-                    <div key={item.id} className="compaction-marker">
-                      {item.summary}
-                    </div>
-                  ) : (
-                    <ChatMessage
-                      key={item.id}
-                      item={item}
-                      canFork={state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
-                      onFork={(id) => void handleFork(id)}
-                    />
-                  )
-                )}
-              </div>
-            )}
-          </main>
+          <div className={`chat-stage${historyNavigatorVisible ? ' has-history-navigator' : ''}`}>
+            <HistoryNavigator
+              index={state.historyIndex}
+              activeEntryId={visibleHistoryEntryId}
+              busy={state.timelineLoading || state.busy}
+              onJump={(landmark) => void actions.jumpToHistoryLandmark(landmark)}
+            />
+            <main className="chat-scroll" ref={scrollRef} onScroll={handleTimelineScroll}>
+              {state.timeline.length === 0 ? (
+                <EmptyState
+                  cwd={state.status.cwd}
+                  starting={state.status.phase === 'starting'}
+                  loadingHistory={state.timelineLoading}
+                  hasSessions={state.sessions.length > 1}
+                />
+              ) : (
+                <div className="timeline">
+                  {state.timeline.map((item) =>
+                    item.kind === 'tool' ? (
+                      <ToolCallItem key={item.id} tool={item.tool} />
+                    ) : item.kind === 'compaction' ? (
+                      <div key={item.id} className="compaction-marker">
+                        {item.summary}
+                      </div>
+                    ) : (
+                      <ChatMessage
+                        key={item.id}
+                        item={item}
+                        canFork={state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
+                        onFork={(id) => void handleFork(id)}
+                      />
+                    )
+                  )}
+                </div>
+              )}
+            </main>
+          </div>
 
           <div className="composer-dock">
             <Composer

@@ -27,6 +27,7 @@ export const IPC = {
   AgentSessionForkMessages: 'pion:agent-session-fork-messages',
   AgentForkSession: 'pion:agent-fork-session',
   AgentEntries: 'pion:agent-entries',
+  AgentHistoryIndex: 'pion:agent-history-index',
   AgentEntriesPage: 'pion:agent-entries-page',
   AgentTree: 'pion:agent-tree',
   AgentSessions: 'pion:agent-sessions',

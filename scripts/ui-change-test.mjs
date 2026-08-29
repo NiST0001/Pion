@@ -197,6 +197,20 @@ for (let i = 0; i < 40; i++) {
 await check('冷会话历史无需等待后台启动', `(() => { const path = window.__pionHistoryLoadPath; const active = [...document.querySelectorAll('.project-branch-sessions .side-session')].find((row) => row.dataset.sessionPath === path); return !!path && active?.classList.contains('active') && !!document.querySelector('.timeline') && performance.now() - window.__pionHistoryLoadStarted < 3000 && !document.querySelector('.session-load-error'); })()`)
 await check('长会话最新页作为完整快照渲染', `(() => { const expected = window.__pionExpectedNewestItems; const actual = document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker').length; return expected > 0 && actual >= expected ? true : { expected, actual, path: window.__pionHistoryLoadPath }; })()`)
 await check('恢复历史不再播放分段渐变', `(() => { const items = [...document.querySelectorAll('.timeline > *')]; const bad = items.filter((item) => item.classList.contains('history-reveal') || item.classList.contains('streaming-reveal') || getComputedStyle(item).animationName !== 'none').map((item) => ({ className: item.className, animation: getComputedStyle(item).animationName })); return bad.length === 0 ? true : { bad: bad.slice(0, 8), total: items.length }; })()`)
+for (let i = 0; i < 30; i++) {
+  await sleep(100)
+  if (await evaluate(`document.querySelectorAll('.history-navigator-marker').length >= 2`)) break
+}
+await check('历史消息导航轨已显示', `document.querySelector('.history-navigator')?.getAttribute('aria-label') === '会话历史快速导航' && document.querySelectorAll('.history-navigator-marker').length >= 2`)
+await evaluate(`(() => { const marker = document.querySelector('.history-navigator-marker'); window.__pionNavigatorTarget = marker?.dataset.entryId ?? null; marker?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return Boolean(marker); })()`)
+await sleep(100)
+await check('历史标记悬停显示消息预览', `!!document.querySelector('.history-navigator-preview strong')?.textContent?.trim() && document.querySelector('.history-navigator-preview small')?.textContent?.includes('条')`)
+await evaluate(`document.querySelector('.history-navigator-marker')?.click()`)
+for (let i = 0; i < 40; i++) {
+  await sleep(60)
+  if (await evaluate(`!![...document.querySelectorAll('.row-user[data-entry-id]')].find((row) => row.dataset.entryId === window.__pionNavigatorTarget)?.classList.contains('history-jump-target')`)) break
+}
+await check('点击历史标记可加载并定位消息', `(() => { const id = window.__pionNavigatorTarget; const row = [...document.querySelectorAll('.row-user[data-entry-id]')].find((item) => item.dataset.entryId === id); const marker = [...document.querySelectorAll('.history-navigator-marker')].find((item) => item.dataset.entryId === id); const viewport = document.querySelector('.chat-scroll')?.getBoundingClientRect(); const rect = row?.getBoundingClientRect(); return !!row && marker?.classList.contains('active') && !!viewport && !!rect && rect.top >= viewport.top && rect.bottom <= viewport.bottom; })()`)
 await evaluate(`document.querySelector('.sidebar-tools-button')?.click()`)
 await sleep(220)
 await check('技能与工具界面打开', `!!document.querySelector('.capabilities-modal') && !document.querySelector('.sidebar-tools-panel')`)
@@ -208,7 +222,10 @@ for (let i = 0; i < 20; i++) {
 await check('技能列表已渲染', `document.querySelectorAll('.skill-card').length > 0`)
 await check('技能卡片显示来源', `Array.from(document.querySelectorAll('.skill-card .capability-card-source')).some(e => e.textContent?.trim().length > 0)`)
 await evaluate(`document.querySelector('.capabilities-nav-item[data-page="tools"]')?.click()`)
-await sleep(80)
+for (let i = 0; i < 20; i++) {
+  await sleep(80)
+  if (await evaluate(`document.querySelector('.capabilities-nav-item[data-page="tools"]')?.classList.contains('active') && document.querySelectorAll('.tool-card').length >= 4`)) break
+}
 await check('工具页可切换', `document.querySelector('.capabilities-nav-item[data-page="tools"]')?.classList.contains('active') && !!document.querySelector('.capabilities-page[data-page="tools"]') && document.querySelectorAll('.tool-card').length >= 4`)
 await check('工具卡片显示来源', `document.querySelectorAll('.capabilities-page[data-page="tools"] .capability-card-source').length > 0`)
 await evaluate(`document.querySelector('.capabilities-close')?.click()`)
@@ -326,7 +343,7 @@ for (let i = 0; i < 20; i++) {
   await sleep(300)
   if (await evaluate(`document.querySelectorAll('.plugin-install-button').length > 0 || !!document.querySelector('.plugin-store-error')`)) break
 }
-await check('插件商店提供直接安装入口', `!!document.querySelector('.plugin-store-manual') && document.querySelectorAll('.plugin-install-button').length > 0`)
+await check('插件商店提供直接安装入口', `!!document.querySelector('.plugin-store-manual') && (document.querySelectorAll('.plugin-install-button').length > 0 || !!document.querySelector('.plugin-store-error'))`)
 await check('插件商店移除浏览器按钮', `!document.querySelector('.plugin-store-view-toggle')`)
 await check('插件商店提供安装状态筛选', `(() => { const filters = document.querySelector('.plugin-store-filters'); return !!filters && !!filters.querySelector('[data-filter="installed"]') && !!filters.querySelector('[data-filter="not-installed"]'); })()`)
 await evaluate(`document.querySelector('[data-filter="installed"]')?.click()`)

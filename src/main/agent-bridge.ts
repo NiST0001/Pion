@@ -28,6 +28,7 @@ import type {
   ProjectTrustInfo,
   RunCheckpointStatus,
   SessionEntriesPage,
+  SessionHistoryIndex,
   SessionInfo,
   SessionMeta,
   SkillInfo,
@@ -1112,6 +1113,56 @@ export class AgentBridge {
     return result
       ? { entries: result.entries.map(toWireEntry), leafId: result.leafId }
       : null
+  }
+
+  async getHistoryIndex(sessionPath?: string): Promise<SessionHistoryIndex | null> {
+    try {
+      const backend = this.getActiveBackend()
+      const target = sessionPath
+        ? await this.resolveListedSession(sessionPath)
+        : this.activeSessionPath ?? backend?.sessionPath
+      if (!target) return null
+      const manager = SessionManager.open(target)
+      this.sessionManagers.set(resolve(target), manager)
+      const entries = manager.getEntries()
+      let ordinal = 0
+      let pendingResponse = -1
+      const landmarks: SessionHistoryIndex['landmarks'] = []
+      entries.forEach((entry, entryIndex) => {
+        if (entry.type !== 'message') return
+        if (entry.message.role === 'user') {
+          ordinal += 1
+          const snippet = messageText(entry.message as unknown as WireMessage)
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 180)
+          landmarks.push({
+            entryId: entry.id,
+            entryIndex,
+            ordinal,
+            snippet: snippet || '(空消息)',
+            timestamp: String(entry.timestamp)
+          })
+          pendingResponse = landmarks.length - 1
+          return
+        }
+        if (entry.message.role !== 'assistant' || pendingResponse < 0) return
+        const responseSnippet = messageText(entry.message as unknown as WireMessage)
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 220)
+        if (!responseSnippet) return
+        landmarks[pendingResponse] = { ...landmarks[pendingResponse], responseSnippet }
+        pendingResponse = -1
+      })
+      return {
+        sessionPath: resolve(target),
+        totalEntries: entries.length,
+        landmarks
+      }
+    } catch {
+      return null
+    }
   }
 
   async getEntriesPage(

@@ -12,6 +12,7 @@ import type {
   ModelOption,
   ProjectMeta,
   RunCheckpointStatus,
+  SessionHistoryIndex,
   SessionInfo,
   SessionMeta,
   SlashCommandInfo,
@@ -79,6 +80,8 @@ export interface AgentState {
   sessionsByProject: Record<string, SessionMeta[]>
   branchesByProject: Record<string, BranchInfo[]>
   tree: { tree: TreeNodeLite[]; leafId: string | null } | null
+  historyIndex: SessionHistoryIndex | null
+  historyJump: { entryId: string; nonce: number } | null
   projects: ProjectMeta[]
   models: ModelOption[]
   thinkingLevels: string[]
@@ -100,6 +103,8 @@ export const initialState: AgentState = {
   sessionsByProject: {},
   branchesByProject: {},
   tree: null,
+  historyIndex: null,
+  historyJump: null,
   projects: [],
   models: [],
   thinkingLevels: [],
@@ -120,6 +125,8 @@ export type Action =
   | { type: 'projectSessions'; sessionsByProject: Record<string, SessionMeta[]> }
   | { type: 'branches'; cwd: string; branches: BranchInfo[] }
   | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
+  | { type: 'historyIndex'; index: SessionHistoryIndex | null }
+  | { type: 'historyJump'; entryId: string; nonce: number }
   | { type: 'projects'; projects: ProjectMeta[] }
   | { type: 'reorderSessions'; cwd: string; paths: string[] }
   | { type: 'models'; models: ModelOption[] }
@@ -129,6 +136,7 @@ export type Action =
   | { type: 'event'; event: WireEventInput }
   | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode }
   | { type: 'prependEntries'; items: TimelineItem[] }
+  | { type: 'appendEntries'; items: TimelineItem[] }
   | { type: 'timelineLoading'; loading: boolean }
   | { type: 'timelineError'; error?: string }
   | { type: 'clearTimeline' }

@@ -221,8 +221,12 @@ export interface TimelineCacheEntry {
   items: TimelineItem[]
   mode: AgentMode
   apiBefore: number
+  apiAfter: number
   toolResults: WireEntry[]
+  /** Whether all older entries have been loaded. */
   complete: boolean
+  /** Whether all newer entries have been loaded (false after a landmark jump). */
+  newerComplete: boolean
   leafId: string | null
   total: number
 }

@@ -33,6 +33,8 @@ export function reducer(state: AgentState, action: Action): AgentState {
         session: dead || ready ? null : state.session,
         sessions: dead ? [] : state.sessions,
         tree: dead || ready ? null : state.tree,
+        historyIndex: dead || ready ? null : state.historyIndex,
+        historyJump: dead || ready ? null : state.historyJump,
         models: ready ? [] : state.models,
         thinkingLevels: ready ? [] : state.thinkingLevels,
         commands: dead || ready ? [] : state.commands,
@@ -81,6 +83,10 @@ export function reducer(state: AgentState, action: Action): AgentState {
     }
     case 'tree':
       return { ...state, tree: action.tree }
+    case 'historyIndex':
+      return { ...state, historyIndex: action.index }
+    case 'historyJump':
+      return { ...state, historyJump: { entryId: action.entryId, nonce: action.nonce } }
     case 'projects': {
       const projectCwds = new Set(action.projects.map((project) => project.cwd))
       const sessionsByProject = Object.fromEntries(
@@ -115,6 +121,13 @@ export function reducer(state: AgentState, action: Action): AgentState {
         ...state,
         timeline: [...action.items, ...state.timeline],
         timelineMutation: 'prepend'
+      }
+    case 'appendEntries':
+      if (action.items.length === 0) return state
+      return {
+        ...state,
+        timeline: [...state.timeline, ...action.items],
+        timelineMutation: 'append'
       }
     case 'timelineLoading':
       return {

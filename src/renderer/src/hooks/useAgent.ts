@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 import type {
   AgentMode,
   BranchInfo,
+  HistoryLandmark,
   ForkMessageOption,
   ImageContent,
   ProjectTrustInfo
@@ -32,6 +33,8 @@ export function useAgent() {
   const bootstrapped = useRef(false)
   const timelineLoadId = useRef(0)
   const modelRefreshId = useRef(0)
+  const historyIndexLoadId = useRef(0)
+  const historyJumpNonce = useRef(0)
   const timelineCache = useRef(new Map<string, TimelineCacheEntry>())
   const historyCursor = useRef<HistoryCursor | null>(null)
   const timelineOwnerPath = useRef<string | undefined>(undefined)
@@ -45,7 +48,7 @@ export function useAgent() {
 
   const restoreCachedTimeline = useCallback((path: string, cached: TimelineCacheEntry): void => {
     const loadId = ++timelineLoadId.current
-    const cursor: HistoryCursor | null = cached.complete
+    const cursor: HistoryCursor | null = cached.complete && cached.newerComplete
       ? null
       : { path, ...cached, loading: false, loadId }
     historyCursor.current = cursor
@@ -160,8 +163,13 @@ export function useAgent() {
       return
     }
 
-    if (path && cached && cached.leafId === page.leafId && cached.total === page.total) {
-      const cursor: HistoryCursor | null = cached.complete
+    if (
+      path
+      && cached?.newerComplete
+      && cached.leafId === page.leafId
+      && cached.total === page.total
+    ) {
+      const cursor: HistoryCursor | null = cached.complete && cached.newerComplete
         ? null
         : { path, ...cached, loading: false, loadId }
       historyCursor.current = cursor
@@ -179,8 +187,10 @@ export function useAgent() {
       items: initialItems,
       mode: page.mode,
       apiBefore: page.start,
+      apiAfter: page.end,
       toolResults: page.toolResults,
       complete: page.start === 0,
+      newerComplete: page.end >= page.total,
       leafId: page.leafId,
       total: page.total,
       loading: false,
@@ -192,12 +202,14 @@ export function useAgent() {
         items: cursor.items,
         mode: cursor.mode,
         apiBefore: cursor.apiBefore,
+        apiAfter: cursor.apiAfter,
         toolResults: cursor.toolResults,
         complete: cursor.complete,
+        newerComplete: cursor.newerComplete,
         leafId: cursor.leafId,
         total: cursor.total
       })
-      historyCursor.current = cursor.complete ? null : cursor
+      historyCursor.current = cursor.complete && cursor.newerComplete ? null : cursor
       showTimeline(path, cursor.items, cursor.mode)
     } else {
       dispatch({ type: 'loadEntries', items: cursor.items, mode: cursor.mode })
@@ -240,19 +252,82 @@ export function useAgent() {
           items: cursor.items,
           mode: cursor.mode,
           apiBefore: cursor.apiBefore,
+          apiAfter: cursor.apiAfter,
           toolResults: cursor.toolResults,
           complete: cursor.complete,
+          newerComplete: cursor.newerComplete,
           leafId: cursor.leafId,
           total: cursor.total
         })
         if (cursor.complete) {
-          historyCursor.current = null
+          if (cursor.newerComplete) historyCursor.current = null
           return
         }
         if (items.length > 0) return
       }
     } finally {
       if (historyCursor.current === cursor) cursor.loading = false
+    }
+  }, [api])
+
+  /** Fetch and append newer history after jumping into the middle of a session. */
+  const loadNewer = useCallback(async (): Promise<void> => {
+    if (!api) return
+    const cursor = historyCursor.current
+    if (!cursor || cursor.loading || cursor.newerComplete) return
+    cursor.loading = true
+    const loadId = cursor.loadId
+    try {
+      for (let attempt = 0; attempt < 16; attempt++) {
+        if (loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+        const end = Math.min(cursor.total, cursor.apiAfter + HISTORY_ENTRY_CHUNK_SIZE)
+        const limit = Math.max(1, end - cursor.apiAfter)
+        const page = await api.getEntriesPage(end, limit, cursor.path)
+        if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+        cursor.apiAfter = page.end
+        cursor.toolResults = page.toolResults
+        cursor.leafId = page.leafId
+        cursor.total = page.total
+        cursor.newerComplete = cursor.apiAfter >= cursor.total
+
+        const items = entriesToTimeline(
+          page.entries,
+          collectToolResults([...page.entries, ...page.toolResults])
+        )
+        cursor.items = [...cursor.items, ...items]
+        if (items.length > 0) dispatch({ type: 'appendEntries', items })
+        storeTimelineCache(timelineCache.current, cursor.path, {
+          items: cursor.items,
+          mode: cursor.mode,
+          apiBefore: cursor.apiBefore,
+          apiAfter: cursor.apiAfter,
+          toolResults: cursor.toolResults,
+          complete: cursor.complete,
+          newerComplete: cursor.newerComplete,
+          leafId: cursor.leafId,
+          total: cursor.total
+        })
+        if (cursor.newerComplete) {
+          if (cursor.complete) historyCursor.current = null
+          return
+        }
+        if (items.length > 0) return
+      }
+    } finally {
+      if (historyCursor.current === cursor) cursor.loading = false
+    }
+  }, [api])
+
+  const refreshHistoryIndex = useCallback(async (sessionPath?: string): Promise<void> => {
+    if (!api) return
+    const loadId = ++historyIndexLoadId.current
+    if (!sessionPath) {
+      dispatch({ type: 'historyIndex', index: null })
+      return
+    }
+    const index = await api.getHistoryIndex(sessionPath).catch(() => null)
+    if (loadId === historyIndexLoadId.current) {
+      dispatch({ type: 'historyIndex', index })
     }
   }, [api])
 
@@ -270,13 +345,21 @@ export function useAgent() {
     dispatch({ type: 'commands', commands })
   }, [api])
 
+  useEffect(() => {
+    const sessionPath = state.session?.sessionFile
+    if (!sessionPath || state.busy) return
+    void refreshHistoryIndex(sessionPath)
+  }, [refreshHistoryIndex, state.busy, state.session?.sessionFile])
+
   const start = useCallback(
     async (cwd: string) => {
       if (!api) return
       ++timelineLoadId.current
+      ++historyIndexLoadId.current
       historyCursor.current = null
       timelineOwnerPath.current = undefined
       expectedTimeline.current = null
+      dispatch({ type: 'historyIndex', index: null })
       dispatch({ type: 'status', status: { phase: 'starting', cwd } })
       dispatch({ type: 'clearTimeline' })
       await api.startAgent(cwd)
@@ -331,9 +414,11 @@ export function useAgent() {
   const newSession = useCallback(async () => {
     if (!api) return
     ++timelineLoadId.current
+    ++historyIndexLoadId.current
     historyCursor.current = null
     timelineOwnerPath.current = undefined
     expectedTimeline.current = null
+    dispatch({ type: 'historyIndex', index: null })
     // Clear the visible conversation before backend startup. The new backend
     // can take a moment to initialize, and the previous session must not stay
     // on screen while that happens.
@@ -391,6 +476,7 @@ export function useAgent() {
         dispatch({ type: 'timelineLoading', loading: true })
       }
       await reloadTimeline(sessionPath)
+      void refreshHistoryIndex(sessionPath)
       // Session history comes from its JSONL file and must not wait for a cold
       // RPC backend. Models and commands refresh once that backend is ready.
       void refreshModels().catch((error: unknown) => {
@@ -398,8 +484,73 @@ export function useAgent() {
       })
       return result
     },
-    [api, refreshModels, reloadTimeline, restoreCachedTimeline]
+    [api, refreshHistoryIndex, refreshModels, reloadTimeline, restoreCachedTimeline]
   )
+
+  const jumpToHistoryLandmark = useCallback(async (landmark: HistoryLandmark): Promise<void> => {
+    const index = state.historyIndex
+    if (!api || !index || !index.sessionPath || index.totalEntries <= 0) return
+    const loadId = ++timelineLoadId.current
+    const end = Math.min(
+      index.totalEntries,
+      Math.max(
+        Math.min(INITIAL_HISTORY_PAGE_SIZE, index.totalEntries),
+        landmark.entryIndex + Math.floor(INITIAL_HISTORY_PAGE_SIZE * 0.35)
+      )
+    )
+    const limit = Math.min(INITIAL_HISTORY_PAGE_SIZE, end)
+    dispatch({ type: 'timelineLoading', loading: true })
+
+    let page = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      page = await api.getEntriesPage(end, limit, index.sessionPath).catch(() => null)
+      if (page || loadId !== timelineLoadId.current) break
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 80 * (attempt + 1)))
+    }
+    if (loadId !== timelineLoadId.current) return
+    if (!page) {
+      dispatch({ type: 'timelineError', error: '无法加载所选历史消息。' })
+      return
+    }
+
+    const items = entriesToTimeline(
+      page.entries,
+      collectToolResults([...page.entries, ...page.toolResults])
+    )
+    const cursor: HistoryCursor = {
+      path: index.sessionPath,
+      items,
+      mode: page.mode,
+      apiBefore: page.start,
+      apiAfter: page.end,
+      toolResults: page.toolResults,
+      complete: page.start === 0,
+      newerComplete: page.end >= page.total,
+      leafId: page.leafId,
+      total: page.total,
+      loading: false,
+      loadId
+    }
+    timelineOwnerPath.current = index.sessionPath
+    historyCursor.current = cursor.complete && cursor.newerComplete ? null : cursor
+    storeTimelineCache(timelineCache.current, index.sessionPath, {
+      items: cursor.items,
+      mode: cursor.mode,
+      apiBefore: cursor.apiBefore,
+      apiAfter: cursor.apiAfter,
+      toolResults: cursor.toolResults,
+      complete: cursor.complete,
+      newerComplete: cursor.newerComplete,
+      leafId: cursor.leafId,
+      total: cursor.total
+    })
+    showTimeline(index.sessionPath, items, page.mode)
+    dispatch({
+      type: 'historyJump',
+      entryId: landmark.entryId,
+      nonce: ++historyJumpNonce.current
+    })
+  }, [api, showTimeline, state.historyIndex])
 
   const reorderSessions = useCallback((cwd: string, paths: string[]) => {
     saveSessionOrder(cwd, paths)
@@ -565,6 +716,8 @@ export function useAgent() {
       bootstrap,
       start,
       loadOlder,
+      loadNewer,
+      jumpToHistoryLandmark,
       send,
       queue,
       abort,
@@ -596,6 +749,8 @@ export function useAgent() {
       bootstrap,
       start,
       loadOlder,
+      loadNewer,
+      jumpToHistoryLandmark,
       send,
       queue,
       abort,

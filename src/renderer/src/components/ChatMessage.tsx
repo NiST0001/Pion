@@ -12,7 +12,7 @@ interface ChatMessageProps {
 export function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactElement | null {
   if (item.kind === 'user') {
     return (
-      <div className="row row-user">
+      <div className="row row-user" data-entry-id={item.entryId}>
         <div className="bubble bubble-user">
           {item.text !== '' && <div className="bubble-content">{item.text}</div>}
           {item.images && item.images.length > 0 && (
