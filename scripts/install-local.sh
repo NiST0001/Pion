@@ -33,8 +33,25 @@ fi
 
 echo "[install] 安装应用到 $APP_DIR ..."
 mkdir -p "$APP_DIR"
-# rsync 增量同步：未变化的依赖文件直接跳过，重复安装很快
-rsync -a --delete out package.json node_modules "$APP_DIR/"
+rsync -a --delete out package.json "$APP_DIR/"
+
+echo "[install] 同步运行时依赖（剔除开发依赖）..."
+LIST="$(mktemp)"
+npm ls --omit=dev --parseable --all 2>/dev/null | tail -n +2 | sed "s|^$PWD/||" > "$LIST" || true
+if [ -s "$LIST" ]; then
+  rm -rf "$APP_DIR/node_modules"
+  mkdir -p "$APP_DIR/node_modules"
+  tar -cf - -T "$LIST" | tar -xf - -C "$APP_DIR"
+else
+  echo "[install] 警告：无法枚举生产依赖，回退为完整复制 node_modules" >&2
+  rsync -a --delete node_modules "$APP_DIR/"
+fi
+rm -f "$LIST"
+# Electron 在 package.json 里属 devDependency，但它是桌面应用运行时本体
+rm -rf "$APP_DIR/node_modules/electron"
+cp -a node_modules/electron "$APP_DIR/node_modules/electron"
+mkdir -p "$APP_DIR/node_modules/.bin"
+ln -sfn ../electron/cli.js "$APP_DIR/node_modules/.bin/electron"
 
 echo "[install] 生成图标..."
 if [ -f "$FONT_BOLD" ]; then
