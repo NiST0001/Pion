@@ -65,6 +65,7 @@ await check('会话历史按窗口读取', `(async()=>{const page=await window.p
 
 // --- 1. 无边框标题栏 ---
 await check('标题栏存在', `!!document.querySelector('.titlebar')`)
+await check('全局字体使用 Maple Mono', `getComputedStyle(document.body).fontFamily.includes('Maple Mono')`)
 await check('旧 header 已移除', `!document.querySelector('.app-header')`)
 await check('窗口控制三键（最小/最大/关闭）', `document.querySelectorAll('.titlebar-btn').length >= 3`)
 await check('关闭按钮样式', `!!document.querySelector('.titlebar-close')`)

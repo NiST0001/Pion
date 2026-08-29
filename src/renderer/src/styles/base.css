@@ -32,8 +32,8 @@
   --code-fg: #ddd6cd;
   --radius: 11px;
   --radius-sm: 7px;
-  --mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, monospace;
-  --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  --mono: 'Maple Mono', 'Maple Mono NF CN', ui-monospace, 'Cascadia Code', 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  --sans: 'Maple Mono', 'Maple Mono NF CN', ui-monospace, sans-serif;
   --shadow-pop: 0 16px 44px rgba(0, 0, 0, 0.34);
   --sidebar-w: 276px;
 }
