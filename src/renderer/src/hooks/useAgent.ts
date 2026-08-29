@@ -294,8 +294,11 @@ export function useAgent() {
     historyCursor.current = null
     timelineOwnerPath.current = undefined
     expectedTimeline.current = null
-    await api.newSession()
+    // Clear the visible conversation before backend startup. The new backend
+    // can take a moment to initialize, and the previous session must not stay
+    // on screen while that happens.
     dispatch({ type: 'clearTimeline' })
+    await api.newSession()
     await refreshModels()
   }, [api, refreshModels])
 

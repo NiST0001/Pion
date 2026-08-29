@@ -164,6 +164,8 @@ await sleep(120)
 await check('项目选择器使用主题菜单', `!!document.querySelector('.composer-project-menu[role="listbox"]') && document.querySelectorAll('.composer-project-option').length > 0`)
 await evaluate(`document.querySelector('.composer-project-option')?.click()`)
 await evaluate(`document.querySelector('.sidebar-new-session')?.click()`)
+await sleep(120)
+await check('新建会话清空上一会话内容', `!document.querySelector('.timeline') && !!document.querySelector('.empty-state')`)
 for (let i = 0; i < 30; i++) {
   await sleep(300)
   if (await evaluate(`!!document.querySelector('.dot-running') && document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)) break
