@@ -83,26 +83,6 @@
   gap: 6px;
 }
 
-.plugin-store-view-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 27px;
-  padding: 0 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--fg-dim);
-  font-size: 11px;
-  transition: all 0.12s ease;
-}
-
-.plugin-store-view-toggle:hover,
-.plugin-store-view-toggle.active {
-  border-color: rgba(var(--accent-rgb), 0.5);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-}
-
 .plugin-store-body {
   position: relative;
   flex: 1;

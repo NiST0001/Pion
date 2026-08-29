@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
 import type {
+  AgentCapabilities,
   AgentMode,
   AgentStatus,
   BranchInfo,
@@ -55,6 +56,7 @@ const api: PionApi = {
   setMode: (mode: AgentMode) => ipcRenderer.invoke(IPC.AgentSetMode, mode),
   getAvailableModels: () => ipcRenderer.invoke(IPC.AgentModels),
   getSkills: () => ipcRenderer.invoke(IPC.AgentSkills) as Promise<SkillInfo[]>,
+  getCapabilities: () => ipcRenderer.invoke(IPC.AgentCapabilities) as Promise<AgentCapabilities>,
   setModel: (provider, modelId) => ipcRenderer.invoke(IPC.AgentSetModel, provider, modelId),
   getThinkingLevels: () => ipcRenderer.invoke(IPC.AgentThinkingLevels),
   setThinkingLevel: (level) => ipcRenderer.invoke(IPC.AgentSetThinking, level),

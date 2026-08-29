@@ -34,6 +34,7 @@ export const IPC = {
   AgentSetMode: 'pion:agent-set-mode',
   AgentModels: 'pion:agent-models',
   AgentSkills: 'pion:agent-skills',
+  AgentCapabilities: 'pion:agent-capabilities',
   AgentSetModel: 'pion:agent-set-model',
   AgentThinkingLevels: 'pion:agent-thinking-levels',
   AgentSetThinking: 'pion:agent-set-thinking',

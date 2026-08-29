@@ -9,17 +9,19 @@ import {
   Wrench,
   X
 } from 'lucide-react'
-import type { SkillInfo } from '../../../shared/types'
+import type { AgentCapabilities, SkillInfo, ToolInfo } from '../../../shared/types'
 
 type CapabilityPage = 'skills' | 'tools'
 
-interface ToolInfo {
+interface BuiltinToolInfo {
   name: string
   title: string
   description: string
 }
 
-const BUILTIN_TOOLS: ToolInfo[] = [
+const EMPTY_CAPABILITIES: AgentCapabilities = { skills: [], tools: [] }
+
+const BUILTIN_TOOLS: BuiltinToolInfo[] = [
   {
     name: 'read',
     title: '读取文件',
@@ -50,21 +52,21 @@ export function SkillsToolsModal({
   onClose: () => void
 }): ReactElement | null {
   const [page, setPage] = useState<CapabilityPage>('skills')
-  const [skills, setSkills] = useState<SkillInfo[]>([])
+  const [capabilities, setCapabilities] = useState<AgentCapabilities>(EMPTY_CAPABILITIES)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     if (!open) return
     setPage('skills')
-    setSkills([])
+    setCapabilities(EMPTY_CAPABILITIES)
     setError('')
     setLoading(true)
     let active = true
 
-    void window.pion.getSkills()
-      .then((loadedSkills) => {
-        if (active) setSkills(loadedSkills)
+    void window.pion.getCapabilities()
+      .then((loadedCapabilities) => {
+        if (active) setCapabilities(loadedCapabilities)
       })
       .catch((err: unknown) => {
         if (active) setError(err instanceof Error ? err.message : String(err))
@@ -128,9 +130,9 @@ export function SkillsToolsModal({
 
           <main className="capabilities-content">
             {page === 'skills' ? (
-              <SkillsPage skills={skills} loading={loading} error={error} />
+              <SkillsPage skills={capabilities.skills} loading={loading} error={error} />
             ) : (
-              <ToolsPage />
+              <ToolsPage tools={capabilities.tools} loading={loading} error={error} />
             )}
           </main>
         </div>
@@ -193,7 +195,7 @@ function SkillsPage({
         <span className="capabilities-count">
           {loading ? '正在读取…' : `${skills.length} 项已加载`}
         </span>
-        <span className="capabilities-source">当前工作区 · 用户配置</span>
+        <span className="capabilities-source">当前工作区 · 用户配置 · 已安装插件</span>
       </div>
 
       {error && <div className="capabilities-error">读取技能失败：{error}</div>}
@@ -217,6 +219,7 @@ function SkillsPage({
               kind="skill"
               icon={<Sparkles size={16} />}
               name={skill.name}
+              source={formatCapabilitySource(skill.source)}
               description={skill.description || '可调用的工作技能。'}
             />
           ))}
@@ -226,29 +229,59 @@ function SkillsPage({
   )
 }
 
-function ToolsPage(): ReactElement {
+function ToolsPage({
+  tools,
+  loading,
+  error
+}: {
+  tools: ToolInfo[]
+  loading: boolean
+  error: string
+}): ReactElement {
   return (
     <section className="capabilities-page" data-page="tools">
       <div className="capabilities-page-heading">
         <div className="capabilities-page-kicker">TOOLS</div>
         <h3>工具</h3>
-        <p>工具是 agent 在当前工作区中可以直接调用的文件和终端能力。</p>
+        <p>工具是 agent 在当前工作区中可以直接调用的文件、终端和已安装插件能力。</p>
       </div>
 
       <div className="capabilities-toolbar">
-        <span className="capabilities-count">{BUILTIN_TOOLS.length} 项可用</span>
-        <span className="capabilities-source">Pi 内置工具</span>
+        <span className="capabilities-count">
+          {loading ? '正在读取…' : `${BUILTIN_TOOLS.length + tools.length} 项可用`}
+        </span>
+        <span className="capabilities-source">Pi 内置工具 · 已安装插件</span>
       </div>
+
+      {error && <div className="capabilities-error">读取插件工具失败：{error}</div>}
+      {loading && (
+        <div className="capabilities-loading-note">
+          <Loader2 size={14} className="spin" />
+          <span>正在读取插件工具…</span>
+        </div>
+      )}
 
       <div className="capabilities-grid">
         {BUILTIN_TOOLS.map((tool) => (
           <CapabilityCard
-            key={tool.name}
+            key={`builtin:${tool.name}`}
             kind="tool"
             icon={tool.name === 'bash' ? <Terminal size={16} /> : <FileDiff size={16} />}
             name={tool.name}
             title={tool.title}
+            source="Pi 内置"
             description={tool.description}
+          />
+        ))}
+        {tools.map((tool) => (
+          <CapabilityCard
+            key={`plugin:${tool.source ?? 'unknown'}:${tool.name}`}
+            kind="tool"
+            icon={<Wrench size={16} />}
+            name={tool.name}
+            title={tool.label || tool.name}
+            source={formatCapabilitySource(tool.source)}
+            description={tool.description || '已安装插件提供的工具。'}
           />
         ))}
       </div>
@@ -256,17 +289,25 @@ function ToolsPage(): ReactElement {
   )
 }
 
+function formatCapabilitySource(source?: string): string | undefined {
+  if (!source) return undefined
+  if (source === 'auto') return '自动发现'
+  return source.replace(/^npm:/, '')
+}
+
 function CapabilityCard({
   kind,
   icon,
   name,
   title,
+  source,
   description
 }: {
   kind: 'skill' | 'tool'
   icon: ReactElement
   name: string
   title?: string
+  source?: string
   description: string
 }): ReactElement {
   return (
@@ -277,6 +318,7 @@ function CapabilityCard({
           <strong>{title || name}</strong>
           <code>{kind === 'skill' ? `/${name}` : name}</code>
         </div>
+        {source && <span className="capability-card-source">{source}</span>}
         <p>{description}</p>
       </div>
     </article>

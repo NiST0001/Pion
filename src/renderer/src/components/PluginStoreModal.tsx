@@ -5,7 +5,6 @@ import {
   Download,
   ExternalLink,
   Globe2,
-  LayoutGrid,
   Loader2,
   PackageOpen,
   RefreshCw,
@@ -18,19 +17,29 @@ import type { PluginCatalogItem } from '../../../shared/types'
 export const PI_PLUGIN_STORE_URL = 'https://pi.dev/packages'
 
 type PluginStoreView = 'catalog' | 'browser'
-type PackageFilter = 'all' | 'extension' | 'skill' | 'theme' | 'prompt' | 'package'
+type PackageTypeFilter = 'extension' | 'skill' | 'theme' | 'prompt' | 'package'
+type PackageFilter = 'all' | PackageTypeFilter | 'installed' | 'not-installed'
 
 interface PluginWebviewElement extends HTMLElement {
   reload: () => void
   loadURL: (url: string) => Promise<void>
 }
 
-const TYPE_LABELS: Record<Exclude<PackageFilter, 'all'>, string> = {
+const TYPE_LABELS: Record<PackageTypeFilter, string> = {
   extension: '扩展',
   skill: '技能',
   theme: '主题',
   prompt: '提示词',
   package: '包'
+}
+
+const STATUS_LABELS = {
+  installed: '已安装',
+  'not-installed': '未安装'
+} as const
+
+function isPackageTypeFilter(filter: PackageFilter): filter is PackageTypeFilter {
+  return filter in TYPE_LABELS
 }
 
 function formatDownloads(downloads?: number): string {
@@ -40,7 +49,7 @@ function formatDownloads(downloads?: number): string {
   return `${downloads} 次下载`
 }
 
-/** Direct installer for the official pi package catalog, with a retained browser view. */
+/** Direct installer for the official pi package catalog. */
 export function PluginStoreModal({
   open,
   onClose
@@ -132,11 +141,13 @@ export function PluginStoreModal({
   const filteredPackages = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase()
     return packages.filter((item) => {
-      if (filter !== 'all' && item.type !== filter) return false
+      if (filter === 'installed' && !installedSources.has(item.source)) return false
+      if (filter === 'not-installed' && installedSources.has(item.source)) return false
+      if (isPackageTypeFilter(filter) && item.type !== filter) return false
       if (!normalizedQuery) return true
       return `${item.name} ${item.description} ${item.source}`.toLowerCase().includes(normalizedQuery)
     })
-  }, [filter, packages, query])
+  }, [filter, installedSources, packages, query])
 
   const install = useCallback(async (source: string, label: string): Promise<boolean> => {
     const normalized = source.trim()
@@ -192,20 +203,9 @@ export function PluginStoreModal({
           <div className="plugin-store-heading">
             <div className="modal-kicker">PI OFFICIAL CATALOG</div>
             <h2 id="plugin-store-title"><Store size={18} />插件商店</h2>
-            <span>直接安装官方扩展、技能与工具包；需要时也可浏览原站。</span>
+            <span>直接安装官方扩展、技能与工具包。</span>
           </div>
           <div className="plugin-store-actions">
-            <button
-              type="button"
-              className={`plugin-store-view-toggle${view === 'browser' ? ' active' : ''}`}
-              title={view === 'browser' ? '返回插件目录' : '打开内置浏览器'}
-              aria-label={view === 'browser' ? '返回插件目录' : '打开内置浏览器'}
-              aria-pressed={view === 'browser'}
-              onClick={() => setView((current) => current === 'catalog' ? 'browser' : 'catalog')}
-            >
-              {view === 'browser' ? <LayoutGrid size={14} /> : <Globe2 size={14} />}
-              <span>{view === 'browser' ? '目录' : '浏览器'}</span>
-            </button>
             <button
               type="button"
               className="icon-button"
@@ -239,7 +239,7 @@ export function PluginStoreModal({
                   aria-label="搜索插件"
                 />
               </label>
-              <div className="plugin-store-filters" role="group" aria-label="插件类型">
+              <div className="plugin-store-filters" role="group" aria-label="插件筛选">
                 <button
                   type="button"
                   className={filter === 'all' ? 'active' : ''}
@@ -247,10 +247,27 @@ export function PluginStoreModal({
                 >
                   全部
                 </button>
-                {(Object.keys(TYPE_LABELS) as Array<Exclude<PackageFilter, 'all'>>).map((type) => (
+                <button
+                  type="button"
+                  data-filter="installed"
+                  className={filter === 'installed' ? 'active' : ''}
+                  onClick={() => setFilter('installed')}
+                >
+                  {STATUS_LABELS.installed}
+                </button>
+                <button
+                  type="button"
+                  data-filter="not-installed"
+                  className={filter === 'not-installed' ? 'active' : ''}
+                  onClick={() => setFilter('not-installed')}
+                >
+                  {STATUS_LABELS['not-installed']}
+                </button>
+                {(Object.keys(TYPE_LABELS) as PackageTypeFilter[]).map((type) => (
                   <button
                     key={type}
                     type="button"
+                    data-filter={type}
                     className={filter === type ? 'active' : ''}
                     onClick={() => setFilter(type)}
                   >
@@ -369,7 +386,7 @@ function PluginCard({
   onInstall: () => void
   onOpen: () => void
 }): ReactElement {
-  const type = (item.type in TYPE_LABELS ? TYPE_LABELS[item.type as Exclude<PackageFilter, 'all'>] : item.type) || '包'
+  const type = (item.type in TYPE_LABELS ? TYPE_LABELS[item.type as PackageTypeFilter] : item.type) || '包'
   return (
     <article className="plugin-card">
       <div className="plugin-card-head">

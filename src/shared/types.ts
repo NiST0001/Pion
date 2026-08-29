@@ -214,6 +214,22 @@ export interface ModelOption {
 export interface SkillInfo {
   name: string
   description?: string
+  /** Owning package/source, e.g. npm:pi-subagents or auto. */
+  source?: string
+}
+
+export interface ToolInfo {
+  name: string
+  label?: string
+  description?: string
+  /** Owning package/source; built-in tools use a renderer-provided label. */
+  source?: string
+}
+
+export interface AgentCapabilities {
+  skills: SkillInfo[]
+  /** Extension/custom tools; built-in tools remain listed by the renderer. */
+  tools: ToolInfo[]
 }
 
 export interface PluginCatalogItem {
@@ -323,6 +339,7 @@ export interface PionApi {
   // model & thinking --------------------------------------------------------
   getAvailableModels(): Promise<ModelOption[]>
   getSkills(): Promise<SkillInfo[]>
+  getCapabilities(): Promise<AgentCapabilities>
   getCommands(): Promise<SlashCommandInfo[]>
   getPluginCatalog(): Promise<PluginCatalogItem[]>
   getInstalledPlugins(): Promise<string[]>

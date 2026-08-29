@@ -3,13 +3,17 @@ import { randomUUID } from 'node:crypto'
 import { access, unlink } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
 import {
+  DefaultResourceLoader,
   RpcClient,
   SessionManager,
+  SettingsManager,
+  getAgentDir,
   getPackageDir
 } from '@earendil-works/pi-coding-agent'
 import type { SessionEntry } from '@earendil-works/pi-coding-agent'
 import { IPC_EVENTS } from '../shared/ipc'
 import type {
+  AgentCapabilities,
   AgentMode,
   AgentStatus,
   BranchInfo,
@@ -696,11 +700,50 @@ export class AgentBridge {
         .filter((command) => command.source === 'skill')
         .map((command) => ({
           name: command.name.replace(/^skill:/, ''),
-          description: command.description
+          description: command.description,
+          source: command.sourceInfo?.source
         }))
     } catch {
       return []
     }
+  }
+
+  /** Discover skills and extension tools from the same package loader Pi uses. */
+  async getCapabilities(): Promise<AgentCapabilities> {
+    const cwd = this.activeCwd ?? this.status.cwd
+    if (!cwd) return { skills: [], tools: [] }
+
+    const agentDir = getAgentDir()
+    const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: true })
+    const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager })
+    await resourceLoader.reload()
+
+    const skills = new Map<string, SkillInfo>()
+    for (const skill of resourceLoader.getSkills().skills) {
+      if (!skills.has(skill.name)) {
+        skills.set(skill.name, {
+          name: skill.name,
+          description: skill.description,
+          source: skill.sourceInfo.source
+        })
+      }
+    }
+
+    const tools = new Map<string, AgentCapabilities['tools'][number]>()
+    for (const extension of resourceLoader.getExtensions().extensions) {
+      for (const { definition, sourceInfo } of extension.tools.values()) {
+        if (!tools.has(definition.name)) {
+          tools.set(definition.name, {
+            name: definition.name,
+            label: definition.label,
+            description: definition.description,
+            source: sourceInfo.source
+          })
+        }
+      }
+    }
+
+    return { skills: [...skills.values()], tools: [...tools.values()] }
   }
 
   async getThinkingLevels(): Promise<string[]> {

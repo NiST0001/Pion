@@ -122,6 +122,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.AgentSetMode, (_event, mode: 'build' | 'plan') => bridge.setMode(mode))
   ipcMain.handle(IPC.AgentModels, () => bridge.getModels())
   ipcMain.handle(IPC.AgentSkills, () => bridge.getSkills())
+  ipcMain.handle(IPC.AgentCapabilities, () => bridge.getCapabilities())
   ipcMain.handle(IPC.AgentSetModel, (_event, provider: string, modelId: string) =>
     bridge.setModel(provider, modelId)
   )
