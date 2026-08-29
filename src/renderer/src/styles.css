@@ -1,6 +1,7 @@
 /* Pion styles entry point. Visual refinements resolve the palette cascade;
    motion.css is last so interaction timing stays consistent across themes. */
 @import './styles/base.css';
+@import './styles/hljs.css';
 @import './styles/titlebar.css';
 @import './styles/sidebar.css';
 @import './styles/composer.css';

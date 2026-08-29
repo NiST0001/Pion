@@ -3,7 +3,6 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import { Check, Copy } from 'lucide-react'
-import 'highlight.js/styles/github-dark.css'
 
 function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactElement {
   const [copied, setCopied] = useState(false)
