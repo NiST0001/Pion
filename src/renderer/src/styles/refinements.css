@@ -5,16 +5,16 @@
 
 :root {
   --surface-tint: rgba(255, 255, 255, 0.025);
-  --backdrop: rgba(21, 17, 14, 0.54);
+  --backdrop: rgba(15, 15, 14, 0.56);
   --code-overlay: rgba(0, 0, 0, 0.26);
   --composer-shadow: 0 5px 22px rgba(0, 0, 0, 0.16);
 }
 
 :root[data-theme='terracotta-light'] {
-  --surface-tint: rgba(79, 59, 43, 0.035);
-  --backdrop: rgba(64, 47, 34, 0.34);
+  --surface-tint: rgba(47, 43, 40, 0.028);
+  --backdrop: rgba(36, 34, 32, 0.3);
   --code-overlay: rgba(255, 255, 255, 0.7);
-  --composer-shadow: 0 5px 20px rgba(93, 67, 47, 0.1);
+  --composer-shadow: 0 5px 20px rgba(47, 43, 40, 0.09);
 }
 
 html,
@@ -2034,4 +2034,199 @@ body.pion-resizing-panels,
 body.pion-resizing-panels * {
   cursor: col-resize !important;
   user-select: none !important;
+}
+
+/* reduced-accent pass -------------------------------------------------------
+   Terracotta is reserved for primary actions, focus, and thin state markers.
+   Selection surfaces, secondary icons, and decorative labels stay neutral. */
+
+.side-item.active,
+.project-folder.active > .project-folder-head,
+.project-branch-head.active,
+.settings-nav-item.active,
+.capabilities-nav-item.active,
+.review-file-item.active,
+.picker-option.selected,
+.thinking-option.selected,
+.composer-project-option.selected,
+.slash-command-option.active,
+.plugin-store-filters button.active,
+.model-choice.selected,
+.theme-choice.active {
+  border-color: var(--selected-border);
+  background: var(--selected-bg);
+  color: var(--fg);
+  box-shadow: none;
+}
+
+.project-branch-sessions .side-session.active {
+  border-color: var(--selected-border);
+  background: var(--selected-bg);
+  color: var(--fg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.segmented button.active,
+.settings-page .segmented button.active {
+  border-color: var(--selected-border);
+  background: var(--selected-bg-strong);
+  color: var(--fg);
+  box-shadow: none;
+}
+
+.composer-mode-plan .composer-mode-option.active:last-child {
+  border-color: color-mix(in srgb, var(--purple) 48%, var(--border));
+  background: var(--selected-bg);
+  color: var(--purple);
+}
+
+.side-item.active .side-item-icon,
+.project-folder-icon,
+.project-folder-new-branch-plus,
+.project-branch-icon,
+.composer-project-icon,
+.composer-project-option-icon,
+.composer-project-option-check,
+.settings-nav-item.active .settings-nav-icon,
+.capabilities-nav-item.active .capabilities-nav-icon,
+.capabilities-nav-item:hover .capabilities-nav-arrow,
+.capabilities-nav-item.active .capabilities-nav-arrow,
+.active-model-icon,
+.provider-mark,
+.theme-choice-check,
+.plugin-store-heading h2 svg,
+.review-checkpoint-icon {
+  color: var(--fg-dim);
+}
+
+.project-folder.active > .project-folder-head .project-folder-name,
+.project-branch-head.active .project-branch-name,
+.project-branch-head.active .project-branch-icon {
+  color: var(--fg);
+}
+
+.capability-card-icon,
+.tool-permission-setting-icon,
+.feature-icon {
+  border-color: var(--border-soft);
+  background: var(--selected-bg);
+  color: var(--fg-dim);
+}
+
+.settings-section-title,
+.modal-kicker,
+.settings-page-kicker,
+.capabilities-page-kicker,
+.review-panel-kicker,
+.capabilities-count,
+.active-model-copy > span {
+  color: var(--fg-faint);
+}
+
+.settings-page > .settings-section,
+.appearance-preview-card,
+.active-model-card,
+.action-card,
+.about-hero {
+  border-color: var(--border);
+  background: var(--surface-tint);
+  box-shadow: none;
+}
+
+.action-card:hover:not(:disabled),
+.capability-card:hover,
+.plugin-card:hover {
+  border-color: var(--selected-border);
+  background: var(--selected-bg);
+  box-shadow: none;
+}
+
+.plugin-type-badge {
+  border-color: var(--border);
+  background: var(--selected-bg);
+  color: var(--fg-dim);
+}
+
+.project-folder-head:hover,
+.project-branch-toggle:hover,
+.project-branch-new:hover,
+.side-session-favorite:hover,
+.sidebar-tools-button:hover,
+.slash-command-option:hover,
+.thinking-option:hover,
+.picker-option:hover,
+.plugin-store-filters button:hover {
+  border-color: var(--selected-border);
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.picker-trigger:hover,
+.picker-compact .picker-trigger:hover,
+.picker-compact .picker-trigger[aria-expanded='true'],
+.thinking-trigger:hover,
+.thinking-trigger[aria-expanded='true'],
+.composer-project-trigger:hover,
+.composer-project-trigger[aria-expanded='true'] {
+  border-color: var(--selected-border);
+}
+
+.composer-project-trigger[aria-expanded='true'] .composer-project-chevron {
+  color: var(--fg-dim);
+}
+
+.sidebar-tools-button:hover .sidebar-tools-arrow,
+.side-session:hover .side-session-drag,
+.side-session.drag-over .side-session-drag,
+.plugin-detail-button:hover,
+.plugin-external-link:hover,
+.fork-button:hover,
+.code-copy:hover {
+  color: var(--fg);
+}
+
+.composer-attachment,
+.message-image {
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.empty-mark {
+  border-color: var(--border);
+  background: var(--selected-bg);
+  color: var(--fg-dim);
+  box-shadow: none;
+}
+
+.markdown blockquote {
+  border-left-color: var(--selected-border);
+}
+
+.titlebar-review-btn.active {
+  background: var(--selected-bg-strong);
+  color: var(--fg);
+}
+
+.project-trust-card-icon {
+  border-color: var(--border);
+  background: var(--selected-bg);
+  color: var(--ok);
+}
+
+.review-checkpoint-rolled-back {
+  border-color: rgba(var(--ok-rgb), 0.3);
+  background: rgba(var(--ok-rgb), 0.08);
+  color: var(--ok);
+}
+
+.review-checkpoint-rollback {
+  border-color: rgba(var(--danger-rgb), 0.3);
+  background: transparent;
+  color: var(--danger);
+}
+
+.review-checkpoint-rollback:hover:not(:disabled) {
+  border-color: rgba(var(--danger-rgb), 0.48);
+  background: rgba(var(--danger-rgb), 0.09);
+  color: var(--danger);
 }
