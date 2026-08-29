@@ -53,6 +53,10 @@ export const IPC = {
   // app settings
   GetCompletionNotifications: 'pion:get-completion-notifications',
   SetCompletionNotifications: 'pion:set-completion-notifications',
+  ToolPermissionPolicyGet: 'pion:tool-permission-policy-get',
+  ToolPermissionPolicySet: 'pion:tool-permission-policy-set',
+  ToolPermissionPending: 'pion:tool-permission-pending',
+  ToolPermissionResolve: 'pion:tool-permission-resolve',
 
   // plugin store
   PluginsCatalog: 'pion:plugins-catalog',
@@ -88,5 +92,6 @@ export const IPC_EVENTS = {
   AgentSessions: 'pion:agent-sessions',
   AgentTree: 'pion:agent-tree',
   Projects: 'pion:projects',
+  ToolPermissionRequests: 'pion:tool-permission-requests',
   WindowState: 'pion:window-state'
 } as const

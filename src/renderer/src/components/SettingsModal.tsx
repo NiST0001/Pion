@@ -19,7 +19,15 @@ import {
   SlidersHorizontal,
   X
 } from 'lucide-react'
-import type { ModelOption, ProjectTrustInfo, SessionInfo } from '../../../shared/types'
+import type {
+  ModelOption,
+  ProjectToolPermissionPolicy,
+  ProjectTrustInfo,
+  SessionInfo,
+  ToolPermissionCategory,
+  ToolPermissionDecision
+} from '../../../shared/types'
+import { ToolPermissionSettings } from './ToolPermissionSettings'
 import { SESSION_PREVIEW_OPTIONS } from '../utils/sessionPreview'
 import type { SessionPreviewDensity } from '../utils/sessionPreview'
 import { currentTheme, saveTheme, THEMES } from '../utils/theme'
@@ -49,6 +57,14 @@ interface SettingsModalProps {
   projectTrustBusy: boolean
   projectTrustError: string
   onProjectTrustChange: (decision: boolean | null) => void
+  toolPermissionPolicy: ProjectToolPermissionPolicy | null
+  toolPermissionBusy: boolean
+  toolPermissionError: string
+  onToolPermissionChange: (
+    category: ToolPermissionCategory,
+    decision: ToolPermissionDecision
+  ) => void
+  onToolPermissionReset: () => void
   onClose: () => void
   actions: SettingsActions
 }
@@ -72,6 +88,11 @@ export function SettingsModal({
   projectTrustBusy,
   projectTrustError,
   onProjectTrustChange,
+  toolPermissionPolicy,
+  toolPermissionBusy,
+  toolPermissionError,
+  onToolPermissionChange,
+  onToolPermissionReset,
   onClose,
   actions
 }: SettingsModalProps): ReactElement | null {
@@ -210,7 +231,7 @@ export function SettingsModal({
               active={page === 'security'}
               icon={<ShieldCheck size={15} />}
               label="安全与信任"
-              description="项目本地资源权限"
+              description="项目资源与工具权限"
               onClick={() => setPage('security')}
             />
             <NavItem
@@ -398,7 +419,7 @@ export function SettingsModal({
                 <PageHeading
                   kicker="SECURITY"
                   title="安全与信任"
-                  description="控制 Pi 是否加载当前项目提供的本地配置、技能、提示词和扩展。"
+                  description="控制项目本地 Pi 资源加载，以及 Agent 工具调用前的允许、询问与拒绝策略。"
                 />
 
                 <div
@@ -460,9 +481,17 @@ export function SettingsModal({
                   </div>
                 </div>
 
+                <ToolPermissionSettings
+                  policy={toolPermissionPolicy}
+                  busy={toolPermissionBusy}
+                  error={toolPermissionError}
+                  onChange={onToolPermissionChange}
+                  onReset={onToolPermissionReset}
+                />
+
                 <div className="settings-note security-note">
                   <ShieldAlert size={14} />
-                  项目信任只阻止仓库在获准前加载并执行本地 Pi 资源，并不是文件、命令或网络沙箱。
+                  项目信任与工具确认都是策略保护层，不是文件、命令或网络沙箱；真正隔离仍需要容器或虚拟机。
                 </div>
               </section>
             )}

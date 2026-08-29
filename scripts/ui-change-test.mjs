@@ -16,6 +16,7 @@ rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
 rmSync(CHECKPOINT_TEST_FILE, { force: true })
 writeFileSync(CHECKPOINT_BASELINE_FILE, 'preserve this pre-run content\n')
 const child = spawn('node_modules/electron/dist/electron', ['.', `--remote-debugging-port=${PORT}`], {
+  env: { ...process.env, PION_TOOL_PERMISSION_TEST: '1' },
   stdio: ['ignore', 'ignore', 'ignore']
 })
 process.on('exit', () => {
@@ -100,6 +101,33 @@ await evaluate(`document.querySelector('.send-button')?.click()`)
 await sleep(1200)
 await check('发送任务后启动后端', `(async () => Boolean((await window.pion.getState())?.sessionId))()`)
 await check('会话历史按窗口读取', `(async()=>{const page=await window.pion.getEntriesPage(undefined, 2); return !!page && page.entries.length <= 2 && page.total >= page.entries.length})()`)
+
+// --- 工具权限 RPC 子协议 ---
+await evaluate(`(async () => { window.__pionToolPolicyBefore = await window.pion.getToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.setToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}, { write: 'ask' }); window.pion.send('/pion-permission-test').catch((error) => { window.__pionPermissionError = String(error); }); return true; })()`)
+for (let i = 0; i < 80; i++) {
+  await sleep(120)
+  if (await evaluate(`!!document.querySelector('.tool-permission-modal')`)) break
+}
+await check('工具调用显示权限确认', `document.querySelector('.tool-permission-modal')?.textContent?.includes('Agent 请求执行操作') && document.querySelector('.tool-permission-summary')?.textContent?.includes('pion-permission-test.txt')`)
+await check('权限确认支持分级允许', `document.querySelectorAll('.tool-permission-allow-actions button').length === 3 && !!document.querySelector('.tool-permission-allow-project')`)
+await evaluate(`document.querySelector('.tool-permission-allow-project')?.click()`)
+for (let i = 0; i < 30; i++) {
+  await sleep(100)
+  if (await evaluate(`!document.querySelector('.tool-permission-modal')`)) break
+}
+await check('项目级允许即时持久化', `(async () => { const policy = await window.pion.getToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}); return policy.source === 'saved' && policy.rules.write === 'allow' && (await window.pion.getPendingToolPermissionRequests()).length === 0 && !window.__pionPermissionError; })()`)
+await evaluate(`(() => { window.pion.send('/pion-permission-risk-test').catch((error) => { window.__pionPermissionError = String(error); }); return true; })()`)
+for (let i = 0; i < 80; i++) {
+  await sleep(120)
+  if (await evaluate(`!!document.querySelector('.tool-permission-modal')`)) break
+}
+await check('高风险命令强制逐次确认', `document.querySelector('.tool-permission-risks')?.textContent?.includes('高风险命令') && document.querySelectorAll('.tool-permission-allow-actions button').length === 1 && !document.querySelector('.tool-permission-allow-project')`)
+await evaluate(`document.querySelector('.tool-permission-allow-actions button')?.click()`)
+for (let i = 0; i < 30; i++) {
+  await sleep(100)
+  if (await evaluate(`!document.querySelector('.tool-permission-modal')`)) break
+}
+await check('高风险单次允许不修改项目策略', `(async () => (await window.pion.getToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)})).rules.shell === 'ask')()`)
 
 // --- 1. 无边框标题栏 ---
 await check('标题栏存在', `!!document.querySelector('.titlebar')`)
@@ -334,6 +362,7 @@ await check('会话预览程度设置可见', `(() => { const row = document.que
 await evaluate(`document.querySelector('[data-setting="session-preview-density"] .segmented button:nth-child(1)')?.click()`)
 await sleep(120)
 await check('紧凑预览即时应用', `document.querySelectorAll('.side-session-compact').length === document.querySelectorAll('.side-session').length`)
+await check('紧凑模式会话间距已收紧', `(() => { const rows = [...document.querySelectorAll('.side-session-compact')]; return rows.length > 0 && rows.every((row) => { const style = getComputedStyle(row); return row.getBoundingClientRect().height <= 28 && parseFloat(style.marginTop) <= 1 && parseFloat(style.marginBottom) <= 1; }); })()`)
 await evaluate(`document.querySelector('[data-setting="session-preview-density"] .segmented button:nth-child(3)')?.click()`)
 await sleep(120)
 await check('详细预览即时应用', `document.querySelectorAll('.side-session-detailed').length === document.querySelectorAll('.side-session').length`)
@@ -347,10 +376,21 @@ await check('会话完成通知开关可切换', `document.querySelector('[data-
 await evaluate(`(() => { const toggle = document.querySelector('[data-setting="completion-notifications"] [role="switch"]'); if (toggle?.getAttribute('aria-checked') !== window.__pionNotificationStateBefore) toggle.click(); return true })()`)
 await sleep(150)
 await check('会话完成通知开关可恢复', `document.querySelector('[data-setting="completion-notifications"] [role="switch"]')?.getAttribute('aria-checked') === window.__pionNotificationStateBefore`)
+await evaluate(`(async () => { await window.pion.startAgent(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.newSession(); return true; })()`)
+await sleep(220)
 await evaluate(`Array.from(document.querySelectorAll('.settings-nav-item')).find(e => e.textContent?.includes('安全与信任'))?.click()`)
 await sleep(160)
 await check('安全与信任页可切换', `!!document.querySelector('.security-page [data-setting="project-trust"]')`)
-await check('安全页说明项目信任不是沙箱', `document.querySelector('.security-note')?.textContent?.includes('不是文件、命令或网络沙箱')`)
+await check('安全页说明项目信任不是沙箱', `Array.from(document.querySelectorAll('.security-note')).some((note) => note.textContent?.includes('不是文件、命令或网络沙箱'))`)
+await check('工具权限五类策略可见', `document.querySelectorAll('[data-setting="tool-permissions"] [data-permission]').length === 5 && document.querySelectorAll('.permission-segmented').length === 5`)
+await check('项目级允许同步到设置', `document.querySelector('[data-permission="write"] .permission-segmented button.active')?.textContent?.trim() === '允许'`)
+await evaluate(`document.querySelector('[data-permission="write"] .permission-segmented button:nth-child(2)')?.click()`)
+for (let i = 0; i < 20; i++) {
+  await sleep(100)
+  if (await evaluate(`(async () => (await window.pion.getToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)})).rules.write === 'ask')()`)) break
+}
+await check('工具权限设置可即时修改', `(async () => (await window.pion.getToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)})).rules.write === 'ask')()`)
+await evaluate(`(async () => { const before = window.__pionToolPolicyBefore; if (before?.source === 'default') await window.pion.setToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}, null); else await window.pion.setToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}, before?.rules ?? null); return true; })()`)
 await evaluate(`Array.from(document.querySelectorAll('.settings-nav-item')).find(e => e.textContent?.includes('诊断'))?.click()`)
 await sleep(200)
 await check('诊断页可切换', `!!document.querySelector('.diagnostics-grid') && !!document.querySelector('.diagnostics-log')`)

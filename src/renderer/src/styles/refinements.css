@@ -1901,9 +1901,23 @@ body {
 }
 
 .side-session-compact {
-  min-height: 30px;
-  padding-top: 5px !important;
-  padding-bottom: 5px !important;
+  min-height: 26px;
+  padding: 2px 7px !important;
+  border-radius: 7px;
+}
+
+.project-branch-sessions .side-session-compact {
+  margin-top: 1px;
+  margin-bottom: 1px;
+}
+
+.side-session-compact .side-session-content {
+  align-items: center;
+  gap: 4px;
+}
+
+.side-session-compact .side-session-drag {
+  margin-top: 0;
 }
 
 .side-session-compact .side-session-meta,

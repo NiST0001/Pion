@@ -48,7 +48,10 @@
 - 项目列表持久化，激活项目不会自动改变用户排序
 - 接入 Pi 原生项目信任：检测 `.pi` 配置、技能、提示词、软件包和扩展，未决定前阻止后端启动
 - 未信任项目使用 `--no-approve` 跳过本地 Pi 资源；信任后自动重启对应工作区后端，可在提示条或“安全与信任”设置页管理
-- 项目信任仅控制项目资源加载，不是工具执行沙箱；Agent 仍以当前系统用户权限运行
+- 项目级工具策略覆盖文件读取、文件修改、Shell、网络和插件工具，可分别设为允许、询问或拒绝
+- 默认允许项目内普通读取，其余能力执行前询问；文件工具识别到的目录外/敏感路径及高风险命令始终需要单独确认
+- 权限确认支持仅本次、当前会话和项目永久允许，并覆盖跨项目后台会话的并发请求队列
+- 项目信任和工具确认都是策略保护层，不是操作系统沙箱；Agent 仍以当前系统用户权限运行
 
 ### 会话与分支
 - 会话列表：按项目目录扫描 `~/.pi/agent/sessions/`，点击后优先显示最新历史，滚到顶部再按需加载更早内容
@@ -82,7 +85,7 @@ npm run typecheck  # 主进程 + 渲染进程 TS 类型检查
 node scripts/rpc-smoke.mjs       # RPC 基础链路（不经 GUI）
 node scripts/rpc-smoke-full.mjs [cwd]  # 会话/条目/树/模型/分叉全链路
 node scripts/gui-cdp-test.mjs node_modules/electron/dist/electron .  # GUI 端到端（CDP 驱动真实界面+真实对话）
-node scripts/ui-change-test.mjs   # 完整 UI 回归（含运行检查点真实创建/恢复）
+node scripts/ui-change-test.mjs   # 完整 UI 回归（含检查点、项目信任与工具权限确认）
 ```
 
 > 注：pi RPC 子进程启动后会把进程标题改写为 `pi`（`process.title`），
@@ -109,6 +112,7 @@ src/
 │   ├── agent-bridge.ts   # RpcClient 生命周期、后台池、会话与模型桥接
 │   ├── git.ts            # Git 分支与 worktree 操作
 │   ├── checkpoints.ts    # 每轮工作区快照、差异检测与安全恢复
+│   ├── tool-permissions.ts # 项目策略存储与 Pi 全局权限门扩展
 │   ├── wire.ts           # pi SDK -> renderer wire 映射
 │   ├── plugin-manager.ts # 官方插件目录与 pi install
 │   └── projects.ts       # 项目列表持久化
@@ -137,6 +141,8 @@ src/
             ├── ToolCallItem.tsx  # 工具调用卡片
             ├── Composer.tsx      # 输入区（文本/剪贴板图像/发送/停止）
             ├── ProjectTrustBanner.tsx # 项目资源信任提示与快速决策
+            ├── ToolPermissionModal.tsx # 工具调用授权队列
+            ├── ToolPermissionSettings.tsx # 项目工具策略设置
             ├── ModelPicker.tsx   # 模型 + 思考级别选择器
             ├── PluginStoreModal.tsx # pi 插件目录 / 安装 / 状态筛选
             ├── SkillsToolsModal.tsx # 内置与插件技能/工具
@@ -146,6 +152,6 @@ src/
 ## 说明
 
 - 本项目**仅本地开发**，未配置打包分发（electron-builder 等）；`npm run dev` 为主工作流。
-- 模型/思考等级切换、会话树、fork、斜杠命令和计划模式均已接入；RPC 尚有能力未接 UI：
-  compact（手动压缩）、export_html——可在 `src/main/agent-bridge.ts` 按 `RpcClient` API 继续扩展。
+- 模型/思考等级切换、会话树、fork、斜杠命令、计划模式、手动压缩与 HTML 导出均已接入。
+- 工具策略保存在 Electron userData 下的 `pion-tool-permissions.json`；运行时生成的全局 Pi 权限门扩展位于 `runtime/` 子目录。
 - 会话文件由 pi 自身管理（JSONL，按目录分桶），Pion 只读扫描列表；跨项目点击会话时交给对应的 pi 后台加载。

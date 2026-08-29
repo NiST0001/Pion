@@ -201,6 +201,42 @@ export interface ProjectTrustInfo {
   error?: string
 }
 
+export type ToolPermissionCategory = 'read' | 'write' | 'shell' | 'network' | 'external'
+export type ToolPermissionDecision = 'allow' | 'ask' | 'deny'
+export type ToolPermissionRisk = 'outside-workspace' | 'sensitive-path' | 'destructive-command'
+export type ToolPermissionResolution = 'allow-once' | 'allow-session' | 'allow-project' | 'deny'
+
+export interface ToolPermissionRules {
+  read: ToolPermissionDecision
+  write: ToolPermissionDecision
+  shell: ToolPermissionDecision
+  network: ToolPermissionDecision
+  external: ToolPermissionDecision
+}
+
+/** Effective project-scoped tool policy applied by Pion's global Pi extension. */
+export interface ProjectToolPermissionPolicy {
+  cwd: string
+  source: 'default' | 'saved'
+  rules: ToolPermissionRules
+}
+
+/** One Pi tool call waiting for an explicit user decision. */
+export interface ToolPermissionRequest {
+  id: string
+  cwd: string
+  sessionPath?: string
+  toolName: string
+  category: ToolPermissionCategory
+  policyCategories: ToolPermissionCategory[]
+  summary: string
+  detail: string
+  risks: ToolPermissionRisk[]
+  canRemember: boolean
+  createdAt: number
+  timeoutAt: number
+}
+
 export interface BranchInfo {
   /** Display name of the Git branch. */
   name: string
@@ -414,6 +450,16 @@ export interface PionApi {
   // app settings -------------------------------------------------------------
   getCompletionNotificationsEnabled(): Promise<boolean>
   setCompletionNotificationsEnabled(enabled: boolean): Promise<void>
+  getToolPermissionPolicy(cwd: string): Promise<ProjectToolPermissionPolicy>
+  setToolPermissionPolicy(
+    cwd: string,
+    updates: Partial<ToolPermissionRules> | null
+  ): Promise<ProjectToolPermissionPolicy>
+  getPendingToolPermissionRequests(): Promise<ToolPermissionRequest[]>
+  resolveToolPermission(
+    requestId: string,
+    resolution: ToolPermissionResolution
+  ): Promise<ProjectToolPermissionPolicy | null>
 
   // projects ----------------------------------------------------------------
   listProjects(): Promise<ProjectMeta[]>
@@ -460,4 +506,6 @@ export interface PionApi {
   onTree(listener: (tree: { tree: TreeNodeLite[]; leafId: string | null } | null) => void): () => void
   /** Subscribe to project-list pushes. */
   onProjects(listener: (projects: ProjectMeta[]) => void): () => void
+  /** Subscribe to the global queue of tool calls awaiting permission. */
+  onToolPermissionRequests(listener: (requests: ToolPermissionRequest[]) => void): () => void
 }

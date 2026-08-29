@@ -1,13 +1,20 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification } from 'electron'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { AgentBridge } from './agent-bridge'
 import { AppSettings } from './app-settings'
 import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
-import type { ImageContent, ProjectMeta } from '../shared/types'
+import type {
+  ImageContent,
+  ProjectMeta,
+  ToolPermissionResolution,
+  ToolPermissionRules
+} from '../shared/types'
 
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url))
 const bridge = new AgentBridge()
 const plugins = new PluginManager()
 const projects = new ProjectStore()
@@ -57,7 +64,7 @@ function createWindow(): void {
     show: false,
     frame: false, // 自绘标题栏
     webPreferences: {
-      preload: join(__dirname, '../preload/index.mjs'),
+      preload: join(MODULE_DIR, '../preload/index.mjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false, // required for ESM preload scripts
@@ -99,7 +106,7 @@ function createWindow(): void {
   if (process.env.ELECTRON_RENDERER_URL) {
     void win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    void win.loadFile(join(__dirname, '../renderer/index.html'))
+    void win.loadFile(join(MODULE_DIR, '../renderer/index.html'))
   }
 }
 
@@ -174,6 +181,20 @@ function registerIpc(): void {
       console.error('[pion] failed to persist notification setting:', error)
     }
   })
+  ipcMain.handle(IPC.ToolPermissionPolicyGet, (_event, cwd: string) =>
+    bridge.getToolPermissionPolicy(cwd)
+  )
+  ipcMain.handle(
+    IPC.ToolPermissionPolicySet,
+    (_event, cwd: string, updates: Partial<ToolPermissionRules> | null) =>
+      bridge.setToolPermissionPolicy(cwd, updates)
+  )
+  ipcMain.handle(IPC.ToolPermissionPending, () => bridge.getPendingToolPermissionRequests())
+  ipcMain.handle(
+    IPC.ToolPermissionResolve,
+    (_event, requestId: string, resolution: ToolPermissionResolution) =>
+      bridge.resolveToolPermission(requestId, resolution)
+  )
 
   // agent settings ----------------------------------------------------------------
   ipcMain.handle(IPC.AgentSetAutoCompaction, (_event, enabled: boolean) =>
@@ -252,7 +273,7 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(async () => {
-  await appSettings.load()
+  await Promise.all([appSettings.load(), bridge.loadToolPermissions()])
   completionNotificationsEnabled = appSettings.completionNotificationsEnabled
   registerIpc()
   createWindow()

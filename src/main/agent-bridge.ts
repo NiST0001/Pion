@@ -1,4 +1,5 @@
 import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { access, unlink } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
@@ -23,6 +24,7 @@ import type {
   ForkMessageOption,
   ImageContent,
   ModelOption,
+  ProjectToolPermissionPolicy,
   ProjectTrustInfo,
   RunCheckpointStatus,
   SessionEntriesPage,
@@ -30,6 +32,10 @@ import type {
   SessionMeta,
   SkillInfo,
   SlashCommandInfo,
+  ToolPermissionCategory,
+  ToolPermissionRequest,
+  ToolPermissionResolution,
+  ToolPermissionRules,
   TreeNodeLite,
   WireEntry,
   WireMessage
@@ -43,6 +49,11 @@ import {
 } from './checkpoints'
 import type { GitRunCheckpoint } from './checkpoints'
 import {
+  TOOL_PERMISSION_MARKER,
+  TOOL_PERMISSION_TIMEOUT_MS,
+  ToolPermissionStore
+} from './tool-permissions'
+import {
   filterToolResults,
   sessionMode,
   toTreeNodeLite,
@@ -50,13 +61,15 @@ import {
   toolCallIds
 } from './wire'
 
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url))
 const EVENT_CHANNEL = IPC_EVENTS.AgentEvent
 const STATUS_CHANNEL = IPC_EVENTS.AgentStatus
 const CHECKPOINT_CHANNEL = IPC_EVENTS.AgentRunCheckpoint
+const TOOL_PERMISSION_CHANNEL = IPC_EVENTS.ToolPermissionRequests
 const STATE_CHANNEL = IPC_EVENTS.AgentState
 const SESSIONS_CHANNEL = IPC_EVENTS.AgentSessions
 const TREE_CHANNEL = IPC_EVENTS.AgentTree
-const PLAN_EXTENSION_PATH = resolve(__dirname, '../../node_modules/@narumitw/pi-plan-mode/dist/index.ts')
+const PLAN_EXTENSION_PATH = resolve(MODULE_DIR, '../../node_modules/@narumitw/pi-plan-mode/dist/index.ts')
 /** Global pool size shared by every project and worktree. */
 const MAX_RETAINED_BACKENDS = 10
 
@@ -73,6 +86,13 @@ interface PushedTree {
 }
 
 type BackendPhase = 'starting' | 'running' | 'error'
+
+interface PendingToolPermission {
+  request: ToolPermissionRequest
+  backendKey: string
+  extensionRequestId: string
+  timeout: ReturnType<typeof setTimeout>
+}
 
 interface BackendRecord {
   key: string
@@ -119,6 +139,8 @@ export class AgentBridge {
   private readonly sessionManagers = new Map<string, SessionManager>()
   private readonly sessionCompletedListeners = new Set<SessionCompletedListener>()
   private readonly projectTrustStore = new ProjectTrustStore(getAgentDir())
+  private readonly toolPermissionStore = new ToolPermissionStore()
+  private readonly pendingToolPermissions = new Map<string, PendingToolPermission>()
   private newSessionInFlight: Promise<void> | null = null
   private activeKey: string | null = null
   private activeCwd: string | undefined
@@ -140,6 +162,7 @@ export class AgentBridge {
     // bring a late-bound window up to date
     this.win.webContents.send(STATUS_CHANNEL, this.status)
     this.pushRunCheckpoint()
+    this.pushToolPermissionRequests()
   }
 
   unbind(win: BrowserWindow): void {
@@ -163,6 +186,196 @@ export class AgentBridge {
   private pushRunCheckpoint(): void {
     const checkpoint = this.getActiveBackend()?.checkpointStatus ?? null
     this.win?.webContents.send(CHECKPOINT_CHANNEL, checkpoint)
+  }
+
+  private pushToolPermissionRequests(): void {
+    this.win?.webContents.send(TOOL_PERMISSION_CHANNEL, this.getPendingToolPermissionRequests())
+  }
+
+  async loadToolPermissions(): Promise<void> {
+    await this.toolPermissionStore.load()
+    await this.toolPermissionStore.ensureExtension()
+  }
+
+  getPendingToolPermissionRequests(): ToolPermissionRequest[] {
+    return [...this.pendingToolPermissions.values()]
+      .map(({ request }) => ({ ...request }))
+      .sort((a, b) => a.createdAt - b.createdAt)
+  }
+
+  getToolPermissionPolicy(cwd: string): Promise<ProjectToolPermissionPolicy> {
+    return this.toolPermissionStore.getPolicy(cwd)
+  }
+
+  setToolPermissionPolicy(
+    cwd: string,
+    updates: Partial<ToolPermissionRules> | null
+  ): Promise<ProjectToolPermissionPolicy> {
+    return this.toolPermissionStore.setPolicy(cwd, updates)
+  }
+
+  private clearToolPermissionRequest(id: string): PendingToolPermission | null {
+    const pending = this.pendingToolPermissions.get(id)
+    if (!pending) return null
+    clearTimeout(pending.timeout)
+    this.pendingToolPermissions.delete(id)
+    this.pushToolPermissionRequests()
+    return pending
+  }
+
+  private clearBackendToolPermissionRequests(backendKey: string): void {
+    let changed = false
+    for (const [id, pending] of this.pendingToolPermissions) {
+      if (pending.backendKey !== backendKey) continue
+      clearTimeout(pending.timeout)
+      this.pendingToolPermissions.delete(id)
+      changed = true
+    }
+    if (changed) this.pushToolPermissionRequests()
+  }
+
+  private respondToExtensionUi(client: RpcClient, id: string, value: string): void {
+    // Pi 0.84 documents extension_ui_response but RpcClient does not expose a
+    // public sender for it. Write the documented JSONL frame to its child stdin
+    // until the SDK provides a first-class method.
+    const process = (client as unknown as {
+      process: {
+        stdin?: {
+          destroyed?: boolean
+          writable?: boolean
+          write(data: string): unknown
+        }
+      } | null
+    }).process
+    const stdin = process?.stdin
+    if (!stdin || stdin.destroyed || stdin.writable === false) {
+      throw new Error('Agent 权限请求已失效')
+    }
+    stdin.write(`${JSON.stringify({ type: 'extension_ui_response', id, value })}\n`)
+  }
+
+  async resolveToolPermission(
+    requestId: string,
+    resolution: ToolPermissionResolution
+  ): Promise<ProjectToolPermissionPolicy | null> {
+    if (!['allow-once', 'allow-session', 'allow-project', 'deny'].includes(resolution)) {
+      throw new Error('无效的工具权限决定')
+    }
+    const pending = this.pendingToolPermissions.get(requestId)
+    if (!pending) throw new Error('工具权限请求已结束')
+    if (
+      (resolution === 'allow-session' || resolution === 'allow-project')
+      && !pending.request.canRemember
+    ) {
+      throw new Error('目录外、敏感路径和高风险操作只能单次允许')
+    }
+
+    let policy: ProjectToolPermissionPolicy | null = null
+    if (resolution === 'allow-project') {
+      policy = await this.toolPermissionStore.allowProjectCategories(
+        pending.request.cwd,
+        pending.request.policyCategories
+      )
+    }
+
+    const backend = this.backends.get(pending.backendKey)
+    if (!backend) {
+      this.clearToolPermissionRequest(requestId)
+      throw new Error('发起请求的 Agent 会话已关闭')
+    }
+    this.respondToExtensionUi(backend.client, pending.extensionRequestId, resolution)
+    this.clearToolPermissionRequest(requestId)
+    return policy
+  }
+
+  private handleExtensionUiRequest(backend: BackendRecord, event: unknown): boolean {
+    if (typeof event !== 'object' || event === null) return false
+    const request = event as {
+      type?: string
+      id?: string
+      method?: string
+      title?: string
+      timeout?: number
+    }
+    if (
+      request.type !== 'extension_ui_request'
+      || request.method !== 'select'
+      || typeof request.id !== 'string'
+      || typeof request.title !== 'string'
+      || !request.title.startsWith(TOOL_PERMISSION_MARKER)
+    ) return false
+
+    try {
+      const metadata = JSON.parse(request.title.slice(TOOL_PERMISSION_MARKER.length)) as {
+        cwd?: unknown
+        sessionPath?: unknown
+        toolName?: unknown
+        category?: unknown
+        policyCategories?: unknown
+        summary?: unknown
+        detail?: unknown
+        risks?: unknown
+        canRemember?: unknown
+      }
+      const categories = Array.isArray(metadata.policyCategories)
+        ? metadata.policyCategories.filter((value): value is ToolPermissionCategory => (
+            value === 'read' || value === 'write' || value === 'shell'
+            || value === 'network' || value === 'external'
+          ))
+        : []
+      const category = metadata.category
+      if (
+        typeof metadata.cwd !== 'string'
+        || typeof metadata.toolName !== 'string'
+        || typeof metadata.summary !== 'string'
+        || typeof metadata.detail !== 'string'
+        || categories.length === 0
+        || (category !== 'read' && category !== 'write' && category !== 'shell'
+          && category !== 'network' && category !== 'external')
+      ) throw new Error('权限请求元数据无效')
+
+      const id = randomUUID()
+      const createdAt = Date.now()
+      const timeoutMs = Math.min(
+        Math.max(typeof request.timeout === 'number' ? request.timeout : TOOL_PERMISSION_TIMEOUT_MS, 1_000),
+        TOOL_PERMISSION_TIMEOUT_MS
+      )
+      const permissionRequest: ToolPermissionRequest = {
+        id,
+        cwd: resolve(metadata.cwd),
+        sessionPath: typeof metadata.sessionPath === 'string'
+          ? metadata.sessionPath
+          : backend.sessionPath,
+        toolName: metadata.toolName,
+        category,
+        policyCategories: [...new Set(categories)],
+        summary: metadata.summary.slice(0, 500),
+        detail: metadata.detail.slice(0, 4_000),
+        risks: Array.isArray(metadata.risks)
+          ? metadata.risks.filter((value): value is ToolPermissionRequest['risks'][number] => (
+              value === 'outside-workspace' || value === 'sensitive-path'
+              || value === 'destructive-command'
+            ))
+          : [],
+        canRemember: metadata.canRemember === true,
+        createdAt,
+        timeoutAt: createdAt + timeoutMs
+      }
+      const timeout = setTimeout(() => {
+        if (this.pendingToolPermissions.delete(id)) this.pushToolPermissionRequests()
+      }, timeoutMs + 250)
+      this.pendingToolPermissions.set(id, {
+        request: permissionRequest,
+        backendKey: backend.key,
+        extensionRequestId: request.id,
+        timeout
+      })
+      this.pushToolPermissionRequests()
+    } catch (error) {
+      console.error('[pion] invalid tool permission request:', error)
+      this.respondToExtensionUi(backend.client, request.id, 'deny')
+    }
+    return true
   }
 
   private async prepareRunCheckpoint(backend: BackendRecord): Promise<void> {
@@ -352,21 +565,24 @@ export class AgentBridge {
     return `new:${resolve(cwd)}:${randomUUID()}`
   }
 
-  private backendArgs(cwd: string, sessionPath?: string): Promise<string[]> {
-    return pathExists(PLAN_EXTENSION_PATH).then((hasPlanExtension) => {
-      if (!hasPlanExtension) {
-        console.warn('[pion] plan mode extension not found:', PLAN_EXTENSION_PATH)
-      }
-      const trust = this.getProjectTrust(cwd)
-      if (trust.decision === 'ask') {
-        throw new Error('此项目包含本地 Pi 配置或扩展，请先选择是否信任项目')
-      }
-      return [
-        trust.decision === 'trusted' ? '--approve' : '--no-approve',
-        ...(hasPlanExtension ? ['--extension', PLAN_EXTENSION_PATH] : []),
-        ...(sessionPath ? ['--session', sessionPath] : [])
-      ]
-    })
+  private async backendArgs(cwd: string, sessionPath?: string): Promise<string[]> {
+    const [hasPlanExtension, permissionExtensionPath] = await Promise.all([
+      pathExists(PLAN_EXTENSION_PATH),
+      this.toolPermissionStore.ensureExtension()
+    ])
+    if (!hasPlanExtension) {
+      console.warn('[pion] plan mode extension not found:', PLAN_EXTENSION_PATH)
+    }
+    const trust = this.getProjectTrust(cwd)
+    if (trust.decision === 'ask') {
+      throw new Error('此项目包含本地 Pi 配置或扩展，请先选择是否信任项目')
+    }
+    return [
+      trust.decision === 'trusted' ? '--approve' : '--no-approve',
+      '--extension', permissionExtensionPath,
+      ...(hasPlanExtension ? ['--extension', PLAN_EXTENSION_PATH] : []),
+      ...(sessionPath ? ['--session', sessionPath] : [])
+    ]
   }
 
   private setActiveBackendStatus(): void {
@@ -385,6 +601,7 @@ export class AgentBridge {
   private attachBackendEvents(backend: BackendRecord): void {
     backend.client.onEvent((event) => {
       const type = (event as { type?: string }).type
+      if (type === 'extension_ui_request' && this.handleExtensionUiRequest(backend, event)) return
       if (type === 'agent_start') {
         backend.phase = 'running'
         backend.completionState = undefined
@@ -434,7 +651,12 @@ export class AgentBridge {
   ): Promise<BackendRecord> {
     const cliPath = join(getPackageDir(), 'dist', 'cli.js')
     const args = await this.backendArgs(cwd, sessionPath)
-    const client = new RpcClient({ cliPath, cwd, args })
+    const client = new RpcClient({
+      cliPath,
+      cwd,
+      args,
+      env: { PION_TOOL_PERMISSION_CONFIG: this.toolPermissionStore.filePath }
+    })
     const backend = {
       key,
       cwd,
@@ -459,6 +681,7 @@ export class AgentBridge {
       })
       .catch((error: unknown) => {
         backend.phase = 'error'
+        this.clearBackendToolPermissionRequests(key)
         this.backends.delete(key)
         this.removeBackendFromOrder(key)
         if (sessionPath && this.backendKeysBySessionPath.get(resolve(sessionPath)) === key) {
@@ -571,6 +794,9 @@ export class AgentBridge {
     const pendingStarts = [...this.backendStarts.values()]
     await Promise.allSettled(pendingStarts)
     const backends = [...this.backends.values()]
+    for (const pending of this.pendingToolPermissions.values()) clearTimeout(pending.timeout)
+    this.pendingToolPermissions.clear()
+    this.pushToolPermissionRequests()
     this.backends.clear()
     this.backendStarts.clear()
     this.backendOrder.length = 0
@@ -772,6 +998,7 @@ export class AgentBridge {
   private async stopBackend(key: string): Promise<void> {
     const backend = this.backends.get(key)
     if (!backend) return
+    this.clearBackendToolPermissionRequests(key)
     this.backends.delete(key)
     this.removeBackendFromOrder(key)
     if (backend.sessionPath && this.backendKeysBySessionPath.get(resolve(backend.sessionPath)) === key) {

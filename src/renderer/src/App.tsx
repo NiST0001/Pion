@@ -4,7 +4,15 @@ import { FolderOpen, Settings, Sparkles, Store } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
 import { deriveChanges } from './agent/timeline'
 import type { FileChange } from './agent/types'
-import type { ProjectTrustInfo } from '../../shared/types'
+import type {
+  ProjectToolPermissionPolicy,
+  ProjectTrustInfo,
+  ToolPermissionCategory,
+  ToolPermissionDecision,
+  ToolPermissionRequest,
+  ToolPermissionResolution,
+  ToolPermissionRules
+} from '../../shared/types'
 import { ChatMessage } from './components/ChatMessage'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
@@ -19,6 +27,7 @@ import { SkillsToolsModal } from './components/SkillsToolsModal'
 import { PluginStoreModal } from './components/PluginStoreModal'
 import { ProjectPicker } from './components/ProjectPicker'
 import { ProjectTrustBanner } from './components/ProjectTrustBanner'
+import { ToolPermissionModal } from './components/ToolPermissionModal'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
 import type { SessionPreviewDensity } from './utils/sessionPreview'
 import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
@@ -51,6 +60,12 @@ export function App(): ReactElement {
   const [projectTrust, setProjectTrust] = useState<ProjectTrustInfo | null>(null)
   const [projectTrustBusy, setProjectTrustBusy] = useState(false)
   const [projectTrustError, setProjectTrustError] = useState('')
+  const [toolPermissionPolicy, setToolPermissionPolicy] = useState<ProjectToolPermissionPolicy | null>(null)
+  const [toolPermissionBusy, setToolPermissionBusy] = useState(false)
+  const [toolPermissionError, setToolPermissionError] = useState('')
+  const [toolPermissionRequests, setToolPermissionRequests] = useState<ToolPermissionRequest[]>([])
+  const [toolPermissionResolveBusy, setToolPermissionResolveBusy] = useState(false)
+  const [toolPermissionResolveError, setToolPermissionResolveError] = useState('')
   const [branchDialogCwd, setBranchDialogCwd] = useState<string | null>(null)
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -94,21 +109,50 @@ export function App(): ReactElement {
     const cwd = state.status.cwd
     if (!hasBridge || !cwd) {
       setProjectTrust(null)
+      setToolPermissionPolicy(null)
       return
     }
     let active = true
     setProjectTrustError('')
-    void window.pion.getProjectTrust(cwd)
-      .then((trust) => {
-        if (active && trust.cwd === cwd) setProjectTrust(trust)
+    setToolPermissionError('')
+    void Promise.all([
+      window.pion.getProjectTrust(cwd),
+      window.pion.getToolPermissionPolicy(cwd)
+    ])
+      .then(([trust, policy]) => {
+        if (!active) return
+        setProjectTrust(trust)
+        setToolPermissionPolicy(policy)
       })
       .catch((error: unknown) => {
-        if (active) setProjectTrustError(error instanceof Error ? error.message : String(error))
+        if (!active) return
+        const message = error instanceof Error ? error.message : String(error)
+        setProjectTrustError(message)
+        setToolPermissionError(message)
       })
     return () => {
       active = false
     }
   }, [hasBridge, state.status.cwd])
+
+  useEffect(() => {
+    if (!hasBridge) return
+    let active = true
+    const off = window.pion.onToolPermissionRequests((requests) => {
+      if (active) setToolPermissionRequests(requests)
+    })
+    void window.pion.getPendingToolPermissionRequests().then((requests) => {
+      if (active) setToolPermissionRequests(requests)
+    })
+    return () => {
+      active = false
+      off()
+    }
+  }, [hasBridge])
+
+  useEffect(() => {
+    setToolPermissionResolveError('')
+  }, [toolPermissionRequests[0]?.id])
 
   const handleCompletionNotificationsChange = useCallback(async (enabled: boolean): Promise<void> => {
     if (!hasBridge) return
@@ -139,6 +183,62 @@ export function App(): ReactElement {
       setProjectTrustBusy(false)
     }
   }, [actions, projectTrustBusy, state.busy, state.status.cwd, state.status.phase])
+
+  const handleToolPermissionChange = useCallback(async (
+    category: ToolPermissionCategory,
+    decision: ToolPermissionDecision
+  ): Promise<void> => {
+    const cwd = state.status.cwd
+    if (!cwd || toolPermissionBusy) return
+    const updates: Partial<ToolPermissionRules> = { [category]: decision }
+    setToolPermissionBusy(true)
+    setToolPermissionError('')
+    try {
+      setToolPermissionPolicy(await window.pion.setToolPermissionPolicy(cwd, updates))
+    } catch (error) {
+      setToolPermissionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setToolPermissionBusy(false)
+    }
+  }, [state.status.cwd, toolPermissionBusy])
+
+  const handleToolPermissionReset = useCallback(async (): Promise<void> => {
+    const cwd = state.status.cwd
+    if (!cwd || toolPermissionBusy) return
+    setToolPermissionBusy(true)
+    setToolPermissionError('')
+    try {
+      setToolPermissionPolicy(await window.pion.setToolPermissionPolicy(cwd, null))
+    } catch (error) {
+      setToolPermissionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setToolPermissionBusy(false)
+    }
+  }, [state.status.cwd, toolPermissionBusy])
+
+  const handleToolPermissionResolve = useCallback(async (
+    resolution: ToolPermissionResolution
+  ): Promise<void> => {
+    const request = toolPermissionRequests[0]
+    if (!request || toolPermissionResolveBusy) return
+    setToolPermissionResolveBusy(true)
+    setToolPermissionResolveError('')
+    try {
+      await window.pion.resolveToolPermission(request.id, resolution)
+      setToolPermissionRequests((current) => current.filter((item) => item.id !== request.id))
+      if (state.status.cwd) {
+        setToolPermissionPolicy(await window.pion.getToolPermissionPolicy(state.status.cwd))
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setToolPermissionResolveError(message)
+      if (message.includes('已结束') || message.includes('已关闭')) {
+        setToolPermissionRequests((current) => current.filter((item) => item.id !== request.id))
+      }
+    } finally {
+      setToolPermissionResolveBusy(false)
+    }
+  }, [state.status.cwd, toolPermissionRequests, toolPermissionResolveBusy])
 
   useEffect(() => {
     saveFavoriteSessionPaths(favoriteSessionPaths)
@@ -659,6 +759,13 @@ export function App(): ReactElement {
         onClose={closeBranchDialog}
         onSubmit={handleCreateBranch}
       />
+      <ToolPermissionModal
+        request={toolPermissionRequests[0] ?? null}
+        queueLength={toolPermissionRequests.length}
+        busy={toolPermissionResolveBusy}
+        error={toolPermissionResolveError}
+        onResolve={(resolution) => void handleToolPermissionResolve(resolution)}
+      />
       <SettingsModal
         open={settingsOpen}
         session={state.session}
@@ -671,6 +778,11 @@ export function App(): ReactElement {
         projectTrustBusy={projectTrustBusy || state.busy || state.status.phase === 'starting'}
         projectTrustError={projectTrustError}
         onProjectTrustChange={(decision) => void handleProjectTrustChange(decision)}
+        toolPermissionPolicy={toolPermissionPolicy}
+        toolPermissionBusy={toolPermissionBusy}
+        toolPermissionError={toolPermissionError}
+        onToolPermissionChange={(category, decision) => void handleToolPermissionChange(category, decision)}
+        onToolPermissionReset={() => void handleToolPermissionReset()}
         onClose={() => setSettingsOpen(false)}
         actions={{
           setModel: actions.setModel,

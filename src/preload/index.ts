@@ -10,6 +10,7 @@ import type {
   PluginCatalogItem,
   PluginInstallResult,
   ProjectMeta,
+  ProjectToolPermissionPolicy,
   ProjectTrustInfo,
   RunCheckpointStatus,
   SessionEntriesPage,
@@ -17,6 +18,9 @@ import type {
   SessionMeta,
   SkillInfo,
   SlashCommandInfo,
+  ToolPermissionRequest,
+  ToolPermissionResolution,
+  ToolPermissionRules,
   TreeNodeLite,
   WireEventInput
 } from '../shared/types'
@@ -80,6 +84,14 @@ const api: PionApi = {
   // app settings
   getCompletionNotificationsEnabled: () => ipcRenderer.invoke(IPC.GetCompletionNotifications) as Promise<boolean>,
   setCompletionNotificationsEnabled: (enabled) => ipcRenderer.invoke(IPC.SetCompletionNotifications, enabled),
+  getToolPermissionPolicy: (cwd) =>
+    ipcRenderer.invoke(IPC.ToolPermissionPolicyGet, cwd) as Promise<ProjectToolPermissionPolicy>,
+  setToolPermissionPolicy: (cwd, updates: Partial<ToolPermissionRules> | null) =>
+    ipcRenderer.invoke(IPC.ToolPermissionPolicySet, cwd, updates) as Promise<ProjectToolPermissionPolicy>,
+  getPendingToolPermissionRequests: () =>
+    ipcRenderer.invoke(IPC.ToolPermissionPending) as Promise<ToolPermissionRequest[]>,
+  resolveToolPermission: (requestId, resolution: ToolPermissionResolution) =>
+    ipcRenderer.invoke(IPC.ToolPermissionResolve, requestId, resolution) as Promise<ProjectToolPermissionPolicy | null>,
 
   // window
   minimizeWindow: () => ipcRenderer.send(IPC.WindowControl, 'minimize'),
@@ -115,6 +127,8 @@ const api: PionApi = {
   onTree: (listener) =>
     subscribe<{ tree: TreeNodeLite[]; leafId: string | null } | null>(IPC_EVENTS.AgentTree, listener),
   onProjects: (listener) => subscribe<ProjectMeta[]>(IPC_EVENTS.Projects, listener),
+  onToolPermissionRequests: (listener) =>
+    subscribe<ToolPermissionRequest[]>(IPC_EVENTS.ToolPermissionRequests, listener),
   onWindowState: (listener) => subscribe<boolean>(IPC_EVENTS.WindowState, listener)
 }
 
