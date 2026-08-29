@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { FolderOpen, Settings, Sparkles, Store } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
-import { deriveChanges } from './agent/timeline'
+import { deriveChanges, deriveLatestRunChanges } from './agent/timeline'
 import type { FileChange } from './agent/types'
 import type {
   ProjectToolPermissionPolicy,
@@ -28,6 +28,7 @@ import { PluginStoreModal } from './components/PluginStoreModal'
 import { ProjectPicker } from './components/ProjectPicker'
 import { ProjectTrustBanner } from './components/ProjectTrustBanner'
 import { HistoryNavigator } from './components/HistoryNavigator'
+import { ModifiedFilesCard } from './components/ModifiedFilesCard'
 import { ToolPermissionModal } from './components/ToolPermissionModal'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
 import type { SessionPreviewDensity } from './utils/sessionPreview'
@@ -588,6 +589,7 @@ export function App(): ReactElement {
   )
 
   const sessionChanges = useMemo(() => deriveChanges(state.timeline), [state.timeline])
+  const latestRunChanges = useMemo(() => deriveLatestRunChanges(state.timeline), [state.timeline])
   const changes = state.runCheckpoint?.state === 'rolled-back' ? [] : sessionChanges
   const messageHistory = useMemo(
     () => state.timeline.flatMap((item) => (
@@ -599,6 +601,15 @@ export function App(): ReactElement {
   const handleToggleReview = useCallback(() => {
     setReviewOpen((open) => !open)
     setDrawerChange(null)
+  }, [])
+
+  const handleReviewLatestChanges = useCallback(() => {
+    setReviewOpen(true)
+    setDrawerChange(latestRunChanges[0] ?? null)
+  }, [latestRunChanges])
+
+  const handleSelectInlineChange = useCallback((change: FileChange) => {
+    setDrawerChange(change)
   }, [])
 
   useEffect(() => {
@@ -771,6 +782,24 @@ export function App(): ReactElement {
                       />
                     )
                   )}
+                  {!state.busy
+                    && state.runCheckpoint?.state !== 'rolled-back'
+                    && latestRunChanges.length > 0
+                    && (
+                      <ModifiedFilesCard
+                        changes={latestRunChanges}
+                        cwd={state.status.cwd}
+                        canUndo={Boolean(
+                          state.runCheckpoint?.state === 'ready'
+                          && state.runCheckpoint.hasChanges
+                        )}
+                        undoBusy={rollbackBusy}
+                        error={rollbackError}
+                        onUndo={() => void handleRollbackRun()}
+                        onReview={handleReviewLatestChanges}
+                        onSelect={handleSelectInlineChange}
+                      />
+                    )}
                 </div>
               )}
             </main>

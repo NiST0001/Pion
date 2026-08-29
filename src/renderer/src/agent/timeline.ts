@@ -124,6 +124,17 @@ export function deriveChanges(timeline: TimelineItem[]): FileChange[] {
   return [...byPath.values()]
 }
 
+/** File changes made after the most recent user message in the loaded timeline. */
+export function deriveLatestRunChanges(timeline: TimelineItem[]): FileChange[] {
+  let start = 0
+  for (let index = timeline.length - 1; index >= 0; index--) {
+    if (timeline[index].kind !== 'user') continue
+    start = index
+    break
+  }
+  return deriveChanges(timeline.slice(start))
+}
+
 // ---------------------------------------------------------------------------
 // Session replay: entries -> timeline
 // ---------------------------------------------------------------------------

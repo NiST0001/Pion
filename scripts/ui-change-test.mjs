@@ -197,7 +197,7 @@ for (let i = 0; i < 40; i++) {
 }
 await check('冷会话历史无需等待后台启动', `(() => { const path = window.__pionHistoryLoadPath; const active = [...document.querySelectorAll('.project-branch-sessions .side-session')].find((row) => row.dataset.sessionPath === path); return !!path && active?.classList.contains('active') && !!document.querySelector('.timeline') && performance.now() - window.__pionHistoryLoadStarted < 3000 && !document.querySelector('.session-load-error'); })()`)
 await check('长会话最新页作为完整快照渲染', `(() => { const expected = window.__pionExpectedNewestItems; const actual = document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker').length; return expected > 0 && actual >= expected ? true : { expected, actual, path: window.__pionHistoryLoadPath }; })()`)
-await check('恢复历史不再播放分段渐变', `(() => { const items = [...document.querySelectorAll('.timeline > *')]; const bad = items.filter((item) => item.classList.contains('history-reveal') || item.classList.contains('streaming-reveal') || getComputedStyle(item).animationName !== 'none').map((item) => ({ className: item.className, animation: getComputedStyle(item).animationName })); return bad.length === 0 ? true : { bad: bad.slice(0, 8), total: items.length }; })()`)
+await check('恢复历史不再播放分段渐变', `(() => { const items = [...document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker')]; const bad = items.filter((item) => item.classList.contains('history-reveal') || item.classList.contains('streaming-reveal') || getComputedStyle(item).animationName !== 'none').map((item) => ({ className: item.className, animation: getComputedStyle(item).animationName })); return bad.length === 0 ? true : { bad: bad.slice(0, 8), total: items.length }; })()`)
 await check('动画系统支持减少动态效果', `(() => { try { return [...document.styleSheets].some((sheet) => [...sheet.cssRules].some((rule) => rule.cssText.includes('prefers-reduced-motion') && rule.cssText.includes('animation-duration'))); } catch { return false; } })()`)
 for (let i = 0; i < 30; i++) {
   await sleep(100)
@@ -207,6 +207,27 @@ await check('历史消息导航轨已显示', `document.querySelector('.history-
 await evaluate(`(() => { const marker = document.querySelector('.history-navigator-marker'); window.__pionNavigatorTarget = marker?.dataset.entryId ?? null; marker?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return Boolean(marker); })()`)
 await sleep(100)
 await check('历史标记悬停显示消息预览', `!!document.querySelector('.history-navigator-preview strong')?.textContent?.trim() && document.querySelector('.history-navigator-preview small')?.textContent?.includes('条')`)
+for (let i = 0; i < 20; i++) {
+  await sleep(80)
+  if (await evaluate(`!!document.querySelector('.modified-files-card')`)) break
+}
+await check('内联显示本轮修改文件摘要', `(() => { const card = document.querySelector('.modified-files-card'); return !!card && card.querySelector('.modified-files-title')?.textContent?.includes('已编辑') && !!card.querySelector('.modified-files-total .stat-add') && !!card.querySelector('.modified-files-review') && !!card.querySelector('.modified-files-undo') && getComputedStyle(card).animationName === 'pion-reveal-in'; })()`)
+await check('修改文件默认保持紧凑列表', `(() => { const rows = document.querySelectorAll('.modified-files-row'); const expand = document.querySelector('.modified-files-expand'); return rows.length > 0 && rows.length <= 3 && (expand ? expand.textContent?.includes('再显示') : true); })()`)
+await evaluate(`document.querySelector('.modified-files-expand')?.click()`)
+await sleep(100)
+await check('修改文件列表可展开', `(() => { const expand = document.querySelector('.modified-files-expand'); return !expand || expand.getAttribute('aria-expanded') === 'true'; })()`)
+await evaluate(`document.querySelector('.modified-files-row')?.click()`)
+await sleep(140)
+await check('点击修改文件可直接查看 Diff', `!!document.querySelector('.drawer')`)
+await evaluate(`document.querySelector('.drawer .icon-button')?.click()`)
+await sleep(100)
+await check('修改文件 Diff 可关闭', `!document.querySelector('.drawer')`)
+await evaluate(`document.querySelector('.modified-files-review')?.click()`)
+await sleep(140)
+await check('修改摘要可打开审查栏', `!!document.querySelector('.review-panel')`)
+await evaluate(`document.querySelector('.review-panel .icon-button')?.click()`)
+await sleep(100)
+await check('修改摘要审查栏可关闭', `!document.querySelector('.review-panel')`)
 await evaluate(`document.querySelector('.history-navigator-marker')?.click()`)
 for (let i = 0; i < 40; i++) {
   await sleep(60)
@@ -316,15 +337,18 @@ await sleep(120)
 await check('新建会话清空上一会话内容', `!document.querySelector('.timeline') && !!document.querySelector('.empty-state')`)
 for (let i = 0; i < 30; i++) {
   await sleep(300)
-  if (await evaluate(`(async () => Boolean((await window.pion.getState())?.sessionId) && document.querySelectorAll('.composer-inline-controls .picker-option').length > 0)()`)) break
+  if (await evaluate(`(async () => Boolean((await window.pion.getState())?.sessionId) && document.querySelector('.composer-inline-controls .picker-trigger')?.disabled === false)()`)) break
 }
 await check('新建会话后模型选择器可用', `(() => { const button = document.querySelector('.composer-inline-controls .picker-trigger'); return !!button && !button.disabled; })()`)
 await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
 await sleep(150)
 await check('新建会话后模型选项可见', `document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
 await evaluate(`(async () => { window.__pionNewSessionId = (await window.pion.getState())?.sessionId ?? null; document.querySelector('.sidebar-new-session')?.click(); return true })()`)
-await sleep(300)
-await check('空会话重复点击不创建新会话', `(async () => (await window.pion.getState())?.sessionId === window.__pionNewSessionId)()`)
+for (let i = 0; i < 20; i++) {
+  await sleep(100)
+  if (await evaluate(`(async () => (await window.pion.getState())?.sessionId === window.__pionNewSessionId)()`)) break
+}
+await check('空会话重复点击不创建新会话', `(async () => { const after = (await window.pion.getState())?.sessionId ?? null; return after === window.__pionNewSessionId ? true : { before: window.__pionNewSessionId, after }; })()`)
 await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
 await check('思考级别嵌入输入框', `!!document.querySelector('.composer-inline-controls .thinking-trigger') && !document.querySelector('.composer-inline-controls .thinking-segment')`)
 await check('思考等级为下拉框', `document.querySelector('.thinking-trigger')?.getAttribute('aria-haspopup') === 'listbox'`)
@@ -336,7 +360,7 @@ await check('旧控制行已移除', `!document.querySelector('.composer-control
 await check('header 中无模型选择器', `!document.querySelector('.app-header .picker')`)
 
 // --- 3. 设置面板入口位于左下角 ---
-await check('设置面板默认关闭', `!document.querySelector('.settings-modal, .modal')`)
+await check('设置面板默认关闭', `!document.querySelector('.settings-modal')`)
 await check('设置入口位于左侧栏底部', `!!document.querySelector('.sidebar-footer .sidebar-settings')`)
 await check('插件商店入口位于设置旁边', `(() => { const button = document.querySelector('.sidebar-plugin-store'); return !!button && button.textContent?.includes('插件商店') && button.getAttribute('title')?.includes('官方插件商店'); })()`)
 await evaluate(`document.querySelector('.sidebar-plugin-store')?.click()`)

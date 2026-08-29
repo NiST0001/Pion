@@ -169,6 +169,7 @@ body,
 
 .settings-page,
 .capabilities-page,
+.modified-files-card,
 .plugin-store-grid,
 .model-grid,
 .review-detail,
@@ -191,6 +192,7 @@ body,
 }
 
 .composer-attachment,
+.modified-files-row,
 .theme-choice,
 .provider-card,
 .capability-card,
