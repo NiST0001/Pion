@@ -54,10 +54,6 @@
   color: var(--fg);
 }
 
-.titlebar-brand .dot {
-  margin-left: auto;
-}
-
 .titlebar-path {
   flex: 1;
   min-width: 0;

@@ -1164,6 +1164,94 @@
   font-size: 11px;
 }
 
+.setting-row-stacked {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.project-trust-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 15px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(110deg, var(--surface-tint), var(--bg-elev));
+}
+
+.project-trust-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(var(--accent-rgb), 0.3);
+  border-radius: 11px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.project-trust-card-untrusted .project-trust-card-icon,
+.project-trust-card-ask .project-trust-card-icon {
+  border-color: rgba(220, 130, 76, 0.34);
+  background: rgba(220, 130, 76, 0.1);
+  color: var(--warn);
+}
+
+.project-trust-card-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.project-trust-card-copy span {
+  color: var(--fg-faint);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.75px;
+  text-transform: uppercase;
+}
+
+.project-trust-card-copy strong {
+  color: var(--fg);
+  font-size: 13px;
+}
+
+.project-trust-card-copy small {
+  overflow: hidden;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-trust-settings-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.project-trust-settings-approve {
+  border-color: rgba(var(--accent-rgb), 0.48);
+  background: var(--accent);
+  color: #17120f;
+}
+
+.project-trust-settings-approve:hover:not(:disabled) {
+  background: var(--accent-strong);
+  color: #17120f;
+}
+
+.security-note {
+  align-items: flex-start;
+  line-height: 1.45;
+}
+
 /* about and diagnostics pages */
 
 .about-hero {

@@ -209,6 +209,10 @@ function registerIpc(): void {
 
   // projects ----------------------------------------------------------------------
   ipcMain.handle(IPC.ProjectsList, () => projects.list())
+  ipcMain.handle(IPC.ProjectTrustGet, (_event, cwd: string) => bridge.getProjectTrust(cwd))
+  ipcMain.handle(IPC.ProjectTrustSet, (_event, cwd: string, decision: boolean | null) =>
+    bridge.setProjectTrust(cwd, decision)
+  )
   ipcMain.handle(IPC.BranchesList, (_event, cwd: string) => bridge.listBranches(cwd))
   ipcMain.handle(IPC.BranchCreate, (_event, cwd: string, name: string) => bridge.createBranch(cwd, name))
   ipcMain.handle(IPC.ProjectsAdd, (_event, cwd: string) => {

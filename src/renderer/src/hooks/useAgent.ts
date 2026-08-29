@@ -11,6 +11,7 @@ import type {
   BranchInfo,
   ForkMessageOption,
   ImageContent,
+  ProjectTrustInfo,
   WireEntry
 } from '../../../shared/types'
 import { reducer } from '../agent/reducer'
@@ -433,6 +434,18 @@ export function useAgent() {
     [api]
   )
 
+  const setProjectTrust = useCallback(
+    async (cwd: string, decision: boolean | null): Promise<ProjectTrustInfo> => {
+      if (!api) throw new Error('preload 桥未加载')
+      const trust = await api.setProjectTrust(cwd, decision)
+      void refreshModels().catch((error: unknown) => {
+        console.error('[pion] failed to refresh models after project trust change:', error)
+      })
+      return trust
+    },
+    [api, refreshModels]
+  )
+
   const setModel = useCallback(
     async (provider: string, modelId: string) => {
       if (!api) return
@@ -518,6 +531,7 @@ export function useAgent() {
       addProject,
       createBranch,
       removeProject,
+      setProjectTrust,
       setModel,
       setThinkingLevel,
       setMode,
@@ -548,6 +562,7 @@ export function useAgent() {
       addProject,
       createBranch,
       removeProject,
+      setProjectTrust,
       setModel,
       setThinkingLevel,
       setMode,

@@ -188,6 +188,19 @@ export interface ProjectMeta {
   lastUsedAt: number
 }
 
+export type ProjectTrustDecision = 'trusted' | 'untrusted' | 'ask'
+export type ProjectTrustSource = 'not-required' | 'saved' | 'inherited' | 'default'
+
+/** Effective Pi project-resource trust for one working directory. */
+export interface ProjectTrustInfo {
+  cwd: string
+  requiresTrust: boolean
+  decision: ProjectTrustDecision
+  source: ProjectTrustSource
+  decisionPath?: string
+  error?: string
+}
+
 export interface BranchInfo {
   /** Display name of the Git branch. */
   name: string
@@ -404,6 +417,10 @@ export interface PionApi {
 
   // projects ----------------------------------------------------------------
   listProjects(): Promise<ProjectMeta[]>
+  /** Resolve native Pi project-resource trust for a workspace. */
+  getProjectTrust(cwd: string): Promise<ProjectTrustInfo>
+  /** Save or clear native Pi project-resource trust and reload matching backends. */
+  setProjectTrust(cwd: string, decision: boolean | null): Promise<ProjectTrustInfo>
   listBranches(cwd: string): Promise<BranchInfo[]>
   createBranch(cwd: string, name: string): Promise<BranchInfo>
   addProject(cwd: string): Promise<ProjectMeta[]>

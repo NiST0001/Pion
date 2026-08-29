@@ -13,10 +13,13 @@ import {
   Palette,
   RefreshCw,
   Settings2,
+  ShieldAlert,
+  ShieldCheck,
+  ShieldOff,
   SlidersHorizontal,
   X
 } from 'lucide-react'
-import type { ModelOption, SessionInfo } from '../../../shared/types'
+import type { ModelOption, ProjectTrustInfo, SessionInfo } from '../../../shared/types'
 import { SESSION_PREVIEW_OPTIONS } from '../utils/sessionPreview'
 import type { SessionPreviewDensity } from '../utils/sessionPreview'
 import { currentTheme, saveTheme, THEMES } from '../utils/theme'
@@ -42,11 +45,15 @@ interface SettingsModalProps {
   onCompletionNotificationsChange: (enabled: boolean) => void
   sessionPreviewDensity: SessionPreviewDensity
   onSessionPreviewDensityChange: (density: SessionPreviewDensity) => void
+  projectTrust: ProjectTrustInfo | null
+  projectTrustBusy: boolean
+  projectTrustError: string
+  onProjectTrustChange: (decision: boolean | null) => void
   onClose: () => void
   actions: SettingsActions
 }
 
-type SettingsPage = 'models' | 'session' | 'appearance' | 'about' | 'diagnostics'
+type SettingsPage = 'models' | 'session' | 'security' | 'appearance' | 'about' | 'diagnostics'
 
 interface ProviderGroup {
   provider: string
@@ -61,6 +68,10 @@ export function SettingsModal({
   onCompletionNotificationsChange,
   sessionPreviewDensity,
   onSessionPreviewDensityChange,
+  projectTrust,
+  projectTrustBusy,
+  projectTrustError,
+  onProjectTrustChange,
   onClose,
   actions
 }: SettingsModalProps): ReactElement | null {
@@ -194,6 +205,13 @@ export function SettingsModal({
               label="会话"
               description="压缩与消息行为"
               onClick={() => setPage('session')}
+            />
+            <NavItem
+              active={page === 'security'}
+              icon={<ShieldCheck size={15} />}
+              label="安全与信任"
+              description="项目本地资源权限"
+              onClick={() => setPage('security')}
             />
             <NavItem
               active={page === 'appearance'}
@@ -375,6 +393,80 @@ export function SettingsModal({
               </section>
             )}
 
+            {page === 'security' && (
+              <section className="settings-page security-page">
+                <PageHeading
+                  kicker="SECURITY"
+                  title="安全与信任"
+                  description="控制 Pi 是否加载当前项目提供的本地配置、技能、提示词和扩展。"
+                />
+
+                <div
+                  className={`project-trust-card project-trust-card-${projectTrust?.decision ?? 'unknown'}`}
+                  data-setting="project-trust"
+                >
+                  <div className="project-trust-card-icon">
+                    {projectTrust?.decision === 'trusted'
+                      ? <ShieldCheck size={20} />
+                      : projectTrust?.decision === 'untrusted'
+                        ? <ShieldOff size={20} />
+                        : <ShieldAlert size={20} />}
+                  </div>
+                  <div className="project-trust-card-copy">
+                    <span>当前项目</span>
+                    <strong>{projectTrustLabel(projectTrust)}</strong>
+                    <small title={projectTrust?.cwd}>{projectTrust?.cwd ?? '尚未选择项目'}</small>
+                  </div>
+                </div>
+
+                {projectTrustError && <div className="settings-inline-error">{projectTrustError}</div>}
+
+                <div className="settings-section">
+                  <div className="settings-section-title">项目资源</div>
+                  <div className="setting-row setting-row-stacked">
+                    <div>
+                      <div className="setting-label">Pi 项目信任</div>
+                      <div className="setting-desc">{projectTrustDescription(projectTrust)}</div>
+                    </div>
+                    {projectTrust?.requiresTrust && (
+                      <div className="project-trust-settings-actions">
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={projectTrustBusy || projectTrust.decision === 'untrusted'}
+                          onClick={() => onProjectTrustChange(false)}
+                        >
+                          <ShieldOff size={12} /> 不信任
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={projectTrustBusy || projectTrust.source === 'default' || projectTrust.source === 'inherited' || projectTrust.source === 'not-required'}
+                          onClick={() => onProjectTrustChange(null)}
+                        >
+                          恢复默认
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button project-trust-settings-approve"
+                          disabled={projectTrustBusy || projectTrust.decision === 'trusted'}
+                          onClick={() => onProjectTrustChange(true)}
+                        >
+                          {projectTrustBusy && <Loader2 size={12} className="spin" />}
+                          <ShieldCheck size={12} /> 信任项目
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="settings-note security-note">
+                  <ShieldAlert size={14} />
+                  项目信任只阻止仓库在获准前加载并执行本地 Pi 资源，并不是文件、命令或网络沙箱。
+                </div>
+              </section>
+            )}
+
             {page === 'appearance' && (
               <section className="settings-page">
                 <PageHeading
@@ -506,6 +598,26 @@ export function SettingsModal({
       </div>
     </div>
   )
+}
+
+function projectTrustLabel(trust: ProjectTrustInfo | null): string {
+  if (!trust) return '等待状态'
+  if (!trust.requiresTrust) return '无需额外授权'
+  if (trust.decision === 'trusted') return '已信任项目资源'
+  if (trust.decision === 'untrusted') return '未信任项目资源'
+  return '等待你的决定'
+}
+
+function projectTrustDescription(trust: ProjectTrustInfo | null): string {
+  if (!trust) return '选择项目后显示信任状态。'
+  if (!trust.requiresTrust) return '当前项目没有需要信任确认的本地 Pi 资源。'
+  if (trust.decision === 'trusted') {
+    return '项目的 .pi 设置、技能、提示词、软件包和扩展会在 Agent 启动时加载。'
+  }
+  if (trust.decision === 'untrusted') {
+    return '项目本地资源会被跳过；用户级和命令行扩展仍然可用。'
+  }
+  return '首次运行 Agent 前必须选择是否加载项目提供的本地资源。'
 }
 
 function NavItem({

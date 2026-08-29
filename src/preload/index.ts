@@ -10,6 +10,7 @@ import type {
   PluginCatalogItem,
   PluginInstallResult,
   ProjectMeta,
+  ProjectTrustInfo,
   RunCheckpointStatus,
   SessionEntriesPage,
   SessionInfo,
@@ -88,6 +89,10 @@ const api: PionApi = {
 
   // projects
   listProjects: () => ipcRenderer.invoke(IPC.ProjectsList),
+  getProjectTrust: (cwd) =>
+    ipcRenderer.invoke(IPC.ProjectTrustGet, cwd) as Promise<ProjectTrustInfo>,
+  setProjectTrust: (cwd, decision) =>
+    ipcRenderer.invoke(IPC.ProjectTrustSet, cwd, decision) as Promise<ProjectTrustInfo>,
   listBranches: (cwd) => ipcRenderer.invoke(IPC.BranchesList, cwd) as Promise<BranchInfo[]>,
   createBranch: (cwd, name) => ipcRenderer.invoke(IPC.BranchCreate, cwd, name) as Promise<BranchInfo>,
   addProject: (cwd) => ipcRenderer.invoke(IPC.ProjectsAdd, cwd),

@@ -9,11 +9,8 @@ import {
   PanelRightClose,
   X
 } from 'lucide-react'
-import type { AgentPhase } from '../../../shared/types'
-
 interface TitleBarProps {
   cwd?: string
-  phase: AgentPhase
   sessionName?: string
   maximized: boolean
   sidebarOpen: boolean
@@ -25,7 +22,6 @@ interface TitleBarProps {
 
 export function TitleBar({
   cwd,
-  phase,
   sessionName,
   maximized,
   sidebarOpen,
@@ -49,7 +45,6 @@ export function TitleBar({
         </button>
         <span className="brand-mark">π⁺</span>
         <span className="brand-name">Pion</span>
-        <span className={`dot dot-${phase}`} title={phase} />
       </div>
       <div className="titlebar-path" title={cwd}>
         {title || 'Pion'}

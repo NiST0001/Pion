@@ -1,10 +1,15 @@
 // UI 变更验证：无边框标题栏 / 模型选择器位置 / 设置面板
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const PORT = '9344'
 const TEST_WORKSPACE = process.cwd()
+const TRUST_TEST_WORKSPACE = mkdtempSync(join(tmpdir(), 'pion-trust-ui-'))
+mkdirSync(join(TRUST_TEST_WORKSPACE, '.pi'), { recursive: true })
+writeFileSync(join(TRUST_TEST_WORKSPACE, '.pi', 'SYSTEM.md'), 'Untrusted test resource\n')
 const CHECKPOINT_BASELINE_FILE = new URL('../.pion-checkpoint-baseline.tmp', import.meta.url)
 const CHECKPOINT_TEST_FILE = new URL('../.pion-checkpoint-ui-test.tmp', import.meta.url)
 rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
@@ -17,6 +22,7 @@ process.on('exit', () => {
   try { child.kill('SIGKILL') } catch {}
   rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
   rmSync(CHECKPOINT_TEST_FILE, { force: true })
+  rmSync(TRUST_TEST_WORKSPACE, { recursive: true, force: true })
 })
 
 async function getPage() {
@@ -68,17 +74,31 @@ const checkHost = (name, value) => {
 // 等待 agent 运行
 for (let i = 0; i < 40; i++) {
   await sleep(500)
-  if (await evaluate(`document.querySelector('.dot-running, .dot-ready') !== null`)) break
+  if (await evaluate(`!!document.querySelector('.composer-row textarea')`)) break
 }
 
-await evaluate(`(async () => { await window.pion.addProject(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.startAgent(${JSON.stringify(TEST_WORKSPACE)}); return true })()`)
+await evaluate(`(async () => { await window.pion.addProject(${JSON.stringify(TRUST_TEST_WORKSPACE)}); await window.pion.setProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)}, false); await window.pion.startAgent(${JSON.stringify(TRUST_TEST_WORKSPACE)}); return true })()`)
+for (let i = 0; i < 20; i++) {
+  await sleep(120)
+  if (await evaluate(`!!document.querySelector('.project-trust-banner')`)) break
+}
+await check('未信任项目显示安全提示', `document.querySelector('.project-trust-banner')?.classList.contains('project-trust-untrusted') && document.querySelector('.project-trust-banner')?.textContent?.includes('不是沙箱')`)
+await check('未信任项目跳过本地 Pi 资源', `(async () => { const trust = await window.pion.getProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)}); return trust.requiresTrust && trust.decision === 'untrusted'; })()`)
+await evaluate(`document.querySelector('.project-trust-approve')?.click()`)
+for (let i = 0; i < 30; i++) {
+  await sleep(150)
+  if (await evaluate(`(async () => (await window.pion.getProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)})).decision === 'trusted' && !document.querySelector('.project-trust-banner'))()`)) break
+}
+await check('项目可被信任并重新加载', `(async () => (await window.pion.getProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)})).decision === 'trusted' && !document.querySelector('.project-trust-banner'))()`)
+await evaluate(`(async () => { await window.pion.setProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)}, null); await window.pion.removeProject(${JSON.stringify(TRUST_TEST_WORKSPACE)}); await window.pion.addProject(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.startAgent(${JSON.stringify(TEST_WORKSPACE)}); return true })()`)
+rmSync(TRUST_TEST_WORKSPACE, { recursive: true, force: true })
 await sleep(250)
-await check('启动时后端未启动', `!!document.querySelector('.dot-ready')`)
+await check('启动时后端未启动', `(async () => (await window.pion.getState()) === null)()`)
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, '/plan exit'); input?.dispatchEvent(new Event('input', { bubbles: true })); input?.focus(); return true })()`)
 await sleep(80)
 await evaluate(`document.querySelector('.send-button')?.click()`)
 await sleep(1200)
-await check('发送任务后启动后端', `!!document.querySelector('.dot-running')`)
+await check('发送任务后启动后端', `(async () => Boolean((await window.pion.getState())?.sessionId))()`)
 await check('会话历史按窗口读取', `(async()=>{const page=await window.pion.getEntriesPage(undefined, 2); return !!page && page.entries.length <= 2 && page.total >= page.entries.length})()`)
 
 // --- 1. 无边框标题栏 ---
@@ -88,6 +108,7 @@ await check('旧 header 已移除', `!document.querySelector('.app-header')`)
 await check('窗口控制三键（最小/最大/关闭）', `document.querySelectorAll('.titlebar-btn').length >= 3`)
 await check('关闭按钮样式', `!!document.querySelector('.titlebar-close')`)
 await check('标题栏含品牌', `document.querySelector('.titlebar-brand .brand-name')?.textContent === 'Pion'`)
+await check('标题栏已移除状态圆点', `!document.querySelector('.titlebar-brand .dot')`)
 await check('左上角会话栏开关', `!!document.querySelector('.titlebar-panel-btn')`)
 await check('右上角文件审查栏开关', `!!document.querySelector('.titlebar-review-btn')`)
 await evaluate(`document.querySelector('.titlebar-review-btn')?.click()`)
@@ -186,7 +207,7 @@ await check('仅图像也可发送', `!!document.querySelector('.send-button') &
 await evaluate(`document.querySelector('.composer-attachment-remove')?.click()`)
 await sleep(100)
 await check('图像附件可移除', `document.querySelectorAll('.composer-attachment').length === 0`)
-await check('当前会话后端已复用', `!!document.querySelector('.dot-running')`)
+await check('当前会话后端已复用', `(async () => Boolean((await window.pion.getState())?.sessionId))()`)
 await check('输入框宽度已扩大', `getComputedStyle(document.querySelector('.composer-row')).maxWidth === '1600px'`)
 await check('输入框高度已缩短', `(() => { const height = document.querySelector('.composer-row')?.getBoundingClientRect().height ?? 0; return height >= 85 && height < 120; })()`)
 await check('任务面板已移除', `!document.querySelector('.task-panel')`)
@@ -236,7 +257,7 @@ await sleep(120)
 await check('新建会话清空上一会话内容', `!document.querySelector('.timeline') && !!document.querySelector('.empty-state')`)
 for (let i = 0; i < 30; i++) {
   await sleep(300)
-  if (await evaluate(`!!document.querySelector('.dot-running') && document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)) break
+  if (await evaluate(`(async () => Boolean((await window.pion.getState())?.sessionId) && document.querySelectorAll('.composer-inline-controls .picker-option').length > 0)()`)) break
 }
 await check('新建会话后模型选择器可用', `(() => { const button = document.querySelector('.composer-inline-controls .picker-trigger'); return !!button && !button.disabled; })()`)
 await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
@@ -326,6 +347,10 @@ await check('会话完成通知开关可切换', `document.querySelector('[data-
 await evaluate(`(() => { const toggle = document.querySelector('[data-setting="completion-notifications"] [role="switch"]'); if (toggle?.getAttribute('aria-checked') !== window.__pionNotificationStateBefore) toggle.click(); return true })()`)
 await sleep(150)
 await check('会话完成通知开关可恢复', `document.querySelector('[data-setting="completion-notifications"] [role="switch"]')?.getAttribute('aria-checked') === window.__pionNotificationStateBefore`)
+await evaluate(`Array.from(document.querySelectorAll('.settings-nav-item')).find(e => e.textContent?.includes('安全与信任'))?.click()`)
+await sleep(160)
+await check('安全与信任页可切换', `!!document.querySelector('.security-page [data-setting="project-trust"]')`)
+await check('安全页说明项目信任不是沙箱', `document.querySelector('.security-note')?.textContent?.includes('不是文件、命令或网络沙箱')`)
 await evaluate(`Array.from(document.querySelectorAll('.settings-nav-item')).find(e => e.textContent?.includes('诊断'))?.click()`)
 await sleep(200)
 await check('诊断页可切换', `!!document.querySelector('.diagnostics-grid') && !!document.querySelector('.diagnostics-log')`)

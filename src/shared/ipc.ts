@@ -65,6 +65,8 @@ export const IPC = {
 
   // projects & git branches
   ProjectsList: 'pion:projects-list',
+  ProjectTrustGet: 'pion:project-trust-get',
+  ProjectTrustSet: 'pion:project-trust-set',
   ProjectsAdd: 'pion:projects-add',
   ProjectsRemove: 'pion:projects-remove',
   ProjectsPush: 'pion:projects',

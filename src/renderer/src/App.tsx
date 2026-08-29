@@ -4,6 +4,7 @@ import { FolderOpen, Settings, Sparkles, Store } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
 import { deriveChanges } from './agent/timeline'
 import type { FileChange } from './agent/types'
+import type { ProjectTrustInfo } from '../../shared/types'
 import { ChatMessage } from './components/ChatMessage'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
@@ -17,6 +18,7 @@ import { SettingsModal } from './components/SettingsModal'
 import { SkillsToolsModal } from './components/SkillsToolsModal'
 import { PluginStoreModal } from './components/PluginStoreModal'
 import { ProjectPicker } from './components/ProjectPicker'
+import { ProjectTrustBanner } from './components/ProjectTrustBanner'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
 import type { SessionPreviewDensity } from './utils/sessionPreview'
 import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
@@ -46,6 +48,9 @@ export function App(): ReactElement {
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [pluginStoreOpen, setPluginStoreOpen] = useState(false)
   const [completionNotificationsEnabled, setCompletionNotificationsEnabled] = useState(true)
+  const [projectTrust, setProjectTrust] = useState<ProjectTrustInfo | null>(null)
+  const [projectTrustBusy, setProjectTrustBusy] = useState(false)
+  const [projectTrustError, setProjectTrustError] = useState('')
   const [branchDialogCwd, setBranchDialogCwd] = useState<string | null>(null)
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -85,6 +90,26 @@ export function App(): ReactElement {
     }
   }, [hasBridge])
 
+  useEffect(() => {
+    const cwd = state.status.cwd
+    if (!hasBridge || !cwd) {
+      setProjectTrust(null)
+      return
+    }
+    let active = true
+    setProjectTrustError('')
+    void window.pion.getProjectTrust(cwd)
+      .then((trust) => {
+        if (active && trust.cwd === cwd) setProjectTrust(trust)
+      })
+      .catch((error: unknown) => {
+        if (active) setProjectTrustError(error instanceof Error ? error.message : String(error))
+      })
+    return () => {
+      active = false
+    }
+  }, [hasBridge, state.status.cwd])
+
   const handleCompletionNotificationsChange = useCallback(async (enabled: boolean): Promise<void> => {
     if (!hasBridge) return
     try {
@@ -99,6 +124,21 @@ export function App(): ReactElement {
     setSessionPreviewDensity(density)
     saveSessionPreviewDensity(density)
   }, [])
+
+  const handleProjectTrustChange = useCallback(async (decision: boolean | null): Promise<void> => {
+    const cwd = state.status.cwd
+    if (!cwd || projectTrustBusy || state.busy || state.status.phase === 'starting') return
+    setProjectTrustBusy(true)
+    setProjectTrustError('')
+    try {
+      const trust = await actions.setProjectTrust(cwd, decision)
+      setProjectTrust(trust)
+    } catch (error) {
+      setProjectTrustError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setProjectTrustBusy(false)
+    }
+  }, [actions, projectTrustBusy, state.busy, state.status.cwd, state.status.phase])
 
   useEffect(() => {
     saveFavoriteSessionPaths(favoriteSessionPaths)
@@ -268,7 +308,12 @@ export function App(): ReactElement {
         setSelectedSession(null)
         if (targetCwd) {
           setNewSessionCwd(targetCwd)
+          const trust = await window.pion.getProjectTrust(targetCwd)
           await activateProject(targetCwd)
+          if (trust.decision === 'ask') {
+            setProjectTrust(trust)
+            return
+          }
         }
         await actions.newSession()
       } catch (error) {
@@ -420,7 +465,6 @@ export function App(): ReactElement {
     <div className="app">
       <TitleBar
         cwd={state.status.cwd}
-        phase={state.status.phase}
         sessionName={state.session?.sessionName}
         maximized={maximized}
         sidebarOpen={sidebarOpen}
@@ -505,6 +549,13 @@ export function App(): ReactElement {
             </div>
           )}
 
+          <ProjectTrustBanner
+            trust={projectTrust}
+            busy={projectTrustBusy || state.busy || state.status.phase === 'starting'}
+            error={projectTrustError}
+            onDecision={(decision) => void handleProjectTrustChange(decision)}
+          />
+
           <main className="chat-scroll" ref={scrollRef} onScroll={handleTimelineScroll}>
             {state.timeline.length === 0 ? (
               <EmptyState
@@ -538,7 +589,7 @@ export function App(): ReactElement {
             <Composer
               busy={state.busy}
               queued={state.queued}
-              disabled={!state.status.cwd || state.status.phase === 'starting' || state.status.phase === 'error'}
+              disabled={!state.status.cwd || state.status.phase === 'starting' || state.status.phase === 'error' || projectTrust?.decision === 'ask'}
               prefill={prefill}
               history={messageHistory}
               commands={state.commands}
@@ -616,6 +667,10 @@ export function App(): ReactElement {
         onCompletionNotificationsChange={(enabled) => void handleCompletionNotificationsChange(enabled)}
         sessionPreviewDensity={sessionPreviewDensity}
         onSessionPreviewDensityChange={handleSessionPreviewDensityChange}
+        projectTrust={projectTrust}
+        projectTrustBusy={projectTrustBusy || state.busy || state.status.phase === 'starting'}
+        projectTrustError={projectTrustError}
+        onProjectTrustChange={(decision) => void handleProjectTrustChange(decision)}
         onClose={() => setSettingsOpen(false)}
         actions={{
           setModel: actions.setModel,

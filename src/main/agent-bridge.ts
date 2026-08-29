@@ -4,11 +4,13 @@ import { access, unlink } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
 import {
   DefaultResourceLoader,
+  ProjectTrustStore,
   RpcClient,
   SessionManager,
   SettingsManager,
   getAgentDir,
-  getPackageDir
+  getPackageDir,
+  hasTrustRequiringProjectResources
 } from '@earendil-works/pi-coding-agent'
 import type { SessionEntry } from '@earendil-works/pi-coding-agent'
 import { IPC_EVENTS } from '../shared/ipc'
@@ -21,6 +23,7 @@ import type {
   ForkMessageOption,
   ImageContent,
   ModelOption,
+  ProjectTrustInfo,
   RunCheckpointStatus,
   SessionEntriesPage,
   SessionInfo,
@@ -115,6 +118,7 @@ export class AgentBridge {
   private readonly desiredModes = new Map<string, AgentMode>()
   private readonly sessionManagers = new Map<string, SessionManager>()
   private readonly sessionCompletedListeners = new Set<SessionCompletedListener>()
+  private readonly projectTrustStore = new ProjectTrustStore(getAgentDir())
   private newSessionInFlight: Promise<void> | null = null
   private activeKey: string | null = null
   private activeCwd: string | undefined
@@ -239,6 +243,96 @@ export class AgentBridge {
     return backend.checkpointStatus
   }
 
+  getProjectTrust(cwd: string): ProjectTrustInfo {
+    const normalizedCwd = resolve(cwd)
+    try {
+      const requiresTrust = hasTrustRequiringProjectResources(normalizedCwd)
+      if (!requiresTrust) {
+        return {
+          cwd: normalizedCwd,
+          requiresTrust: false,
+          decision: 'trusted',
+          source: 'not-required'
+        }
+      }
+
+      const entry = this.projectTrustStore.getEntry(normalizedCwd)
+      if (entry) {
+        return {
+          cwd: normalizedCwd,
+          requiresTrust: true,
+          decision: entry.decision ? 'trusted' : 'untrusted',
+          source: resolve(entry.path) === normalizedCwd ? 'saved' : 'inherited',
+          decisionPath: entry.path
+        }
+      }
+
+      const settings = SettingsManager.create(normalizedCwd, getAgentDir(), {
+        projectTrusted: false
+      })
+      const fallback = settings.getDefaultProjectTrust()
+      return {
+        cwd: normalizedCwd,
+        requiresTrust: true,
+        decision: fallback === 'always'
+          ? 'trusted'
+          : fallback === 'never'
+            ? 'untrusted'
+            : 'ask',
+        source: 'default'
+      }
+    } catch (error) {
+      return {
+        cwd: normalizedCwd,
+        requiresTrust: true,
+        decision: 'ask',
+        source: 'default',
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+
+  async setProjectTrust(cwd: string, decision: boolean | null): Promise<ProjectTrustInfo> {
+    if (decision !== true && decision !== false && decision !== null) {
+      throw new Error('无效的项目信任设置')
+    }
+    const normalizedCwd = resolve(cwd)
+    const affected = [...this.backends.values()]
+      .filter((backend) => resolve(backend.cwd) === normalizedCwd)
+    for (const backend of affected) {
+      const state = await backend.client.getState()
+      if (state.isStreaming) throw new Error('项目中仍有 Agent 正在运行，请先等待完成或中止运行')
+    }
+
+    const active = this.activeCwd ? resolve(this.activeCwd) === normalizedCwd : false
+    const activeSessionPath = active ? this.activeSessionPath : undefined
+    const activeBackend = active ? this.getActiveBackend() : null
+    const desiredMode = activeBackend ? this.desiredModes.get(activeBackend.key) : undefined
+
+    this.projectTrustStore.set(normalizedCwd, decision)
+    for (const backend of affected) await this.stopBackend(backend.key)
+
+    const trust = this.getProjectTrust(normalizedCwd)
+    if (active) {
+      this.activeCwd = normalizedCwd
+      this.activeSessionPath = activeSessionPath
+      this.activeKey = activeSessionPath ?? this.newSessionKey(normalizedCwd)
+      if (desiredMode) this.desiredModes.set(this.activeKey, desiredMode)
+      this.setStatus({ phase: 'ready', error: undefined, cwd: normalizedCwd })
+      this.pushRunCheckpoint()
+      if (trust.decision !== 'ask') {
+        void this.ensureActiveBackend()
+          .then(() => this.pushSessionInfo())
+          .catch(() => {
+            // ensureActiveBackend already publishes the active startup error
+          })
+      } else {
+        void this.pushSessionInfo()
+      }
+    }
+    return trust
+  }
+
   // ---------------------------------------------------------------- lifecycle
 
   /** Select a workspace; an individual session backend loads when selected. */
@@ -258,12 +352,17 @@ export class AgentBridge {
     return `new:${resolve(cwd)}:${randomUUID()}`
   }
 
-  private backendArgs(sessionPath?: string): Promise<string[]> {
+  private backendArgs(cwd: string, sessionPath?: string): Promise<string[]> {
     return pathExists(PLAN_EXTENSION_PATH).then((hasPlanExtension) => {
       if (!hasPlanExtension) {
         console.warn('[pion] plan mode extension not found:', PLAN_EXTENSION_PATH)
       }
+      const trust = this.getProjectTrust(cwd)
+      if (trust.decision === 'ask') {
+        throw new Error('此项目包含本地 Pi 配置或扩展，请先选择是否信任项目')
+      }
       return [
+        trust.decision === 'trusted' ? '--approve' : '--no-approve',
         ...(hasPlanExtension ? ['--extension', PLAN_EXTENSION_PATH] : []),
         ...(sessionPath ? ['--session', sessionPath] : [])
       ]
@@ -334,7 +433,7 @@ export class AgentBridge {
     sessionPath?: string
   ): Promise<BackendRecord> {
     const cliPath = join(getPackageDir(), 'dist', 'cli.js')
-    const args = await this.backendArgs(sessionPath)
+    const args = await this.backendArgs(cwd, sessionPath)
     const client = new RpcClient({ cliPath, cwd, args })
     const backend = {
       key,
@@ -883,7 +982,10 @@ export class AgentBridge {
     if (!cwd) return { skills: [], tools: [] }
 
     const agentDir = getAgentDir()
-    const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: true })
+    const trust = this.getProjectTrust(cwd)
+    const settingsManager = SettingsManager.create(cwd, agentDir, {
+      projectTrusted: trust.decision === 'trusted'
+    })
     const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager })
     await resourceLoader.reload()
 
