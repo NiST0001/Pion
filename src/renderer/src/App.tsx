@@ -342,12 +342,9 @@ export function App(): ReactElement {
         {sidebarOpen && <aside className="sidebar" style={{ width: sidebarWidth }}>
           <div className="sidebar-scroll">
             <SidebarToolbar
-              projects={state.projects}
-              newSessionCwd={newSessionCwd}
               searchQuery={sessionQuery}
               onSearch={setSessionQuery}
               onNewSession={() => void handleNewSession(newSessionCwd || undefined)}
-              onNewSessionProjectChange={setNewSessionCwd}
               onOpenCapabilities={() => setCapabilitiesOpen(true)}
             />
             <ProjectList
@@ -439,6 +436,27 @@ export function App(): ReactElement {
               commands={state.commands}
               mode={state.mode}
               onModeChange={(mode) => void actions.setMode(mode)}
+              projectSelector={
+                <label className="composer-project-picker">
+                  <span className="composer-project-label">项目</span>
+                  <select
+                    aria-label="新会话项目"
+                    value={newSessionCwd}
+                    disabled={state.projects.length === 0}
+                    onChange={(event) => setNewSessionCwd(event.target.value)}
+                  >
+                    {state.projects.length === 0 ? (
+                      <option value="">暂无项目</option>
+                    ) : (
+                      state.projects.map((project) => (
+                        <option key={project.cwd} value={project.cwd} title={project.cwd}>
+                          {project.name}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+              }
               controls={
                 <>
                   <ModelPicker

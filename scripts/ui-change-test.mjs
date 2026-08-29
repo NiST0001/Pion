@@ -152,7 +152,7 @@ await sleep(300)
 await check('模型菜单已显示', `!!document.querySelector('.composer-inline-controls .picker-menu')`)
 await check('模型选项可见', `document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
 await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
-await check('新建会话下面有项目选择', `(() => { const select = document.querySelector('.sidebar-new-session-project select'); return !!select && select.getAttribute('aria-label') === '新会话项目' && select.options.length > 0; })()`)
+await check('构建/计划左侧有项目选择', `(() => { const picker = document.querySelector('.composer-inline-controls .composer-project-picker'); const select = picker?.querySelector('select'); const mode = document.querySelector('.composer-mode-picker'); return !!select && select.getAttribute('aria-label') === '新会话项目' && select.options.length > 0 && !!mode && Boolean(picker.compareDocumentPosition(mode) & Node.DOCUMENT_POSITION_FOLLOWING) && !document.querySelector('.sidebar-new-session-project'); })()`)
 await evaluate(`document.querySelector('.sidebar-new-session')?.click()`)
 for (let i = 0; i < 30; i++) {
   await sleep(300)

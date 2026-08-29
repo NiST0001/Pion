@@ -10,6 +10,8 @@ interface ComposerProps {
   prefill: string
   /** 当前会话中的用户消息，按时间顺序用于上下键导航。 */
   history: string[]
+  /** 输入框底部、工作模式左侧的项目选择器 */
+  projectSelector?: ReactNode
   /** 嵌入输入框底部的控制区（模型/思考级别选择器等） */
   controls?: ReactNode
   commands: SlashCommandInfo[]
@@ -26,6 +28,7 @@ export function Composer({
   disabled,
   prefill,
   history,
+  projectSelector,
   controls,
   commands,
   mode,
@@ -279,6 +282,7 @@ export function Composer({
             aria-keyshortcuts="ArrowUp ArrowDown"
           />
           <div className="composer-inline-controls">
+            {projectSelector}
             <div className="composer-mode-picker" role="group" aria-label="工作模式">
               <button
                 type="button"
