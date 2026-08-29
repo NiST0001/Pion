@@ -17,6 +17,8 @@ import {
   X
 } from 'lucide-react'
 import type { ModelOption, SessionInfo } from '../../../shared/types'
+import { SESSION_PREVIEW_OPTIONS } from '../utils/sessionPreview'
+import type { SessionPreviewDensity } from '../utils/sessionPreview'
 import { currentTheme, saveTheme, THEMES } from '../utils/theme'
 import type { ThemeId } from '../utils/theme'
 import pkg from '../../../../package.json'
@@ -38,6 +40,8 @@ interface SettingsModalProps {
   models: ModelOption[]
   completionNotificationsEnabled: boolean
   onCompletionNotificationsChange: (enabled: boolean) => void
+  sessionPreviewDensity: SessionPreviewDensity
+  onSessionPreviewDensityChange: (density: SessionPreviewDensity) => void
   onClose: () => void
   actions: SettingsActions
 }
@@ -55,6 +59,8 @@ export function SettingsModal({
   models,
   completionNotificationsEnabled,
   onCompletionNotificationsChange,
+  sessionPreviewDensity,
+  onSessionPreviewDensityChange,
   onClose,
   actions
 }: SettingsModalProps): ReactElement | null {
@@ -314,6 +320,21 @@ export function SettingsModal({
                         { value: 'one-at-a-time', label: '逐条' }
                       ]}
                       onChange={(value) => void actions.setFollowUpMode(value as 'all' | 'one-at-a-time')}
+                    />
+                  </div>
+                </div>
+
+                <div className="settings-section">
+                  <div className="settings-section-title">会话列表</div>
+                  <div className="setting-row" data-setting="session-preview-density">
+                    <div>
+                      <div className="setting-label">会话预览程度</div>
+                      <div className="setting-desc">调整左侧会话选择条显示的信息量</div>
+                    </div>
+                    <Segmented
+                      value={sessionPreviewDensity}
+                      options={SESSION_PREVIEW_OPTIONS.map(({ value, label }) => ({ value, label }))}
+                      onChange={(value) => onSessionPreviewDensityChange(value as SessionPreviewDensity)}
                     />
                   </div>
                 </div>

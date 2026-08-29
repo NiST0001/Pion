@@ -18,6 +18,7 @@ import type {
   SessionMeta
 } from '../../../shared/types'
 import { SessionItems, sessionMatchesQuery } from './SessionList'
+import type { SessionPreviewDensity } from '../utils/sessionPreview'
 
 // ---------------------------------------------------------------------------
 // Section shell
@@ -122,6 +123,7 @@ export function ProjectList({
   searchQuery,
   activeCwd,
   activePath,
+  previewDensity,
   onSelect,
   onAdd,
   onRemove,
@@ -140,6 +142,7 @@ export function ProjectList({
   searchQuery: string
   activeCwd?: string
   activePath?: string
+  previewDensity: SessionPreviewDensity
   onSelect: (cwd: string) => void
   onAdd: () => void
   onRemove: (cwd: string) => void
@@ -191,6 +194,7 @@ export function ProjectList({
           branches={branches}
           activeCwd={activeCwd}
           activePath={activePath}
+          previewDensity={previewDensity}
           searchActive={Boolean(normalizedQuery)}
           canRemove={projects.length > 1}
           onSelect={onSelect}
@@ -214,6 +218,7 @@ function ProjectBranch({
   sessions,
   allSessions,
   activePath,
+  previewDensity,
   onNewSession,
   onReorder,
   onSelectSession,
@@ -226,6 +231,7 @@ function ProjectBranch({
   sessions: SessionMeta[]
   allSessions: SessionMeta[]
   activePath?: string
+  previewDensity: SessionPreviewDensity
   onNewSession: (cwd: string) => void
   onReorder: (cwd: string, paths: string[]) => void
   onSelectSession: (cwd: string, path: string) => void
@@ -283,6 +289,7 @@ function ProjectBranch({
             <SessionItems
               sessions={sessions}
               activePath={activePath}
+              previewDensity={previewDensity}
               onSelect={(path) => onSelectSession(branch.cwd, path)}
               onReorder={handleReorder}
               onDelete={(path) => onDelete(branch.cwd, path)}
@@ -304,6 +311,7 @@ function ProjectFolder({
   activePath,
   searchActive,
   canRemove,
+  previewDensity,
   onSelect,
   onRemove,
   onNewSession,
@@ -321,6 +329,7 @@ function ProjectFolder({
   activePath?: string
   searchActive: boolean
   canRemove: boolean
+  previewDensity: SessionPreviewDensity
   onSelect: (cwd: string) => void
   onRemove: (cwd: string) => void
   onNewSession: (cwd: string) => void
@@ -393,6 +402,7 @@ function ProjectFolder({
               sessions={sessions}
               allSessions={allSessions}
               activePath={activePath}
+              previewDensity={previewDensity}
               onNewSession={onNewSession}
               onReorder={onReorder}
               onSelectSession={onSelectSession}

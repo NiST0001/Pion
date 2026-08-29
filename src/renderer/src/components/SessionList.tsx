@@ -10,6 +10,7 @@ import {
   Trash2
 } from 'lucide-react'
 import type { ForkMessageOption, SessionMeta } from '../../../shared/types'
+import type { SessionPreviewDensity } from '../utils/sessionPreview'
 
 export function sessionMatchesQuery(session: SessionMeta, query: string): boolean {
   const haystack = [session.name, session.preview, session.path]
@@ -42,13 +43,14 @@ interface SessionItemActions {
 export function SessionItems({
   sessions,
   activePath,
+  previewDensity,
   onSelect,
   onReorder,
   onDelete,
   onCopy,
   getForkMessages,
   onFork
-}: { sessions: SessionMeta[] } & SessionItemActions): ReactElement {
+}: { sessions: SessionMeta[]; previewDensity: SessionPreviewDensity } & SessionItemActions): ReactElement {
   const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(null)
   const [draggedPath, setDraggedPath] = useState<string | null>(null)
   const [dragOverPath, setDragOverPath] = useState<string | null>(null)
@@ -108,7 +110,7 @@ export function SessionItems({
         <div
           key={session.path}
           data-session-path={session.path}
-          className={`side-item side-session${session.path === activePath ? ' active' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
+          className={`side-item side-session side-session-${previewDensity}${session.path === activePath ? ' active' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
           draggable
           onDragStart={(event) => handleDragStart(event, session)}
           onDragOver={(event) => {
@@ -134,9 +136,14 @@ export function SessionItems({
               <span className="side-item-label">
                 {session.name || session.preview || '未命名会话'}
               </span>
-              <span className="side-session-meta">
-                {formatTime(session.mtime)} · {session.messageCount} 条消息
-              </span>
+              {previewDensity === 'detailed' && session.name && session.preview && (
+                <span className="side-session-preview">{session.preview}</span>
+              )}
+              {previewDensity !== 'compact' && (
+                <span className="side-session-meta">
+                  {formatTime(session.mtime)} · {session.messageCount} 条消息
+                </span>
+              )}
             </div>
           </div>
         </div>

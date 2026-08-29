@@ -39,6 +39,7 @@
 - 输入框内置「构建 / 计划」模式切换；计划模式由 `@narumitw/pi-plan-mode` 提供只读探索和方案整理能力
 - pi 官方插件商店：原生目录可直接安装，支持全部/已安装/未安装筛选（`https://pi.dev/packages`）
 - 技能与工具中心：展示当前配置和已安装插件提供的技能、扩展工具及来源
+- 会话列表预览：支持紧凑、舒适、详细三种显示密度，并持久化保存在本机
 
 ### 项目
 - 多项目管理：侧栏切换工作目录，后台池跨项目与 worktree 共享
@@ -119,7 +120,7 @@ src/
         ├── hooks/useAgent.ts     # IPC 订阅与 actions 组装
         └── components/
             ├── Sidebar.tsx       # 项目/分支工作树
-            ├── SessionList.tsx   # 会话条目、拖拽与右键操作
+            ├── SessionList.tsx   # 会话条目、预览密度、拖拽与右键操作
             ├── ChangesDrawer.tsx # 变更 Diff 抽屉
             ├── ChatMessage.tsx   # 消息气泡（Markdown、fork 按钮）
             ├── Markdown.tsx      # react-markdown + 高亮 + 复制

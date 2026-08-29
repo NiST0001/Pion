@@ -17,6 +17,8 @@ import { SettingsModal } from './components/SettingsModal'
 import { SkillsToolsModal } from './components/SkillsToolsModal'
 import { PluginStoreModal } from './components/PluginStoreModal'
 import { ProjectPicker } from './components/ProjectPicker'
+import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
+import type { SessionPreviewDensity } from './utils/sessionPreview'
 
 type ResizeTarget = 'sidebar' | 'review'
 
@@ -50,6 +52,7 @@ export function App(): ReactElement {
   const [sidebarWidth, setSidebarWidth] = useState(276)
   const [reviewWidth, setReviewWidth] = useState(390)
   const [sessionQuery, setSessionQuery] = useState('')
+  const [sessionPreviewDensity, setSessionPreviewDensity] = useState<SessionPreviewDensity>(readSessionPreviewDensity)
   const [newSessionCwd, setNewSessionCwd] = useState('')
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
   const newSessionInFlight = useRef(false)
@@ -87,6 +90,11 @@ export function App(): ReactElement {
       console.error('[pion] failed to update notification setting:', error)
     }
   }, [hasBridge])
+
+  const handleSessionPreviewDensityChange = useCallback((density: SessionPreviewDensity): void => {
+    setSessionPreviewDensity(density)
+    saveSessionPreviewDensity(density)
+  }, [])
 
   // Resize either side panel with its vertical drag handle.
   const handleResizeStart = useCallback(
@@ -388,6 +396,7 @@ export function App(): ReactElement {
               sessionsByProject={state.sessionsByProject}
               branchesByProject={state.branchesByProject}
               searchQuery={sessionQuery}
+              previewDensity={sessionPreviewDensity}
               activeCwd={activeCwd}
               activePath={activePath}
               onSelect={(cwd) => void handleSelectProject(cwd)}
@@ -537,6 +546,8 @@ export function App(): ReactElement {
         models={state.models}
         completionNotificationsEnabled={completionNotificationsEnabled}
         onCompletionNotificationsChange={(enabled) => void handleCompletionNotificationsChange(enabled)}
+        sessionPreviewDensity={sessionPreviewDensity}
+        onSessionPreviewDensityChange={handleSessionPreviewDensityChange}
         onClose={() => setSettingsOpen(false)}
         actions={{
           setModel: actions.setModel,
