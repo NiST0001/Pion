@@ -239,6 +239,18 @@ export function Composer({
       return
     }
 
+    if (
+      event.key === 'Tab' &&
+      event.ctrlKey &&
+      !event.shiftKey &&
+      !event.metaKey &&
+      !event.altKey
+    ) {
+      event.preventDefault()
+      if (!disabled && !busy) onModeChange(mode === 'build' ? 'plan' : 'build')
+      return
+    }
+
     const historyDirection = event.key === 'ArrowUp' ? 'up' : event.key === 'ArrowDown' ? 'down' : null
     const atHistoryBoundary = historyDirection === 'up'
       ? event.currentTarget.selectionStart === 0 && event.currentTarget.selectionEnd === 0
@@ -342,8 +354,8 @@ export function Composer({
             placeholder={disabled
               ? 'agent 未运行…'
               : mode === 'plan'
-                ? '计划模式：描述要探索和设计的目标… (↑↓ 编辑历史 / Tab 排队 / Enter 直接发送)'
-                : '描述任务… (↑↓ 编辑历史 / Tab 排队 / Enter 直接发送)'}
+                ? '计划模式：描述要探索和设计的目标… (↑↓ 编辑历史 / Tab 排队 / Ctrl+Tab 切换模式 / Enter 直接发送)'
+                : '描述任务… (↑↓ 编辑历史 / Tab 排队 / Ctrl+Tab 切换模式 / Enter 直接发送)'}
             disabled={disabled}
             aria-autocomplete="list"
             aria-controls="slash-command-menu"
@@ -355,7 +367,7 @@ export function Composer({
             }}
             onPaste={handlePaste}
             onKeyDown={handleKeyDown}
-            aria-keyshortcuts="ArrowUp ArrowDown"
+            aria-keyshortcuts="ArrowUp ArrowDown Control+Tab"
           />
           {(pendingImages.length > 0 || imageError) && (
             <div className="composer-attachments" aria-label="待发送图像">
