@@ -144,18 +144,6 @@
 .row {
   display: flex;
   gap: 10px;
-  animation: rise 0.18s ease;
-}
-
-@keyframes rise {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
 }
 
 .row-user {
@@ -470,7 +458,6 @@
   background: transparent;
   font-size: 12.5px;
   overflow: visible;
-  animation: rise 0.18s ease;
 }
 
 .tool-head {

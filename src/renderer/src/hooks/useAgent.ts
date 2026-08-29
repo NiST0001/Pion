@@ -11,8 +11,7 @@ import type {
   BranchInfo,
   ForkMessageOption,
   ImageContent,
-  ProjectTrustInfo,
-  WireEntry
+  ProjectTrustInfo
 } from '../../../shared/types'
 import { reducer } from '../agent/reducer'
 import {
@@ -20,7 +19,6 @@ import {
   entriesToTimeline,
   HISTORY_ENTRY_CHUNK_SIZE,
   INITIAL_HISTORY_PAGE_SIZE,
-  initialEntryStart,
   storeTimelineCache
 } from '../agent/timeline'
 import type { HistoryCursor, TimelineCacheEntry } from '../agent/timeline'
@@ -173,13 +171,13 @@ export function useAgent() {
     }
 
     const toolResults = collectToolResults([...page.entries, ...page.toolResults])
-    const relativeStart = page.start === 0 ? 0 : initialEntryStart(page.entries)
-    const initialItems = entriesToTimeline(page.entries.slice(relativeStart), toolResults)
+    // Mount the complete newest page as one stable snapshot. Splitting out a
+    // special bottom-only slice made long sessions visibly appear in phases.
+    const initialItems = entriesToTimeline(page.entries, toolResults)
     const cursor: HistoryCursor = {
       path: path ?? '',
       items: initialItems,
       mode: page.mode,
-      pendingEntries: page.start === 0 ? [] : page.entries.slice(0, relativeStart),
       apiBefore: page.start,
       toolResults: page.toolResults,
       complete: page.start === 0,
@@ -193,7 +191,6 @@ export function useAgent() {
       storeTimelineCache(timelineCache.current, path, {
         items: cursor.items,
         mode: cursor.mode,
-        pendingEntries: cursor.pendingEntries,
         apiBefore: cursor.apiBefore,
         toolResults: cursor.toolResults,
         complete: cursor.complete,
@@ -221,37 +218,27 @@ export function useAgent() {
       // events left to trigger the next load.
       for (let attempt = 0; attempt < 16; attempt++) {
         if (loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
-        let entries: WireEntry[]
-        let toolResults = cursor.toolResults
-        if (cursor.pendingEntries.length > 0) {
-          const end = cursor.pendingEntries.length
-          const start = Math.max(0, end - HISTORY_ENTRY_CHUNK_SIZE)
-          entries = cursor.pendingEntries.slice(start, end)
-          cursor.pendingEntries = cursor.pendingEntries.slice(0, start)
-        } else {
-          const page = await api.getEntriesPage(
-            cursor.apiBefore,
-            HISTORY_ENTRY_CHUNK_SIZE,
-            cursor.path
-          )
-          if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
-          entries = page.entries
-          toolResults = page.toolResults
-          cursor.toolResults = toolResults
-          cursor.apiBefore = page.start
-          cursor.leafId = page.leafId
-          cursor.total = page.total
-        }
-        if (loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+        const page = await api.getEntriesPage(
+          cursor.apiBefore,
+          HISTORY_ENTRY_CHUNK_SIZE,
+          cursor.path
+        )
+        if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+        cursor.toolResults = page.toolResults
+        cursor.apiBefore = page.start
+        cursor.leafId = page.leafId
+        cursor.total = page.total
 
-        const items = entriesToTimeline(entries, collectToolResults([...entries, ...toolResults]))
+        const items = entriesToTimeline(
+          page.entries,
+          collectToolResults([...page.entries, ...page.toolResults])
+        )
         cursor.items = [...items, ...cursor.items]
-        cursor.complete = cursor.pendingEntries.length === 0 && cursor.apiBefore === 0
+        cursor.complete = cursor.apiBefore === 0
         if (items.length > 0) dispatch({ type: 'prependEntries', items })
         storeTimelineCache(timelineCache.current, cursor.path, {
           items: cursor.items,
           mode: cursor.mode,
-          pendingEntries: cursor.pendingEntries,
           apiBefore: cursor.apiBefore,
           toolResults: cursor.toolResults,
           complete: cursor.complete,

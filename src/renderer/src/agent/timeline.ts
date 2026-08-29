@@ -147,25 +147,6 @@ export function collectToolResults(entries: WireEntry[]): Map<string, Historical
   return results
 }
 
-function timelineItemCount(entry: WireEntry): number {
-  if (entry.type === 'compaction') return typeof entry.summary === 'string' ? 1 : 0
-  if (entry.type !== 'message' || !entry.message) return 0
-  if (entry.message.role === 'user') return 1
-  if (entry.message.role === 'assistant') return 1 + messageToolCalls(entry.message).length
-  return 0
-}
-
-/** Find where the newest-window slice should start to render ~maxItems items. */
-export function initialEntryStart(entries: WireEntry[], maxItems = INITIAL_HISTORY_ITEMS): number {
-  let count = 0
-  let start = entries.length
-  while (start > 0 && count < maxItems) {
-    start -= 1
-    count += timelineItemCount(entries[start])
-  }
-  return start
-}
-
 export function entriesToTimeline(
   entries: WireEntry[],
   toolResults: Map<string, HistoricalToolResult> = collectToolResults(entries)
@@ -174,7 +155,7 @@ export function entriesToTimeline(
   for (const entry of entries) {
     if (entry.type === 'compaction') {
       if (typeof entry.summary === 'string') {
-        items.push({ kind: 'compaction', id: nextTimelineId(), summary: '上下文已压缩', historical: true })
+        items.push({ kind: 'compaction', id: nextTimelineId(), summary: '上下文已压缩' })
       }
       continue
     }
@@ -188,8 +169,7 @@ export function entriesToTimeline(
         id: nextTimelineId(),
         entryId: entry.id,
         text: messageText(message),
-        images: messageImages(message),
-        historical: true
+        images: messageImages(message)
       })
       continue
     }
@@ -205,8 +185,7 @@ export function entriesToTimeline(
           entryId: entry.id,
           text,
           thinking,
-          streaming: false,
-          historical: true
+          streaming: false
         })
       }
       for (const call of calls) {
@@ -221,7 +200,6 @@ export function entriesToTimeline(
         items.push({
           kind: 'tool',
           id: nextTimelineId(),
-          historical: true,
           tool: result ? applyToolResult(tool, result.result, result.isError) : tool
         })
       }
@@ -235,7 +213,6 @@ export function entriesToTimeline(
 // Paged-history timeline cache
 // ---------------------------------------------------------------------------
 
-export const INITIAL_HISTORY_ITEMS = 30
 export const HISTORY_ENTRY_CHUNK_SIZE = 80
 export const INITIAL_HISTORY_PAGE_SIZE = 160
 const MAX_TIMELINE_CACHE = 10
@@ -243,7 +220,6 @@ const MAX_TIMELINE_CACHE = 10
 export interface TimelineCacheEntry {
   items: TimelineItem[]
   mode: AgentMode
-  pendingEntries: WireEntry[]
   apiBefore: number
   toolResults: WireEntry[]
   complete: boolean

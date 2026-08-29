@@ -41,7 +41,7 @@ export interface ToolItem {
 }
 
 export type TimelineItem =
-  | { kind: 'user'; id: number; entryId?: string; text: string; images?: ImageContent[]; historical?: boolean }
+  | { kind: 'user'; id: number; entryId?: string; text: string; images?: ImageContent[] }
   | {
       kind: 'assistant'
       id: number
@@ -50,10 +50,9 @@ export type TimelineItem =
       thinking: string
       streaming: boolean
       error?: string
-      historical?: boolean
     }
-  | { kind: 'tool'; id: number; tool: ToolItem; historical?: boolean }
-  | { kind: 'compaction'; id: number; summary: string; historical?: boolean }
+  | { kind: 'tool'; id: number; tool: ToolItem }
+  | { kind: 'compaction'; id: number; summary: string }
 
 // ---------------------------------------------------------------------------
 // Changes (review panel)
