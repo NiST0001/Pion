@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
-import { FolderOpen, Loader2, Settings, Sparkles, Store } from 'lucide-react'
+import { FolderOpen, Settings, Sparkles, Store } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
-import { deriveChanges, deriveLatestRunChanges } from './agent/timeline'
+import { deriveAgentTodos, deriveChanges, deriveLatestRunChanges } from './agent/timeline'
 import type { FileChange } from './agent/types'
 import type {
   ProjectToolPermissionPolicy,
@@ -627,6 +627,16 @@ export function App(): ReactElement {
   const latestRunChanges = useMemo(() => deriveLatestRunChanges(state.timeline), [state.timeline])
   const changes = state.runCheckpoint?.state === 'rolled-back' ? [] : sessionChanges
   const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
+  const agentTodos = useMemo(() => deriveAgentTodos(state.timeline), [state.timeline])
+  const workingLabel = useMemo(() => {
+    for (let index = state.timeline.length - 1; index >= 0; index--) {
+      const item = state.timeline[index]
+      if (item.kind === 'tool' && item.tool.status === 'running') return '执行中'
+      if (item.kind === 'assistant' && item.streaming) return item.text === '' ? '思考中' : '输出中'
+      if (item.kind === 'user') break
+    }
+    return '思考中'
+  }, [state.timeline])
   const messageHistory = useMemo(
     () => state.timeline.flatMap((item) => (
       item.kind === 'user' && item.text.trim() ? [item.text] : []
@@ -842,9 +852,8 @@ export function App(): ReactElement {
               )}
             </main>
             {state.busy && (
-              <div className="agent-working" role="status" aria-live="polite">
-                <Loader2 size={13} className="spin" />
-                <span>Agent 正在工作…</span>
+              <div className="agent-working-text" role="status" aria-live="polite">
+                {workingLabel}
               </div>
             )}
             <ToolPermissionModal
@@ -857,7 +866,7 @@ export function App(): ReactElement {
           </div>
 
           <div className="composer-dock">
-            <TaskPanel key={taskSessionKey} sessionKey={taskSessionKey} />
+            <TaskPanel key={taskSessionKey} sessionKey={taskSessionKey} agentTodos={agentTodos} />
             <Composer
               busy={state.busy}
               queued={state.queued}

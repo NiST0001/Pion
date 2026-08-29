@@ -39,6 +39,18 @@ export interface ToolItem {
   writeContent?: string
   /** Generic textual output */
   outputText?: string
+  /** todo 工具结果中的完整任务快照 */
+  todos?: AgentTodo[]
+}
+
+/** A task entry from the agent's todo tool (rpiv-todo). */
+export interface AgentTodo {
+  id: number | string
+  title: string
+  status: 'pending' | 'in_progress' | 'completed' | 'deleted'
+  /** Present-continuous label shown while in_progress */
+  activeForm?: string
+  description?: string
 }
 
 export type TimelineItem =

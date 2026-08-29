@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { Clock3 } from 'lucide-react'
 import type {
   HistoryLandmark,
@@ -70,6 +70,9 @@ export function HistoryNavigator({
   const [preview, setPreview] = useState<HistoryLandmark | null>(null)
   const [previewTop, setPreviewTop] = useState(50)
   const [hoverIndex, setHoverIndex] = useState<number | null>(null)
+  const trackRef = useRef<HTMLDivElement>(null)
+  const scrubbingRef = useRef(false)
+  const lastScrubJumpRef = useRef(0)
   const markers = useMemo(
     () => sampleLandmarks(index?.landmarks ?? [], activeEntryId),
     [activeEntryId, index?.landmarks]
@@ -77,12 +80,54 @@ export function HistoryNavigator({
 
   if (!index || index.landmarks.length < 2) return null
 
-  const jumpNearest = (event: ReactMouseEvent<HTMLDivElement>): void => {
+  const nearestIndexAt = (clientY: number): number => {
+    const track = trackRef.current
+    if (!track) return 0
+    const rect = track.getBoundingClientRect()
+    const ratio = Math.min(Math.max((clientY - rect.top) / Math.max(rect.height, 1), 0), 1)
+    return Math.round(ratio * (markers.length - 1))
+  }
+
+  /** Hover follows the cursor anywhere on the rail — gaps between bars count too. */
+  const hoverAt = (clientY: number): void => {
+    const markerIndex = nearestIndexAt(clientY)
+    const landmark = markers[markerIndex]
+    if (!landmark) return
+    setHoverIndex(markerIndex)
+    setPreview(landmark)
+    const track = trackRef.current
+    const bar = track?.querySelectorAll('.history-navigator-marker')[markerIndex]
+    if (track && bar) {
+      const trackRect = track.getBoundingClientRect()
+      const barRect = bar.getBoundingClientRect()
+      const center = barRect.top + barRect.height / 2 - trackRect.top
+      setPreviewTop(Math.min(Math.max(center / Math.max(trackRect.height, 1), 0.08), 0.92))
+    }
+  }
+
+  const handleTrackPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (busy || event.target !== event.currentTarget) return
-    const rect = event.currentTarget.getBoundingClientRect()
-    const ratio = Math.min(Math.max((event.clientY - rect.top) / rect.height, 0), 1)
-    const target = markers[Math.round(ratio * (markers.length - 1))]
-    if (target) onJump(target)
+    scrubbingRef.current = true
+    event.currentTarget.setPointerCapture(event.pointerId)
+    hoverAt(event.clientY)
+  }
+
+  const handleTrackPointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    hoverAt(event.clientY)
+    if (!scrubbingRef.current || busy) return
+    const now = Date.now()
+    if (now - lastScrubJumpRef.current < 200) return
+    lastScrubJumpRef.current = now
+    const landmark = markers[nearestIndexAt(event.clientY)]
+    if (landmark) onJump(landmark)
+  }
+
+  const handleTrackPointerUp = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (scrubbingRef.current && !busy) {
+      const landmark = markers[nearestIndexAt(event.clientY)]
+      if (landmark) onJump(landmark)
+    }
+    scrubbingRef.current = false
   }
 
   return (
@@ -91,11 +136,16 @@ export function HistoryNavigator({
       aria-label="会话历史快速导航"
     >
       <div
+        ref={trackRef}
         className="history-navigator-track"
         role="presentation"
         style={{ gap: `${gap}px` }}
-        onClick={jumpNearest}
+        onPointerDown={handleTrackPointerDown}
+        onPointerMove={handleTrackPointerMove}
+        onPointerUp={handleTrackPointerUp}
+        onPointerCancel={() => { scrubbingRef.current = false }}
         onMouseLeave={() => {
+          if (scrubbingRef.current) return
           setHoverIndex(null)
           setPreview(null)
         }}

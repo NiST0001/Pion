@@ -299,27 +299,40 @@
   background: var(--bg-elev);
 }
 
-/* Agent 工作指示器 --------------------------------------------------------- */
+/* Agent 工作指示器（扫光文字） ------------------------------------------------ */
 
-.agent-working {
+.agent-working-text {
   position: absolute;
   left: 58px;
-  bottom: 14px;
+  bottom: 16px;
   z-index: 24;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 6px 13px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-elev);
-  color: var(--fg-dim);
-  font-size: 11.5px;
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0.4px;
   pointer-events: none;
+  background: linear-gradient(100deg, var(--fg-faint) 25%, var(--fg) 50%, var(--fg-faint) 75%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: agent-shimmer 1.5s linear infinite;
 }
 
-.agent-working .spin {
-  color: var(--accent-strong);
+@keyframes agent-shimmer {
+  from {
+    background-position: 115% 0;
+  }
+  to {
+    background-position: -15% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-working-text {
+    background: none;
+    color: var(--fg-dim);
+    animation: none;
+  }
 }
 
 /* ==========================================================================

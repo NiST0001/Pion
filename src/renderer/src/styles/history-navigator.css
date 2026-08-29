@@ -36,6 +36,7 @@
   border-radius: 8px;
   pointer-events: auto;
   cursor: pointer;
+  touch-action: none;
   transition: background 0.14s ease;
 }
 
@@ -87,7 +88,7 @@
 
 .history-navigator-preview {
   position: absolute;
-  left: 40px;
+  left: 54px;
   width: min(330px, calc(100vw - 110px));
   padding: 11px 12px;
   border: 1px solid var(--border);

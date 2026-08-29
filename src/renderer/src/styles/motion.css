@@ -28,10 +28,21 @@
   }
 }
 
-@keyframes pion-menu-in {
+@keyframes pion-menu-in-down {
   from {
     opacity: 0;
-    transform: translateY(-4px) scale(0.985);
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pion-menu-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
@@ -141,23 +152,28 @@ body,
   animation: pion-slide-in-down var(--motion-normal) var(--motion-ease-out) both;
 }
 
-/* Menus and transient overlays ------------------------------------------- */
+/* Menus pull out from their anchored edge, drawer-style. */
 
 .picker-menu,
-.composer-project-menu,
-.slash-command-menu,
 .context-menu,
 .context-submenu {
   transform-origin: top center;
-  animation: pion-menu-in var(--motion-normal) var(--motion-ease-out) both;
+  animation: pion-menu-in-down var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.composer-inline-controls .picker-menu,
+.composer-project-menu,
+.slash-command-menu {
+  transform-origin: bottom center;
+  animation: pion-menu-in-up var(--motion-normal) var(--motion-ease-out) both;
 }
 
 .history-navigator {
   animation: pion-fade-in var(--motion-slow) ease both;
 }
 
-.agent-working {
-  animation: pion-fade-in var(--motion-fast) ease both;
+.agent-working-text {
+  animation: pion-fade-in var(--motion-fast) ease both, agent-shimmer 1.5s linear infinite;
 }
 
 .history-navigator-preview {

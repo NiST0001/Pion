@@ -1,65 +1,9 @@
 import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
-import { ArrowDown, Check, Circle, ListTodo } from 'lucide-react'
+import { ArrowDown, Check, Circle, ListTodo, Loader2 } from 'lucide-react'
+import type { AgentTodo } from '../agent/types'
 
-interface TaskTarget {
-  id: string
-  title: string
-  done: boolean
-}
-
-const TASK_STORAGE_PREFIX = 'pion:session-tasks:'
 const TASK_PANEL_STATE_PREFIX = 'pion:session-task-panel-state:'
-
-function createDefaultTasks(): TaskTarget[] {
-  return [
-    { id: 'understand', title: '梳理任务目标与验收标准', done: true },
-    { id: 'inspect', title: '检查项目结构与现有实现', done: true },
-    { id: 'plan', title: '确定交互与技术方案', done: true },
-    { id: 'implement', title: '实现核心功能与数据流', done: false },
-    { id: 'polish', title: '完善界面细节和交互状态', done: false },
-    { id: 'verify-types', title: '运行类型检查并修复问题', done: false },
-    { id: 'verify-build', title: '执行构建与自动化验证', done: false },
-    { id: 'review', title: '复查改动并整理交付说明', done: false },
-    { id: 'document', title: '补充使用说明与注意事项', done: false },
-    { id: 'finish', title: '确认任务完成并提交变更', done: false }
-  ]
-}
-
-function taskStorageKey(sessionKey: string): string {
-  return `${TASK_STORAGE_PREFIX}${encodeURIComponent(sessionKey)}`
-}
-
-function loadTasks(sessionKey: string): TaskTarget[] {
-  const defaults = createDefaultTasks()
-  if (typeof window === 'undefined') return defaults
-  try {
-    const raw = window.localStorage.getItem(taskStorageKey(sessionKey))
-    if (!raw) return defaults
-    const saved = JSON.parse(raw) as unknown
-    if (!Array.isArray(saved)) return defaults
-    const tasks = saved.flatMap((task): TaskTarget[] => {
-      if (!task || typeof task !== 'object') return []
-      const record = task as Record<string, unknown>
-      if (typeof record.id !== 'string' || typeof record.title !== 'string' || typeof record.done !== 'boolean') {
-        return []
-      }
-      return [{ id: record.id, title: record.title, done: record.done }]
-    })
-    return tasks.length === saved.length ? tasks : defaults
-  } catch {
-    return defaults
-  }
-}
-
-function saveTasks(sessionKey: string, tasks: TaskTarget[]): void {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.setItem(taskStorageKey(sessionKey), JSON.stringify(tasks))
-  } catch {
-    // Task persistence is best effort and should never block the chat UI.
-  }
-}
 
 function taskPanelStateKey(sessionKey: string): string {
   return `${TASK_PANEL_STATE_PREFIX}${encodeURIComponent(sessionKey)}`
@@ -70,7 +14,7 @@ function loadExpanded(sessionKey: string): boolean {
   try {
     const raw = window.localStorage.getItem(taskPanelStateKey(sessionKey))
     if (raw === null) return true
-    const saved = JSON.parse(raw) as unknown
+    const saved = JSON.parse(raw)
     return typeof saved === 'boolean' ? saved : true
   } catch {
     return true
@@ -86,23 +30,23 @@ function saveExpanded(sessionKey: string, expanded: boolean): void {
   }
 }
 
-/** Compact, expandable work-plan surface docked above the composer. */
-export function TaskPanel({ sessionKey }: { sessionKey: string }): ReactElement {
+/** The agent's real work plan, docked above the composer.
+    Mirrors the todo tool: the agent plans and executes, the panel follows.
+    Hidden entirely when the session has no AI task list. */
+export function TaskPanel({ sessionKey, agentTodos }: { sessionKey: string; agentTodos?: AgentTodo[] | null }): ReactElement | null {
   const [expanded, setExpanded] = useState(() => loadExpanded(sessionKey))
-  const [tasks, setTasks] = useState(() => loadTasks(sessionKey))
-  const completed = tasks.filter((task) => task.done).length
-
-  useEffect(() => {
-    saveTasks(sessionKey, tasks)
-  }, [sessionKey, tasks])
+  const todos = agentTodos ?? []
+  const completed = todos.filter((task) => task.status === 'completed').length
 
   useEffect(() => {
     saveExpanded(sessionKey, expanded)
   }, [sessionKey, expanded])
 
+  if (todos.length === 0) return null
+
   return (
     <section
-      className={`task-panel${expanded ? ' expanded' : ' collapsed'}`}
+      className={`task-panel task-panel-agent${expanded ? ' expanded' : ' collapsed'}`}
       data-session-key={sessionKey}
     >
       <div className="task-panel-card">
@@ -110,34 +54,32 @@ export function TaskPanel({ sessionKey }: { sessionKey: string }): ReactElement 
           <div className="task-panel-summary">
             <ListTodo size={15} />
             <span className="task-panel-title">任务目标</span>
-            <span className="task-panel-count">{completed}/{tasks.length}</span>
+            <span className="task-panel-count">{completed}/{todos.length}</span>
           </div>
-          <span className="task-panel-caption">工作计划</span>
+          <span className="task-panel-caption">AI 工作计划</span>
         </div>
 
         <div className="task-panel-list-shell">
-          <div id="task-target-list" className="task-panel-list" role="list" aria-label="任务目标列表">
-            {tasks.map((task, index) => (
+          <div id="task-target-list" className="task-panel-list" role="list" aria-label="AI 任务目标列表">
+            {todos.map((task, index) => (
               <div
                 key={task.id}
-                className={`task-item${task.done ? ' done' : ''}`}
+                className={`task-item task-agent${task.status === 'completed' ? ' done' : ''}${task.status === 'in_progress' ? ' active' : ''}`}
                 role="listitem"
                 data-task-index={index + 1}
+                data-task-status={task.status}
               >
-                <button
-                  type="button"
-                  className="task-check"
-                  aria-label={task.done ? `标记任务未完成：${task.title}` : `标记任务完成：${task.title}`}
-                  onClick={() => {
-                    setTasks((current) => current.map((item) => (
-                      item.id === task.id ? { ...item, done: !item.done } : item
-                    )))
-                  }}
-                >
-                  {task.done ? <Check size={12} /> : <Circle size={11} />}
-                </button>
+                <span className="task-check task-status" aria-hidden="true">
+                  {task.status === 'completed'
+                    ? <Check size={12} />
+                    : task.status === 'in_progress'
+                      ? <Loader2 size={11} className="spin" />
+                      : <Circle size={11} />}
+                </span>
                 <span className="task-index">{String(index + 1).padStart(2, '0')}</span>
-                <span className="task-title" title={task.title}>{task.title}</span>
+                <span className="task-title" title={task.description ?? task.title}>
+                  {task.status === 'in_progress' && task.activeForm ? task.activeForm : task.title}
+                </span>
               </div>
             ))}
           </div>
@@ -152,7 +94,7 @@ export function TaskPanel({ sessionKey }: { sessionKey: string }): ReactElement 
         aria-controls="task-target-list"
         onClick={() => setExpanded((value) => !value)}
       >
-        <ArrowDown size={18} className="task-panel-toggle-icon" />
+        <ArrowDown size={16} className="task-panel-toggle-icon" />
       </button>
     </section>
   )

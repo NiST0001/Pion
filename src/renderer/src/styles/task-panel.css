@@ -13,7 +13,6 @@
   border: 0;
   border-radius: 0;
   box-shadow: none;
-  transition: height 0.38s cubic-bezier(0.22, 1, 0.36, 1), margin-bottom 0.38s ease;
 }
 
 .task-panel.expanded {
@@ -184,51 +183,61 @@
   text-decoration-color: rgba(var(--accent-rgb), 0.45);
 }
 
-/* 圆形悬浮切换按钮：位于卡片上方 */
+/* AI 任务条目 */
+
+.task-item.active {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.task-item.active .task-title {
+  color: var(--fg);
+  font-weight: 550;
+}
+
+.task-item.active .task-status {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  color: var(--accent-strong);
+}
+
+.task-status {
+  cursor: default;
+}
+
+/* 圆形切换按钮：白底 + 主题重点色箭头，无外环/阴影/位移 */
 
 .task-panel-toggle {
   position: absolute;
   z-index: 5;
-  top: -48px;
+  top: -36px;
   left: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
+  width: 30px;
+  height: 30px;
   padding: 0;
-  border: 2px solid var(--bg-elev);
+  border: 1px solid var(--border);
   border-radius: 50%;
-  background: var(--accent);
-  color: var(--on-accent);
-  box-shadow: 0 9px 24px rgba(0, 0, 0, 0.28), 0 0 0 2px rgba(var(--accent-rgb), 0.5), 0 0 0 6px var(--bg);
+  background: var(--bg-elev);
+  color: var(--accent-strong);
+  box-shadow: none;
   transform: translateX(-50%);
-  transition: background 0.14s ease, color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
+  transition: background 0.14s ease, color 0.14s ease;
 }
 
 .task-panel-toggle:hover {
-  background: var(--accent-strong);
-  color: var(--on-accent);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34), 0 0 0 2px rgba(var(--accent-rgb), 0.7), 0 0 0 6px var(--bg);
-  transform: translateX(-50%) translateY(-2px);
-}
-
-.task-panel.collapsed .task-panel-toggle {
-  top: -48px;
-  bottom: auto;
-}
-
-.task-panel.collapsed .task-panel-toggle:hover {
-  transform: translateX(-50%) translateY(2px);
+  background: var(--bg-hover);
+  color: var(--accent);
 }
 
 .task-panel-toggle > svg {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
 }
 
 .task-panel-toggle-icon {
-  transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .task-panel-toggle.collapsed .task-panel-toggle-icon {

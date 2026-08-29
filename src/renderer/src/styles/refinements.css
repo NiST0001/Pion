@@ -715,6 +715,9 @@ body {
   animation-delay: var(--history-row-delay, 0ms);
 }
 
+/* Live streaming output: only the row entrance animates (once, at mount).
+   Markdown children must NOT fade per-block — react-markdown remounts them on
+   every token update, which replays the fade and reads as blocky chunking. */
 .streaming-reveal {
   animation: history-item-reveal 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
@@ -722,8 +725,7 @@ body {
 .history-reveal.history-reveal-armed .bubble-content,
 .history-reveal.history-reveal-armed .thinking,
 .history-reveal.history-reveal-armed .tool-head,
-.history-reveal.history-reveal-armed .message-images,
-.streaming-reveal .thinking {
+.history-reveal.history-reveal-armed .message-images {
   animation: history-text-reveal 520ms ease both;
   animation-delay: var(--history-row-delay, 0ms);
 }
@@ -732,12 +734,6 @@ body {
   opacity: 0;
   animation: history-text-reveal 560ms ease both;
   animation-delay: var(--history-row-delay, 0ms);
-}
-
-.streaming-reveal .markdown > * {
-  opacity: 0;
-  animation: history-text-reveal 560ms ease both;
-  animation-delay: 70ms;
 }
 
 @media (prefers-reduced-motion: reduce) {

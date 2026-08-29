@@ -11,7 +11,7 @@ import type {
   WireMessage
 } from '../../../shared/types'
 import { messageImages, messageText, messageThinking, messageToolCalls } from '../../../shared/types'
-import type { FileChange, TimelineItem, ToolItem } from './types'
+import type { AgentTodo, FileChange, TimelineItem, ToolItem } from './types'
 
 // ---------------------------------------------------------------------------
 // Timeline id allocation (shared by live events and session replay)
@@ -64,8 +64,46 @@ export function applyToolResult(tool: ToolItem, result: unknown, isError: boolea
   }
   const details = payload.details
   if (typeof details?.diff === 'string') next.diff = details.diff
+  if (tool.name === 'todo') {
+    const todos = parseAgentTodos(details?.tasks)
+    if (todos) next.todos = todos
+  }
   // bash output lives in content text
   return next
+}
+
+/** Validate and normalize the task snapshot carried by todo tool results. */
+function parseAgentTodos(raw: unknown): AgentTodo[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const todos: AgentTodo[] = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') return undefined
+    const record = entry as Record<string, unknown>
+    if ((typeof record.id !== 'number' && typeof record.id !== 'string') || typeof record.subject !== 'string') return undefined
+    const status = record.status === 'in_progress' || record.status === 'completed' || record.status === 'deleted'
+      ? record.status
+      : 'pending'
+    todos.push({
+      id: record.id,
+      title: record.subject,
+      status,
+      activeForm: typeof record.activeForm === 'string' ? record.activeForm : undefined,
+      description: typeof record.description === 'string' ? record.description : undefined
+    })
+  }
+  return todos
+}
+
+/** Latest task snapshot from the agent's todo tool, if the timeline has one. */
+export function deriveAgentTodos(timeline: TimelineItem[]): AgentTodo[] | null {
+  for (let index = timeline.length - 1; index >= 0; index--) {
+    const item = timeline[index]
+    if (item.kind === 'tool' && item.tool.todos) {
+      const visible = item.tool.todos.filter((todo) => todo.status !== 'deleted')
+      return visible
+    }
+  }
+  return null
 }
 
 // ---------------------------------------------------------------------------
