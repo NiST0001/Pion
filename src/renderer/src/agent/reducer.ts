@@ -7,7 +7,7 @@ import type {
   WireEventInput,
   WireMessage
 } from '../../../shared/types'
-import { messageText, messageThinking } from '../../../shared/types'
+import { messageImages, messageText, messageThinking } from '../../../shared/types'
 import { orderSessions, reorderSessionsByPaths } from './sessionOrder'
 import {
   applyToolResult,
@@ -146,7 +146,12 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
           ...state,
           timeline: [
             ...state.timeline,
-            { kind: 'user', id: nextTimelineId(), text: messageText(message) }
+            {
+              kind: 'user',
+              id: nextTimelineId(),
+              text: messageText(message),
+              images: messageImages(message)
+            }
           ]
         }
       }

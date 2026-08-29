@@ -1,7 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { KeyboardEvent, ReactElement, ReactNode } from 'react'
-import { ArrowUp, Hammer, ListTodo, Square } from 'lucide-react'
-import type { AgentMode, SlashCommandInfo } from '../../../shared/types'
+import type { ClipboardEvent, KeyboardEvent, ReactElement, ReactNode } from 'react'
+import { ArrowUp, Hammer, ImagePlus, ListTodo, Square, X } from 'lucide-react'
+import type { AgentMode, ImageContent, SlashCommandInfo } from '../../../shared/types'
+
+function fileToImageContent(file: File): Promise<ImageContent> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result
+      if (typeof result !== 'string') {
+        reject(new Error('无法读取剪贴板图像'))
+        return
+      }
+      const separator = result.indexOf(',')
+      if (separator < 0) {
+        reject(new Error('剪贴板图像格式无效'))
+        return
+      }
+      resolve({
+        type: 'image',
+        data: result.slice(separator + 1),
+        mimeType: file.type || 'image/png'
+      })
+    }
+    reader.onerror = () => reject(new Error('无法读取剪贴板图像'))
+    reader.readAsDataURL(file)
+  })
+}
 
 interface ComposerProps {
   busy: boolean
@@ -17,8 +42,8 @@ interface ComposerProps {
   commands: SlashCommandInfo[]
   mode: AgentMode
   onModeChange: (mode: AgentMode) => void
-  onSend: (text: string) => void
-  onQueue: (text: string) => void
+  onSend: (text: string, images: ImageContent[]) => void
+  onQueue: (text: string, images: ImageContent[]) => void
   onAbort: () => void
 }
 
@@ -38,6 +63,8 @@ export function Composer({
   onAbort
 }: ComposerProps): ReactElement {
   const [value, setValue] = useState('')
+  const [pendingImages, setPendingImages] = useState<ImageContent[]>([])
+  const [imageError, setImageError] = useState('')
   const [commandIndex, setCommandIndex] = useState(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const historyIndexRef = useRef<number | null>(null)
@@ -114,6 +141,52 @@ export function Composer({
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
   }, [resetHistoryNavigation])
 
+  const appendImage = useCallback((image: ImageContent): void => {
+    if (!image.data || !image.mimeType.startsWith('image/')) {
+      setImageError('剪贴板中没有可用的图像')
+      return
+    }
+    setPendingImages((current) => [...current, image])
+    setImageError('')
+  }, [])
+
+  const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>): void => {
+    const imageItem = Array.from(event.clipboardData.items)
+      .find((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    const file = imageItem?.getAsFile()
+    if (file) {
+      event.preventDefault()
+      setImageError('')
+      void fileToImageContent(file)
+        .then(appendImage)
+        .catch((error: unknown) => {
+          setImageError(error instanceof Error ? error.message : '无法读取剪贴板图像')
+        })
+      return
+    }
+
+    // Electron/Linux may expose an image through the native clipboard without
+    // adding an image item to ClipboardEvent. Keep normal text paste intact and
+    // use the main-process fallback in parallel.
+    const hasText = event.clipboardData.getData('text/plain').length > 0
+    void window.pion.readClipboardImage()
+      .then((image) => {
+        if (image) appendImage(image)
+      })
+      .catch((error: unknown) => {
+        if (!hasText) setImageError(error instanceof Error ? error.message : '无法读取剪贴板图像')
+      })
+  }, [appendImage])
+
+  const removeImage = useCallback((index: number): void => {
+    setPendingImages((current) => current.filter((_, imageIndex) => imageIndex !== index))
+  }, [])
+
+  const clearImages = useCallback((): void => {
+    setPendingImages([])
+    setImageError('')
+  }, [])
+
   const slashMatch = value.match(/^\s*\/([^\s]*)$/)
   const slashQuery = slashMatch?.[1].toLocaleLowerCase() ?? null
   const commandOptions = slashQuery === null
@@ -128,17 +201,19 @@ export function Composer({
 
   const submit = useCallback(() => {
     const text = value.trim()
-    if (text === '' || disabled) return
-    onSend(text)
+    if ((text === '' && pendingImages.length === 0) || disabled) return
+    onSend(text, pendingImages)
     clearValue()
-  }, [value, disabled, onSend, clearValue])
+    clearImages()
+  }, [value, pendingImages, disabled, onSend, clearValue, clearImages])
 
   const queue = useCallback(() => {
     const text = value.trim()
-    if (text === '' || disabled) return
-    onQueue(text)
+    if ((text === '' && pendingImages.length === 0) || disabled) return
+    onQueue(text, pendingImages)
     clearValue()
-  }, [value, disabled, onQueue, clearValue])
+    clearImages()
+  }, [value, pendingImages, disabled, onQueue, clearValue, clearImages])
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (showCommandMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
@@ -196,7 +271,7 @@ export function Composer({
       selectSlashCommand(activeCommandIndex)
       return
     }
-    if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.metaKey && value.trim() !== '') {
+    if (event.key === 'Tab' && !event.shiftKey && !event.ctrlKey && !event.metaKey && (value.trim() !== '' || pendingImages.length > 0)) {
       event.preventDefault()
       queue()
       return
@@ -278,9 +353,38 @@ export function Composer({
               setValue(event.target.value)
               autoSize(event.target)
             }}
+            onPaste={handlePaste}
             onKeyDown={handleKeyDown}
             aria-keyshortcuts="ArrowUp ArrowDown"
           />
+          {(pendingImages.length > 0 || imageError) && (
+            <div className="composer-attachments" aria-label="待发送图像">
+              <div className="composer-attachment-list">
+                {pendingImages.map((image, index) => (
+                  <div className="composer-attachment" key={`${image.mimeType}:${index}`}>
+                    <img
+                      src={`data:${image.mimeType};base64,${image.data}`}
+                      alt={`待发送图像 ${index + 1}`}
+                    />
+                    <button
+                      type="button"
+                      className="composer-attachment-remove"
+                      title="移除图像"
+                      aria-label={`移除第 ${index + 1} 张图像`}
+                      onClick={() => removeImage(index)}
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                ))}
+                <span className="composer-attachment-label">
+                  <ImagePlus size={13} />
+                  {pendingImages.length} 张图像待发送
+                </span>
+              </div>
+              {imageError && <span className="composer-attachment-error">{imageError}</span>}
+            </div>
+          )}
           <div className="composer-inline-controls">
             {projectSelector}
             <div className="composer-mode-picker" role="group" aria-label="工作模式">
@@ -315,7 +419,7 @@ export function Composer({
         <button
           className="send-button"
           onClick={submit}
-          disabled={disabled || value.trim() === ''}
+          disabled={disabled || (value.trim() === '' && pendingImages.length === 0)}
           title="Enter 直接发送"
         >
           <ArrowUp size={16} />

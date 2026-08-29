@@ -126,6 +126,13 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`!!document.querySelector('.composer-inline-controls .thinking-trigger')`)) break
 }
 await check('composer 输入框存在', `!!document.querySelector('.composer-row textarea')`)
+await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); if (!input || typeof DataTransfer === 'undefined' || typeof ClipboardEvent === 'undefined') return false; const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), (char) => char.charCodeAt(0)); const file = new File([bytes], 'pasted.png', { type: 'image/png' }); const transfer = new DataTransfer(); transfer.items.add(file); input.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: transfer })); return true })()`)
+await sleep(220)
+await check('粘贴图像显示待发送附件', `document.querySelectorAll('.composer-attachment').length === 1`)
+await check('仅图像也可发送', `!!document.querySelector('.send-button') && !document.querySelector('.send-button')?.disabled`)
+await evaluate(`document.querySelector('.composer-attachment-remove')?.click()`)
+await sleep(100)
+await check('图像附件可移除', `document.querySelectorAll('.composer-attachment').length === 0`)
 await check('当前会话后端已复用', `!!document.querySelector('.dot-running')`)
 await check('输入框宽度已扩大', `getComputedStyle(document.querySelector('.composer-row')).maxWidth === '1600px'`)
 await check('输入框高度已缩短', `(() => { const height = document.querySelector('.composer-row')?.getBoundingClientRect().height ?? 0; return height >= 85 && height < 120; })()`)

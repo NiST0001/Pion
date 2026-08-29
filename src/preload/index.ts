@@ -4,6 +4,7 @@ import type {
   AgentCapabilities,
   AgentMode,
   AgentStatus,
+  ImageContent,
   BranchInfo,
   PionApi,
   PluginCatalogItem,
@@ -90,6 +91,7 @@ const api: PionApi = {
 
   // misc
   getStderr: () => ipcRenderer.invoke(IPC.AgentStderr),
+  readClipboardImage: () => ipcRenderer.invoke(IPC.ClipboardImage) as Promise<ImageContent | null>,
   pickWorkspace: () => ipcRenderer.invoke(IPC.PickWorkspace),
   defaultWorkspace: () => ipcRenderer.invoke(IPC.DefaultWorkspace),
 

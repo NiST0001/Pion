@@ -8,6 +8,7 @@ import type {
   AgentMode,
   AgentStatus,
   BranchInfo,
+  ImageContent,
   ModelOption,
   ProjectMeta,
   SessionInfo,
@@ -39,7 +40,7 @@ export interface ToolItem {
 }
 
 export type TimelineItem =
-  | { kind: 'user'; id: number; entryId?: string; text: string; historical?: boolean }
+  | { kind: 'user'; id: number; entryId?: string; text: string; images?: ImageContent[]; historical?: boolean }
   | {
       kind: 'assistant'
       id: number

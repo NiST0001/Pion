@@ -58,6 +58,13 @@ export interface WireToolCall {
 /** Loosely-typed content part (text / thinking / toolCall / …). */
 export type WireContentPart = Record<string, unknown> & { type: string }
 
+export interface ImageContent {
+  type: 'image'
+  /** Base64-encoded image bytes without the data URL prefix. */
+  data: string
+  mimeType: string
+}
+
 export interface WireMessage {
   role: 'user' | 'assistant' | 'toolResult' | (string & {})
   content?: string | WireContentPart[]
@@ -274,6 +281,19 @@ export function messageText(message: WireMessage | undefined | null): string {
   return ''
 }
 
+/** Extract image parts from a user message for chat replay and rendering. */
+export function messageImages(message: WireMessage | undefined | null): ImageContent[] {
+  if (!message || !Array.isArray(message.content)) return []
+  return message.content.flatMap((part) => {
+    if (
+      part.type !== 'image'
+      || typeof part.data !== 'string'
+      || typeof part.mimeType !== 'string'
+    ) return []
+    return [{ type: 'image' as const, data: part.data, mimeType: part.mimeType }]
+  })
+}
+
 /** Extract thinking text from an assistant wire message. */
 export function messageThinking(message: WireMessage | undefined | null): string {
   if (!message || !Array.isArray(message.content)) return ''
@@ -306,9 +326,9 @@ export interface PionApi {
   /** Stop all retained agent subprocesses. */
   stopAgent(): Promise<void>
   /** Send directly: prompt when idle or steer when the selected backend is busy. */
-  send(message: string): Promise<void>
+  send(message: string, images?: ImageContent[]): Promise<void>
   /** Queue a follow-up message for after the current run. */
-  queue(message: string): Promise<void>
+  queue(message: string, images?: ImageContent[]): Promise<void>
   /** Abort the current run. */
   abort(): Promise<void>
 
@@ -376,6 +396,8 @@ export interface PionApi {
   // misc --------------------------------------------------------------------
   /** Collected stderr of the agent subprocess (debugging aid). */
   getStderr(): Promise<string>
+  /** Read an image from the system clipboard as base64. */
+  readClipboardImage(): Promise<ImageContent | null>
   /** Open a native directory picker; returns null when cancelled. */
   pickWorkspace(): Promise<string | null>
   /** Default workspace suggestion (user home directory). */

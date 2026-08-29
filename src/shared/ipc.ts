@@ -70,6 +70,7 @@ export const IPC = {
   BranchCreate: 'pion:branch-create',
 
   // misc
+  ClipboardImage: 'pion:clipboard-image',
   PickWorkspace: 'pion:pick-workspace',
   DefaultWorkspace: 'pion:default-workspace'
 } as const

@@ -10,6 +10,7 @@ import type {
   AgentMode,
   BranchInfo,
   ForkMessageOption,
+  ImageContent,
   WireEntry
 } from '../../../shared/types'
 import { reducer } from '../agent/reducer'
@@ -266,18 +267,18 @@ export function useAgent() {
   }, [api, start])
 
   const send = useCallback(
-    async (message: string) => {
-      if (!api || message.trim() === '') return
-      await api.send(message.trim())
+    async (message: string, images: ImageContent[] = []) => {
+      if (!api || (message.trim() === '' && images.length === 0)) return
+      await api.send(message.trim(), images)
       await refreshModels()
     },
     [api, refreshModels]
   )
 
   const queue = useCallback(
-    async (message: string) => {
-      if (!api || message.trim() === '') return
-      await api.queue(message.trim())
+    async (message: string, images: ImageContent[] = []) => {
+      if (!api || (message.trim() === '' && images.length === 0)) return
+      await api.queue(message.trim(), images)
       await refreshModels()
     },
     [api, refreshModels]

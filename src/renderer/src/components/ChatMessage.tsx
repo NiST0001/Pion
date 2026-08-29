@@ -14,7 +14,19 @@ export function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactE
     return (
       <div className={`row row-user${item.historical ? ' history-reveal' : ''}`}>
         <div className="bubble bubble-user">
-          <div className="bubble-content">{item.text}</div>
+          {item.text !== '' && <div className="bubble-content">{item.text}</div>}
+          {item.images && item.images.length > 0 && (
+            <div className="message-images" aria-label="消息中的图像">
+              {item.images.map((image, index) => (
+                <img
+                  key={`${image.mimeType}:${index}`}
+                  className="message-image"
+                  src={`data:${image.mimeType};base64,${image.data}`}
+                  alt={`消息图像 ${index + 1}`}
+                />
+              ))}
+            </div>
+          )}
           {canFork && item.entryId && (
             <button
               className="fork-button"

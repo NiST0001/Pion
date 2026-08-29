@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Notification } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification } from 'electron'
 import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { AgentBridge } from './agent-bridge'
@@ -6,7 +6,7 @@ import { AppSettings } from './app-settings'
 import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
-import type { ProjectMeta } from '../shared/types'
+import type { ImageContent, ProjectMeta } from '../shared/types'
 
 const bridge = new AgentBridge()
 const plugins = new PluginManager()
@@ -112,8 +112,8 @@ function registerIpc(): void {
     return result
   })
   ipcMain.handle(IPC.AgentStop, () => bridge.stop())
-  ipcMain.handle(IPC.AgentSend, (_event, message: string) => bridge.send(message))
-  ipcMain.handle(IPC.AgentQueue, (_event, message: string) => bridge.queue(message))
+  ipcMain.handle(IPC.AgentSend, (_event, message: string, images?: ImageContent[]) => bridge.send(message, images))
+  ipcMain.handle(IPC.AgentQueue, (_event, message: string, images?: ImageContent[]) => bridge.queue(message, images))
   ipcMain.handle(IPC.AgentAbort, () => bridge.abort())
   ipcMain.handle(IPC.AgentState, () => bridge.getSessionInfo())
   ipcMain.handle(IPC.AgentStderr, () => bridge.getStderr())
@@ -221,6 +221,20 @@ function registerIpc(): void {
   })
 
   // misc --------------------------------------------------------------------------
+  ipcMain.handle(IPC.ClipboardImage, async () => {
+    const items = await clipboard.read()
+    for (const item of items) {
+      const mimeType = item.types.find((type) => type.startsWith('image/'))
+      if (!mimeType) continue
+      const blob = await item.getType(mimeType) as Blob
+      return {
+        type: 'image' as const,
+        data: Buffer.from(await blob.arrayBuffer()).toString('base64'),
+        mimeType
+      }
+    }
+    return null
+  })
   ipcMain.handle(IPC.PickWorkspace, async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],

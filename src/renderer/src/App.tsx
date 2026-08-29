@@ -506,8 +506,8 @@ export function App(): ReactElement {
                   />
                 </>
               }
-              onSend={(text) => void actions.send(text)}
-              onQueue={(text) => void actions.queue(text)}
+              onSend={(text, images) => void actions.send(text, images)}
+              onQueue={(text, images) => void actions.queue(text, images)}
               onAbort={() => void actions.abort()}
             />
           </div>

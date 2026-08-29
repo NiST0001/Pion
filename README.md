@@ -33,6 +33,7 @@
 ### 对话
 - 流式输出 + 思考过程折叠 + 打字指示
 - Markdown 渲染（GFM、代码高亮、一键复制）
+- 支持将剪贴板图像直接粘贴到输入框，发送前显示缩略图，也会在会话消息中保留预览
 - 工具调用卡片：edit 显示彩色 Diff（+/- 行统计），write/bash/read 折叠详情
 - 运行中可继续输入（自动作为转向消息 steer 注入）或中止
 - 输入 `/` 打开动态斜杠命令菜单，支持 pi 扩展、提示词模板和技能命令
@@ -126,7 +127,7 @@ src/
             ├── Markdown.tsx      # react-markdown + 高亮 + 复制
             ├── DiffView.tsx      # pi diff 格式 -> 彩色行渲染
             ├── ToolCallItem.tsx  # 工具调用卡片
-            ├── Composer.tsx      # 输入区（发送/停止/转向提示）
+            ├── Composer.tsx      # 输入区（文本/剪贴板图像/发送/停止）
             ├── ModelPicker.tsx   # 模型 + 思考级别选择器
             ├── PluginStoreModal.tsx # pi 插件目录 / 安装 / 状态筛选
             ├── SkillsToolsModal.tsx # 内置与插件技能/工具

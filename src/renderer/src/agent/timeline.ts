@@ -10,7 +10,7 @@ import type {
   WireEntry,
   WireMessage
 } from '../../../shared/types'
-import { messageText, messageThinking, messageToolCalls } from '../../../shared/types'
+import { messageImages, messageText, messageThinking, messageToolCalls } from '../../../shared/types'
 import type { FileChange, TimelineItem, ToolItem } from './types'
 
 // ---------------------------------------------------------------------------
@@ -183,7 +183,14 @@ export function entriesToTimeline(
     if (!message) continue
 
     if (message.role === 'user') {
-      items.push({ kind: 'user', id: nextTimelineId(), entryId: entry.id, text: messageText(message), historical: true })
+      items.push({
+        kind: 'user',
+        id: nextTimelineId(),
+        entryId: entry.id,
+        text: messageText(message),
+        images: messageImages(message),
+        historical: true
+      })
       continue
     }
 

@@ -19,6 +19,7 @@ import type {
   BranchInfo,
   DeleteSessionResult,
   ForkMessageOption,
+  ImageContent,
   ModelOption,
   SessionEntriesPage,
   SessionInfo,
@@ -394,27 +395,27 @@ export class AgentBridge {
   }
 
   /** Prompt when idle, steer when mid-run. Starts only this session's backend. */
-  async send(message: string): Promise<void> {
+  async send(message: string, images: ImageContent[] = []): Promise<void> {
     const backend = await this.ensureActiveBackend()
     const state = await backend.client.getState().catch(() => null)
     if (state?.isStreaming) {
-      await backend.client.steer(message)
+      await backend.client.steer(message, images)
     } else {
       await this.applyDesiredMode(backend)
-      await backend.client.prompt(message)
+      await backend.client.prompt(message, images)
     }
     await this.syncBackendSession(backend)
   }
 
   /** Queue a follow-up while running; starts this session's backend if needed. */
-  async queue(message: string): Promise<void> {
+  async queue(message: string, images: ImageContent[] = []): Promise<void> {
     const backend = await this.ensureActiveBackend()
     const state = await backend.client.getState().catch(() => null)
     if (state?.isStreaming) {
-      await backend.client.followUp(message)
+      await backend.client.followUp(message, images)
     } else {
       await this.applyDesiredMode(backend)
-      await backend.client.prompt(message)
+      await backend.client.prompt(message, images)
     }
     await this.syncBackendSession(backend)
   }
