@@ -27,6 +27,10 @@
 .history-navigator-track {
   position: absolute;
   inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 4px 0;
   border-radius: 8px;
   pointer-events: auto;
   cursor: pointer;
@@ -38,37 +42,39 @@
 }
 
 .history-navigator-marker {
-  position: absolute;
-  left: 10px;
-  width: 7px;
-  height: 1px;
-  min-height: 1px;
+  position: relative;
+  flex: 0 1 auto;
+  align-self: flex-start;
+  width: 14px;
+  height: 3px;
+  min-height: 2px;
+  margin-left: 8px;
   padding: 0;
   border: 0;
   border-radius: 999px;
   background: var(--fg-faint);
-  opacity: 0.46;
-  transform: translateY(-50%);
+  opacity: 0.42;
+  transform-origin: left center;
   pointer-events: auto;
-  transition: width 0.12s ease, height 0.12s ease, left 0.12s ease, opacity 0.12s ease, background 0.12s ease;
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.18s ease, background 0.18s ease;
+}
+
+/* Expand the hover hit area without changing the bar's visual size. */
+.history-navigator-marker::before {
+  content: '';
+  position: absolute;
+  inset: -5px -4px;
 }
 
 .history-navigator-marker:hover,
 .history-navigator-marker:focus-visible {
-  left: 5px;
-  width: 17px;
-  height: 2px;
   outline: none;
   background: var(--fg-dim);
-  opacity: 0.92;
+  opacity: 0.95;
 }
 
 .history-navigator-marker.active {
-  left: 1px;
-  width: 28px;
-  height: 2px;
-  background: var(--fg);
-  box-shadow: 0 0 0 1px var(--bg), 0 0 8px rgba(var(--accent-rgb), 0.24);
+  background: var(--accent);
   opacity: 1;
 }
 

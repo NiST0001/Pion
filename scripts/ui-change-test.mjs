@@ -214,6 +214,9 @@ await check('历史消息导航轨已显示', `document.querySelector('.history-
 await evaluate(`(() => { const marker = document.querySelector('.history-navigator-marker'); window.__pionNavigatorTarget = marker?.dataset.entryId ?? null; marker?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return Boolean(marker); })()`)
 await sleep(100)
 await check('历史标记悬停显示消息预览', `!!document.querySelector('.history-navigator-preview strong')?.textContent?.trim() && document.querySelector('.history-navigator-preview small')?.textContent?.includes('条')`)
+await evaluate(`(() => { const markers = [...document.querySelectorAll('.history-navigator-marker')]; const mid = markers[Math.floor(markers.length / 2)]; mid?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true })()`)
+await sleep(120)
+await check('导航条悬停呈现波形放大', `(() => { const markers = [...document.querySelectorAll('.history-navigator-marker')]; const scale = (el) => { const m = /scaleX\\(([^)]+)\\)/.exec(el?.style?.transform || ''); return m ? parseFloat(m[1]) : 1; }; const mid = Math.floor(markers.length / 2); const center = scale(markers[mid]); const near = scale(markers[mid + 2] ?? markers[mid]); const far = scale(markers[Math.min(markers.length - 1, mid + 12)]); return markers.length > 8 && center > 1.8 && near < center && far <= near ? true : { count: markers.length, center, near, far }; })()`)
 for (let i = 0; i < 20; i++) {
   await sleep(80)
   if (await evaluate(`!!document.querySelector('.modified-files-card')`)) break

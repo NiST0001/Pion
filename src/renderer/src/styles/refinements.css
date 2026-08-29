@@ -394,25 +394,22 @@ body {
   min-height: 27px;
   gap: 5px;
   padding: 4px 8px;
-  border: 1px solid var(--border-soft);
   border-radius: 999px;
-  background: var(--surface-tint);
+  background: transparent;
   color: var(--fg-dim);
   font-family: var(--mono);
   font-size: 10.5px;
-  transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, color 0.12s ease;
+  transition: background 0.12s ease, box-shadow 0.12s ease, color 0.12s ease;
 }
 
 .composer-project-trigger:hover,
 .composer-project-trigger[aria-expanded='true'] {
-  border-color: rgba(var(--accent-rgb), 0.6);
   background: var(--bg-hover);
   color: var(--fg);
 }
 
 .composer-project-trigger:focus-visible {
   outline: 0;
-  border-color: rgba(var(--accent-rgb), 0.72);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
@@ -1131,21 +1128,18 @@ body {
 }
 
 .sidebar-new-session {
-  background: var(--accent);
-  color: var(--on-accent);
-  box-shadow: 0 3px 10px rgba(var(--accent-rgb), 0.14);
-  font-weight: 650;
+  background: transparent;
+  color: var(--fg-dim);
+  font-weight: 500;
 }
 
 .sidebar-new-session:hover {
-  background: var(--accent-strong);
-  color: var(--on-accent);
-  transform: translateY(-1px);
+  background: var(--bg-hover);
+  color: var(--fg);
 }
 
 .sidebar-tools-button {
-  border: 1px solid var(--border);
-  background: var(--surface-tint);
+  background: transparent;
   color: var(--fg-dim);
 }
 
@@ -1173,7 +1167,7 @@ body {
   min-height: 34px;
   margin-top: 8px;
   padding: 7px 10px;
-  background: var(--bg-input);
+  background: var(--selected-bg);
   border: 1px solid transparent;
   border-radius: 9px;
   color: var(--fg-faint);
@@ -1853,8 +1847,6 @@ body {
 
 .project-folder.active > .project-folder-head {
   background: var(--bg-active);
-  border-color: rgba(var(--accent-rgb), 0.18);
-  box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.05);
 }
 
 .project-folder-branches {
@@ -1886,7 +1878,6 @@ body {
 
 .project-branch-head.active {
   background: var(--surface-tint);
-  border-color: var(--border-soft);
 }
 
 .project-branch-sessions {
@@ -1912,7 +1903,6 @@ body {
 
 .project-branch-sessions .side-session.active {
   background: var(--accent-soft);
-  border-color: rgba(var(--accent-rgb), 0.28);
   box-shadow: inset 3px 0 0 var(--accent);
   color: var(--fg);
 }
@@ -2078,8 +2068,6 @@ body.pion-resizing-panels * {
    Selection surfaces, secondary icons, and decorative labels stay neutral. */
 
 .side-item.active,
-.project-folder.active > .project-folder-head,
-.project-branch-head.active,
 .settings-nav-item.active,
 .capabilities-nav-item.active,
 .review-file-item.active,
@@ -2096,8 +2084,15 @@ body.pion-resizing-panels * {
   box-shadow: none;
 }
 
+/* Sidebar tree selection stays borderless: background + thin accent bar only. */
+.project-folder.active > .project-folder-head,
+.project-branch-head.active {
+  background: var(--selected-bg);
+  color: var(--fg);
+}
+
 .project-branch-sessions .side-session.active {
-  border-color: var(--selected-border);
+  border-color: transparent;
   background: var(--selected-bg);
   color: var(--fg);
   box-shadow: inset 2px 0 0 var(--accent);
@@ -2192,7 +2187,11 @@ body.pion-resizing-panels * {
 .project-branch-toggle:hover,
 .project-branch-new:hover,
 .side-session-favorite:hover,
-.sidebar-tools-button:hover,
+.sidebar-tools-button:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
 .slash-command-option:hover,
 .thinking-option:hover,
 .picker-option:hover,
@@ -2209,7 +2208,8 @@ body.pion-resizing-panels * {
 .thinking-trigger[aria-expanded='true'],
 .composer-project-trigger:hover,
 .composer-project-trigger[aria-expanded='true'] {
-  border-color: var(--selected-border);
+  background: var(--bg-hover);
+  color: var(--fg);
 }
 
 .composer-project-trigger[aria-expanded='true'] .composer-project-chevron {

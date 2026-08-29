@@ -87,8 +87,6 @@
 }
 
 .modified-files-actions .modified-files-review {
-  border-color: var(--border);
-  background: var(--bg-elev);
   color: var(--fg);
 }
 

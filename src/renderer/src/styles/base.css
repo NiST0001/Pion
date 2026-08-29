@@ -44,9 +44,9 @@
 
 :root[data-theme='terracotta-light'] {
   color-scheme: light;
-  --bg: #fbfaf8;
-  --bg-elev: #f2f0ec;
-  --bg-input: #eeece8;
+  --bg: #ffffff;
+  --bg-elev: #ffffff;
+  --bg-input: #ffffff;
   --bg-hover: #e8e4de;
   --bg-active: #e4e1dc;
   --border: #d8d1c8;
@@ -109,9 +109,9 @@
 
 :root[data-theme='codex-light'] {
   color-scheme: light;
-  --bg: #f7f7f7;
+  --bg: #ffffff;
   --bg-elev: #ffffff;
-  --bg-input: #f1f1f1;
+  --bg-input: #ffffff;
   --bg-hover: #e9e9e9;
   --bg-active: #e3e3e3;
   --border: #d8d8d8;
