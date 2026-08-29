@@ -132,12 +132,27 @@ export function App(): ReactElement {
     if (!el) return
     const previousHeight = previousTimelineHeight.current
     if (state.timelineMutation === 'prepend' && previousHeight > 0) {
+      // keep the reading position stable while older history is prepended
       el.scrollTop += el.scrollHeight - previousHeight
-    } else if (state.timelineMutation !== null) {
+    } else if (state.timelineMutation === 'replace') {
       el.scrollTop = el.scrollHeight
+    } else if (state.timelineMutation === 'append') {
+      // follow the newest message only while the user is already near the
+      // bottom; never yank someone away who is reading older history
+      const wasNearBottom = previousHeight - el.scrollTop - el.clientHeight <= 80
+      if (wasNearBottom || previousHeight === 0) el.scrollTop = el.scrollHeight
     }
     previousTimelineHeight.current = el.scrollHeight
   }, [lastGrow, lastItemId, state.timelineMutation, timelineLength])
+
+  // The newest-window load may fit entirely inside the viewport, leaving the
+  // container without a scrollbar (and therefore without scroll events). Keep
+  // pulling older history until the timeline can actually scroll.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    if (el.scrollHeight <= el.clientHeight + 16) void actions.loadOlder()
+  }, [timelineLength, state.session?.sessionFile, actions])
 
   const handleTimelineScroll = useCallback(() => {
     const el = scrollRef.current

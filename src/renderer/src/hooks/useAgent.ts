@@ -308,7 +308,7 @@ export function deriveChanges(timeline: TimelineItem[]): FileChange[] {
 
 let nextId = 1
 
-const INITIAL_HISTORY_ITEMS = 10
+const INITIAL_HISTORY_ITEMS = 30
 const HISTORY_ENTRY_CHUNK_SIZE = 80
 const INITIAL_HISTORY_PAGE_SIZE = 160
 const MAX_TIMELINE_CACHE = 10
@@ -867,36 +867,47 @@ export function useAgent() {
     cursor.loading = true
     const loadId = cursor.loadId
     try {
-      let entries: WireEntry[]
-      let toolResults = cursor.toolResults
-      if (cursor.pendingEntries.length > 0) {
-        const end = cursor.pendingEntries.length
-        const start = Math.max(0, end - HISTORY_ENTRY_CHUNK_SIZE)
-        entries = cursor.pendingEntries.slice(start, end)
-        cursor.pendingEntries = cursor.pendingEntries.slice(0, start)
-      } else {
-        const page = await api.getEntriesPage(cursor.apiBefore, HISTORY_ENTRY_CHUNK_SIZE)
-        if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
-        entries = page.entries
-        toolResults = page.toolResults
-        cursor.toolResults = toolResults
-        cursor.apiBefore = page.start
-      }
-      if (loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+      // A chunk can render zero timeline items (e.g. toolResult-only entries).
+      // Keep consuming older chunks until something is prepended or history is
+      // exhausted, otherwise the view would stall at the top with no scroll
+      // events left to trigger the next load.
+      for (let attempt = 0; attempt < 16; attempt++) {
+        if (loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+        let entries: WireEntry[]
+        let toolResults = cursor.toolResults
+        if (cursor.pendingEntries.length > 0) {
+          const end = cursor.pendingEntries.length
+          const start = Math.max(0, end - HISTORY_ENTRY_CHUNK_SIZE)
+          entries = cursor.pendingEntries.slice(start, end)
+          cursor.pendingEntries = cursor.pendingEntries.slice(0, start)
+        } else {
+          const page = await api.getEntriesPage(cursor.apiBefore, HISTORY_ENTRY_CHUNK_SIZE)
+          if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+          entries = page.entries
+          toolResults = page.toolResults
+          cursor.toolResults = toolResults
+          cursor.apiBefore = page.start
+        }
+        if (loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
 
-      const items = entriesToTimeline(entries, collectToolResults([...entries, ...toolResults]))
-      cursor.items = [...items, ...cursor.items]
-      cursor.complete = cursor.pendingEntries.length === 0 && cursor.apiBefore === 0
-      if (items.length > 0) dispatch({ type: 'prependEntries', items })
-      storeTimelineCache(timelineCache.current, cursor.path, {
-        items: cursor.items,
-        mode: cursor.mode,
-        pendingEntries: cursor.pendingEntries,
-        apiBefore: cursor.apiBefore,
-        toolResults: cursor.toolResults,
-        complete: cursor.complete
-      })
-      if (cursor.complete) historyCursor.current = null
+        const items = entriesToTimeline(entries, collectToolResults([...entries, ...toolResults]))
+        cursor.items = [...items, ...cursor.items]
+        cursor.complete = cursor.pendingEntries.length === 0 && cursor.apiBefore === 0
+        if (items.length > 0) dispatch({ type: 'prependEntries', items })
+        storeTimelineCache(timelineCache.current, cursor.path, {
+          items: cursor.items,
+          mode: cursor.mode,
+          pendingEntries: cursor.pendingEntries,
+          apiBefore: cursor.apiBefore,
+          toolResults: cursor.toolResults,
+          complete: cursor.complete
+        })
+        if (cursor.complete) {
+          historyCursor.current = null
+          return
+        }
+        if (items.length > 0) return
+      }
     } finally {
       if (historyCursor.current === cursor) cursor.loading = false
     }
