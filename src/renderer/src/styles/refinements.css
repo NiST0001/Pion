@@ -701,37 +701,44 @@ body {
   }
 }
 
-/* Freshly loaded history replays a staggered per-segment fade; paged/prepended
-   history stays static (entriesToTimeline reveal:false). Live streaming output
-   uses the same reveal through streaming-reveal. */
-.history-reveal,
+/* Freshly loaded history reveals top-to-bottom across the visible screen:
+   App assigns --history-row-delay from each row's viewport position at mount
+   and adds .history-reveal-armed. Paged/prepended history stays static;
+   live streaming uses .streaming-reveal. */
+.history-reveal {
+  opacity: 0;
+}
+
+.history-reveal.history-reveal-armed {
+  opacity: 1;
+  animation: history-item-reveal 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: var(--history-row-delay, 0ms);
+}
+
 .streaming-reveal {
   animation: history-item-reveal 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-.history-reveal .bubble-content,
-.history-reveal .thinking,
-.history-reveal .tool-head,
-.history-reveal .message-images,
+.history-reveal.history-reveal-armed .bubble-content,
+.history-reveal.history-reveal-armed .thinking,
+.history-reveal.history-reveal-armed .tool-head,
+.history-reveal.history-reveal-armed .message-images,
 .streaming-reveal .thinking {
   animation: history-text-reveal 520ms ease both;
+  animation-delay: var(--history-row-delay, 0ms);
 }
 
-.history-reveal .markdown > *,
+.history-reveal.history-reveal-armed .markdown > * {
+  opacity: 0;
+  animation: history-text-reveal 560ms ease both;
+  animation-delay: calc(var(--history-row-delay, 0ms) + 40ms);
+}
+
 .streaming-reveal .markdown > * {
   opacity: 0;
   animation: history-text-reveal 560ms ease both;
-  animation-delay: var(--history-text-delay, 70ms);
+  animation-delay: 70ms;
 }
-
-.history-reveal .markdown > :nth-child(1) { --history-text-delay: 0ms; }
-.history-reveal .markdown > :nth-child(2) { --history-text-delay: 80ms; }
-.history-reveal .markdown > :nth-child(3) { --history-text-delay: 160ms; }
-.history-reveal .markdown > :nth-child(4) { --history-text-delay: 240ms; }
-.history-reveal .markdown > :nth-child(5) { --history-text-delay: 320ms; }
-.history-reveal .markdown > :nth-child(6) { --history-text-delay: 400ms; }
-.history-reveal .markdown > :nth-child(7) { --history-text-delay: 480ms; }
-.history-reveal .markdown > :nth-child(8) { --history-text-delay: 560ms; }
 
 @media (prefers-reduced-motion: reduce) {
   .history-reveal,

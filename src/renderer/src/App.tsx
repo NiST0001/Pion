@@ -425,6 +425,24 @@ export function App(): ReactElement {
     return () => window.cancelAnimationFrame(frame)
   }, [state.historyJump?.nonce])
 
+  // Freshly loaded history reveals top-to-bottom in screen space: measure each
+  // restored row's viewport position after the scroll-to-bottom layout effect,
+  // then arm its animation with a matching delay. Paged/prepended rows never
+  // carry .history-reveal, so they stay static.
+  useLayoutEffect(() => {
+    const container = scrollRef.current
+    if (!container) return
+    const rows = container.querySelectorAll<HTMLElement>('.history-reveal:not(.history-reveal-armed)')
+    if (rows.length === 0) return
+    const rect = container.getBoundingClientRect()
+    const span = Math.max(rect.height, 1)
+    rows.forEach((row) => {
+      const ratio = Math.min(Math.max((row.getBoundingClientRect().top - rect.top) / span, 0), 1)
+      row.style.setProperty('--history-row-delay', `${Math.round(ratio * 380)}ms`)
+      row.classList.add('history-reveal-armed')
+    })
+  }, [state.timeline])
+
   useEffect(() => () => {
     if (historyScrollFrame.current !== null) window.cancelAnimationFrame(historyScrollFrame.current)
     if (historyHighlightTimer.current !== null) window.clearTimeout(historyHighlightTimer.current)
