@@ -1566,6 +1566,97 @@
   font-weight: 650;
 }
 
+.review-checkpoint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 50px;
+  padding: 8px 10px 8px 13px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-tint);
+}
+
+.review-checkpoint-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 27px;
+  height: 27px;
+  border: 1px solid rgba(var(--accent-rgb), 0.25);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.review-checkpoint-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.review-checkpoint-copy strong,
+.review-checkpoint-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-checkpoint-copy strong {
+  color: var(--fg);
+  font-size: 10.5px;
+  font-weight: 680;
+}
+
+.review-checkpoint-copy span {
+  color: var(--fg-faint);
+  font-size: 9px;
+}
+
+.review-checkpoint-unavailable .review-checkpoint-icon {
+  border-color: rgba(220, 90, 90, 0.3);
+  background: rgba(220, 90, 90, 0.1);
+  color: var(--danger);
+}
+
+.review-checkpoint-unavailable .review-checkpoint-copy span {
+  color: var(--danger);
+}
+
+.review-checkpoint-rolled-back {
+  background: var(--accent-soft);
+}
+
+.review-checkpoint-rollback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 5px;
+  min-height: 27px;
+  padding: 5px 8px;
+  border: 1px solid rgba(var(--accent-rgb), 0.32);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--accent-strong);
+  font-size: 9.5px;
+  font-weight: 650;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+}
+
+.review-checkpoint-rollback:hover:not(:disabled) {
+  border-color: rgba(var(--accent-rgb), 0.58);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.review-checkpoint-rollback:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
 .review-panel-body {
   display: flex;
   flex: 1;

@@ -23,6 +23,20 @@ export interface AgentStatus {
   cwd?: string
 }
 
+export type RunCheckpointState = 'ready' | 'rolled-back' | 'unavailable'
+
+/** Snapshot created immediately before an idle session starts a new run. */
+export interface RunCheckpointStatus {
+  id: string
+  cwd: string
+  createdAt: number
+  state: RunCheckpointState
+  /** Whether non-ignored workspace content differs from the snapshot. */
+  hasChanges: boolean
+  changedFileCount: number
+  error?: string
+}
+
 export interface SessionInfo {
   provider?: string
   model?: string
@@ -331,6 +345,10 @@ export interface PionApi {
   queue(message: string, images?: ImageContent[]): Promise<void>
   /** Abort the current run. */
   abort(): Promise<void>
+  /** Current run checkpoint for the selected session. */
+  getRunCheckpoint(): Promise<RunCheckpointStatus | null>
+  /** Restore the selected workspace to the current run checkpoint. */
+  rollbackRunCheckpoint(): Promise<RunCheckpointStatus>
 
   // session management ------------------------------------------------------
   /** Current session info, or null when no session is selected. */
@@ -415,6 +433,8 @@ export interface PionApi {
   onEvent(listener: (event: WireEventInput) => void): () => void
   /** Subscribe to lifecycle status changes; returns an unsubscribe function. */
   onStatus(listener: (status: AgentStatus) => void): () => void
+  /** Subscribe to run-checkpoint changes for the selected session. */
+  onRunCheckpoint(listener: (checkpoint: RunCheckpointStatus | null) => void): () => void
   /** Subscribe to session info pushes; returns an unsubscribe function. */
   onState(listener: (state: SessionInfo | null) => void): () => void
   /** Subscribe to session-list pushes for the active cwd. */

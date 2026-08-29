@@ -43,6 +43,8 @@ export function reducer(state: AgentState, action: Action): AgentState {
         session: action.session,
         busy: action.session?.isStreaming ?? false
       }
+    case 'runCheckpoint':
+      return { ...state, runCheckpoint: action.checkpoint }
     case 'sessions': {
       const projectCwd = action.sessions[0]?.projectCwd ?? state.status.cwd
       const previous = projectCwd ? state.sessionsByProject[projectCwd] ?? [] : []

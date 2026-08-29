@@ -13,12 +13,26 @@ import type { BranchInfo } from '../shared/types'
 
 const execFileAsync = promisify(execFile)
 
-export async function runGit(cwd: string, args: string[]): Promise<string> {
+interface RunGitOptions {
+  env?: NodeJS.ProcessEnv
+  timeout?: number
+  /** Keep exact stdout bytes represented as UTF-8 text (needed for NUL-delimited paths). */
+  trim?: boolean
+}
+
+export async function runGit(
+  cwd: string,
+  args: string[],
+  options: RunGitOptions = {}
+): Promise<string> {
   const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
-    maxBuffer: 4 * 1024 * 1024
+    maxBuffer: 4 * 1024 * 1024,
+    env: options.env,
+    timeout: options.timeout
   })
-  return String(stdout).trim()
+  const output = String(stdout)
+  return options.trim === false ? output : output.trim()
 }
 
 interface GitWorktreeRecord {

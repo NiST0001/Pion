@@ -10,6 +10,7 @@ import type {
   PluginCatalogItem,
   PluginInstallResult,
   ProjectMeta,
+  RunCheckpointStatus,
   SessionEntriesPage,
   SessionInfo,
   SessionMeta,
@@ -29,9 +30,13 @@ const api: PionApi = {
   // agent lifecycle
   startAgent: (cwd) => ipcRenderer.invoke(IPC.AgentStart, cwd),
   stopAgent: () => ipcRenderer.invoke(IPC.AgentStop),
-  send: (message) => ipcRenderer.invoke(IPC.AgentSend, message),
-  queue: (message) => ipcRenderer.invoke(IPC.AgentQueue, message),
+  send: (message, images) => ipcRenderer.invoke(IPC.AgentSend, message, images),
+  queue: (message, images) => ipcRenderer.invoke(IPC.AgentQueue, message, images),
   abort: () => ipcRenderer.invoke(IPC.AgentAbort),
+  getRunCheckpoint: () =>
+    ipcRenderer.invoke(IPC.AgentRunCheckpoint) as Promise<RunCheckpointStatus | null>,
+  rollbackRunCheckpoint: () =>
+    ipcRenderer.invoke(IPC.AgentRollbackCheckpoint) as Promise<RunCheckpointStatus>,
 
   // session management
   getState: () => ipcRenderer.invoke(IPC.AgentState),
@@ -98,6 +103,8 @@ const api: PionApi = {
   // events
   onEvent: (listener) => subscribe<WireEventInput>(IPC_EVENTS.AgentEvent, listener),
   onStatus: (listener) => subscribe<AgentStatus>(IPC_EVENTS.AgentStatus, listener),
+  onRunCheckpoint: (listener) =>
+    subscribe<RunCheckpointStatus | null>(IPC_EVENTS.AgentRunCheckpoint, listener),
   onState: (listener) => subscribe<SessionInfo | null>(IPC_EVENTS.AgentState, listener),
   onSessions: (listener) => subscribe<SessionMeta[]>(IPC_EVENTS.AgentSessions, listener),
   onTree: (listener) =>

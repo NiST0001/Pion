@@ -77,6 +77,7 @@ export function useAgent() {
     if (!api) return
     const offs = [
       api.onStatus((status) => dispatch({ type: 'status', status })),
+      api.onRunCheckpoint((checkpoint) => dispatch({ type: 'runCheckpoint', checkpoint })),
       api.onState((session) => dispatch({ type: 'session', session })),
       api.onSessions((sessions) => dispatch({ type: 'sessions', sessions })),
       api.onTree((tree) => dispatch({ type: 'tree', tree })),
@@ -289,6 +290,13 @@ export function useAgent() {
     await api.abort()
   }, [api])
 
+  const rollbackRunCheckpoint = useCallback(async () => {
+    if (!api) return null
+    const checkpoint = await api.rollbackRunCheckpoint()
+    dispatch({ type: 'runCheckpoint', checkpoint })
+    return checkpoint
+  }, [api])
+
   const newSession = useCallback(async () => {
     if (!api) return
     ++timelineLoadId.current
@@ -498,6 +506,7 @@ export function useAgent() {
       send,
       queue,
       abort,
+      rollbackRunCheckpoint,
       newSession,
       forkAt,
       switchSession,
@@ -527,6 +536,7 @@ export function useAgent() {
       send,
       queue,
       abort,
+      rollbackRunCheckpoint,
       newSession,
       forkAt,
       switchSession,

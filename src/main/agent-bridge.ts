@@ -21,6 +21,7 @@ import type {
   ForkMessageOption,
   ImageContent,
   ModelOption,
+  RunCheckpointStatus,
   SessionEntriesPage,
   SessionInfo,
   SessionMeta,
@@ -33,6 +34,12 @@ import type {
 import { messageText } from '../shared/types'
 import { createWorktreeBranch, listBranchInfos } from './git'
 import {
+  createGitRunCheckpoint,
+  inspectGitRunCheckpoint,
+  rollbackGitRunCheckpoint
+} from './checkpoints'
+import type { GitRunCheckpoint } from './checkpoints'
+import {
   filterToolResults,
   sessionMode,
   toTreeNodeLite,
@@ -42,6 +49,7 @@ import {
 
 const EVENT_CHANNEL = IPC_EVENTS.AgentEvent
 const STATUS_CHANNEL = IPC_EVENTS.AgentStatus
+const CHECKPOINT_CHANNEL = IPC_EVENTS.AgentRunCheckpoint
 const STATE_CHANNEL = IPC_EVENTS.AgentState
 const SESSIONS_CHANNEL = IPC_EVENTS.AgentSessions
 const TREE_CHANNEL = IPC_EVENTS.AgentTree
@@ -71,6 +79,8 @@ interface BackendRecord {
   phase: BackendPhase
   modePrimed?: AgentMode
   completionState?: 'completed' | 'aborted'
+  checkpoint?: GitRunCheckpoint
+  checkpointStatus?: RunCheckpointStatus
   startPromise: Promise<void>
 }
 
@@ -125,6 +135,7 @@ export class AgentBridge {
     this.win = win
     // bring a late-bound window up to date
     this.win.webContents.send(STATUS_CHANNEL, this.status)
+    this.pushRunCheckpoint()
   }
 
   unbind(win: BrowserWindow): void {
@@ -145,6 +156,89 @@ export class AgentBridge {
     this.win?.webContents.send(STATUS_CHANNEL, this.status)
   }
 
+  private pushRunCheckpoint(): void {
+    const checkpoint = this.getActiveBackend()?.checkpointStatus ?? null
+    this.win?.webContents.send(CHECKPOINT_CHANNEL, checkpoint)
+  }
+
+  private async prepareRunCheckpoint(backend: BackendRecord): Promise<void> {
+    try {
+      const checkpoint = await createGitRunCheckpoint(backend.cwd)
+      backend.checkpoint = checkpoint
+      backend.checkpointStatus = {
+        id: checkpoint.id,
+        cwd: checkpoint.cwd,
+        createdAt: checkpoint.createdAt,
+        state: 'ready',
+        hasChanges: false,
+        changedFileCount: 0
+      }
+    } catch (error) {
+      backend.checkpoint = undefined
+      backend.checkpointStatus = {
+        id: randomUUID(),
+        cwd: backend.cwd,
+        createdAt: Date.now(),
+        state: 'unavailable',
+        hasChanges: false,
+        changedFileCount: 0,
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
+    if (this.activeKey === backend.key) this.pushRunCheckpoint()
+  }
+
+  private async refreshRunCheckpoint(backend: BackendRecord): Promise<RunCheckpointStatus | null> {
+    const checkpoint = backend.checkpoint
+    const status = backend.checkpointStatus
+    if (!checkpoint || !status || status.state !== 'ready') return status ?? null
+    try {
+      const inspection = await inspectGitRunCheckpoint(checkpoint)
+      backend.checkpointStatus = { ...status, ...inspection, error: undefined }
+    } catch (error) {
+      backend.checkpointStatus = {
+        ...status,
+        state: 'unavailable',
+        hasChanges: false,
+        changedFileCount: 0,
+        error: error instanceof Error ? error.message : String(error)
+      }
+    }
+    if (this.activeKey === backend.key) this.pushRunCheckpoint()
+    return backend.checkpointStatus
+  }
+
+  async getRunCheckpoint(): Promise<RunCheckpointStatus | null> {
+    const backend = this.getActiveBackend()
+    if (!backend) return null
+    const state = await backend.client.getState().catch(() => null)
+    if (backend.checkpoint && !state?.isStreaming) return this.refreshRunCheckpoint(backend)
+    return backend.checkpointStatus ?? null
+  }
+
+  async rollbackRunCheckpoint(): Promise<RunCheckpointStatus> {
+    const backend = this.getActiveBackend()
+    const checkpoint = backend?.checkpoint
+    const status = backend?.checkpointStatus
+    if (!backend || !checkpoint || !status) throw new Error('当前会话没有可恢复的运行检查点')
+    if (status.state !== 'ready') {
+      throw new Error(status.error || '当前运行检查点不可用')
+    }
+    const state = await backend.client.getState()
+    if (state.isStreaming) throw new Error('Agent 运行期间不能恢复检查点，请先等待完成或中止运行')
+
+    await rollbackGitRunCheckpoint(checkpoint)
+    backend.checkpointStatus = {
+      ...status,
+      state: 'rolled-back',
+      hasChanges: false,
+      changedFileCount: 0,
+      error: undefined
+    }
+    this.pushRunCheckpoint()
+    return backend.checkpointStatus
+  }
+
   // ---------------------------------------------------------------- lifecycle
 
   /** Select a workspace; an individual session backend loads when selected. */
@@ -156,6 +250,7 @@ export class AgentBridge {
     this.activeSessionPath = undefined
     this.activeKey = this.newSessionKey(normalizedCwd)
     this.setStatus({ phase: 'ready', error: undefined, cwd: normalizedCwd })
+    this.pushRunCheckpoint()
     void this.pushSessionInfo()
   }
 
@@ -218,6 +313,7 @@ export class AgentBridge {
           }
         }
         backend.completionState = undefined
+        void this.refreshRunCheckpoint(backend)
       }
       if (this.activeKey !== backend.key) return
       if (type === 'agent_start') this.setActiveBackendStatus()
@@ -392,6 +488,7 @@ export class AgentBridge {
       }
     }))
     this.setStatus({ phase: 'stopped', cwd: undefined })
+    this.pushRunCheckpoint()
   }
 
   /** Prompt when idle, steer when mid-run. Starts only this session's backend. */
@@ -401,6 +498,7 @@ export class AgentBridge {
     if (state?.isStreaming) {
       await backend.client.steer(message, images)
     } else {
+      await this.prepareRunCheckpoint(backend)
       await this.applyDesiredMode(backend)
       await backend.client.prompt(message, images)
     }
@@ -414,6 +512,7 @@ export class AgentBridge {
     if (state?.isStreaming) {
       await backend.client.followUp(message, images)
     } else {
+      await this.prepareRunCheckpoint(backend)
       await this.applyDesiredMode(backend)
       await backend.client.prompt(message, images)
     }
@@ -473,6 +572,7 @@ export class AgentBridge {
     this.activeSessionPath = undefined
     this.activeKey = this.newSessionKey(this.activeCwd)
     this.setStatus({ phase: 'ready', error: undefined, cwd: this.activeCwd })
+    this.pushRunCheckpoint()
     // A fresh session has no backend until its first prompt. Start it here so
     // model/thinking pickers are usable before the first message is sent.
     await this.ensureActiveBackend()
@@ -494,6 +594,7 @@ export class AgentBridge {
     this.activeKey = this.backendKeysBySessionPath.get(target) ?? target
     this.activeCwd = resolve(cwd ?? this.activeCwd ?? this.status.cwd ?? dirname(target))
     this.setActiveBackendStatus()
+    this.pushRunCheckpoint()
   }
 
   private createEmptyChildSession(manager: SessionManager, parentSession: string): string {
@@ -596,6 +697,7 @@ export class AgentBridge {
       this.activeSessionPath = undefined
       this.activeKey = this.newSessionKey(this.activeCwd ?? this.status.cwd ?? dirname(target))
       this.setStatus({ phase: 'ready', error: undefined, cwd: this.activeCwd })
+      this.pushRunCheckpoint()
     }
     await this.pushSessionInfo()
     void this.refreshSidebarSessions()

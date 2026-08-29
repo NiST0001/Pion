@@ -1,12 +1,23 @@
 // UI 变更验证：无边框标题栏 / 模型选择器位置 / 设置面板
 import { spawn } from 'node:child_process'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const PORT = '9344'
+const TEST_WORKSPACE = process.cwd()
+const CHECKPOINT_BASELINE_FILE = new URL('../.pion-checkpoint-baseline.tmp', import.meta.url)
+const CHECKPOINT_TEST_FILE = new URL('../.pion-checkpoint-ui-test.tmp', import.meta.url)
+rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
+rmSync(CHECKPOINT_TEST_FILE, { force: true })
+writeFileSync(CHECKPOINT_BASELINE_FILE, 'preserve this pre-run content\n')
 const child = spawn('node_modules/electron/dist/electron', ['.', `--remote-debugging-port=${PORT}`], {
   stdio: ['ignore', 'ignore', 'ignore']
 })
-process.on('exit', () => { try { child.kill('SIGKILL') } catch {} })
+process.on('exit', () => {
+  try { child.kill('SIGKILL') } catch {}
+  rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
+  rmSync(CHECKPOINT_TEST_FILE, { force: true })
+})
 
 async function getPage() {
   for (let i = 0; i < 30; i++) {
@@ -49,12 +60,19 @@ const check = async (name, expr) => {
   if (pass) ok++
 }
 
+const checkHost = (name, value) => {
+  console.log(`${value ? '✓' : '✗'} ${name}`)
+  if (value) ok++
+}
+
 // 等待 agent 运行
 for (let i = 0; i < 40; i++) {
   await sleep(500)
   if (await evaluate(`document.querySelector('.dot-running, .dot-ready') !== null`)) break
 }
 
+await evaluate(`(async () => { await window.pion.addProject(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.startAgent(${JSON.stringify(TEST_WORKSPACE)}); return true })()`)
+await sleep(250)
 await check('启动时后端未启动', `!!document.querySelector('.dot-ready')`)
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, '/plan exit'); input?.dispatchEvent(new Event('input', { bubbles: true })); input?.focus(); return true })()`)
 await sleep(80)
@@ -72,6 +90,32 @@ await check('关闭按钮样式', `!!document.querySelector('.titlebar-close')`)
 await check('标题栏含品牌', `document.querySelector('.titlebar-brand .brand-name')?.textContent === 'Pion'`)
 await check('左上角会话栏开关', `!!document.querySelector('.titlebar-panel-btn')`)
 await check('右上角文件审查栏开关', `!!document.querySelector('.titlebar-review-btn')`)
+await evaluate(`document.querySelector('.titlebar-review-btn')?.click()`)
+await sleep(180)
+await check('发送任务前自动创建运行检查点', `document.querySelector('.review-checkpoint')?.classList.contains('review-checkpoint-ready') && !!document.querySelector('.review-checkpoint-rollback')`)
+writeFileSync(CHECKPOINT_BASELINE_FILE, 'changed after Pion run checkpoint\n')
+writeFileSync(CHECKPOINT_TEST_FILE, 'created after Pion run checkpoint\n')
+await evaluate(`window.pion.getRunCheckpoint()`)
+for (let i = 0; i < 20; i++) {
+  await sleep(120)
+  if (await evaluate(`document.querySelector('.review-checkpoint-rollback')?.disabled === false`)) break
+}
+await check('检查点检测本轮工作区修改', `document.querySelector('.review-checkpoint-rollback')?.disabled === false && document.querySelector('.review-checkpoint-copy')?.textContent?.includes('可恢复')`)
+await evaluate(`(() => { window.__pionOriginalConfirm = window.confirm; window.confirm = () => true; document.querySelector('.review-checkpoint-rollback')?.click(); return true })()`)
+for (let i = 0; i < 30; i++) {
+  await sleep(120)
+  if (await evaluate(`document.querySelector('.review-checkpoint')?.classList.contains('review-checkpoint-rolled-back')`)) break
+}
+await check('一键恢复本轮检查点', `document.querySelector('.review-checkpoint')?.classList.contains('review-checkpoint-rolled-back') && document.querySelector('.review-checkpoint-copy')?.textContent?.includes('已恢复')`)
+checkHost('检查点移除本轮新增文件', !existsSync(CHECKPOINT_TEST_FILE))
+checkHost(
+  '检查点保留并恢复发送前已有文件',
+  existsSync(CHECKPOINT_BASELINE_FILE)
+    && readFileSync(CHECKPOINT_BASELINE_FILE, 'utf8') === 'preserve this pre-run content\n'
+)
+rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
+await evaluate(`(() => { if (window.__pionOriginalConfirm) window.confirm = window.__pionOriginalConfirm; document.querySelector('.titlebar-review-btn')?.click(); return true })()`)
+await sleep(120)
 await check('左侧会话栏默认打开', `!!document.querySelector('.sidebar')`)
 await check('会话栏含宽度拖拽手柄', `document.querySelector('.sidebar-resizer')?.getAttribute('role') === 'separator'`)
 await evaluate(`(() => { const handle = document.querySelector('.sidebar-resizer'); const sidebar = document.querySelector('.sidebar')?.getBoundingClientRect(); if (!handle || !sidebar) return false; window.__pionSidebarBefore = sidebar.width; handle.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: sidebar.right, pointerId: 11, pointerType: 'mouse' })); window.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: sidebar.right + 36, pointerId: 11, pointerType: 'mouse' })); window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: sidebar.right + 36, pointerId: 11, pointerType: 'mouse' })); return true })()`)

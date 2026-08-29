@@ -55,6 +55,8 @@
 
 ### 审查
 - 「变更」面板：聚合本会话所有 edit/write 触及的文件，+/- 统计
+- 每轮空闲会话发送任务前自动创建 Git 工作区检查点；审查栏可一键撤销本轮开始后的全部非忽略文件修改
+- 检查点会完整保留发送前已有的暂存、未暂存和未跟踪文件状态；未解决 Git 冲突或非 Git 目录会明确显示为不可用
 - 点击文件打开右侧抽屉：彩色 Diff 视图（新增/删除/上下文/省略行）或新文件全文预览
 
 ### 模型
@@ -77,6 +79,7 @@ npm run typecheck  # 主进程 + 渲染进程 TS 类型检查
 node scripts/rpc-smoke.mjs       # RPC 基础链路（不经 GUI）
 node scripts/rpc-smoke-full.mjs [cwd]  # 会话/条目/树/模型/分叉全链路
 node scripts/gui-cdp-test.mjs node_modules/electron/dist/electron .  # GUI 端到端（CDP 驱动真实界面+真实对话）
+node scripts/ui-change-test.mjs   # 完整 UI 回归（含运行检查点真实创建/恢复）
 ```
 
 > 注：pi RPC 子进程启动后会把进程标题改写为 `pi`（`process.title`），
@@ -102,6 +105,7 @@ src/
 │   ├── index.ts          # 窗口创建 + IPC 注册
 │   ├── agent-bridge.ts   # RpcClient 生命周期、后台池、会话与模型桥接
 │   ├── git.ts            # Git 分支与 worktree 操作
+│   ├── checkpoints.ts    # 每轮工作区快照、差异检测与安全恢复
 │   ├── wire.ts           # pi SDK -> renderer wire 映射
 │   ├── plugin-manager.ts # 官方插件目录与 pi install
 │   └── projects.ts       # 项目列表持久化

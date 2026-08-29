@@ -13,6 +13,8 @@ export const IPC = {
   AgentSend: 'pion:agent-send',
   AgentQueue: 'pion:agent-queue',
   AgentAbort: 'pion:agent-abort',
+  AgentRunCheckpoint: 'pion:agent-run-checkpoint',
+  AgentRollbackCheckpoint: 'pion:agent-rollback-checkpoint',
   AgentStderr: 'pion:agent-stderr',
 
   // session management
@@ -79,6 +81,7 @@ export const IPC = {
 export const IPC_EVENTS = {
   AgentEvent: 'pion:agent-event',
   AgentStatus: 'pion:agent-status',
+  AgentRunCheckpoint: 'pion:agent-run-checkpoint',
   AgentState: 'pion:agent-state',
   AgentSessions: 'pion:agent-sessions',
   AgentTree: 'pion:agent-tree',

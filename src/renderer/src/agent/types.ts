@@ -11,6 +11,7 @@ import type {
   ImageContent,
   ModelOption,
   ProjectMeta,
+  RunCheckpointStatus,
   SessionInfo,
   SessionMeta,
   SlashCommandInfo,
@@ -74,6 +75,7 @@ export interface FileChange {
 export interface AgentState {
   status: AgentStatus
   session: SessionInfo | null
+  runCheckpoint: RunCheckpointStatus | null
   sessions: SessionMeta[]
   sessionsByProject: Record<string, SessionMeta[]>
   branchesByProject: Record<string, BranchInfo[]>
@@ -92,6 +94,7 @@ export interface AgentState {
 export const initialState: AgentState = {
   status: { phase: 'stopped' },
   session: null,
+  runCheckpoint: null,
   sessions: [],
   sessionsByProject: {},
   branchesByProject: {},
@@ -110,6 +113,7 @@ export const initialState: AgentState = {
 export type Action =
   | { type: 'status'; status: AgentStatus }
   | { type: 'session'; session: SessionInfo | null }
+  | { type: 'runCheckpoint'; checkpoint: RunCheckpointStatus | null }
   | { type: 'sessions'; sessions: SessionMeta[] }
   | { type: 'projectSessions'; sessionsByProject: Record<string, SessionMeta[]> }
   | { type: 'branches'; cwd: string; branches: BranchInfo[] }

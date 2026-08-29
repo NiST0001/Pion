@@ -50,6 +50,8 @@ export function App(): ReactElement {
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [reviewOpen, setReviewOpen] = useState(false)
+  const [rollbackBusy, setRollbackBusy] = useState(false)
+  const [rollbackError, setRollbackError] = useState('')
   const [sidebarWidth, setSidebarWidth] = useState(276)
   const [reviewWidth, setReviewWidth] = useState(390)
   const [sessionQuery, setSessionQuery] = useState('')
@@ -364,7 +366,8 @@ export function App(): ReactElement {
     [actions, activateProject]
   )
 
-  const changes = useMemo(() => deriveChanges(state.timeline), [state.timeline])
+  const sessionChanges = useMemo(() => deriveChanges(state.timeline), [state.timeline])
+  const changes = state.runCheckpoint?.state === 'rolled-back' ? [] : sessionChanges
   const messageHistory = useMemo(
     () => state.timeline.flatMap((item) => (
       item.kind === 'user' && item.text.trim() ? [item.text] : []
@@ -376,6 +379,30 @@ export function App(): ReactElement {
     setReviewOpen((open) => !open)
     setDrawerChange(null)
   }, [])
+
+  useEffect(() => {
+    setRollbackError('')
+    if (state.runCheckpoint?.state === 'rolled-back') setDrawerChange(null)
+  }, [state.runCheckpoint?.id, state.runCheckpoint?.state])
+
+  const handleRollbackRun = useCallback(async (): Promise<void> => {
+    const checkpoint = state.runCheckpoint
+    if (!checkpoint || checkpoint.state !== 'ready' || !checkpoint.hasChanges || state.busy) return
+    const confirmed = window.confirm(
+      '确定撤销本轮修改？\n\n工作区将恢复到发送本轮任务之前。发送前已有的暂存、未暂存和未跟踪文件会保留；本轮开始后的手动修改也会一并撤销。'
+    )
+    if (!confirmed) return
+    setRollbackBusy(true)
+    setRollbackError('')
+    try {
+      await actions.rollbackRunCheckpoint()
+      setDrawerChange(null)
+    } catch (error) {
+      setRollbackError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setRollbackBusy(false)
+    }
+  }, [actions, state.busy, state.runCheckpoint])
 
   const activeCwd = selectedSession?.cwd ?? state.status.cwd
   const activePath = selectedSession?.path ?? state.session?.sessionFile
@@ -553,8 +580,13 @@ export function App(): ReactElement {
           <ReviewPanel
             changes={changes}
             selectedChange={drawerChange}
+            checkpoint={state.runCheckpoint}
+            agentBusy={state.busy}
+            rollbackBusy={rollbackBusy}
+            rollbackError={rollbackError}
             width={reviewWidth}
             onSelect={setDrawerChange}
+            onRollback={() => void handleRollbackRun()}
             onClose={handleToggleReview}
             onResizeStart={(event) => handleResizeStart('review', event)}
           />

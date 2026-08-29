@@ -115,6 +115,8 @@ function registerIpc(): void {
   ipcMain.handle(IPC.AgentSend, (_event, message: string, images?: ImageContent[]) => bridge.send(message, images))
   ipcMain.handle(IPC.AgentQueue, (_event, message: string, images?: ImageContent[]) => bridge.queue(message, images))
   ipcMain.handle(IPC.AgentAbort, () => bridge.abort())
+  ipcMain.handle(IPC.AgentRunCheckpoint, () => bridge.getRunCheckpoint())
+  ipcMain.handle(IPC.AgentRollbackCheckpoint, () => bridge.rollbackRunCheckpoint())
   ipcMain.handle(IPC.AgentState, () => bridge.getSessionInfo())
   ipcMain.handle(IPC.AgentStderr, () => bridge.getStderr())
 
