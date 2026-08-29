@@ -151,6 +151,18 @@ await check('模型选择器可打开', `(() => { document.querySelector('.compo
 await sleep(300)
 await check('模型菜单已显示', `!!document.querySelector('.composer-inline-controls .picker-menu')`)
 await check('模型选项可见', `document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
+await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
+await check('新建会话下面有项目选择', `(() => { const select = document.querySelector('.sidebar-new-session-project select'); return !!select && select.getAttribute('aria-label') === '新会话项目' && select.options.length > 0; })()`)
+await evaluate(`document.querySelector('.sidebar-new-session')?.click()`)
+for (let i = 0; i < 30; i++) {
+  await sleep(300)
+  if (await evaluate(`!!document.querySelector('.dot-running') && document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)) break
+}
+await check('新建会话后模型选择器可用', `(() => { const button = document.querySelector('.composer-inline-controls .picker-trigger'); return !!button && !button.disabled; })()`)
+await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
+await sleep(150)
+await check('新建会话后模型选项可见', `document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
+await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
 await check('思考级别嵌入输入框', `!!document.querySelector('.composer-inline-controls .thinking-trigger') && !document.querySelector('.composer-inline-controls .thinking-segment')`)
 await check('思考等级为下拉框', `document.querySelector('.thinking-trigger')?.getAttribute('aria-haspopup') === 'listbox'`)
 await evaluate(`document.querySelector('.composer-inline-controls .thinking-trigger')?.click()`)

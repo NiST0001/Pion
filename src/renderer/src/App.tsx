@@ -48,6 +48,7 @@ export function App(): ReactElement {
   const [sidebarWidth, setSidebarWidth] = useState(276)
   const [reviewWidth, setReviewWidth] = useState(390)
   const [sessionQuery, setSessionQuery] = useState('')
+  const [newSessionCwd, setNewSessionCwd] = useState('')
   const [pendingSession, setPendingSession] = useState<{ cwd: string; path: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const panelResizeRef = useRef<PanelResizeState | null>(null)
@@ -106,6 +107,17 @@ export function App(): ReactElement {
     void window.pion.getWindowState().then(setMaximized)
     return off
   }, [hasBridge])
+
+  // Keep the new-session target valid as projects are added/removed. It follows
+  // the active project initially, but remains independently selectable.
+  useEffect(() => {
+    setNewSessionCwd((current) => {
+      if (current && state.projects.some((project) => project.cwd === current)) return current
+      return state.projects.find((project) => project.cwd === state.status.cwd)?.cwd
+        ?? state.projects[0]?.cwd
+        ?? ''
+    })
+  }, [state.projects, state.status.cwd])
 
   // Keep sidebar selection independent from the slower session replay. Once
   // the agent reports the target session, the optimistic selection is cleared.
@@ -178,6 +190,7 @@ export function App(): ReactElement {
 
   const handleSelectProject = useCallback(
     async (cwd: string) => {
+      setNewSessionCwd(cwd)
       sessionSelectionId.current += 1
       setPendingSession(null)
       if (cwd === state.status.cwd) return
@@ -195,12 +208,16 @@ export function App(): ReactElement {
 
   const handleNewSession = useCallback(
     async (cwd?: string) => {
+      const targetCwd = cwd ?? (newSessionCwd || state.status.cwd)
       sessionSelectionId.current += 1
       setPendingSession(null)
-      if (cwd) await activateProject(cwd)
+      if (targetCwd) {
+        setNewSessionCwd(targetCwd)
+        await activateProject(targetCwd)
+      }
       await actions.newSession()
     },
-    [actions, activateProject]
+    [actions, activateProject, newSessionCwd, state.status.cwd]
   )
 
   const handleNewBranch = useCallback((cwd: string) => {
@@ -232,6 +249,7 @@ export function App(): ReactElement {
       }
       const requestId = ++sessionSelectionId.current
       const previousSelection = pendingSession
+      setNewSessionCwd(cwd)
       setPendingSession({ cwd, path })
       try {
         await activateProject(cwd)
@@ -325,9 +343,12 @@ export function App(): ReactElement {
         {sidebarOpen && <aside className="sidebar" style={{ width: sidebarWidth }}>
           <div className="sidebar-scroll">
             <SidebarToolbar
+              projects={state.projects}
+              newSessionCwd={newSessionCwd}
               searchQuery={sessionQuery}
               onSearch={setSessionQuery}
-              onNewSession={() => void handleNewSession()}
+              onNewSession={() => void handleNewSession(newSessionCwd || undefined)}
+              onNewSessionProjectChange={setNewSessionCwd}
               onOpenCapabilities={() => setCapabilitiesOpen(true)}
             />
             <ProjectList

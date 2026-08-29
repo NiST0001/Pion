@@ -57,14 +57,20 @@ function Section({
 // ---------------------------------------------------------------------------
 
 export function SidebarToolbar({
+  projects,
+  newSessionCwd,
   searchQuery,
   onSearch,
   onNewSession,
+  onNewSessionProjectChange,
   onOpenCapabilities
 }: {
+  projects: ProjectMeta[]
+  newSessionCwd: string
   searchQuery: string
   onSearch: (value: string) => void
   onNewSession: () => void
+  onNewSessionProjectChange: (cwd: string) => void
   onOpenCapabilities: () => void
 }): ReactElement {
   return (
@@ -79,6 +85,25 @@ export function SidebarToolbar({
           <MessageSquarePlus size={15} />
           <span>新建会话</span>
         </button>
+        <label className="sidebar-new-session-project">
+          <span className="sidebar-new-session-project-label">项目</span>
+          <select
+            aria-label="新会话项目"
+            value={newSessionCwd}
+            disabled={projects.length === 0}
+            onChange={(event) => onNewSessionProjectChange(event.target.value)}
+          >
+            {projects.length === 0 ? (
+              <option value="">暂无项目</option>
+            ) : (
+              projects.map((project) => (
+                <option key={project.cwd} value={project.cwd} title={project.cwd}>
+                  {project.name}
+                </option>
+              ))
+            )}
+          </select>
+        </label>
         <button
           type="button"
           className="sidebar-tools-button"

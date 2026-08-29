@@ -296,7 +296,8 @@ export function useAgent() {
     expectedTimeline.current = null
     await api.newSession()
     dispatch({ type: 'clearTimeline' })
-  }, [api])
+    await refreshModels()
+  }, [api, refreshModels])
 
   /** Fork before a user message; resolves with the message text for prefill. */
   const forkAt = useCallback(

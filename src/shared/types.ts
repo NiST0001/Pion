@@ -299,7 +299,7 @@ export interface PionApi {
   // session management ------------------------------------------------------
   /** Current session info, or null when no session is selected. */
   getState(): Promise<SessionInfo | null>
-  /** Start a fresh session in the same cwd. */
+  /** Start a fresh session in the same cwd and initialize its backend. */
   newSession(): Promise<void>
   /** Fork the session at an entry; resolves with the message text at the fork point. */
   forkAt(entryId: string): Promise<{ text: string; cancelled: boolean }>

@@ -402,6 +402,9 @@ export class AgentBridge {
     this.activeSessionPath = undefined
     this.activeKey = this.newSessionKey(this.activeCwd)
     this.setStatus({ phase: 'ready', error: undefined, cwd: this.activeCwd })
+    // A fresh session has no backend until its first prompt. Start it here so
+    // model/thinking pickers are usable before the first message is sent.
+    await this.ensureActiveBackend()
     await this.pushSessionInfo()
   }
 
@@ -679,8 +682,8 @@ export class AgentBridge {
   }
 
   async setModel(provider: string, modelId: string): Promise<void> {
-    if (!this.client) throw new Error('agent 未启动')
-    await this.client.setModel(provider, modelId)
+    const backend = await this.ensureActiveBackend()
+    await backend.client.setModel(provider, modelId)
     await this.refresh()
   }
 
@@ -711,9 +714,9 @@ export class AgentBridge {
   }
 
   async setThinkingLevel(level: string): Promise<void> {
-    if (!this.client) throw new Error('agent 未启动')
+    const backend = await this.ensureActiveBackend()
     type ThinkingLevelParam = Parameters<RpcClient['setThinkingLevel']>[0]
-    await this.client.setThinkingLevel(level as ThinkingLevelParam)
+    await backend.client.setThinkingLevel(level as ThinkingLevelParam)
     await this.refresh()
   }
 
