@@ -142,6 +142,7 @@ export class AgentBridge {
   private readonly toolPermissionStore = new ToolPermissionStore()
   private readonly pendingToolPermissions = new Map<string, PendingToolPermission>()
   private newSessionInFlight: Promise<void> | null = null
+  private sessionSelectionGeneration = 0
   private activeKey: string | null = null
   private activeCwd: string | undefined
   private activeSessionPath: string | undefined
@@ -551,6 +552,7 @@ export class AgentBridge {
   /** Select a workspace; an individual session backend loads when selected. */
   async start(cwd: string): Promise<void> {
     this.stopping = false
+    this.sessionSelectionGeneration += 1
     const normalizedCwd = resolve(cwd)
     if (this.activeCwd === normalizedCwd && this.activeKey) return
     this.activeCwd = normalizedCwd
@@ -631,15 +633,17 @@ export class AgentBridge {
         backend.completionState = undefined
         void this.refreshRunCheckpoint(backend)
       }
+      if (type === 'agent_start' || type === 'message_start' || type === 'agent_settled') {
+        // Keep persisted history fresh even when this backend finishes while a
+        // different project or session is selected.
+        void this.syncBackendSession(backend)
+      }
       if (this.activeKey !== backend.key) return
       if (type === 'agent_start') this.setActiveBackendStatus()
       this.win?.webContents.send(EVENT_CHANNEL, event)
       if (typeof type === 'string' && STATE_REFRESH_EVENTS.has(type)) {
         void this.pushSessionInfo()
         void this.refreshSidebarSessions()
-      }
-      if (type === 'agent_start' || type === 'message_start') {
-        void this.syncBackendSession(backend)
       }
     })
   }
@@ -672,7 +676,11 @@ export class AgentBridge {
     if (this.activeKey === key) this.setActiveBackendStatus()
 
     const startPromise = client.start()
-      .then(() => {
+      .then(async () => {
+        // RpcClient.start() only waits 100 ms. The permission and plan
+        // extensions can make cold startup longer, so require one successful
+        // RPC round trip before exposing this backend as ready.
+        await client.getState()
         backend.phase = 'running'
         console.log('[pion] agent subprocess running, session:', sessionPath ?? key)
         if (this.activeKey === key) this.setActiveBackendStatus()
@@ -873,6 +881,7 @@ export class AgentBridge {
   }
 
   private async createNewSession(): Promise<void> {
+    this.sessionSelectionGeneration += 1
     const cwd = this.activeCwd ?? this.status.cwd
     if (!cwd) throw new Error('没有活动工作目录')
 
@@ -960,7 +969,9 @@ export class AgentBridge {
 
   /** Select a session and load its backend once, reusing it on later visits. */
   async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
+    const generation = ++this.sessionSelectionGeneration
     const target = await this.resolveListedSession(sessionPath)
+    if (generation !== this.sessionSelectionGeneration) return { cancelled: true }
     const manager = this.openSessionManager(target)
     this.activateLogicalSession(target, manager.getCwd() || this.activeCwd)
     // Activate the logical session synchronously, then warm its backend in the
@@ -1068,9 +1079,19 @@ export class AgentBridge {
     return { text: result.text, cancelled: false }
   }
 
-  private async getActiveEntries(): Promise<{ entries: SessionEntry[]; leafId: string | null } | null> {
+  private async getActiveEntries(
+    requestedSessionPath?: string
+  ): Promise<{ entries: SessionEntry[]; leafId: string | null } | null> {
     const backend = this.getActiveBackend()
     try {
+      if (requestedSessionPath) {
+        const target = await this.resolveListedSession(requestedSessionPath)
+        // Explicit history reads re-open JSONL so a retained background
+        // backend cannot leave the SessionManager cache missing newer entries.
+        const manager = SessionManager.open(target)
+        this.sessionManagers.set(target, manager)
+        return { entries: manager.getEntries(), leafId: manager.getLeafId() }
+      }
       const sessionPath = this.activeSessionPath ?? backend?.sessionPath
       if (sessionPath) {
         const manager = this.openSessionManager(sessionPath)
@@ -1093,8 +1114,12 @@ export class AgentBridge {
       : null
   }
 
-  async getEntriesPage(before?: number, limit = 160): Promise<SessionEntriesPage | null> {
-    const result = await this.getActiveEntries()
+  async getEntriesPage(
+    before?: number,
+    limit = 160,
+    sessionPath?: string
+  ): Promise<SessionEntriesPage | null> {
+    const result = await this.getActiveEntries(sessionPath)
     if (!result) return null
 
     const total = result.entries.length
@@ -1120,7 +1145,7 @@ export class AgentBridge {
   async getTree(): Promise<PushedTree | null> {
     const backend = this.getActiveBackend()
     try {
-      const result = backend
+      const result = backend?.phase === 'running'
         ? await backend.client.getTree()
         : this.activeSessionPath
           ? (() => {
@@ -1341,8 +1366,14 @@ export class AgentBridge {
   async getSessionInfo(): Promise<SessionInfo | null> {
     const backend = this.getActiveBackend()
     try {
-      if (backend) return await this.toSessionInfo(backend.client)
-      if (!this.activeSessionPath) return null
+      if (backend?.phase === 'running') return await this.toSessionInfo(backend.client)
+      // A persisted session can be described directly from JSONL while its
+      // colder RPC backend is still loading extensions and models.
+      if (!this.activeSessionPath) {
+        if (!backend) return null
+        await backend.startPromise
+        return this.toSessionInfo(backend.client)
+      }
       const manager = this.openSessionManager(this.activeSessionPath)
       const context = manager.buildSessionContext()
       return {

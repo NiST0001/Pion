@@ -1900,6 +1900,45 @@ body {
   color: var(--fg);
 }
 
+.project-folder-compact {
+  margin-bottom: 6px;
+}
+
+.project-folder-compact:last-child {
+  margin-bottom: 2px;
+}
+
+.project-folder-compact > .project-folder-head {
+  min-height: 30px;
+  padding: 3px 6px;
+  border-radius: 8px;
+}
+
+.project-folder-compact > .project-folder-branches {
+  margin: 2px 3px 0 15px;
+  padding: 1px 0 2px 9px;
+}
+
+.project-folder-compact .project-branch {
+  margin-bottom: 3px;
+}
+
+.project-folder-compact .project-branch-head {
+  min-height: 28px;
+  padding: 2px 5px;
+  border-radius: 7px;
+}
+
+.project-folder-compact .project-branch-sessions {
+  margin: 2px 0 0 12px;
+  padding: 1px 0 1px 8px;
+}
+
+.project-folder-compact .project-folder-empty {
+  padding-top: 3px;
+  padding-bottom: 4px;
+}
+
 .side-session-compact {
   min-height: 26px;
   padding: 2px 7px !important;

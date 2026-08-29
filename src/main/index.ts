@@ -146,8 +146,10 @@ function registerIpc(): void {
     bridge.forkSession(sessionPath, entryId)
   )
   ipcMain.handle(IPC.AgentEntries, () => bridge.getEntries())
-  ipcMain.handle(IPC.AgentEntriesPage, (_event, before?: number, limit?: number) =>
-    bridge.getEntriesPage(before, limit)
+  ipcMain.handle(
+    IPC.AgentEntriesPage,
+    (_event, before?: number, limit?: number, sessionPath?: string) =>
+      bridge.getEntriesPage(before, limit, sessionPath)
   )
   ipcMain.handle(IPC.AgentTree, () => bridge.getTree())
   ipcMain.handle(IPC.AgentSessions, (_event, cwd?: string) => bridge.listSessions(cwd))

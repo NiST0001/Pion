@@ -28,6 +28,8 @@ export function reducer(state: AgentState, action: Action): AgentState {
         ...state,
         status: action.status,
         busy: dead || ready ? false : state.busy,
+        timelineLoading: dead ? false : state.timelineLoading,
+        timelineError: dead ? undefined : state.timelineError,
         session: dead || ready ? null : state.session,
         sessions: dead ? [] : state.sessions,
         tree: dead || ready ? null : state.tree,
@@ -103,6 +105,8 @@ export function reducer(state: AgentState, action: Action): AgentState {
         timeline: action.items,
         mode: action.mode ?? state.mode,
         timelineMutation: 'replace',
+        timelineLoading: false,
+        timelineError: undefined,
         busy: false
       }
     case 'prependEntries':
@@ -112,12 +116,22 @@ export function reducer(state: AgentState, action: Action): AgentState {
         timeline: [...action.items, ...state.timeline],
         timelineMutation: 'prepend'
       }
+    case 'timelineLoading':
+      return {
+        ...state,
+        timelineLoading: action.loading,
+        timelineError: action.loading ? undefined : state.timelineError
+      }
+    case 'timelineError':
+      return { ...state, timelineLoading: false, timelineError: action.error }
     case 'clearTimeline':
       return {
         ...state,
         timeline: [],
         mode: 'build',
         timelineMutation: 'replace',
+        timelineLoading: false,
+        timelineError: undefined,
         busy: false,
         queued: { steering: 0, followUp: 0 }
       }

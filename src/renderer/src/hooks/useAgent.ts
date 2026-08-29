@@ -33,6 +33,7 @@ export function useAgent() {
   const api = typeof window !== 'undefined' ? window.pion : undefined
   const bootstrapped = useRef(false)
   const timelineLoadId = useRef(0)
+  const modelRefreshId = useRef(0)
   const timelineCache = useRef(new Map<string, TimelineCacheEntry>())
   const historyCursor = useRef<HistoryCursor | null>(null)
   const timelineOwnerPath = useRef<string | undefined>(undefined)
@@ -138,10 +139,38 @@ export function useAgent() {
   const reloadTimeline = useCallback(async (sessionPath?: string): Promise<void> => {
     if (!api) return
     const loadId = ++timelineLoadId.current
+    const path = sessionPath
+      ?? timelineOwnerPath.current
+      ?? (await api.getState().catch(() => null))?.sessionFile
+    const cached = path ? timelineCache.current.get(path) : undefined
     historyCursor.current = null
-    const path = sessionPath ?? timelineOwnerPath.current ?? (await api.getState())?.sessionFile
-    const page = await api.getEntriesPage(undefined, INITIAL_HISTORY_PAGE_SIZE)
-    if (!page || loadId !== timelineLoadId.current) return
+    if (path) dispatch({ type: 'timelineLoading', loading: true })
+
+    let page = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      page = await api.getEntriesPage(undefined, INITIAL_HISTORY_PAGE_SIZE, path)
+        .catch(() => null)
+      if (page || loadId !== timelineLoadId.current) break
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 80 * (attempt + 1)))
+    }
+    if (loadId !== timelineLoadId.current) return
+    if (!page) {
+      dispatch({
+        type: 'timelineError',
+        error: '会话历史加载失败，请重新选择该会话或检查会话文件是否仍然存在。'
+      })
+      return
+    }
+
+    if (path && cached && cached.leafId === page.leafId && cached.total === page.total) {
+      const cursor: HistoryCursor | null = cached.complete
+        ? null
+        : { path, ...cached, loading: false, loadId }
+      historyCursor.current = cursor
+      storeTimelineCache(timelineCache.current, path, cached)
+      showTimeline(path, cached.items, cached.mode)
+      return
+    }
 
     const toolResults = collectToolResults([...page.entries, ...page.toolResults])
     const relativeStart = page.start === 0 ? 0 : initialEntryStart(page.entries)
@@ -154,6 +183,8 @@ export function useAgent() {
       apiBefore: page.start,
       toolResults: page.toolResults,
       complete: page.start === 0,
+      leafId: page.leafId,
+      total: page.total,
       loading: false,
       loadId
     }
@@ -165,7 +196,9 @@ export function useAgent() {
         pendingEntries: cursor.pendingEntries,
         apiBefore: cursor.apiBefore,
         toolResults: cursor.toolResults,
-        complete: cursor.complete
+        complete: cursor.complete,
+        leafId: cursor.leafId,
+        total: cursor.total
       })
       historyCursor.current = cursor.complete ? null : cursor
       showTimeline(path, cursor.items, cursor.mode)
@@ -196,12 +229,18 @@ export function useAgent() {
           entries = cursor.pendingEntries.slice(start, end)
           cursor.pendingEntries = cursor.pendingEntries.slice(0, start)
         } else {
-          const page = await api.getEntriesPage(cursor.apiBefore, HISTORY_ENTRY_CHUNK_SIZE)
+          const page = await api.getEntriesPage(
+            cursor.apiBefore,
+            HISTORY_ENTRY_CHUNK_SIZE,
+            cursor.path
+          )
           if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
           entries = page.entries
           toolResults = page.toolResults
           cursor.toolResults = toolResults
           cursor.apiBefore = page.start
+          cursor.leafId = page.leafId
+          cursor.total = page.total
         }
         if (loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
 
@@ -215,7 +254,9 @@ export function useAgent() {
           pendingEntries: cursor.pendingEntries,
           apiBefore: cursor.apiBefore,
           toolResults: cursor.toolResults,
-          complete: cursor.complete
+          complete: cursor.complete,
+          leafId: cursor.leafId,
+          total: cursor.total
         })
         if (cursor.complete) {
           historyCursor.current = null
@@ -230,11 +271,13 @@ export function useAgent() {
 
   const refreshModels = useCallback(async () => {
     if (!api) return
+    const refreshId = ++modelRefreshId.current
     const [models, levels, commands] = await Promise.all([
       api.getAvailableModels(),
       api.getThinkingLevels(),
       api.getCommands()
     ])
+    if (refreshId !== modelRefreshId.current) return
     dispatch({ type: 'models', models })
     dispatch({ type: 'thinkingLevels', levels })
     dispatch({ type: 'commands', commands })
@@ -331,22 +374,41 @@ export function useAgent() {
   const switchSession = useCallback(
     async (sessionPath: string): Promise<{ cancelled: boolean }> => {
       if (!api) return { cancelled: true }
+      const requestLoadId = ++timelineLoadId.current
       const cached = timelineCache.current.get(sessionPath)
+      let result: { cancelled: boolean }
+      try {
+        result = await api.switchSession(sessionPath)
+      } catch (error) {
+        if (requestLoadId === timelineLoadId.current) {
+          dispatch({
+            type: 'timelineError',
+            error: error instanceof Error ? error.message : String(error)
+          })
+        }
+        throw error
+      }
+      if (result.cancelled || requestLoadId !== timelineLoadId.current) {
+        return { cancelled: true }
+      }
+
       if (cached) {
+        // Paint the cached timeline immediately, then revalidate JSONL below in
+        // case this retained backend produced messages while it was hidden.
         restoreCachedTimeline(sessionPath, cached)
       } else {
-        ++timelineLoadId.current
         historyCursor.current = null
         timelineOwnerPath.current = sessionPath
         expectedTimeline.current = null
+        dispatch({ type: 'clearTimeline' })
+        dispatch({ type: 'timelineLoading', loading: true })
       }
-      const result = await api.switchSession(sessionPath)
-      if (!result.cancelled) {
-        await Promise.all([
-          cached ? Promise.resolve() : reloadTimeline(sessionPath),
-          refreshModels()
-        ])
-      }
+      await reloadTimeline(sessionPath)
+      // Session history comes from its JSONL file and must not wait for a cold
+      // RPC backend. Models and commands refresh once that backend is ready.
+      void refreshModels().catch((error: unknown) => {
+        console.error('[pion] failed to refresh models after session switch:', error)
+      })
       return result
     },
     [api, refreshModels, reloadTimeline, restoreCachedTimeline]

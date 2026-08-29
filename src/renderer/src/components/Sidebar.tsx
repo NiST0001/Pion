@@ -434,7 +434,7 @@ function ProjectFolder({
   const active = branches.some(({ branch }) => branch.cwd === activeCwd)
 
   return (
-    <div className={`project-folder${active ? ' active' : ''}`}>
+    <div className={`project-folder project-folder-${previewDensity}${active ? ' active' : ''}`}>
       <div
         className="project-folder-head"
         onClick={() => onSelect(project.cwd)}

@@ -87,6 +87,8 @@ export interface AgentState {
   mode: AgentMode
   timeline: TimelineItem[]
   timelineMutation: 'replace' | 'prepend' | 'append' | null
+  timelineLoading: boolean
+  timelineError?: string
   busy: boolean
   queued: { steering: number; followUp: number }
 }
@@ -106,6 +108,7 @@ export const initialState: AgentState = {
   mode: 'build',
   timeline: [],
   timelineMutation: null,
+  timelineLoading: false,
   busy: false,
   queued: { steering: 0, followUp: 0 }
 }
@@ -127,4 +130,6 @@ export type Action =
   | { type: 'event'; event: WireEventInput }
   | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode }
   | { type: 'prependEntries'; items: TimelineItem[] }
+  | { type: 'timelineLoading'; loading: boolean }
+  | { type: 'timelineError'; error?: string }
   | { type: 'clearTimeline' }

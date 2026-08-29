@@ -187,6 +187,14 @@ await sleep(350)
 await check('选择收藏会话同步原列表', `(() => { const path = window.__pionFavoriteTestPath; const rows = [...document.querySelectorAll('.side-session')].filter((item) => item.dataset.sessionPath === path); return rows.length >= 2 && rows.every((item) => item.classList.contains('active')); })()`)
 await evaluate(`(() => { const path = window.__pionFavoriteTestPath; const section = [...document.querySelectorAll('.side-section')].find((item) => item.querySelector('.side-section-title')?.textContent?.trim() === '收藏'); const row = [...(section?.querySelectorAll('.side-session') ?? [])].find((item) => item.dataset.sessionPath === path); const star = row?.querySelector('.side-session-favorite'); if (star?.getAttribute('aria-pressed') === 'true') star.click(); return true; })()`)
 await sleep(120)
+await check('会话历史读取绑定目标路径', `(async () => { const paths = [...new Set([...document.querySelectorAll('.project-branch-sessions .side-session')].map((row) => row.dataset.sessionPath).filter(Boolean))]; if (paths.length < 2) return false; const [a, b] = await Promise.all([window.pion.getEntriesPage(undefined, 32, paths[0]), window.pion.getEntriesPage(undefined, 32, paths[1])]); return !!a && !!b && a.total > 0 && b.total > 0 && (a.leafId !== b.leafId || a.total !== b.total); })()`)
+await check('并发切换始终以最后选择为准', `(async () => { const paths = [...new Set([...document.querySelectorAll('.project-branch-sessions .side-session')].map((row) => row.dataset.sessionPath).filter(Boolean))]; if (paths.length < 2) return false; for (let i = 0; i < 20; i++) { const first = paths[i % 2]; const last = paths[(i + 1) % 2]; await Promise.allSettled([window.pion.switchSession(first), window.pion.switchSession(last)]); const state = await window.pion.getState(); if (state?.sessionFile !== last) return false; } return true; })()`)
+await evaluate(`(() => { const rows = [...document.querySelectorAll('.project-branch-sessions .side-session')]; const row = rows.find((item) => item.dataset.sessionPath !== window.__pionFavoriteTestPath) ?? rows[0]; window.__pionHistoryLoadPath = row?.dataset.sessionPath ?? null; window.__pionHistoryLoadStarted = performance.now(); row?.click(); return Boolean(row); })()`)
+for (let i = 0; i < 40; i++) {
+  await sleep(75)
+  if (await evaluate(`!document.querySelector('.empty-state h2')?.textContent?.includes('正在加载会话') && !!document.querySelector('.timeline')`)) break
+}
+await check('冷会话历史无需等待后台启动', `(() => { const path = window.__pionHistoryLoadPath; const active = [...document.querySelectorAll('.project-branch-sessions .side-session')].find((row) => row.dataset.sessionPath === path); return !!path && active?.classList.contains('active') && !!document.querySelector('.timeline') && performance.now() - window.__pionHistoryLoadStarted < 3000 && !document.querySelector('.session-load-error'); })()`)
 await evaluate(`document.querySelector('.sidebar-tools-button')?.click()`)
 await sleep(220)
 await check('技能与工具界面打开', `!!document.querySelector('.capabilities-modal') && !document.querySelector('.sidebar-tools-panel')`)
@@ -363,6 +371,7 @@ await evaluate(`document.querySelector('[data-setting="session-preview-density"]
 await sleep(120)
 await check('紧凑预览即时应用', `document.querySelectorAll('.side-session-compact').length === document.querySelectorAll('.side-session').length`)
 await check('紧凑模式会话间距已收紧', `(() => { const rows = [...document.querySelectorAll('.side-session-compact')]; return rows.length > 0 && rows.every((row) => { const style = getComputedStyle(row); return row.getBoundingClientRect().height <= 28 && parseFloat(style.marginTop) <= 1 && parseFloat(style.marginBottom) <= 1; }); })()`)
+await check('紧凑模式项目和分支同步收紧', `(() => { const folders = [...document.querySelectorAll('.project-folder-compact')]; const folderHeads = folders.map((folder) => folder.querySelector(':scope > .project-folder-head')).filter(Boolean); const branchHeads = folders.flatMap((folder) => [...folder.querySelectorAll('.project-branch-head')]); return folders.length > 0 && folderHeads.every((head) => head.getBoundingClientRect().height <= 31) && branchHeads.every((head) => head.getBoundingClientRect().height <= 29) && folders.every((folder) => parseFloat(getComputedStyle(folder).marginBottom) <= 6); })()`)
 await evaluate(`document.querySelector('[data-setting="session-preview-density"] .segmented button:nth-child(3)')?.click()`)
 await sleep(120)
 await check('详细预览即时应用', `document.querySelectorAll('.side-session-detailed').length === document.querySelectorAll('.side-session').length`)

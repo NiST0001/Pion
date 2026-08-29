@@ -419,7 +419,11 @@ export interface PionApi {
   /** Full entry list of the active session (kept for diagnostics/compatibility). */
   getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null>
   /** Load a bounded history window; omit before for the newest window. */
-  getEntriesPage(before?: number, limit?: number): Promise<SessionEntriesPage | null>
+  getEntriesPage(
+    before?: number,
+    limit?: number,
+    sessionPath?: string
+  ): Promise<SessionEntriesPage | null>
   /** Flattened branch tree of the active session. */
   getTree(): Promise<{ tree: TreeNodeLite[]; leafId: string | null } | null>
 

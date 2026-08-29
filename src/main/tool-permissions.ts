@@ -57,6 +57,7 @@ function parseRules(value: unknown): ToolPermissionRules | null {
 export class ToolPermissionStore {
   private data: ToolPermissionFile = { version: 1, projects: {} }
   private loaded = false
+  private extensionReady = false
   private writeQueue: Promise<void> = Promise.resolve()
 
   get filePath(): string {
@@ -88,14 +89,19 @@ export class ToolPermissionStore {
 
   async ensureExtension(): Promise<string> {
     const path = this.extensionPath
+    if (this.extensionReady) return path
     const source = toolPermissionExtensionSource()
     await mkdir(dirname(path), { recursive: true })
     try {
-      if (await readFile(path, 'utf8') === source) return path
+      if (await readFile(path, 'utf8') === source) {
+        this.extensionReady = true
+        return path
+      }
     } catch {
       // Write the generated extension below.
     }
     await writeFile(path, source, 'utf8')
+    this.extensionReady = true
     return path
   }
 

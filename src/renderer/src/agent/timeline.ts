@@ -247,6 +247,8 @@ export interface TimelineCacheEntry {
   apiBefore: number
   toolResults: WireEntry[]
   complete: boolean
+  leafId: string | null
+  total: number
 }
 
 export interface HistoryCursor extends TimelineCacheEntry {

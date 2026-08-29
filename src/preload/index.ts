@@ -55,8 +55,8 @@ const api: PionApi = {
   forkSession: (sessionPath, entryId) =>
     ipcRenderer.invoke(IPC.AgentForkSession, sessionPath, entryId),
   getEntries: () => ipcRenderer.invoke(IPC.AgentEntries),
-  getEntriesPage: (before, limit) =>
-    ipcRenderer.invoke(IPC.AgentEntriesPage, before, limit) as Promise<SessionEntriesPage | null>,
+  getEntriesPage: (before, limit, sessionPath) =>
+    ipcRenderer.invoke(IPC.AgentEntriesPage, before, limit, sessionPath) as Promise<SessionEntriesPage | null>,
   getTree: () => ipcRenderer.invoke(IPC.AgentTree),
 
   // commands, modes, model & thinking
