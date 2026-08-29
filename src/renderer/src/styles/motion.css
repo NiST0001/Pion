@@ -156,6 +156,10 @@ body,
   animation: pion-fade-in var(--motion-slow) ease both;
 }
 
+.agent-working {
+  animation: pion-fade-in var(--motion-fast) ease both;
+}
+
 .history-navigator-preview {
   animation: pion-pop-in var(--motion-fast) var(--motion-ease-out) both;
 }

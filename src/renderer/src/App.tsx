@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
-import { FolderOpen, Settings, Sparkles, Store } from 'lucide-react'
+import { FolderOpen, Loader2, Settings, Sparkles, Store } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
 import { deriveChanges, deriveLatestRunChanges } from './agent/timeline'
 import type { FileChange } from './agent/types'
@@ -433,40 +433,30 @@ export function App(): ReactElement {
     return () => window.cancelAnimationFrame(frame)
   }, [state.historyJump?.nonce])
 
-  // Freshly loaded history reveals top-to-bottom in screen space: measure each
-  // restored row's viewport position in rAF (after scroll settles), then arm its
-  // animation with a matching delay. The frame is intentionally NOT cancelled on
-  // cleanup: timeline updates (pagination chains) re-run this effect rapidly and
-  // would otherwise starve the measurement forever. The fire-time query is
-  // idempotent — only rows that are not yet armed are measured.
+  // Freshly loaded history reveals top-to-bottom in screen space. Measurement is
+  // synchronous in this layout effect: the scroll-to-bottom layout effect above
+  // has already run, so positions are settled before first paint (no flash, and
+  // no rAF — occluded windows throttle rAF and would starve the arming).
+  // Blocks inside tall rows get their own screen-space delay so the cascade
+  // flows through messages that exceed the viewport.
   useLayoutEffect(() => {
     const container = scrollRef.current
     if (!container) return
-    let attempts = 0
-    const arm = (): void => {
-      const rows = [...container.querySelectorAll<HTMLElement>('.history-reveal:not(.history-reveal-armed)')]
-      if (rows.length === 0) return
-      const rect = container.getBoundingClientRect()
-      const span = Math.max(rect.height, 1)
-      const ratios = rows.map((row) => Math.min(Math.max((row.getBoundingClientRect().top - rect.top) / span, 0), 1))
-      const suspicious = rows.length > 2 && ratios.every((ratio) => ratio === ratios[0])
-      if (suspicious && attempts < 5) {
-        attempts += 1
-        requestAnimationFrame(arm)
-        return
-      }
-      rows.forEach((row, index) => {
-        row.style.setProperty('--history-row-delay', `${Math.round(ratios[index] * 380)}ms`)
-        row.classList.add('history-reveal-armed')
-        // Blocks inside tall rows (a single message can exceed the viewport) get
-        // their own screen-space delay so the cascade flows through them too.
-        row.querySelectorAll<HTMLElement>('.markdown > *').forEach((child) => {
-          const childRatio = Math.min(Math.max((child.getBoundingClientRect().top - rect.top) / span, 0), 1)
-          child.style.setProperty('--history-row-delay', `${Math.round(childRatio * 380)}ms`)
-        })
-      })
+    const rows = container.querySelectorAll<HTMLElement>('.history-reveal:not(.history-reveal-armed)')
+    if (rows.length === 0) return
+    const rect = container.getBoundingClientRect()
+    const span = Math.max(rect.height, 1)
+    const delayOf = (top: number): string => {
+      const ratio = Math.min(Math.max((top - rect.top) / span, 0), 1)
+      return `${Math.round(ratio * 380)}ms`
     }
-    requestAnimationFrame(arm)
+    rows.forEach((row) => {
+      row.style.setProperty('--history-row-delay', delayOf(row.getBoundingClientRect().top))
+      row.classList.add('history-reveal-armed')
+      row.querySelectorAll<HTMLElement>('.markdown > *').forEach((child) => {
+        child.style.setProperty('--history-row-delay', delayOf(child.getBoundingClientRect().top))
+      })
+    })
   }, [state.timeline])
 
   useEffect(() => () => {
@@ -849,6 +839,19 @@ export function App(): ReactElement {
                 </div>
               )}
             </main>
+            {state.busy && (
+              <div className="agent-working" role="status" aria-live="polite">
+                <Loader2 size={13} className="spin" />
+                <span>Agent 正在工作…</span>
+              </div>
+            )}
+            <ToolPermissionModal
+              request={toolPermissionRequests[0] ?? null}
+              queueLength={toolPermissionRequests.length}
+              busy={toolPermissionResolveBusy}
+              error={toolPermissionResolveError}
+              onResolve={(resolution) => void handleToolPermissionResolve(resolution)}
+            />
           </div>
 
           <div className="composer-dock">
@@ -924,13 +927,6 @@ export function App(): ReactElement {
         projectCwd={branchDialogCwd ?? ''}
         onClose={closeBranchDialog}
         onSubmit={handleCreateBranch}
-      />
-      <ToolPermissionModal
-        request={toolPermissionRequests[0] ?? null}
-        queueLength={toolPermissionRequests.length}
-        busy={toolPermissionResolveBusy}
-        error={toolPermissionResolveError}
-        onResolve={(resolution) => void handleToolPermissionResolve(resolution)}
       />
       <SettingsModal
         open={settingsOpen}

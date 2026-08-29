@@ -264,6 +264,11 @@
   cursor: pointer;
   user-select: none;
   font-style: italic;
+  outline: none;
+}
+
+.thinking summary:focus-visible {
+  color: var(--fg-dim);
 }
 
 .thinking summary:hover {
@@ -271,11 +276,11 @@
 }
 
 .thinking pre {
-  margin-top: 6px;
-  padding: 10px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
+  margin-top: 4px;
+  padding: 2px 0 2px 12px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   font-family: var(--mono);
   font-size: 11px;
   line-height: 1.55;
@@ -292,6 +297,29 @@
   border-radius: 999px;
   padding: 2px 14px;
   background: var(--bg-elev);
+}
+
+/* Agent 工作指示器 --------------------------------------------------------- */
+
+.agent-working {
+  position: absolute;
+  left: 58px;
+  bottom: 14px;
+  z-index: 24;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  pointer-events: none;
+}
+
+.agent-working .spin {
+  color: var(--accent-strong);
 }
 
 /* ==========================================================================

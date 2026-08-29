@@ -110,6 +110,7 @@ for (let i = 0; i < 80; i++) {
   if (await evaluate(`!!document.querySelector('.tool-permission-modal')`)) break
 }
 await check('工具调用显示权限确认', `document.querySelector('.tool-permission-modal')?.textContent?.includes('Agent 请求执行操作') && document.querySelector('.tool-permission-summary')?.textContent?.includes('pion-permission-test.txt')`)
+await check('权限请求悬浮在输入框上方', `(() => { const backdrop = document.querySelector('.tool-permission-backdrop'); const panel = document.querySelector('.tool-permission-modal')?.getBoundingClientRect(); const composer = document.querySelector('.composer-dock')?.getBoundingClientRect(); if (!backdrop || !panel || !composer) return false; const cs = getComputedStyle(backdrop); return cs.position === 'absolute' && cs.pointerEvents === 'none' && cs.backgroundColor === 'rgba(0, 0, 0, 0)' && panel.bottom <= composer.top + 8; })()`)
 await check('权限确认支持分级允许', `document.querySelectorAll('.tool-permission-allow-actions button').length === 3 && !!document.querySelector('.tool-permission-allow-project')`)
 await evaluate(`document.querySelector('.tool-permission-allow-project')?.click()`)
 for (let i = 0; i < 30; i++) {
@@ -117,7 +118,7 @@ for (let i = 0; i < 30; i++) {
   if (await evaluate(`!document.querySelector('.tool-permission-modal')`)) break
 }
 await check('项目级允许即时持久化', `(async () => { const policy = await window.pion.getToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}); return policy.source === 'saved' && policy.rules.write === 'allow' && (await window.pion.getPendingToolPermissionRequests()).length === 0 && !window.__pionPermissionError; })()`)
-await evaluate(`(() => { window.pion.send('/pion-permission-risk-test').catch((error) => { window.__pionPermissionError = String(error); }); return true; })()`)
+await evaluate(`(async () => { await window.pion.setToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}, { write: 'allow', shell: 'ask' }); window.pion.send('/pion-permission-risk-test').catch((error) => { window.__pionPermissionError = String(error); }); return true; })()`)
 for (let i = 0; i < 80; i++) {
   await sleep(120)
   if (await evaluate(`!!document.querySelector('.tool-permission-modal')`)) break
@@ -129,6 +130,7 @@ for (let i = 0; i < 30; i++) {
   if (await evaluate(`!document.querySelector('.tool-permission-modal')`)) break
 }
 await check('高风险单次允许不修改项目策略', `(async () => (await window.pion.getToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)})).rules.shell === 'ask')()`)
+await check('Agent 工作指示器在空闲时隐藏', `!document.querySelector('.agent-working')`)
 
 // --- 1. 无边框标题栏 ---
 await check('标题栏存在', `!!document.querySelector('.titlebar')`)
@@ -203,6 +205,7 @@ for (let i = 0; i < 30; i++) {
 }
 await check('恢复历史播放逐段淡入动画', `(() => { const items = [...document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker')]; const revealed = items.filter((item) => item.classList.contains('history-reveal')); const animated = revealed.filter((item) => getComputedStyle(item).animationName === 'history-item-reveal'); return revealed.length > 0 && animated.length === revealed.length ? true : { revealed: revealed.length, animated: animated.length, total: items.length }; })()`)
 await check('历史动画按屏幕空间级联', `(() => { const container = document.querySelector('.chat-scroll'); if (!container) return false; const ctop = container.getBoundingClientRect().top; const els = [...document.querySelectorAll('.timeline .history-reveal, .timeline .history-reveal-armed .markdown > *')]; const items = els.map((el) => ({ top: el.getBoundingClientRect().top - ctop, delay: parseFloat(getComputedStyle(el).animationDelay) || 0 })); if (items.length < 3) return { fail: 'too-few', count: items.length }; const sorted = [...items].sort((a, b) => a.top - b.top); let ordered = true; for (let i = 1; i < sorted.length; i++) { if (sorted[i].delay < sorted[i - 1].delay - 0.002) { ordered = false; break; } } const delays = new Set(items.map((item) => item.delay.toFixed(3))); return ordered && delays.size > 1 ? true : { ordered, delays: [...delays].slice(0, 8) }; })()`)
+await check('思考内容无大边框', `(() => { const pre = document.querySelector('.thinking pre'); const summary = document.querySelector('.thinking summary'); if (!summary) return true; const noOutline = getComputedStyle(summary).outlineStyle === 'none' || getComputedStyle(summary).outlineWidth === '0px'; if (!pre) return noOutline; const cs = getComputedStyle(pre); return noOutline && cs.borderTopWidth === '0px' && cs.backgroundColor === 'rgba(0, 0, 0, 0)'; })()`)
 await evaluate(`(() => { const el = document.querySelector('.chat-scroll'); window.__pionPrependCount = document.querySelectorAll('.timeline > *').length; if (el) { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); } return true; })()`)
 for (let i = 0; i < 25; i++) {
   await sleep(100)
@@ -220,7 +223,7 @@ await sleep(100)
 await check('历史标记悬停显示消息预览', `!!document.querySelector('.history-navigator-preview strong')?.textContent?.trim() && document.querySelector('.history-navigator-preview small')?.textContent?.includes('条')`)
 await evaluate(`(() => { const markers = [...document.querySelectorAll('.history-navigator-marker')]; const mid = markers[Math.floor(markers.length / 2)]; mid?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true })()`)
 await sleep(120)
-await check('导航条间距适中', `(() => { const m = [...document.querySelectorAll('.history-navigator-marker')]; if (m.length < 10) return true; const tops = m.map((el) => el.getBoundingClientRect().top); let sum = 0; for (let i = 1; i < tops.length; i++) sum += tops[i] - tops[i - 1]; const avg = sum / (tops.length - 1); return (avg >= 10.5 && avg <= 16) ? true : { avg: Math.round(avg * 10) / 10, count: m.length }; })()`)
+await check('导航条间距适中', `(() => { const track = document.querySelector('.history-navigator-track'); const m = [...document.querySelectorAll('.history-navigator-marker')]; if (!track || m.length < 10) return true; const gap = parseFloat(getComputedStyle(track).rowGap) || 0; const barH = m[0].getBoundingClientRect().height; const tops = m.map((el) => el.getBoundingClientRect().top); let sum = 0; for (let i = 1; i < tops.length; i++) sum += tops[i] - tops[i - 1]; const avg = sum / (tops.length - 1); return Math.abs(avg - (gap + barH)) <= 1.5 ? true : { avg: Math.round(avg * 10) / 10, gap, barH }; })()`)
 await check('导航条悬停呈现波形放大', `(() => { const markers = [...document.querySelectorAll('.history-navigator-marker')]; const scale = (el) => { const m = /scaleX\\(([^)]+)\\)/.exec(el?.style?.transform || ''); return m ? parseFloat(m[1]) : 1; }; const mid = Math.floor(markers.length / 2); const center = scale(markers[mid]); const d1 = scale(markers[mid + 1] ?? markers[mid]); const near = scale(markers[mid + 2] ?? markers[mid]); const far = scale(markers[Math.min(markers.length - 1, mid + 12)]); return markers.length > 8 && center > 2.6 && center - d1 > 0.6 && near < d1 && far <= near ? true : { count: markers.length, center, d1, near, far }; })()`)
 for (let i = 0; i < 20; i++) {
   await sleep(80)
@@ -424,6 +427,7 @@ await check('Codex 浅色主题可应用', `(() => { const root = getComputedSty
 await evaluate(`Array.from(document.querySelectorAll('.theme-choice')).find(e => e.textContent?.includes('陶土浅色'))?.click()`)
 await sleep(260)
 await check('陶土浅色主题即时应用', `document.documentElement.dataset.theme === 'terracotta-light'`)
+await check('代码块无有色背景', `getComputedStyle(document.documentElement).getPropertyValue('--code-bg').trim() === 'transparent'`)
 await check('浅色主题重点色仅用于重要操作', `(() => { const probe = document.createElement('i'); probe.style.color = 'var(--accent-strong)'; document.body.appendChild(probe); const accent = getComputedStyle(probe).color; probe.remove(); const primary = getComputedStyle(document.querySelector('.sidebar-new-session')).backgroundColor; const selected = getComputedStyle(document.querySelector('.theme-choice.active')).backgroundColor; const nav = getComputedStyle(document.querySelector('.settings-nav-item.active')).color; const section = getComputedStyle(document.querySelector('.settings-section-title')).color; const folder = getComputedStyle(document.querySelector('.project-folder-icon')).color; const body = getComputedStyle(document.body).color; return primary !== selected && nav !== accent && section !== accent && folder !== accent ? true : { primary, selected, nav, body, section, accent, folder }; })()`)
 await evaluate(`Array.from(document.querySelectorAll('.theme-choice')).find(e => e.textContent?.includes('陶土深色'))?.click()`)
 await sleep(260)

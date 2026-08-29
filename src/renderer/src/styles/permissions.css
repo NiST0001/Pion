@@ -1,23 +1,26 @@
 .tool-permission-backdrop {
-  position: fixed;
+  position: absolute;
   inset: 0;
-  z-index: 320;
+  z-index: 30;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: center;
-  padding: 24px;
-  background: rgba(18, 16, 14, 0.62);
-  backdrop-filter: blur(5px);
+  padding: 16px 16px 14px;
+  background: transparent;
+  pointer-events: none;
 }
 
 .tool-permission-modal {
-  width: min(660px, calc(100vw - 36px));
-  max-height: min(720px, calc(100vh - 48px));
+  pointer-events: auto;
+  width: min(620px, 100%);
+  max-height: min(520px, calc(100% - 16px));
   overflow: hidden;
-  border: 1px solid rgba(var(--accent-rgb), 0.3);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
   border-radius: 15px;
   background: var(--bg-elev);
-  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-pop);
 }
 
 .tool-permission-head {
@@ -53,7 +56,8 @@
 
 .tool-permission-body {
   display: flex;
-  max-height: calc(min(720px, 100vh - 48px) - 146px);
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   flex-direction: column;
   gap: 11px;
