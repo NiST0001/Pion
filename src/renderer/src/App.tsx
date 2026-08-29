@@ -52,6 +52,7 @@ export function App(): ReactElement {
   const [sessionQuery, setSessionQuery] = useState('')
   const [newSessionCwd, setNewSessionCwd] = useState('')
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
+  const newSessionInFlight = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const panelResizeRef = useRef<PanelResizeState | null>(null)
   const sessionSelectionId = useRef(0)
@@ -231,14 +232,22 @@ export function App(): ReactElement {
 
   const handleNewSession = useCallback(
     async (cwd?: string) => {
-      const targetCwd = cwd ?? (newSessionCwd || state.status.cwd)
-      sessionSelectionId.current += 1
-      setSelectedSession(null)
-      if (targetCwd) {
-        setNewSessionCwd(targetCwd)
-        await activateProject(targetCwd)
+      if (newSessionInFlight.current) return
+      newSessionInFlight.current = true
+      try {
+        const targetCwd = cwd ?? (newSessionCwd || state.status.cwd)
+        sessionSelectionId.current += 1
+        setSelectedSession(null)
+        if (targetCwd) {
+          setNewSessionCwd(targetCwd)
+          await activateProject(targetCwd)
+        }
+        await actions.newSession()
+      } catch (error) {
+        console.error('[pion] 新建会话失败', error)
+      } finally {
+        newSessionInFlight.current = false
       }
-      await actions.newSession()
     },
     [actions, activateProject, newSessionCwd, state.status.cwd]
   )

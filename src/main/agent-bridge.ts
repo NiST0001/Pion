@@ -104,6 +104,7 @@ export class AgentBridge {
   private readonly desiredModes = new Map<string, AgentMode>()
   private readonly sessionManagers = new Map<string, SessionManager>()
   private readonly sessionCompletedListeners = new Set<SessionCompletedListener>()
+  private newSessionInFlight: Promise<void> | null = null
   private activeKey: string | null = null
   private activeCwd: string | undefined
   private activeSessionPath: string | undefined
@@ -436,8 +437,37 @@ export class AgentBridge {
   // ---------------------------------------------------------------- sessions
 
   async newSession(): Promise<void> {
+    if (this.newSessionInFlight) return this.newSessionInFlight
+    const operation = this.createNewSession()
+    this.newSessionInFlight = operation
+    try {
+      await operation
+    } finally {
+      if (this.newSessionInFlight === operation) this.newSessionInFlight = null
+    }
+  }
+
+  private async createNewSession(): Promise<void> {
     const cwd = this.activeCwd ?? this.status.cwd
     if (!cwd) throw new Error('没有活动工作目录')
+
+    // A fresh session is already usable once its empty backend exists. Do not
+    // create another backend/session when the user clicks "new session" again.
+    const existing = this.getActiveBackend()
+    if (existing) {
+      await existing.startPromise
+      const currentState = await existing.client.getState().catch(() => null)
+      const isEmpty = currentState
+        && currentState.messageCount === 0
+        && !currentState.isStreaming
+        && currentState.pendingMessageCount === 0
+      if (isEmpty) {
+        await this.pushSessionInfo()
+        return
+      }
+      await this.syncBackendSession(existing)
+    }
+
     this.activeCwd = resolve(cwd)
     this.activeSessionPath = undefined
     this.activeKey = this.newSessionKey(this.activeCwd)
