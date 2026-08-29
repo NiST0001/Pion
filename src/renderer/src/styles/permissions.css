@@ -209,12 +209,12 @@
 .tool-permission-actions .tool-permission-allow-project {
   border-color: rgba(var(--accent-rgb), 0.4);
   background: var(--accent);
-  color: #17120f;
+  color: var(--on-accent);
 }
 
 .tool-permission-actions .tool-permission-allow-project:hover:not(:disabled) {
   background: var(--accent-strong);
-  color: #17120f;
+  color: var(--on-accent);
 }
 
 @media (max-width: 680px) {

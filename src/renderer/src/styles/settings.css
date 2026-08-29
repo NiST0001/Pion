@@ -774,7 +774,7 @@
   height: 38px;
   border-radius: 10px;
   background: var(--accent);
-  color: #10131a;
+  color: var(--on-accent);
   flex-shrink: 0;
 }
 
@@ -1150,7 +1150,7 @@
   height: 20px;
   border-radius: 6px;
   background: var(--accent);
-  color: #10131a;
+  color: var(--on-accent);
   font-size: 13px;
   font-weight: 700;
 }
@@ -1239,12 +1239,12 @@
 .project-trust-settings-approve {
   border-color: rgba(var(--accent-rgb), 0.48);
   background: var(--accent);
-  color: #17120f;
+  color: var(--on-accent);
 }
 
 .project-trust-settings-approve:hover:not(:disabled) {
   background: var(--accent-strong);
-  color: #17120f;
+  color: var(--on-accent);
 }
 
 .security-note {
@@ -1344,7 +1344,7 @@
   height: 48px;
   border-radius: 13px;
   background: var(--accent);
-  color: #10131a;
+  color: var(--on-accent);
   font-size: 22px;
   font-weight: 750;
 }
@@ -1589,6 +1589,16 @@
   border-color: #ded8d1;
 }
 
+.theme-card-preview.codex-dark {
+  background: #171717;
+  border-color: #383838;
+}
+
+.theme-card-preview.codex-light {
+  background: #f7f7f7;
+  border-color: #d8d8d8;
+}
+
 .theme-card-top {
   display: flex;
   align-items: center;
@@ -1608,11 +1618,29 @@
   border-color: #e5dfd9;
 }
 
+.codex-dark .theme-card-top {
+  background: #1f1f1f;
+  border-color: #383838;
+}
+
+.codex-light .theme-card-top {
+  background: #ffffff;
+  border-color: #dddddd;
+}
+
 .theme-card-top i {
   width: 4px;
   height: 4px;
   border-radius: 50%;
   background: #d97757;
+}
+
+.codex-dark .theme-card-top i {
+  background: #f1f1ef;
+}
+
+.codex-light .theme-card-top i {
+  background: #202020;
 }
 
 .theme-card-content {
@@ -1645,10 +1673,26 @@
   background: #d9d2ca;
 }
 
+.codex-dark .theme-card-line {
+  background: #4a4a4a;
+}
+
+.codex-light .theme-card-line {
+  background: #d4d4d4;
+}
+
 .theme-card-pill {
   width: 28%;
   margin-top: 2px;
   background: #d97757;
+}
+
+.codex-dark .theme-card-pill {
+  background: #f1f1ef;
+}
+
+.codex-light .theme-card-pill {
+  background: #202020;
 }
 
 .theme-choice-copy {
@@ -1681,7 +1725,7 @@
   height: 19px;
   border-radius: 50%;
   background: var(--accent);
-  color: #10131a;
+  color: var(--on-accent);
 }
 
 /* split panes --------------------------------------------------------------- */

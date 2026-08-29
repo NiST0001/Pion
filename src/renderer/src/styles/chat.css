@@ -103,7 +103,7 @@
 .project-trust-approve {
   border-color: rgba(var(--accent-rgb), 0.4) !important;
   background: var(--accent) !important;
-  color: #17120f !important;
+  color: var(--on-accent) !important;
 }
 
 .project-trust-untrusted {

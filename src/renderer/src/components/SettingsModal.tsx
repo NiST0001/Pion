@@ -501,7 +501,7 @@ export function SettingsModal({
                 <PageHeading
                   kicker="APPEARANCE"
                   title="外观"
-                  description="选择陶土深色或浅色外观，主题会统一调整工作台的整体视觉。所有更改会立即应用。"
+                  description="选择陶土或 Codex 风格的深色/浅色外观。所有更改会立即应用并保存在本机。"
                 />
                 <div className="settings-section theme-section">
                   <div className="settings-section-title">工作台主题</div>

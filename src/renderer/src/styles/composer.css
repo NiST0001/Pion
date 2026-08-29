@@ -306,7 +306,7 @@
   align-items: center;
   justify-content: center;
   background: var(--accent);
-  color: #10131a;
+  color: var(--on-accent);
   transition: background 0.12s ease, opacity 0.12s ease;
 }
 

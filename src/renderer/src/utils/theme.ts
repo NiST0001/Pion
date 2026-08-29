@@ -1,9 +1,13 @@
 /**
- * 陶土主题的本地持久化与应用。
- * 主题会统一改变工作台的整体配色、背景、边框和文字层级。
+ * 工作台主题的本地持久化与应用。
+ * 每套主题统一定义表面、文字层级、重点色和语义状态颜色。
  */
 
-export type ThemeId = 'terracotta-dark' | 'terracotta-light'
+export type ThemeId =
+  | 'terracotta-dark'
+  | 'terracotta-light'
+  | 'codex-dark'
+  | 'codex-light'
 
 export interface ThemeOption {
   id: ThemeId
@@ -13,19 +17,22 @@ export interface ThemeOption {
 
 export const THEMES: ThemeOption[] = [
   { id: 'terracotta-dark', name: '陶土深色', description: '暖黑背景，低干扰长时间工作' },
-  { id: 'terracotta-light', name: '陶土浅色', description: '暖白纸张感，适合明亮环境' }
+  { id: 'terracotta-light', name: '陶土浅色', description: '暖白纸张感，适合明亮环境' },
+  { id: 'codex-dark', name: 'Codex 深色', description: '近黑表面与白色重点操作' },
+  { id: 'codex-light', name: 'Codex 浅色', description: '纯白表面与黑色重点操作' }
 ]
 
 const THEME_STORAGE_KEY = 'pion:theme'
+const THEME_IDS = new Set<ThemeId>(THEMES.map((theme) => theme.id))
 
 export function currentTheme(): ThemeId {
-  const stored = localStorage.getItem(THEME_STORAGE_KEY)
-  return stored === 'terracotta-light' || stored === 'terracotta-dark' ? stored : 'terracotta-dark'
+  const stored = localStorage.getItem(THEME_STORAGE_KEY) as ThemeId | null
+  return stored && THEME_IDS.has(stored) ? stored : 'terracotta-dark'
 }
 
 export function applyTheme(theme: ThemeId): void {
   document.documentElement.dataset.theme = theme
-  document.documentElement.style.colorScheme = theme === 'terracotta-light' ? 'light' : 'dark'
+  document.documentElement.style.colorScheme = theme.endsWith('-light') ? 'light' : 'dark'
 }
 
 export function saveTheme(theme: ThemeId): void {

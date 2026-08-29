@@ -20,6 +20,7 @@
   --accent-rgb: 217, 119, 87;
   --accent-strong: #e59072;
   --accent-soft: rgba(217, 119, 87, 0.1);
+  --on-accent: #17120f;
   --user-bubble: #373633;
   --selected-bg: rgba(255, 255, 255, 0.055);
   --selected-bg-strong: rgba(255, 255, 255, 0.09);
@@ -71,6 +72,72 @@
   --code-bg: #f0ede8;
   --code-fg: #48423c;
   --shadow-pop: 0 18px 46px rgba(76, 57, 43, 0.16);
+}
+
+:root[data-theme='codex-dark'] {
+  color-scheme: dark;
+  --bg: #171717;
+  --bg-elev: #1f1f1f;
+  --bg-input: #262626;
+  --bg-hover: #2d2d2d;
+  --bg-active: #333333;
+  --border: #383838;
+  --border-soft: #292929;
+  --fg: #f2f2f2;
+  --fg-dim: #b7b7b7;
+  --fg-faint: #7c7c7c;
+  --accent: #f1f1ef;
+  --accent-rgb: 241, 241, 239;
+  --accent-strong: #ffffff;
+  --accent-soft: rgba(255, 255, 255, 0.09);
+  --on-accent: #171717;
+  --user-bubble: #2b2b2b;
+  --selected-bg: rgba(255, 255, 255, 0.06);
+  --selected-bg-strong: rgba(255, 255, 255, 0.1);
+  --selected-border: #505050;
+  --danger: #e47d7d;
+  --danger-rgb: 228, 125, 125;
+  --ok: #82b991;
+  --ok-rgb: 130, 185, 145;
+  --warn: #d4aa6a;
+  --purple: #aaa0c7;
+  --cyan: #86a9c6;
+  --code-bg: #121212;
+  --code-fg: #e7e7e7;
+  --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.42);
+}
+
+:root[data-theme='codex-light'] {
+  color-scheme: light;
+  --bg: #f7f7f7;
+  --bg-elev: #ffffff;
+  --bg-input: #f1f1f1;
+  --bg-hover: #e9e9e9;
+  --bg-active: #e3e3e3;
+  --border: #d8d8d8;
+  --border-soft: #e8e8e8;
+  --fg: #202020;
+  --fg-dim: #686868;
+  --fg-faint: #969696;
+  --accent: #202020;
+  --accent-rgb: 32, 32, 32;
+  --accent-strong: #090909;
+  --accent-soft: rgba(32, 32, 32, 0.08);
+  --on-accent: #ffffff;
+  --user-bubble: #ececec;
+  --selected-bg: rgba(32, 32, 32, 0.055);
+  --selected-bg-strong: rgba(32, 32, 32, 0.09);
+  --selected-border: #c5c5c5;
+  --danger: #b64f4f;
+  --danger-rgb: 182, 79, 79;
+  --ok: #527f5f;
+  --ok-rgb: 82, 127, 95;
+  --warn: #956d34;
+  --purple: #6f6590;
+  --cyan: #47758f;
+  --code-bg: #f0f0f0;
+  --code-fg: #333333;
+  --shadow-pop: 0 18px 46px rgba(0, 0, 0, 0.16);
 }
 
 * {

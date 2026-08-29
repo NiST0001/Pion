@@ -17,6 +17,20 @@
   --composer-shadow: 0 5px 20px rgba(47, 43, 40, 0.09);
 }
 
+:root[data-theme='codex-dark'] {
+  --surface-tint: rgba(255, 255, 255, 0.022);
+  --backdrop: rgba(0, 0, 0, 0.62);
+  --code-overlay: rgba(0, 0, 0, 0.32);
+  --composer-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
+}
+
+:root[data-theme='codex-light'] {
+  --surface-tint: rgba(0, 0, 0, 0.022);
+  --backdrop: rgba(0, 0, 0, 0.28);
+  --code-overlay: rgba(255, 255, 255, 0.76);
+  --composer-shadow: 0 5px 20px rgba(0, 0, 0, 0.08);
+}
+
 html,
 body {
   background: var(--bg);
@@ -834,7 +848,7 @@ body {
   border: 1px solid transparent;
   border-radius: 8px;
   background: var(--accent);
-  color: #2a1b16;
+  color: var(--on-accent);
   font-size: 12px;
   font-weight: 650;
   transition: background 0.12s ease, opacity 0.12s ease;
@@ -1095,14 +1109,14 @@ body {
 
 .sidebar-new-session {
   background: var(--accent);
-  color: #2a1b16;
+  color: var(--on-accent);
   box-shadow: 0 3px 10px rgba(var(--accent-rgb), 0.14);
   font-weight: 650;
 }
 
 .sidebar-new-session:hover {
   background: var(--accent-strong);
-  color: #2a1b16;
+  color: var(--on-accent);
   transform: translateY(-1px);
 }
 
@@ -2093,7 +2107,6 @@ body.pion-resizing-panels * {
 .capabilities-nav-item.active .capabilities-nav-arrow,
 .active-model-icon,
 .provider-mark,
-.theme-choice-check,
 .plugin-store-heading h2 svg,
 .review-checkpoint-icon {
   color: var(--fg-dim);
@@ -2102,6 +2115,11 @@ body.pion-resizing-panels * {
 .project-folder.active > .project-folder-head .project-folder-name,
 .project-branch-head.active .project-branch-name,
 .project-branch-head.active .project-branch-icon {
+  color: var(--fg);
+}
+
+.active-model-icon {
+  background: var(--selected-bg-strong);
   color: var(--fg);
 }
 
