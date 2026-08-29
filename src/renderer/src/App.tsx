@@ -16,6 +16,7 @@ import { TitleBar } from './components/TitleBar'
 import { SettingsModal } from './components/SettingsModal'
 import { SkillsToolsModal } from './components/SkillsToolsModal'
 import { PluginStoreModal } from './components/PluginStoreModal'
+import { ProjectPicker } from './components/ProjectPicker'
 
 type ResizeTarget = 'sidebar' | 'review'
 
@@ -437,25 +438,12 @@ export function App(): ReactElement {
               mode={state.mode}
               onModeChange={(mode) => void actions.setMode(mode)}
               projectSelector={
-                <label className="composer-project-picker">
-                  <span className="composer-project-label">项目</span>
-                  <select
-                    aria-label="新会话项目"
-                    value={newSessionCwd}
-                    disabled={state.projects.length === 0}
-                    onChange={(event) => setNewSessionCwd(event.target.value)}
-                  >
-                    {state.projects.length === 0 ? (
-                      <option value="">暂无项目</option>
-                    ) : (
-                      state.projects.map((project) => (
-                        <option key={project.cwd} value={project.cwd} title={project.cwd}>
-                          {project.name}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                </label>
+                <ProjectPicker
+                  projects={state.projects}
+                  value={newSessionCwd}
+                  disabled={state.projects.length === 0}
+                  onChange={setNewSessionCwd}
+                />
               }
               controls={
                 <>

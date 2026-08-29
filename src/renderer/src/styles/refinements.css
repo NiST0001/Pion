@@ -277,30 +277,48 @@ body {
 .composer-project-picker {
   position: relative;
   display: flex;
-  align-items: center;
-  flex: 0 1 180px;
+  flex: 0 1 190px;
   min-width: 0;
-  gap: 6px;
+}
+
+.composer-project-trigger {
+  display: inline-flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
   min-height: 27px;
-  padding: 3px 8px;
+  gap: 5px;
+  padding: 4px 8px;
   border: 1px solid var(--border-soft);
   border-radius: 999px;
   background: var(--surface-tint);
   color: var(--fg-dim);
-  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  transition: background 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, color 0.12s ease;
 }
 
-.composer-project-picker:focus-within {
+.composer-project-trigger:hover,
+.composer-project-trigger[aria-expanded='true'] {
   border-color: rgba(var(--accent-rgb), 0.6);
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.composer-project-trigger:focus-visible {
+  outline: 0;
+  border-color: rgba(var(--accent-rgb), 0.72);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-.composer-project-picker::after {
-  content: '▾';
-  flex: 0 0 auto;
+.composer-project-trigger:disabled {
   color: var(--fg-faint);
-  font-size: 10px;
-  pointer-events: none;
+  cursor: not-allowed;
+}
+
+.composer-project-icon {
+  flex: 0 0 auto;
+  color: var(--accent-strong);
 }
 
 .composer-project-label {
@@ -311,28 +329,106 @@ body {
   letter-spacing: 0.35px;
 }
 
-.composer-project-picker select {
+.composer-project-value {
   min-width: 0;
   flex: 1;
-  border: 0;
-  outline: 0;
-  padding: 0;
-  appearance: none;
-  background: transparent;
+  overflow: hidden;
   color: var(--fg);
-  font: inherit;
-  font-size: 10.5px;
-  cursor: pointer;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.composer-project-picker select:disabled {
+.composer-project-chevron {
+  flex: 0 0 auto;
   color: var(--fg-faint);
-  cursor: not-allowed;
+  transition: transform 0.12s ease;
 }
 
-.composer-project-picker select option {
-  background: var(--bg);
+.composer-project-trigger[aria-expanded='true'] .composer-project-chevron {
+  transform: rotate(180deg);
+  color: var(--accent-strong);
+}
+
+.composer-project-menu.picker-menu {
+  left: 0;
+  right: auto;
+  min-width: 245px;
+  max-width: min(360px, calc(100vw - 32px));
+}
+
+.composer-project-menu-head {
+  padding: 7px 8px 5px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.65px;
+  text-transform: uppercase;
+}
+
+.composer-project-option {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--fg-dim);
+  text-align: left;
+  transition: background 0.1s ease, border-color 0.1s ease, color 0.1s ease;
+}
+
+.composer-project-option:hover,
+.composer-project-option:focus-visible {
+  outline: 0;
+  border-color: var(--border-soft);
+  background: var(--bg-hover);
   color: var(--fg);
+}
+
+.composer-project-option.selected {
+  border-color: rgba(var(--accent-rgb), 0.28);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.composer-project-option-icon {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.composer-project-option-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.composer-project-option-copy strong,
+.composer-project-option-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-project-option-copy strong {
+  color: inherit;
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.composer-project-option-copy small {
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.composer-project-option-check {
+  flex: 0 0 auto;
+  color: var(--accent-strong);
 }
 
 .composer-mode-picker {
