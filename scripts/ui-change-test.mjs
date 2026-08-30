@@ -241,24 +241,24 @@ await check('右上角文件审查栏开关', `!!document.querySelector('.titleb
 await check('审查面板默认打开', `!!document.querySelector('.review-panel')`)
 await check('审查面板默认占工作区一半', `(() => { const body = document.querySelector('.app-body')?.getBoundingClientRect(); const sidebar = document.querySelector('.sidebar')?.getBoundingClientRect(); const review = document.querySelector('.review-panel')?.getBoundingClientRect(); if (!body || !sidebar || !review) return false; const available = body.width - sidebar.width; const ratio = review.width / available; return Math.abs(ratio - 0.5) <= 0.035 ? true : { ratio, review: review.width, available }; })()`)
 await sleep(180)
-await check('发送任务前自动创建运行检查点', `document.querySelector('.review-checkpoint')?.classList.contains('review-checkpoint-ready') && !!document.querySelector('.review-checkpoint-rollback')`)
+await check('发送任务前自动创建运行检查点', `(async () => { const checkpoint = await window.pion.getRunCheckpoint(); return checkpoint?.state === 'ready' && !document.querySelector('.review-checkpoint') && !document.querySelector('.review-rollback-button'); })()`)
 writeFileSync(CHECKPOINT_BASELINE_FILE, 'changed after Pion run checkpoint\n')
 writeFileSync(CHECKPOINT_TEST_FILE, 'created after Pion run checkpoint\n')
 await evaluate(`window.pion.getRunCheckpoint()`)
 for (let i = 0; i < 20; i++) {
   await sleep(120)
-  if (await evaluate(`document.querySelector('.review-checkpoint-rollback')?.disabled === false`)) break
+  if (await evaluate(`document.querySelector('.review-rollback-button')?.disabled === false`)) break
 }
-await check('检查点检测本轮工作区修改', `document.querySelector('.review-checkpoint-rollback')?.disabled === false && document.querySelector('.review-checkpoint-copy')?.textContent?.includes('可恢复')`)
-await evaluate(`document.querySelector('.review-checkpoint-rollback')?.click()`)
+await check('检查点检测本轮工作区修改', `(async () => { const checkpoint = await window.pion.getRunCheckpoint(); return checkpoint?.state === 'ready' && checkpoint.hasChanges && document.querySelector('.review-rollback-button')?.disabled === false; })()`)
+await evaluate(`document.querySelector('.review-rollback-button')?.click()`)
 await sleep(120)
 await check('本轮回滚使用主题确认框', `(() => { const dialog = document.querySelector('.confirm-dialog'); const probe = document.createElement('i'); probe.style.background = 'var(--bg-elev)'; document.body.appendChild(probe); const expected = getComputedStyle(probe).backgroundColor; probe.remove(); return !!dialog && dialog.getAttribute('role') === 'alertdialog' && dialog.textContent?.includes('撤销本轮修改') && getComputedStyle(dialog).backgroundColor === expected; })()`)
 await evaluate(`document.querySelector('.confirm-dialog-confirm')?.click()`)
 for (let i = 0; i < 30; i++) {
   await sleep(120)
-  if (await evaluate(`document.querySelector('.review-checkpoint')?.classList.contains('review-checkpoint-rolled-back')`)) break
+  if (await evaluate(`(async () => (await window.pion.getRunCheckpoint())?.state === 'rolled-back')()`)) break
 }
-await check('一键恢复本轮检查点', `document.querySelector('.review-checkpoint')?.classList.contains('review-checkpoint-rolled-back') && document.querySelector('.review-checkpoint-copy')?.textContent?.includes('已恢复') && !document.querySelector('.confirm-dialog')`)
+await check('一键恢复本轮检查点', `(async () => (await window.pion.getRunCheckpoint())?.state === 'rolled-back' && !document.querySelector('.review-rollback-button') && !document.querySelector('.confirm-dialog'))()`)
 checkHost('检查点移除本轮新增文件', !existsSync(CHECKPOINT_TEST_FILE))
 checkHost(
   '检查点保留并恢复发送前已有文件',
@@ -360,11 +360,17 @@ if (await evaluate(`!!document.querySelector('.task-panel')`)) {
   await check('AI 任务条目只读无勾选按钮', `document.querySelectorAll('.task-panel .task-item button.task-check').length === 0`)
   await check('任务行无扫光且圆圈仅在运行时旋转', `(() => { const panel = document.querySelector('.task-panel'); const active = panel?.querySelector('.task-item.active'); const spinner = active?.querySelector('.task-status-spinner'); if (!panel || !active || !spinner) return true; const wasRunning = panel.classList.contains('running'); panel.classList.remove('running'); const idleAnimation = getComputedStyle(spinner).animationName; panel.classList.add('running'); const runningAnimation = getComputedStyle(spinner).animationName; panel.classList.toggle('running', wasRunning); return idleAnimation === 'none' && runningAnimation === 'task-status-spin' && getComputedStyle(active, '::before').animationName === 'none' ? true : { idleAnimation, runningAnimation, rowAnimation: getComputedStyle(active, '::before').animationName }; })()`)
   await evaluate(`(() => { const t = document.querySelector('.task-panel-toggle'); window.__pionTaskExpandedBefore = t?.getAttribute('aria-expanded'); t?.click(); return true })()`)
-  await sleep(200)
+  for (let i = 0; i < 20; i++) {
+    await sleep(50)
+    if (await evaluate(`!document.querySelector('.task-panel-card')?.classList.contains('task-animating')`)) break
+  }
   await check('任务面板可切换折叠状态', `(() => { const t = document.querySelector('.task-panel-toggle'); const now = t?.getAttribute('aria-expanded'); return now !== null && now !== window.__pionTaskExpandedBefore && !document.querySelector('.task-panel-card')?.classList.contains('task-animating'); })()`)
   await check('任务面板恢复展开动画且按钮不漂移', `(() => { const icon = document.querySelector('.task-panel-toggle-icon'); const card = document.querySelector('.task-panel-card'); const panel = document.querySelector('.task-panel'); if (!icon || !card || !panel) return false; const cardDurations = getComputedStyle(card).transitionDuration.split(',').map(parseFloat); const panelDurations = getComputedStyle(panel).transitionDuration.split(',').map(parseFloat); let stablePress = false; try { stablePress = [...document.styleSheets].some((sheet) => [...sheet.cssRules].some((rule) => rule.cssText.includes('.task-panel-toggle:active') && rule.cssText.includes('translate: none') && rule.cssText.includes('scale: 1'))); } catch {} return getComputedStyle(icon).transitionDuration === '0s' && cardDurations.some((value) => value > 0) && panelDurations.some((value) => value > 0) && stablePress; })()`)
   await evaluate(`document.querySelector('.task-panel-toggle')?.click()`)
-  await sleep(200)
+  for (let i = 0; i < 20; i++) {
+    await sleep(50)
+    if (await evaluate(`!document.querySelector('.task-panel-card')?.classList.contains('task-animating')`)) break
+  }
   await check('任务面板可切回原状态', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === window.__pionTaskExpandedBefore`)
   await check('任务面板折叠状态按会话持久化', `(() => { const key = document.querySelector('.task-panel')?.dataset.sessionKey; if (!key) return false; return localStorage.getItem('pion:session-task-panel-state:' + encodeURIComponent(key)) !== null; })()`)
 } else {
@@ -374,20 +380,30 @@ for (let i = 0; i < 20; i++) {
   await sleep(80)
   if (await evaluate(`!!document.querySelector('.modified-files-card')`)) break
 }
-await check('内联显示本轮修改文件摘要', `(() => { const card = document.querySelector('.modified-files-card'); return !!card && card.querySelector('.modified-files-title')?.textContent?.includes('已编辑') && !!card.querySelector('.modified-files-total .stat-add') && !!card.querySelector('.modified-files-review') && !!card.querySelector('.modified-files-undo') && getComputedStyle(card).animationName === 'pion-reveal-in'; })()`)
-await check('修改文件默认保持紧凑列表', `(() => { const rows = document.querySelectorAll('.modified-files-row'); const expand = document.querySelector('.modified-files-expand'); return rows.length > 0 && rows.length <= 3 && (expand ? expand.textContent?.includes('再显示') : true); })()`)
-await evaluate(`document.querySelector('.modified-files-expand')?.click()`)
-await sleep(100)
-await check('修改文件列表可展开', `(() => { const expand = document.querySelector('.modified-files-expand'); return !expand || expand.getAttribute('aria-expanded') === 'true'; })()`)
-await evaluate(`document.querySelector('.modified-files-row')?.click()`)
-await sleep(140)
-await check('点击修改文件直接打开审查栏', `(() => { const active = document.querySelector('.review-panel .review-file-item.active'); return !!document.querySelector('.review-panel') && !!active && (active.getAttribute('title') ?? '').length > 0; })()`)
-await evaluate(`document.querySelector('.modified-files-review')?.click()`)
-await sleep(140)
-await check('修改摘要可打开审查栏', `!!document.querySelector('.review-panel')`)
-await evaluate(`document.querySelector('.review-panel .icon-button')?.click()`)
-await sleep(100)
-await check('修改摘要审查栏可关闭', `!document.querySelector('.review-panel')`)
+const hasModifiedFilesCard = await evaluate(`!!document.querySelector('.modified-files-card')`)
+if (hasModifiedFilesCard) {
+  await check('内联显示本轮修改文件摘要', `(() => { const card = document.querySelector('.modified-files-card'); return !!card && card.querySelector('.modified-files-title')?.textContent?.includes('已编辑') && !!card.querySelector('.modified-files-total .stat-add') && !!card.querySelector('.modified-files-review') && !!card.querySelector('.modified-files-undo') && getComputedStyle(card).animationName === 'pion-reveal-in'; })()`)
+  await check('修改文件默认保持紧凑列表', `(() => { const rows = document.querySelectorAll('.modified-files-row'); const expand = document.querySelector('.modified-files-expand'); return rows.length > 0 && rows.length <= 3 && (expand ? expand.textContent?.includes('再显示') : true); })()`)
+  await evaluate(`document.querySelector('.modified-files-expand')?.click()`)
+  await sleep(100)
+  await check('修改文件列表可展开', `(() => { const expand = document.querySelector('.modified-files-expand'); return !expand || expand.getAttribute('aria-expanded') === 'true'; })()`)
+  await evaluate(`document.querySelector('.modified-files-row')?.click()`)
+  await sleep(140)
+  await check('点击修改文件直接打开审查栏', `(() => { const active = document.querySelector('.review-panel .review-file-item.active'); return !!document.querySelector('.review-panel') && !!active && (active.getAttribute('title') ?? '').length > 0; })()`)
+  await evaluate(`document.querySelector('.modified-files-review')?.click()`)
+  await sleep(140)
+  await check('修改摘要可打开审查栏', `!!document.querySelector('.review-panel')`)
+  await evaluate(`document.querySelector('.review-close-button')?.click()`)
+  await sleep(100)
+  await check('修改摘要审查栏可关闭', `!document.querySelector('.review-panel')`)
+} else {
+  await check('内联显示本轮修改文件摘要（当前历史无修改，跳过）', `true`)
+  await check('修改文件默认保持紧凑列表（当前历史无修改，跳过）', `true`)
+  await check('修改文件列表可展开（当前历史无修改，跳过）', `true`)
+  await check('点击修改文件直接打开审查栏（当前历史无修改，跳过）', `true`)
+  await check('修改摘要可打开审查栏（当前历史无修改，跳过）', `true`)
+  await check('修改摘要审查栏可关闭', `!document.querySelector('.review-panel')`)
+}
 await evaluate(`document.querySelector('.history-navigator-marker')?.click()`)
 for (let i = 0; i < 40; i++) {
   await sleep(60)

@@ -2178,8 +2178,7 @@ body.pion-resizing-panels * {
 .capabilities-nav-item.active .capabilities-nav-arrow,
 .active-model-icon,
 .provider-mark,
-.plugin-store-heading h2 svg,
-.review-checkpoint-icon {
+.plugin-store-heading h2 svg {
   color: var(--fg-dim);
 }
 
@@ -2305,22 +2304,4 @@ body.pion-resizing-panels * {
   border-color: var(--border);
   background: var(--selected-bg);
   color: var(--ok);
-}
-
-.review-checkpoint-rolled-back {
-  border-color: rgba(var(--ok-rgb), 0.3);
-  background: rgba(var(--ok-rgb), 0.08);
-  color: var(--ok);
-}
-
-.review-checkpoint-rollback {
-  border-color: rgba(var(--danger-rgb), 0.3);
-  background: transparent;
-  color: var(--danger);
-}
-
-.review-checkpoint-rollback:hover:not(:disabled) {
-  border-color: rgba(var(--danger-rgb), 0.48);
-  background: rgba(var(--danger-rgb), 0.09);
-  color: var(--danger);
 }
