@@ -1,0 +1,288 @@
+/* ========================================================================== 
+   Readable typography pass
+
+   Loaded after refinements.css so the application keeps its spatial density
+   while text no longer drops to 8–10px on high-resolution displays.
+   ========================================================================== */
+
+body {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.62;
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font-weight: inherit;
+}
+
+::placeholder {
+  opacity: 1;
+}
+
+/* Numeric micro-labels: retain hierarchy without becoming illegible. */
+.task-index,
+.task-history-task-index {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* Former 9–9.5px labels. */
+.history-navigator-preview small,
+.composer-project-option-copy small,
+.slash-command-source,
+.capability-card-source,
+.capability-card-name-row code,
+.plugin-type-badge,
+.project-trust-card-copy span,
+.project-trust-card-copy small,
+.review-panel-kicker,
+.review-checkpoint-copy span,
+.task-history-run-copy small,
+.confirm-dialog-detail,
+.tool-permission-note,
+.provider-status,
+.review-checkpoint-rollback,
+.review-file-item .tool-stats,
+.review-detail-head .tool-stats,
+.task-history-summary small,
+.task-history-run-index,
+.task-history-task-copy small {
+  font-size: 11px;
+  font-weight: 550;
+}
+
+/* Former 10–10.5px supporting text and controls. */
+.project-trust-copy span,
+.project-trust-copy small,
+.modified-files-error,
+.tool-permission-meta,
+.tool-permission-project,
+.tool-permission-risks,
+.side-session-meta,
+.composer-attachment-label,
+.composer-attachment-error,
+.composer-project-label,
+.composer-project-menu-head,
+.slash-command-heading,
+.capabilities-nav-label,
+.capabilities-nav-copy small,
+.capabilities-page-kicker,
+.capabilities-toolbar,
+.project-folder-count,
+.project-branch-count,
+.side-session-preview,
+.plugin-card-meta,
+.plugin-card-error,
+.modal-kicker,
+.settings-page-kicker,
+.settings-nav-label,
+.settings-nav-copy small,
+.active-model-copy > span,
+.model-badge,
+.reasoning-tag,
+.provider-copy code,
+.model-choice-meta,
+.preview-toolbar,
+.preview-bubble,
+.preview-input,
+.tool-permission-settings-note,
+.review-count,
+.side-count,
+.context-fork-index,
+.task-history-summary,
+.task-panel-count,
+.task-panel-caption,
+.project-trust-actions button,
+.fork-button,
+.picker-group-title,
+.picker-option-meta,
+.confirm-dialog-actions button,
+.history-navigator-preview p,
+.modified-files-total,
+.modified-files-actions button,
+.modified-files-path,
+.modified-files-stats,
+.modified-files-expand,
+.tool-permission-detail,
+.tool-permission-actions button,
+.composer-project-trigger,
+.composer-mode-option,
+.plugin-store-manual-error,
+.plugin-detail-button,
+.plugin-external-link,
+.active-model-copy small,
+.provider-count,
+.action-card small,
+.info-row > span,
+.info-row > strong.mono,
+.theme-choice-copy small,
+.review-checkpoint-copy strong,
+.review-section-head,
+.review-detail-name,
+.review-detail-body .diff-view,
+.review-detail-body .file-preview,
+.context-menu-header small,
+.task-history-heading > span {
+  font-size: 12px;
+}
+
+/* Former 11–11.5px labels and secondary body copy. */
+.thinking pre,
+.compaction-marker,
+.tool-stats,
+.tool-running-label,
+.empty-tips span,
+.thinking-trigger,
+.thinking-option,
+.side-section-toggle,
+.slash-command-name,
+.slash-command-description,
+.branch-create-path,
+.branch-create-hint,
+.capabilities-loading-note,
+.capability-card-copy p,
+.capabilities-error,
+.project-folder-new-branch-plus,
+.project-folder-empty,
+.plugin-store-filters button,
+.plugin-store-notice,
+.plugin-install-button,
+.settings-section-title,
+.setting-range-value,
+.setting-path,
+.settings-stderr,
+.settings-note,
+.feature-item small,
+.review-file-name,
+.review-empty-files,
+.review-empty-detail span,
+.context-menu-empty,
+.context-menu-error,
+.task-history-summary strong,
+.task-history-task-copy strong,
+.tool-output,
+.diff-dense,
+.picker-compact .picker-trigger,
+.confirm-dialog-message,
+.history-navigator-preview strong,
+.titlebar-path,
+.composer-project-option-copy strong,
+.branch-create-error,
+.project-branch-name,
+.side-session-compact .side-item-label,
+.plugin-store-heading > span,
+.plugin-store-search input,
+.plugin-store-manual input,
+.plugin-card-description,
+.setting-desc,
+.settings-about code,
+.model-choice-name,
+.about-hero p,
+.info-row > strong,
+.diagnostics-empty,
+.task-history-state,
+.task-history-run-copy strong,
+.task-title {
+  font-size: 13px;
+}
+
+/* Former 12–12.5px controls and content. */
+.file-preview,
+.project-trust-copy strong,
+.bubble-error,
+.thinking,
+.tool-command,
+.tool-empty,
+.diff-view,
+.empty-state p code,
+.picker-trigger,
+.status-run,
+.queued,
+.modified-files-title strong,
+.tool-permission-summary,
+.branch-create-field,
+.branch-create-submit,
+.sidebar-new-session,
+.sidebar-tools-button,
+.sidebar-search input,
+.capabilities-nav-copy strong,
+.capabilities-page-heading p,
+.capability-card-name-row strong,
+.capabilities-empty,
+.project-branch-sessions .side-session,
+.plugin-store-state,
+.ghost-button,
+.segmented button,
+.settings-nav-copy strong,
+.settings-page-heading p,
+.provider-mark,
+.models-empty,
+.settings-inline-error,
+.action-card strong,
+.preview-brand span,
+.feature-item strong,
+.theme-choice-copy strong,
+.review-empty-detail strong,
+.sidebar-settings,
+.side-empty,
+.context-menu-header > span,
+.context-menu-item,
+.context-fork-item,
+.task-panel-summary,
+.agent-working-text,
+.markdown :not(pre) > code,
+.code-block pre,
+.tool-call,
+.picker-option,
+.branch-create-input,
+.project-folder-name,
+.setting-input,
+.provider-copy strong {
+  font-size: 14px;
+}
+
+/* Former 13px primary labels. */
+.banner,
+.markdown table,
+.empty-state p,
+.confirm-dialog-copy h2,
+.side-item,
+.branch-create-description,
+.plugin-card-title h3,
+.setting-label,
+.preview-send,
+.project-trust-card-copy strong,
+.review-panel-title strong,
+.brand-name {
+  font-size: 15px;
+}
+
+/* Main reading and writing surfaces. */
+.markdown,
+.composer textarea,
+.active-model-copy strong {
+  font-size: 16px;
+}
+
+/* Faint text needs contrast as well as size on both light and dark themes. */
+:root {
+  --fg-faint: #9a9289;
+}
+
+:root[data-theme='terracotta-light'] {
+  --fg-faint: #827b74;
+}
+
+:root[data-theme='codex-dark'] {
+  --fg-faint: #929292;
+}
+
+:root[data-theme='codex-light'] {
+  --fg-faint: #858585;
+}

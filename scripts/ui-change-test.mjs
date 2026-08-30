@@ -224,6 +224,10 @@ await check('Agent 工作指示器在空闲时隐藏', `!document.querySelector(
 // --- 1. 无边框标题栏 ---
 await check('标题栏存在', `!!document.querySelector('.titlebar')`)
 await check('全局字体使用 Maple Mono', `getComputedStyle(document.body).fontFamily.includes('Maple Mono')`)
+await check('全局字体提升至清晰中等字重', `(() => { const style = getComputedStyle(document.body); return parseFloat(style.fontSize) >= 15 && Number(style.fontWeight) >= 500; })()`)
+await check('Linux 字体恢复系统子像素渲染', `getComputedStyle(document.body).webkitFontSmoothing === 'auto'`)
+await check('主输入区使用大号正文', `parseFloat(getComputedStyle(document.querySelector('.composer textarea')).fontSize) >= 16`)
+await check('侧栏项目标签不再使用小字号', `parseFloat(getComputedStyle(document.querySelector('.project-folder-name')).fontSize) >= 14`)
 await check('旧 header 已移除', `!document.querySelector('.app-header')`)
 await check('窗口控制三键（最小/最大/关闭）', `document.querySelectorAll('.titlebar-btn').length >= 3`)
 await check('关闭按钮样式', `!!document.querySelector('.titlebar-close')`)
