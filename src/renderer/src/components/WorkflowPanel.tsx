@@ -24,6 +24,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 
 interface WorkflowPanelProps {
   cwd?: string
+  embedded?: boolean
   workflows: WorkflowSnapshot[]
   selected: WorkflowSnapshot | null
   loading: boolean
@@ -76,6 +77,7 @@ function WorkerRow({ worker }: { worker: WorkflowWorker }) {
 
 export function WorkflowPanel({
   cwd,
+  embedded = false,
   workflows,
   selected,
   loading,
@@ -96,6 +98,7 @@ export function WorkflowPanel({
   const [creating, setCreating] = useState(false)
   const [goal, setGoal] = useState('')
   const [confirmation, setConfirmation] = useState<Confirmation>(null)
+  const expanded = embedded || open
   const running = selected ? isWorkflowRunning(selected.state) : false
   const canRepair = selected?.state === 'blocked'
     && selected.blockedReason !== 'no-verification'
@@ -157,16 +160,18 @@ export function WorkflowPanel({
   }
 
   return (
-    <section className={`workflow-panel${open ? ' open' : ''}${running ? ' running' : ''}`}>
-      <button type="button" className="workflow-toggle" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
-        <Users size={13} />
-        <strong>多 Agent</strong>
-        {selected ? <><span>{workflowStateLabel(selected.state)}</span><span className="workflow-role-count">{selected.workers.length} workers</span></> : <span>未启动</span>}
-        {running && <Loader2 size={12} className="spin" />}
-        <ChevronDown size={13} className="workflow-chevron" />
-      </button>
+    <section className={`workflow-panel${expanded ? ' open' : ''}${embedded ? ' embedded' : ''}${running ? ' running' : ''}`}>
+      {!embedded && (
+        <button type="button" className="workflow-toggle" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+          <Users size={13} />
+          <strong>多 Agent</strong>
+          {selected ? <><span>{workflowStateLabel(selected.state)}</span><span className="workflow-role-count">{selected.workers.length} workers</span></> : <span>未启动</span>}
+          {running && <Loader2 size={12} className="spin" />}
+          <ChevronDown size={13} className="workflow-chevron" />
+        </button>
+      )}
 
-      {open && (
+      {expanded && (
         <div className="workflow-content">
           <div className="workflow-topbar">
             <div className="workflow-tabs" role="tablist" aria-label="多 Agent 工作流">

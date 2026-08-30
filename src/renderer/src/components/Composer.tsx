@@ -43,6 +43,8 @@ interface ComposerProps {
   /** 嵌入输入框底部的控制区（模型/思考级别选择器等） */
   controls?: ReactNode
   commands: SlashCommandInfo[]
+  /** Renderer-owned commands that stay available while the Agent backend prepares. */
+  localCommandNames?: string[]
   mode: AgentMode
   onModeChange: (mode: AgentMode) => void
   onSend: (text: string, images: ImageContent[]) => void
@@ -60,6 +62,7 @@ export function Composer({
   projectSelector,
   controls,
   commands,
+  localCommandNames = [],
   mode,
   onModeChange,
   onSend,
@@ -195,8 +198,10 @@ export function Composer({
   const slashQuery = slashMatch?.[1].toLocaleLowerCase() ?? null
   const commandOptions = slashQuery === null
     ? []
-    : commands.filter((command) => command.name.toLocaleLowerCase().startsWith(slashQuery)).slice(0, 8)
+    : commands.filter((command) => command.name.toLocaleLowerCase().startsWith(slashQuery)).slice(0, 12)
   const showCommandMenu = !disabled && commandOptions.length > 0
+  const invokedCommandName = value.trim().match(/^\/([^\s]+)(?:\s+[\s\S]*)?$/)?.[1]?.toLocaleLowerCase()
+  const localCommandReady = Boolean(invokedCommandName && localCommandNames.includes(invokedCommandName))
   const activeCommandIndex = Math.min(commandIndex, Math.max(0, commandOptions.length - 1))
 
   useEffect(() => {
@@ -205,19 +210,30 @@ export function Composer({
 
   const submit = useCallback(() => {
     const text = value.trim()
-    if ((text === '' && pendingImages.length === 0) || disabled || sendDisabled) return
-    onSend(text, pendingImages)
+    if ((text === '' && pendingImages.length === 0) || disabled || (sendDisabled && !localCommandReady)) return
+    onSend(text, localCommandReady ? [] : pendingImages)
     clearValue()
-    clearImages()
-  }, [value, pendingImages, disabled, sendDisabled, onSend, clearValue, clearImages])
+    if (!localCommandReady) clearImages()
+  }, [value, pendingImages, disabled, sendDisabled, localCommandReady, onSend, clearValue, clearImages])
 
   const queue = useCallback(() => {
     const text = value.trim()
-    if ((text === '' && pendingImages.length === 0) || disabled || sendDisabled) return
-    onQueue(text, pendingImages)
+    if ((text === '' && pendingImages.length === 0) || disabled || (sendDisabled && !localCommandReady)) return
+    if (localCommandReady) onSend(text, [])
+    else onQueue(text, pendingImages)
     clearValue()
-    clearImages()
-  }, [value, pendingImages, disabled, sendDisabled, onQueue, clearValue, clearImages])
+    if (!localCommandReady) clearImages()
+  }, [
+    value,
+    pendingImages,
+    disabled,
+    sendDisabled,
+    localCommandReady,
+    onSend,
+    onQueue,
+    clearValue,
+    clearImages
+  ])
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (showCommandMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
@@ -239,7 +255,8 @@ export function Composer({
       !event.nativeEvent.isComposing
     ) {
       event.preventDefault()
-      selectSlashCommand(activeCommandIndex)
+      if (localCommandReady) submit()
+      else selectSlashCommand(activeCommandIndex)
       return
     }
 
@@ -321,6 +338,7 @@ export function Composer({
 
   const sourceLabel = (source: SlashCommandInfo['source']): string => {
     if (source === 'builtin') return 'Pi 内置'
+    if (source === 'pion') return 'Pion 内置'
     if (source === 'skill') return '技能'
     if (source === 'prompt') return '提示词'
     return '扩展'
@@ -438,8 +456,8 @@ export function Composer({
         <button
           className="send-button"
           onClick={submit}
-          disabled={disabled || sendDisabled || (value.trim() === '' && pendingImages.length === 0)}
-          title={sendDisabled ? 'Agent 正在准备，输入内容会保留' : 'Enter 直接发送'}
+          disabled={disabled || (sendDisabled && !localCommandReady) || (value.trim() === '' && pendingImages.length === 0)}
+          title={sendDisabled && !localCommandReady ? 'Agent 正在准备，输入内容会保留' : 'Enter 直接发送'}
         >
           <ArrowUp size={16} />
         </button>

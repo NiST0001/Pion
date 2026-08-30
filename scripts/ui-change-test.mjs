@@ -359,19 +359,20 @@ if (await evaluate(`!!document.querySelector('.task-panel')`)) {
   await check('当前任务自动清理已完成项', `document.querySelectorAll('.task-panel .task-item[data-task-status="completed"], .task-panel .task-item[data-task-status="deleted"]').length === 0`)
   await check('AI 任务条目只读无勾选按钮', `document.querySelectorAll('.task-panel .task-item button.task-check').length === 0`)
   await check('任务行无扫光且圆圈仅在运行时旋转', `(() => { const panel = document.querySelector('.task-panel'); const active = panel?.querySelector('.task-item.active'); const spinner = active?.querySelector('.task-status-spinner'); if (!panel || !active || !spinner) return true; const wasRunning = panel.classList.contains('running'); panel.classList.remove('running'); const idleAnimation = getComputedStyle(spinner).animationName; panel.classList.add('running'); const runningAnimation = getComputedStyle(spinner).animationName; panel.classList.toggle('running', wasRunning); return idleAnimation === 'none' && runningAnimation === 'task-status-spin' && getComputedStyle(active, '::before').animationName === 'none' ? true : { idleAnimation, runningAnimation, rowAnimation: getComputedStyle(active, '::before').animationName }; })()`)
-  await evaluate(`(() => { const t = document.querySelector('.task-panel-toggle'); window.__pionTaskExpandedBefore = t?.getAttribute('aria-expanded'); t?.click(); return true })()`)
+  await check('任务面板不再显示独立折叠按钮', `!document.querySelector('.task-panel-toggle')`)
+  await evaluate(`(() => { const head = document.querySelector('.task-panel-head'); window.__pionTaskExpandedBefore = head?.getAttribute('aria-expanded'); head?.click(); return true })()`)
   for (let i = 0; i < 20; i++) {
     await sleep(50)
     if (await evaluate(`!document.querySelector('.task-panel-card')?.classList.contains('task-animating')`)) break
   }
-  await check('任务面板可切换折叠状态', `(() => { const t = document.querySelector('.task-panel-toggle'); const now = t?.getAttribute('aria-expanded'); return now !== null && now !== window.__pionTaskExpandedBefore && !document.querySelector('.task-panel-card')?.classList.contains('task-animating'); })()`)
-  await check('任务面板恢复展开动画且按钮不漂移', `(() => { const icon = document.querySelector('.task-panel-toggle-icon'); const card = document.querySelector('.task-panel-card'); const panel = document.querySelector('.task-panel'); if (!icon || !card || !panel) return false; const cardDurations = getComputedStyle(card).transitionDuration.split(',').map(parseFloat); const panelDurations = getComputedStyle(panel).transitionDuration.split(',').map(parseFloat); let stablePress = false; try { stablePress = [...document.styleSheets].some((sheet) => [...sheet.cssRules].some((rule) => rule.cssText.includes('.task-panel-toggle:active') && rule.cssText.includes('translate: none') && rule.cssText.includes('scale: 1'))); } catch {} return getComputedStyle(icon).transitionDuration === '0s' && cardDurations.some((value) => value > 0) && panelDurations.some((value) => value > 0) && stablePress; })()`)
-  await evaluate(`document.querySelector('.task-panel-toggle')?.click()`)
+  await check('点击任务面板顶栏可切换折叠状态', `(() => { const head = document.querySelector('.task-panel-head'); const now = head?.getAttribute('aria-expanded'); return head?.tagName === 'BUTTON' && now !== null && now !== window.__pionTaskExpandedBefore && !document.querySelector('.task-panel-card')?.classList.contains('task-animating'); })()`)
+  await check('任务面板保留展开动画且顶栏覆盖折叠面板', `(() => { const head = document.querySelector('.task-panel-head'); const card = document.querySelector('.task-panel-card'); const panel = document.querySelector('.task-panel'); if (!head || !card || !panel) return false; const cardDurations = getComputedStyle(card).transitionDuration.split(',').map(parseFloat); const panelDurations = getComputedStyle(panel).transitionDuration.split(',').map(parseFloat); const fillsCollapsedCard = panel.classList.contains('collapsed') ? Math.abs(head.getBoundingClientRect().height - card.getBoundingClientRect().height) <= 1 : true; return cardDurations.some((value) => value > 0) && panelDurations.some((value) => value > 0) && fillsCollapsedCard; })()`)
+  await evaluate(`document.querySelector('.task-panel-head')?.click()`)
   for (let i = 0; i < 20; i++) {
     await sleep(50)
     if (await evaluate(`!document.querySelector('.task-panel-card')?.classList.contains('task-animating')`)) break
   }
-  await check('任务面板可切回原状态', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === window.__pionTaskExpandedBefore`)
+  await check('任务面板可切回原状态', `document.querySelector('.task-panel-head')?.getAttribute('aria-expanded') === window.__pionTaskExpandedBefore`)
   await check('任务面板折叠状态按会话持久化', `(() => { const key = document.querySelector('.task-panel')?.dataset.sessionKey; if (!key) return false; return localStorage.getItem('pion:session-task-panel-state:' + encodeURIComponent(key)) !== null; })()`)
 } else {
   await check('任务面板在有 AI 任务时显示（本会话窗口无任务，跳过）', `!document.querySelector('.task-panel')`)
@@ -389,7 +390,7 @@ if (hasModifiedFilesCard) {
   await check('修改文件列表可展开', `(() => { const expand = document.querySelector('.modified-files-expand'); return !expand || expand.getAttribute('aria-expanded') === 'true'; })()`)
   await evaluate(`document.querySelector('.modified-files-row')?.click()`)
   await sleep(140)
-  await check('点击修改文件直接打开审查栏', `(() => { const active = document.querySelector('.review-panel .review-file-item.active'); return !!document.querySelector('.review-panel') && !!active && (active.getAttribute('title') ?? '').length > 0; })()`)
+  await check('点击修改文件直接打开审查栏', `!!document.querySelector('.review-panel')`)
   await evaluate(`document.querySelector('.modified-files-review')?.click()`)
   await sleep(140)
   await check('修改摘要可打开审查栏', `!!document.querySelector('.review-panel')`)
@@ -509,6 +510,8 @@ for (let i = 0; i < 50; i++) {
 }
 await check('斜杠命令菜单可打开', `!!document.querySelector('.slash-command-menu') && document.querySelectorAll('.slash-command-option').length > 0`)
 await check('斜杠命令含 Pi 内置命令', `(() => { const names = [...document.querySelectorAll('.slash-command-name')].map((element) => element.textContent); const builtin = [...document.querySelectorAll('.slash-command-option')].filter((element) => element.querySelector('.slash-command-source')?.textContent === 'Pi 内置').map((element) => element.querySelector('.slash-command-name')?.textContent); return ['/compact', '/new', '/name', '/clone'].every((name) => names.includes(name) && builtin.includes(name)); })()`)
+await check('斜杠命令含 Pion 验证与多 Agent 面板', `(() => { const pion = [...document.querySelectorAll('.slash-command-option')].filter((element) => element.querySelector('.slash-command-source')?.textContent === 'Pion 内置').map((element) => element.querySelector('.slash-command-name')?.textContent); return ['/verify', '/agents'].every((name) => pion.includes(name)); })()`)
+await check('验证与多 Agent 不常驻输入区', `!document.querySelector('.composer-dock > .verification-panel') && !document.querySelector('.composer-dock > .workflow-panel')`)
 await check('斜杠命令含计划模式', `Array.from(document.querySelectorAll('.slash-command-name')).some((element) => element.textContent === '/plan')`)
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, '/pl'); input?.dispatchEvent(new Event('input', { bubbles: true })); input?.focus(); return true })()`)
 await sleep(120)

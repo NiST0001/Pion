@@ -14,6 +14,7 @@ import type {
   ProjectToolPermissionPolicy,
   ProjectTrustInfo,
   SessionMeta,
+  SlashCommandInfo,
   ToolPermissionCategory,
   ToolPermissionDecision,
   ToolPermissionRequest,
@@ -37,6 +38,8 @@ import { RunMetricsStrip } from './components/RunMetricsStrip'
 import { RunRecoveryBanner } from './components/RunRecoveryBanner'
 import { VerificationPanel } from './components/VerificationPanel'
 import { WorkflowPanel } from './components/WorkflowPanel'
+import { OperationsModal } from './components/OperationsModal'
+import type { OperationsPanelKind } from './components/OperationsModal'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
 import type { SessionPreviewDensity } from './utils/sessionPreview'
 import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
@@ -67,6 +70,11 @@ const MIN_SIDEBAR_WIDTH = 220
 const MAX_SIDEBAR_WIDTH = 2200
 const MIN_REVIEW_WIDTH = 300
 const MAX_REVIEW_WIDTH = 2800
+const PION_LOCAL_SLASH_COMMANDS: SlashCommandInfo[] = [
+  { name: 'verify', description: '打开项目自动验证面板', source: 'pion' },
+  { name: 'agents', description: '打开隔离多 Agent 工作流面板', source: 'pion' }
+]
+const LOCAL_SLASH_COMMAND_NAMES = PION_LOCAL_SLASH_COMMANDS.map((command) => command.name)
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
@@ -132,6 +140,7 @@ export function App(): ReactElement {
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [reviewOpen, setReviewOpen] = useState(true)
+  const [operationsPanel, setOperationsPanel] = useState<OperationsPanelKind | null>(null)
   const [rollbackConfirmOpen, setRollbackConfirmOpen] = useState(false)
   const [rollbackBusy, setRollbackBusy] = useState(false)
   const [rollbackError, setRollbackError] = useState('')
@@ -645,6 +654,7 @@ export function App(): ReactElement {
   // Keep modal callbacks stable while streaming events rerender the app. Some
   // panels load resources on open and must not interpret every token as reopen.
   const closeTaskHistory = useCallback(() => setTaskHistorySession(null), [])
+  const closeOperationsPanel = useCallback(() => setOperationsPanel(null), [])
   const closeCapabilities = useCallback(() => setCapabilitiesOpen(false), [])
   const closePluginStore = useCallback(() => setPluginStoreOpen(false), [])
   const closeSettings = useCallback(() => setSettingsOpen(false), [])
@@ -719,9 +729,10 @@ export function App(): ReactElement {
     text: string,
     images: ImageContent[]
   ): Promise<void> => {
-    const match = images.length === 0
+    const localMatch = text.trim().match(/^\/(verify|agents)(?:\s+([\s\S]*))?$/i)
+    const match = localMatch ?? (images.length === 0
       ? text.trim().match(/^\/(compact|new|name|clone)(?:\s+([\s\S]*))?$/i)
-      : null
+      : null)
     if (!match) {
       await actions.send(text, images)
       return
@@ -740,12 +751,31 @@ export function App(): ReactElement {
         const path = state.session?.sessionFile
         if (!path) throw new Error('当前会话尚未持久化，无法复制')
         await handleCopySession(state.status.cwd ?? '', path)
+      } else if (command === 'verify') {
+        setOperationsPanel('verification')
+        void verification.rediscover()
+      } else if (command === 'agents') {
+        setOperationsPanel('agents')
+        void workflows.refresh()
       }
     } catch (error) {
       console.error(`[pion] /${command} 执行失败`, error)
     }
-  }, [actions, handleCopySession, handleNewSession, state.session?.sessionFile, state.status.cwd])
+  }, [
+    actions,
+    handleCopySession,
+    handleNewSession,
+    state.session?.sessionFile,
+    state.status.cwd,
+    verification.rediscover,
+    workflows.refresh
+  ])
 
+  const composerCommands = useMemo(() => {
+    const merged = new Map(state.commands.map((command) => [command.name, command]))
+    for (const command of PION_LOCAL_SLASH_COMMANDS) merged.set(command.name, command)
+    return [...merged.values()]
+  }, [state.commands])
   const latestRunChanges = useMemo(() => deriveLatestRunChanges(state.timeline), [state.timeline])
   const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
   const agentTodos = useMemo(() => deriveAgentTodos(state.timeline), [state.timeline])
@@ -1019,39 +1049,6 @@ export function App(): ReactElement {
               onDiscard={(runId) => void runRecovery.discard(runId)}
               onRestoreCheckpoint={(runId) => void runRecovery.restoreCheckpoint(runId)}
             />
-            <WorkflowPanel
-              cwd={state.status.cwd}
-              workflows={workflows.workflows}
-              selected={workflows.selected}
-              loading={workflows.loading}
-              busy={workflows.busy}
-              error={workflows.error}
-              onSelect={workflows.select}
-              onCreate={workflows.create}
-              onStart={workflows.start}
-              onApprovePlan={workflows.approvePlan}
-              onRepair={workflows.repair}
-              onWaiveTests={workflows.waiveTests}
-              onResume={workflows.resume}
-              onCancel={workflows.cancel}
-              onMerge={workflows.merge}
-              onCleanup={workflows.cleanup}
-            />
-            <VerificationPanel
-              plan={verification.plan}
-              policy={verification.policy}
-              run={verification.latestRun}
-              activeRun={verification.activeRun}
-              liveLog={verification.liveLog}
-              loading={verification.loading}
-              busy={verification.busy}
-              error={verification.error}
-              onStart={(kinds) => void verification.start(kinds)}
-              onRerun={(runId) => void verification.rerun(runId)}
-              onCancel={(runId) => void verification.cancel(runId)}
-              onPolicyChange={(updates) => void verification.updatePolicy(updates)}
-              onRepair={(prompt) => setPrefill(prompt)}
-            />
             <RunMetricsStrip run={runTelemetry.activeRun ?? runTelemetry.latestRun} />
             <Composer
               busy={state.busy}
@@ -1060,7 +1057,8 @@ export function App(): ReactElement {
               sendDisabled={state.status.phase === 'starting' || state.status.phase === 'error' || projectTrust?.decision === 'ask'}
               prefill={prefill}
               history={messageHistory}
-              commands={state.commands}
+              commands={composerCommands}
+              localCommandNames={LOCAL_SLASH_COMMAND_NAMES}
               mode={state.mode}
               onModeChange={(mode) => void actions.setMode(mode)}
               projectSelector={
@@ -1130,6 +1128,52 @@ export function App(): ReactElement {
           />
         )}
       </div>
+
+      {operationsPanel && (
+        <OperationsModal kind={operationsPanel} onClose={closeOperationsPanel}>
+          {operationsPanel === 'agents' ? (
+            <WorkflowPanel
+              embedded
+              cwd={state.status.cwd}
+              workflows={workflows.workflows}
+              selected={workflows.selected}
+              loading={workflows.loading}
+              busy={workflows.busy}
+              error={workflows.error}
+              onSelect={workflows.select}
+              onCreate={workflows.create}
+              onStart={workflows.start}
+              onApprovePlan={workflows.approvePlan}
+              onRepair={workflows.repair}
+              onWaiveTests={workflows.waiveTests}
+              onResume={workflows.resume}
+              onCancel={workflows.cancel}
+              onMerge={workflows.merge}
+              onCleanup={workflows.cleanup}
+            />
+          ) : (
+            <VerificationPanel
+              embedded
+              plan={verification.plan}
+              policy={verification.policy}
+              run={verification.latestRun}
+              activeRun={verification.activeRun}
+              liveLog={verification.liveLog}
+              loading={verification.loading}
+              busy={verification.busy}
+              error={verification.error}
+              onStart={(kinds) => void verification.start(kinds)}
+              onRerun={(runId) => void verification.rerun(runId)}
+              onCancel={(runId) => void verification.cancel(runId)}
+              onPolicyChange={(updates) => void verification.updatePolicy(updates)}
+              onRepair={(prompt) => {
+                setPrefill(prompt)
+                closeOperationsPanel()
+              }}
+            />
+          )}
+        </OperationsModal>
+      )}
 
       <ConfirmDialog
         open={rollbackConfirmOpen}

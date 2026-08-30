@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
-import { ArrowDown, Check, Circle, ListTodo, Loader2 } from 'lucide-react'
+import { Check, Circle, ListTodo, Loader2 } from 'lucide-react'
 import type { AgentTodo } from '../agent/types'
 
 const TASK_PANEL_STATE_PREFIX = 'pion:session-task-panel-state:'
@@ -62,14 +62,21 @@ export function TaskPanel({
       style={panelStyle}
     >
       <div className="task-panel-card">
-        <div className="task-panel-head">
-          <div className="task-panel-summary">
+        <button
+          type="button"
+          className="task-panel-head"
+          aria-label={expanded ? '收起本轮任务' : '展开本轮任务'}
+          aria-expanded={expanded}
+          aria-controls="task-target-list"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <span className="task-panel-summary">
             <ListTodo size={15} />
             <span className="task-panel-title">本轮任务</span>
             <span className="task-panel-count">{todos.length} 项</span>
-          </div>
+          </span>
           <span className="task-panel-caption">当前对话</span>
-        </div>
+        </button>
 
         <div className="task-panel-list-shell">
           <div id="task-target-list" className="task-panel-list" role="list" aria-label="本轮 AI 任务列表">
@@ -97,17 +104,6 @@ export function TaskPanel({
           </div>
         </div>
       </div>
-
-      <button
-        type="button"
-        className={`task-panel-toggle${expanded ? ' expanded' : ' collapsed'}`}
-        aria-label={expanded ? '收起任务目标' : '展开任务目标'}
-        aria-expanded={expanded}
-        aria-controls="task-target-list"
-        onClick={() => setExpanded((value) => !value)}
-      >
-        <ArrowDown size={16} className="task-panel-toggle-icon" />
-      </button>
     </section>
   )
 }

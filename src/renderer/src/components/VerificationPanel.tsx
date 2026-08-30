@@ -46,6 +46,7 @@ function duration(run: VerificationRun): string {
 }
 
 export function VerificationPanel({
+  embedded = false,
   plan,
   policy,
   run,
@@ -60,6 +61,7 @@ export function VerificationPanel({
   onPolicyChange,
   onRepair
 }: {
+  embedded?: boolean
   plan: VerificationPlan | null
   policy: VerificationPolicy | null
   run: VerificationRun | null
@@ -75,6 +77,7 @@ export function VerificationPanel({
   onRepair: (prompt: string) => void
 }): ReactElement | null {
   const [expanded, setExpanded] = useState(false)
+  const detailVisible = embedded || expanded
   useEffect(() => {
     if (run?.state === 'failed' || run?.state === 'infrastructure-error') setExpanded(true)
   }, [run?.id, run?.state])
@@ -85,29 +88,38 @@ export function VerificationPanel({
     return run.steps.map((step) => step.outputTail).filter(Boolean).join('\n').slice(-24_000)
   }, [liveLog, run])
 
-  if (!loading && !plan && !run) return null
+  if (!embedded && !loading && !plan && !run && !error) return null
   const steps = plan?.steps ?? []
   const selectedKinds = policy?.selectedKinds ?? steps.map((step) => step.kind)
   const runnable = steps.filter((step) => selectedKinds.includes(step.kind))
   const running = activeRun?.state === 'running' || activeRun?.state === 'queued'
+  const summaryContent = (
+    <>
+      {run?.state === 'passed' ? <CheckCircle2 size={14} />
+        : run?.state === 'failed' || run?.state === 'infrastructure-error' ? <CircleAlert size={14} />
+          : running ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />}
+      <strong>验证</strong>
+      <span>{stateLabel(run)}</span>
+      {run && <span>· {duration(run)}</span>}
+      {!embedded && <ChevronDown size={13} className="verification-chevron" />}
+    </>
+  )
 
   return (
-    <section className={`verification-panel state-${run?.state ?? 'idle'}${expanded ? ' expanded' : ''}`} aria-label="自动验证">
+    <section className={`verification-panel state-${run?.state ?? 'idle'}${detailVisible ? ' expanded' : ''}${embedded ? ' embedded' : ''}`} aria-label="自动验证">
       <div className="verification-summary-row">
-        <button
-          type="button"
-          className="verification-summary"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
-        >
-          {run?.state === 'passed' ? <CheckCircle2 size={14} />
-            : run?.state === 'failed' || run?.state === 'infrastructure-error' ? <CircleAlert size={14} />
-              : running ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />}
-          <strong>验证</strong>
-          <span>{stateLabel(run)}</span>
-          {run && <span>· {duration(run)}</span>}
-          <ChevronDown size={13} className="verification-chevron" />
-        </button>
+        {embedded ? (
+          <div className="verification-summary verification-summary-static">{summaryContent}</div>
+        ) : (
+          <button
+            type="button"
+            className="verification-summary"
+            aria-expanded={detailVisible}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {summaryContent}
+          </button>
+        )}
         <div className="verification-primary-actions">
           {running && activeRun ? (
             <button type="button" className="verification-stop" disabled={busy} onClick={() => onCancel(activeRun.id)}>
@@ -125,8 +137,14 @@ export function VerificationPanel({
         </div>
       </div>
 
-      {expanded && (
+      {detailVisible && (
         <div className="verification-detail">
+          {loading && !plan && (
+            <div className="verification-empty"><Loader2 size={13} className="spin" />正在发现项目验证命令…</div>
+          )}
+          {!loading && !plan && !run && !error && (
+            <div className="verification-empty">未发现 typecheck、lint、test 或 build 命令。</div>
+          )}
           <div className="verification-options">
             <div className="verification-kinds" aria-label="验证步骤">
               {steps.map((step) => {

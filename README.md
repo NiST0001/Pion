@@ -37,7 +37,7 @@
 - 支持将剪贴板图像直接粘贴到输入框，发送前显示缩略图，也会在会话消息中保留预览
 - 工具调用卡片：edit 显示彩色 Diff（+/- 行统计），write/bash/read 折叠详情
 - 运行中可继续输入（自动作为转向消息 steer 注入）或中止
-- 输入 `/` 打开动态斜杠命令菜单，支持 Pi 内置 `/compact`、`/new`、`/name`、`/clone`，以及扩展、提示词模板和技能命令
+- 输入 `/` 打开动态斜杠命令菜单，支持 Pi 内置 `/compact`、`/new`、`/name`、`/clone`，Pion 内置 `/verify`、`/agents`，以及扩展、提示词模板和技能命令
 - 输入框内置「构建 / 计划」模式切换，支持 `Ctrl+Tab` 快速切换；计划模式由 `@narumitw/pi-plan-mode` 提供只读探索和方案整理能力
 - Pi 官方插件商店：原生目录可直接安装和卸载，支持全部/已安装/未安装筛选及目录外已安装包管理（`https://pi.dev/packages`）
 - 技能与工具中心：展示当前配置和已安装插件提供的技能、扩展工具及来源
@@ -71,10 +71,10 @@
 - 所有 Git 修改携带乐观 `snapshotId`；工作区变化后拒绝旧操作。文件撤销、操作中止和工作流合并/清理使用主题确认界面
 - 每轮发送前自动创建 Git 检查点，可恢复发送前已有的 staged/unstaged/untracked 状态；重启后中断运行不会隐式重放
 - 主进程持久化每轮 token、费用、时长、工具耗时、上下文压力和压缩指标，并在输入区显示紧凑运行摘要
-- 自动发现 `typecheck / lint / test / build`，按 argv 顺序执行、流式显示有界日志、支持取消/重跑，并可把失败诊断回填给 Agent 进行有上限的修复
+- 自动发现 `typecheck / lint / test / build`，按 argv 顺序执行、流式显示有界日志、支持取消/重跑，并可把失败诊断回填给 Agent 进行有上限的修复；输入 `/verify` 按需打开，不常驻占用输入区
 
 ### 有边界多 Agent
-- 原生 Planner → Implementer → Reviewer → Tester 工作流；每个角色和状态、权限信封、输出、失败与 worktree 路径均对用户可见
+- 输入 `/agents` 按需打开原生 Planner → Implementer → Reviewer → Tester 工作流；面板不常驻输入区，每个角色和状态、权限信封、输出、失败与 worktree 路径均对用户可见
 - Planner/Reviewer 只读；Implementer 只能使用候选 worktree 内的内置读写工具；Shell、网络、外部插件、项目扩展、递归委派与 push 禁用
 - Tester 只运行 Pion 确定性发现的验证命令；缺少验证时必须由用户明确豁免，审查失败和测试失败最多允许两轮显式修复
 - 候选修改保留在独立 Git 分支；只有目标仍等于捕获基准、工作区干净、Reviewer 通过且验证通过/已豁免时，用户才能确认 `git merge --ff-only`

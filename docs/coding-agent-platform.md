@@ -71,7 +71,9 @@ idle -> queued -> running -> passed | failed | cancelled
 ```
 
 Discovery reads project manifests and exact script names without executing code.
-Steps run sequentially in `typecheck`, `lint`, `test`, `build` order. Failure creates a
+The UI is opened on demand with the renderer-owned `/verify` command rather than a
+persistent composer bar. Steps run sequentially in `typecheck`, `lint`, `test`,
+`build` order. Failure creates a
 bounded diagnostic artifact. User-visible repair can start a linked Agent turn; any
 automatic repair mode is bounded and remains subject to normal tool permissions.
 
@@ -90,6 +92,9 @@ rejected and refreshed.
   operation aware; Pion never silently resolves a conflict.
 
 ## Multi-agent workflow
+
+The renderer-owned `/agents` command opens the workflow surface on demand; it does not
+send a prompt to Pi and no workflow bar remains docked above the composer.
 
 Initial concurrency is bounded to one planner, one implementer (with a hard global
 worker cap of two), one reviewer, and one deterministic tester. Recursive delegation,

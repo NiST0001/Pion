@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactElement, ReactNode } from 'react'
 import { AlertTriangle, Loader2 } from 'lucide-react'
+import { containModalTab, isTopmostModalDialog } from '../utils/dialogFocus'
 
 export function ConfirmDialog({
   open,
@@ -26,20 +27,39 @@ export function ConfirmDialog({
   onConfirm: () => void
   onCancel: () => void
 }): ReactElement | null {
+  const dialogRef = useRef<HTMLElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
+  const busyRef = useRef(busy)
+  const onCancelRef = useRef(onCancel)
+
+  useEffect(() => {
+    busyRef.current = busy
+    onCancelRef.current = onCancel
+  }, [busy, onCancel])
 
   useEffect(() => {
     if (!open) return
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const frame = requestAnimationFrame(() => cancelRef.current?.focus())
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !busy) onCancel()
+      const dialog = dialogRef.current
+      if (!dialog || !isTopmostModalDialog(dialog)) return
+      if (event.key === 'Tab') {
+        containModalTab(event, dialog)
+        return
+      }
+      if (event.key !== 'Escape' || busyRef.current) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      onCancelRef.current()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => {
       cancelAnimationFrame(frame)
       window.removeEventListener('keydown', handleKeyDown)
+      previousFocus?.focus()
     }
-  }, [busy, onCancel, open])
+  }, [open])
 
   if (!open) return null
 
@@ -51,8 +71,11 @@ export function ConfirmDialog({
       }}
     >
       <section
+        ref={dialogRef}
         className={`confirm-dialog confirm-dialog-${tone}`}
         role="alertdialog"
+        tabIndex={-1}
+        data-modal-layer="340"
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
         aria-describedby="confirm-dialog-message"

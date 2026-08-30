@@ -100,7 +100,9 @@ const BUILTIN_SLASH_COMMANDS: SlashCommandInfo[] = [
   { name: 'compact', description: '手动压缩上下文，可附加摘要要求', source: 'builtin' },
   { name: 'new', description: '在当前项目中新建会话', source: 'builtin' },
   { name: 'name', description: '设置或清除当前会话名称', source: 'builtin' },
-  { name: 'clone', description: '复制当前活动分支为新会话', source: 'builtin' }
+  { name: 'clone', description: '复制当前活动分支为新会话', source: 'builtin' },
+  { name: 'verify', description: '打开项目自动验证面板', source: 'pion' },
+  { name: 'agents', description: '打开隔离多 Agent 工作流面板', source: 'pion' }
 ]
 
 /** Events after which derived state (model/session/tree) is re-pushed. */

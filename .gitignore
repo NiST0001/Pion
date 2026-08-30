@@ -13,7 +13,7 @@ npm-debug.log*
 logs/
 
 # test artifacts
-coverage/
+/coverage/
 playwright-report/
 test-results/
 

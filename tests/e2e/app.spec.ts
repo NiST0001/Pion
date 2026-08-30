@@ -38,9 +38,21 @@ test('boots the Electron shell with an immediately editable composer', async ({}
     await expect(composer).toHaveValue('draft survives agent preparation')
     await expect(page.locator('.titlebar')).toBeVisible()
     await expect(page.locator('.sidebar')).toBeVisible()
-    await expect(page.locator('.workflow-panel')).toBeVisible()
-    await page.locator('.workflow-toggle').click()
-    await expect(page.getByText('创建一个有边界、可见、可取消的隔离多 Agent 工作流。')).toBeVisible()
+    await expect(page.locator('.workflow-panel')).toHaveCount(0)
+    await expect(page.locator('.verification-panel')).toHaveCount(0)
+
+    await composer.fill('/agents')
+    await composer.press('Enter')
+    await expect(page.getByRole('dialog', { name: '隔离多 Agent' })).toBeVisible()
+    await expect(page.locator('.operations-modal .workflow-panel.embedded')).toBeVisible()
+    await page.getByRole('button', { name: '关闭隔离多 Agent' }).click()
+
+    await composer.fill('/verify')
+    await composer.press('Enter')
+    await expect(page.getByRole('dialog', { name: '项目自动验证' })).toBeVisible()
+    await expect(page.locator('.operations-modal .verification-panel.embedded')).toBeVisible()
+    await page.getByRole('button', { name: '关闭项目自动验证' }).click()
+    await expect(page.locator('.operations-modal')).toHaveCount(0)
   } finally {
     await app.close()
   }

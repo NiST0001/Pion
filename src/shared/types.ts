@@ -415,7 +415,7 @@ export interface PluginUninstallResult {
   output: string
 }
 
-export type SlashCommandSource = 'builtin' | 'extension' | 'prompt' | 'skill'
+export type SlashCommandSource = 'builtin' | 'pion' | 'extension' | 'prompt' | 'skill'
 
 export interface SlashCommandInfo {
   /** Command name without the leading slash. */

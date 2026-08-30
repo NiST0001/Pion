@@ -34,6 +34,10 @@
   cursor: pointer;
 }
 
+.verification-summary-static {
+  cursor: default;
+}
+
 .verification-summary strong {
   color: var(--fg);
 }
@@ -104,6 +108,14 @@
 .verification-detail {
   padding: 2px 9px 10px;
   animation: pion-expand-in var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.verification-empty {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  gap: 7px;
+  color: var(--fg-faint);
 }
 
 .verification-options {
