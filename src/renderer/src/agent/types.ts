@@ -41,7 +41,7 @@ export interface ToolItem {
   writeContent?: string
   /** Generic textual output */
   outputText?: string
-  /** todo 工具结果中的完整任务快照 */
+  /** Pion 原生任务或旧 todo 工具结果中的完整任务快照 */
   todos?: AgentTodo[]
 }
 

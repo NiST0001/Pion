@@ -1,5 +1,12 @@
 import type { SessionTask, SessionTaskRun } from './types'
 
+export const PION_TASK_TOOL_NAME = 'pion_task'
+export const LEGACY_TASK_TOOL_NAME = 'todo'
+
+export function isTaskToolName(name: unknown): name is string {
+  return name === PION_TASK_TOOL_NAME || name === LEGACY_TASK_TOOL_NAME
+}
+
 export type SessionTaskHistoryEvent =
   | {
       kind: 'user'
@@ -10,7 +17,7 @@ export type SessionTaskHistoryEvent =
     }
   | { kind: 'snapshot'; tasks: SessionTask[] }
 
-/** Validate and normalize the task snapshot emitted by rpiv-todo. */
+/** Validate native Pion snapshots and legacy rpiv-todo snapshots. */
 export function normalizeSessionTasks(raw: unknown): SessionTask[] | undefined {
   if (!Array.isArray(raw)) return undefined
   const tasks: SessionTask[] = []
@@ -51,9 +58,9 @@ function snapshotMap(tasks: SessionTask[]): Map<string, SessionTask> {
 }
 
 /**
- * Convert complete todo snapshots into per-user-message plans.
+ * Convert complete task snapshots into per-user-message plans.
  *
- * Legacy sessions keep a session-wide todo list, so each new snapshot is
+ * Legacy sessions may keep a session-wide todo list, so each new snapshot is
  * compared with the preceding one and only new/changed tasks are attributed
  * to the current message. New Pion sessions clear todo at each complex turn;
  * an empty snapshot starts a fresh id generation after the reset.

@@ -11,7 +11,11 @@ import type {
   WireMessage
 } from '../../../shared/types'
 import { messageImages, messageText, messageThinking, messageToolCalls } from '../../../shared/types'
-import { deriveSessionTaskRuns, normalizeSessionTasks } from '../../../shared/task-history'
+import {
+  deriveSessionTaskRuns,
+  isTaskToolName,
+  normalizeSessionTasks
+} from '../../../shared/task-history'
 import type { SessionTaskHistoryEvent } from '../../../shared/task-history'
 import type { AgentTaskRun, AgentTodo, FileChange, TimelineItem, ToolItem } from './types'
 
@@ -66,7 +70,7 @@ export function applyToolResult(tool: ToolItem, result: unknown, isError: boolea
   }
   const details = payload.details
   if (typeof details?.diff === 'string') next.diff = details.diff
-  if (tool.name === 'todo') {
+  if (isTaskToolName(tool.name)) {
     const todos = normalizeSessionTasks(details?.tasks)
     if (todos) next.todos = todos
   }

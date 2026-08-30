@@ -145,7 +145,7 @@ export interface SessionEntriesPage {
   mode: AgentMode
 }
 
-/** One normalized rpiv-todo task persisted in a session transcript. */
+/** One normalized native/legacy task persisted in a session transcript. */
 export interface SessionTask {
   id: number | string
   title: string

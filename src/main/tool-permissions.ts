@@ -181,6 +181,7 @@ const DEFAULTS = { read: "allow", write: "ask", shell: "ask", network: "ask", ex
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const SHELL_TOOLS = new Set(["bash", "powershell"]);
+const PION_INTERNAL_TOOLS = new Set(["pion_task"]);
 const NETWORK_TOOL = /(web|http|fetch|browser|search|crawl|url|download|upload|request|api)/i;
 const NETWORK_COMMAND = /(^|[;&|\s])(curl|wget|ssh|scp|sftp|rsync|telnet|nc|ncat|ftp|gh\s+api|git\s+(clone|fetch|pull|push)|npm\s+(install|publish|view)|pnpm\s+(add|install)|yarn\s+(add|install)|pip\s+install|cargo\s+install|docker\s+pull|kubectl\s+)/i;
 const DESTRUCTIVE_COMMAND = /(\brm\s+[^\n]*(?:-r|-f|--recursive|--force)|\bsudo\b|\b(?:chmod|chown)\b|\bmkfs\b|\bdd\s+[^\n]*\bof=|\b(?:shutdown|reboot|poweroff)\b|\bgit\s+(?:reset\s+--hard|clean\s+-[^\n]*f|checkout\s+--)|:\s*>\s*\/dev\/sd)/i;
@@ -274,6 +275,7 @@ function classify(event, ctx) {
 }
 
 async function gate(event, ctx) {
+  if (PION_INTERNAL_TOOLS.has(event.toolName)) return undefined;
   const request = classify(event, ctx);
   const policy = readPolicy(ctx.cwd);
   const decisions = request.policyCategories.map((category) => policy[category] ?? "ask");

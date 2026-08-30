@@ -4,11 +4,61 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { SessionManager } from '@earendil-works/pi-coding-agent'
 
 const PORT = '9344'
 // 测试工作区用独立临时 git 仓库，避免与本机正在使用的项目会话互相干扰
 const TEST_WORKSPACE = mkdtempSync(join(tmpdir(), 'pion-ui-test-'))
 execSync('git init -q -b main && git config user.email nist@localhost && git config user.name nist && git commit -q --allow-empty -m init', { cwd: TEST_WORKSPACE })
+const ORDER_SESSION_PATHS = ['A', 'B'].map((label) => {
+  const manager = SessionManager.create(TEST_WORKSPACE)
+  manager.appendSessionInfo(`Pion reorder probe ${label}`)
+  manager.appendMessage({
+    role: 'user',
+    content: [{ type: 'text', text: `Pion reorder probe ${label}` }],
+    timestamp: Date.now()
+  })
+  manager.appendMessage({
+    role: 'assistant',
+    content: [{ type: 'text', text: `Pion reorder response ${label}` }],
+    provider: 'test',
+    model: 'test',
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: 'stop',
+    timestamp: Date.now() + 1
+  })
+  const path = manager.getSessionFile()
+  if (!path) throw new Error('failed to create reorder probe session')
+  return path
+})
+const NATIVE_TASK_WORKSPACE = mkdtempSync(join(tmpdir(), 'pion-native-task-ui-'))
+const nativeTaskSession = SessionManager.create(NATIVE_TASK_WORKSPACE)
+nativeTaskSession.appendSessionInfo('Pion native task UI probe')
+nativeTaskSession.appendMessage({
+  role: 'user',
+  content: [{ type: 'text', text: '验证 Pion 原生任务历史' }],
+  timestamp: Date.now()
+})
+nativeTaskSession.appendMessage({
+  role: 'assistant',
+  content: [{ type: 'toolCall', id: 'pion-native-task-call', name: 'pion_task', arguments: { action: 'create', subject: '验证原生任务' } }],
+  provider: 'test',
+  model: 'test',
+  usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  stopReason: 'toolUse',
+  timestamp: Date.now() + 1
+})
+nativeTaskSession.appendMessage({
+  role: 'toolResult',
+  toolCallId: 'pion-native-task-call',
+  toolName: 'pion_task',
+  content: [{ type: 'text', text: 'Created Pion task #1' }],
+  details: { action: 'create', tasks: [{ id: 1, subject: '验证原生任务', status: 'in_progress', activeForm: '正在验证原生任务' }], nextId: 2, native: 'pion' },
+  isError: false,
+  timestamp: Date.now() + 2
+})
+const NATIVE_TASK_SESSION_PATH = nativeTaskSession.getSessionFile()
+if (!NATIVE_TASK_SESSION_PATH) throw new Error('failed to create native task probe session')
 const TRUST_TEST_WORKSPACE = mkdtempSync(join(tmpdir(), 'pion-trust-ui-'))
 mkdirSync(join(TRUST_TEST_WORKSPACE, '.pi'), { recursive: true })
 writeFileSync(join(TRUST_TEST_WORKSPACE, '.pi', 'SYSTEM.md'), 'Untrusted test resource\n')
@@ -26,6 +76,9 @@ process.on('exit', () => {
   rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
   rmSync(CHECKPOINT_TEST_FILE, { force: true })
   rmSync(TRUST_TEST_WORKSPACE, { recursive: true, force: true })
+  for (const path of ORDER_SESSION_PATHS) rmSync(path, { force: true })
+  rmSync(NATIVE_TASK_SESSION_PATH, { force: true })
+  rmSync(NATIVE_TASK_WORKSPACE, { recursive: true, force: true })
   rmSync(TEST_WORKSPACE, { recursive: true, force: true })
 })
 
@@ -133,6 +186,9 @@ for (let i = 0; i < 40; i++) {
 await check('发送任务后启动后端', `(async () => Boolean((await window.pion.getState())?.sessionId))()`)
 await check('任务面板在无任务会话中隐藏', `!document.querySelector('.task-panel')`)
 await check('会话历史按窗口读取', `(async()=>{const page=await window.pion.getEntriesPage(undefined, 2); return !!page && page.entries.length <= 2 && page.total >= page.entries.length})()`)
+await check('Pion 原生任务可从会话历史恢复', `(async () => { const runs = await window.pion.getSessionTaskHistory(${JSON.stringify(NATIVE_TASK_SESSION_PATH)}); return runs.length === 1 && runs[0].tasks.length === 1 && runs[0].tasks[0].title === '验证原生任务' && runs[0].tasks[0].status === 'in_progress'; })()`)
+checkHost('原生任务工具不依赖外部 todo 插件', (() => { const source = readFileSync('src/main/task-planning.ts', 'utf8'); return source.includes('name: TOOL_NAME') && source.includes('const TOOL_NAME = "pion_task"') && !source.includes('from "@juicesharp/'); })())
+checkHost('旧 todo 会话仍保持兼容', readFileSync('src/shared/task-history.ts', 'utf8').includes("LEGACY_TASK_TOOL_NAME = 'todo'"))
 
 // --- 工具权限 RPC 子协议 ---
 await evaluate(`(async () => { window.__pionToolPolicyBefore = await window.pion.getToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.setToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}, { write: 'ask' }); window.pion.send('/pion-permission-test').catch((error) => { window.__pionPermissionError = String(error); }); return true; })()`)
@@ -305,7 +361,7 @@ if (await evaluate(`!!document.querySelector('.task-panel')`)) {
   await check('任务面板可切回原状态', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === window.__pionTaskExpandedBefore`)
   await check('任务面板折叠状态按会话持久化', `(() => { const key = document.querySelector('.task-panel')?.dataset.sessionKey; if (!key) return false; return localStorage.getItem('pion:session-task-panel-state:' + encodeURIComponent(key)) !== null; })()`)
 } else {
-  await check('任务面板在有 AI 任务时显示（本会话窗口无 todo，跳过）', `!document.querySelector('.task-panel')`)
+  await check('任务面板在有 AI 任务时显示（本会话窗口无任务，跳过）', `!document.querySelector('.task-panel')`)
 }
 for (let i = 0; i < 20; i++) {
   await sleep(80)
@@ -354,6 +410,7 @@ for (let i = 0; i < 60; i++) {
 }
 await check('工具页可切换', `document.querySelector('.capabilities-nav-item[data-page="tools"]')?.classList.contains('active') && !!document.querySelector('.capabilities-page[data-page="tools"]') && document.querySelectorAll('.tool-card').length >= 4`)
 await check('工具卡片显示来源', `document.querySelectorAll('.capabilities-page[data-page="tools"] .capability-card-source').length > 0`)
+await check('技能工具面板标记 Pion 原生任务工具', `(() => { const card = [...document.querySelectorAll('.capabilities-page[data-page="tools"] .tool-card')].find((item) => item.querySelector('code')?.textContent === 'pion_task'); return card?.querySelector('.capability-card-source')?.textContent === 'Pi 内置'; })()`)
 await evaluate(`window.pion.toggleMaximizeWindow()`)
 await sleep(180)
 await evaluate(`window.pion.toggleMaximizeWindow()`)
@@ -634,6 +691,7 @@ await evaluate(`(() => {
   const items = list ? [...list.querySelectorAll('.side-session')] : []
   if (items.length < 2 || typeof DataTransfer === 'undefined' || typeof DragEvent === 'undefined') return false
   window.__pionSessionOrderBefore = items.map((item) => item.dataset.sessionPath)
+  window.__pionSessionListAnchor = items[0].dataset.sessionPath
   window.__pionActiveSessionBefore = items.find((item) => item.classList.contains('active'))?.dataset.sessionPath ?? null
   const data = new DataTransfer()
   items[0].dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: data }))
@@ -643,16 +701,16 @@ await evaluate(`(() => {
   return true
 })()`)
 await sleep(180)
-await check('拖拽后会话顺序可改变', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && before.length >= 2 && after[0] === before[1] && after[1] === before[0]; })()`)
+await check('拖拽后会话顺序可改变', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => [...candidate.querySelectorAll('.side-session')].some((item) => item.dataset.sessionPath === window.__pionSessionListAnchor)); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && before.length >= 2 && after[0] === before[1] && after[1] === before[0] ? true : { before, after, anchor: window.__pionSessionListAnchor }; })()`)
 await evaluate(`window.__pionProjectOrderBefore = [...document.querySelectorAll('.project-folder .project-folder-name')].map((item) => item.textContent)`)
-await evaluate(`(() => { const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const target = [...(list?.querySelectorAll('.side-session') ?? [])].find((item) => item.dataset.sessionPath !== window.__pionActiveSessionBefore); window.__pionTargetSessionPath = target?.dataset.sessionPath ?? null; target?.click(); return Boolean(target); })()`)
-await check('选中会话立即高亮', `(() => { const target = document.querySelector('.side-session[data-session-path="' + window.__pionTargetSessionPath + '"]'); return !!target && target.classList.contains('active'); })()`)
+await evaluate(`(() => { const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => [...candidate.querySelectorAll('.side-session')].some((item) => item.dataset.sessionPath === window.__pionSessionListAnchor)); const target = [...(list?.querySelectorAll('.side-session') ?? [])].find((item) => item.dataset.sessionPath !== window.__pionActiveSessionBefore); window.__pionTargetSessionPath = target?.dataset.sessionPath ?? null; target?.click(); return Boolean(target); })()`)
+await check('选中会话立即高亮', `(() => { const target = document.querySelector('.side-session[data-session-path="' + window.__pionTargetSessionPath + '"]'); return !!target && target.classList.contains('active') ? true : { targetPath: window.__pionTargetSessionPath, found: !!target, activePaths: [...document.querySelectorAll('.side-session.active')].map((item) => item.dataset.sessionPath) }; })()`)
 await sleep(1200)
 await check('异步刷新保持选中会话', `(() => { const target = document.querySelector('.side-session[data-session-path="' + window.__pionTargetSessionPath + '"]'); return !!target && target.classList.contains('active'); })()`)
 await check('激活会话不会自动置顶项目', `JSON.stringify(window.__pionProjectOrderBefore) === JSON.stringify([...document.querySelectorAll('.project-folder .project-folder-name')].map((item) => item.textContent))`)
-await check('激活会话不会自动置顶', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && after[0] === before[1] && after[1] === before[0]; })()`)
+await check('激活会话不会自动置顶', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => [...candidate.querySelectorAll('.side-session')].some((item) => item.dataset.sessionPath === window.__pionSessionListAnchor)); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && after[0] === before[1] && after[1] === before[0]; })()`)
 await evaluate(`(() => {
-  const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => candidate.querySelectorAll('.side-session').length >= 2)
+  const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => [...candidate.querySelectorAll('.side-session')].some((item) => item.dataset.sessionPath === window.__pionSessionListAnchor))
   const items = list ? [...list.querySelectorAll('.side-session')] : []
   if (items.length < 2 || typeof DataTransfer === 'undefined' || typeof DragEvent === 'undefined') return false
   const data = new DataTransfer()

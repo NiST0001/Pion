@@ -23,7 +23,8 @@ const TOOL_LABELS: Record<string, string> = {
   powershell: '终端',
   grep: '搜索内容',
   find: '查找文件',
-  ls: '目录'
+  ls: '目录',
+  pion_task: '任务'
 }
 
 function truncate(text: string, max: number): string {

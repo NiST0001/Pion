@@ -43,7 +43,11 @@ import type {
   WireMessage
 } from '../shared/types'
 import { messageText } from '../shared/types'
-import { deriveSessionTaskRuns, normalizeSessionTasks } from '../shared/task-history'
+import {
+  deriveSessionTaskRuns,
+  isTaskToolName,
+  normalizeSessionTasks
+} from '../shared/task-history'
 import type { SessionTaskHistoryEvent } from '../shared/task-history'
 import { createWorktreeBranch, listBranchInfos } from './git'
 import {
@@ -57,7 +61,7 @@ import {
   TOOL_PERMISSION_TIMEOUT_MS,
   ToolPermissionStore
 } from './tool-permissions'
-import { ensureTaskPlanningExtension } from './task-planning'
+import { ensureNativeTaskExtension } from './task-planning'
 import {
   filterToolResults,
   sessionMode,
@@ -583,10 +587,10 @@ export class AgentBridge {
   }
 
   private async backendArgs(cwd: string, sessionPath?: string): Promise<string[]> {
-    const [hasPlanExtension, permissionExtensionPath, taskPlanningExtensionPath] = await Promise.all([
+    const [hasPlanExtension, permissionExtensionPath, nativeTaskExtensionPath] = await Promise.all([
       pathExists(PLAN_EXTENSION_PATH),
       this.toolPermissionStore.ensureExtension(),
-      ensureTaskPlanningExtension()
+      ensureNativeTaskExtension()
     ])
     if (!hasPlanExtension) {
       console.warn('[pion] plan mode extension not found:', PLAN_EXTENSION_PATH)
@@ -598,7 +602,7 @@ export class AgentBridge {
     return [
       trust.decision === 'trusted' ? '--approve' : '--no-approve',
       '--extension', permissionExtensionPath,
-      '--extension', taskPlanningExtensionPath,
+      '--extension', nativeTaskExtensionPath,
       ...(hasPlanExtension ? ['--extension', PLAN_EXTENSION_PATH] : []),
       ...(sessionPath ? ['--session', sessionPath] : [])
     ]
@@ -1204,7 +1208,7 @@ export class AgentBridge {
         toolName?: unknown
         details?: { tasks?: unknown }
       }
-      if (message.toolName !== 'todo') continue
+      if (!isTaskToolName(message.toolName)) continue
       const tasks = normalizeSessionTasks(message.details?.tasks)
       if (tasks) events.push({ kind: 'snapshot', tasks })
     }

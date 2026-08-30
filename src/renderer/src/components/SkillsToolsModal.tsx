@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 import {
   ChevronRight,
   FileDiff,
+  ListTodo,
   Loader2,
   Sparkles,
   Terminal,
@@ -41,6 +42,11 @@ const BUILTIN_TOOLS: BuiltinToolInfo[] = [
     name: 'bash',
     title: '执行命令',
     description: '在当前项目目录运行构建、测试和其他 Shell 命令。'
+  },
+  {
+    name: 'pion_task',
+    title: '任务计划',
+    description: 'Pion 原生的本轮任务规划、状态更新和会话历史归档工具。'
   }
 ]
 
@@ -272,7 +278,11 @@ function ToolsPage({
           <CapabilityCard
             key={`builtin:${tool.name}`}
             kind="tool"
-            icon={tool.name === 'bash' ? <Terminal size={16} /> : <FileDiff size={16} />}
+            icon={tool.name === 'bash'
+              ? <Terminal size={16} />
+              : tool.name === 'pion_task'
+                ? <ListTodo size={16} />
+                : <FileDiff size={16} />}
             name={tool.name}
             title={tool.title}
             source="Pi 内置"
