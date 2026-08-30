@@ -352,7 +352,7 @@ body {
 }
 
 .composer-attachment:hover .composer-attachment-remove,
-.composer-attachment-remove:focus-visible {
+html.pion-keyboard-focus .composer-attachment-remove:focus-visible {
   opacity: 1;
 }
 
@@ -408,7 +408,7 @@ body {
   color: var(--fg);
 }
 
-.composer-project-trigger:focus-visible {
+html.pion-keyboard-focus .composer-project-trigger:focus-visible {
   outline: 0;
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
@@ -483,7 +483,7 @@ body {
 }
 
 .composer-project-option:hover,
-.composer-project-option:focus-visible {
+html.pion-keyboard-focus .composer-project-option:focus-visible {
   outline: 0;
   border-color: var(--border-soft);
   background: var(--bg-hover);
@@ -1782,7 +1782,7 @@ body {
 }
 
 .side-session:hover .side-session-favorite,
-.side-session-favorite:focus-visible,
+html.pion-keyboard-focus .side-session-favorite:focus-visible,
 .side-session-favorite.active {
   opacity: 1;
 }

@@ -248,7 +248,7 @@
   scale: 1;
 }
 
-.task-panel-toggle:focus-visible {
+html.pion-keyboard-focus .task-panel-toggle:focus-visible {
   outline: none;
   box-shadow: none;
   border-color: var(--fg-dim);

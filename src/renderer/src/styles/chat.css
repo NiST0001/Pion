@@ -267,7 +267,7 @@
   outline: none;
 }
 
-.thinking summary:focus-visible {
+html.pion-keyboard-focus .thinking summary:focus-visible {
   color: var(--fg-dim);
 }
 

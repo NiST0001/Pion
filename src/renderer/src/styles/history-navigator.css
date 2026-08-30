@@ -70,7 +70,7 @@
 }
 
 .history-navigator-marker:hover,
-.history-navigator-marker:focus-visible {
+html.pion-keyboard-focus .history-navigator-marker:focus-visible {
   outline: none;
   background: var(--fg-dim);
   opacity: 0.95;

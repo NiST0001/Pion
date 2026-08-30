@@ -170,6 +170,30 @@ button {
   color: inherit;
 }
 
+/* Chromium promotes an already pointer-focused control to :focus-visible when
+   Shift is pressed. Suppress that native outline in pointer mode; Tab/Shift+Tab
+   enables a restrained theme-aware keyboard focus indicator instead. */
+html:not(.pion-keyboard-focus) :where(
+  button,
+  a[href],
+  summary,
+  [role='button'],
+  [tabindex]:not([tabindex='-1'])
+):focus-visible {
+  outline: none !important;
+}
+
+html.pion-keyboard-focus :where(
+  button,
+  a[href],
+  summary,
+  [role='button'],
+  [tabindex]:not([tabindex='-1'])
+):focus-visible {
+  outline: 1px solid var(--selected-border);
+  outline-offset: 2px;
+}
+
 ::selection {
   background: rgba(var(--accent-rgb), 0.3);
 }

@@ -265,6 +265,12 @@ for (let i = 0; i < 25; i++) {
   await check('分页追加的历史保持静态', `(() => { const items = [...document.querySelectorAll('.timeline > .row, .timeline > .tool-call, .timeline > .compaction-marker')]; const firstIdx = items.indexOf(window.__pionFirstRowEl); if (!window.__pionFirstRowEl || firstIdx <= 0) return true; const prepended = items.slice(0, firstIdx); const bad = prepended.filter((item) => item.classList.contains('history-reveal') || getComputedStyle(item).animationName !== 'none'); return bad.length === 0 ? true : { count: prepended.length, bad: bad.slice(0, 3).map((item) => ({ cls: item.className.slice(0, 50), anim: getComputedStyle(item).animationName })) }; })()`)
 }
 await check('动画系统支持减少动态效果', `(() => { try { return [...document.styleSheets].some((sheet) => [...sheet.cssRules].some((rule) => rule.cssText.includes('prefers-reduced-motion') && rule.cssText.includes('animation-duration'))); } catch { return false; } })()`)
+await evaluate(`(() => { const root = document.documentElement; root.classList.remove('pion-keyboard-focus'); const control = document.querySelector('.tool-head') ?? document.querySelector('button'); control?.focus(); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift' })); window.__pionShiftFocusProbe = { active: document.activeElement === control, outline: control ? getComputedStyle(control).outlineStyle : '', keyboard: root.classList.contains('pion-keyboard-focus') }; return true; })()`)
+await check('单按 Shift 不显示复选框式焦点框', `window.__pionShiftFocusProbe?.active && window.__pionShiftFocusProbe.outline === 'none' && window.__pionShiftFocusProbe.keyboard === false`)
+await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab' }))`)
+await check('Tab 仍启用主题键盘焦点', `document.documentElement.classList.contains('pion-keyboard-focus')`)
+await evaluate(`window.dispatchEvent(new PointerEvent('pointerdown'))`)
+await check('鼠标操作可退出键盘焦点模式', `!document.documentElement.classList.contains('pion-keyboard-focus')`)
 for (let i = 0; i < 30; i++) {
   await sleep(100)
   if (await evaluate(`document.querySelectorAll('.history-navigator-marker').length >= 2`)) break
