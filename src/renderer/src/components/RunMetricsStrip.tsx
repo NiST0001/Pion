@@ -92,7 +92,12 @@ export function RunMetricsStrip({ run }: { run: RunOperation | null }): ReactEle
         </span>
         {cost > 0 && <span className="run-metric">${cost.toFixed(cost < 0.01 ? 4 : 3)}</span>}
         {pressure !== null && (
-          <span className={`run-metric${pressure >= 0.8 ? ' pressure-high' : ''}`} title="最近一次模型请求的上下文占用">
+          <span
+            className={`run-metric${pressure >= 0.8 ? ' pressure-high' : ''}`}
+            title={run.contextTokens !== undefined && run.contextWindow !== undefined
+              ? `上下文 ${formatTokens(run.contextTokens)} / ${formatTokens(run.contextWindow)}`
+              : '最近一次模型请求的上下文占用'}
+          >
             <Gauge size={12} />{Math.round(pressure * 100)}%
           </span>
         )}
@@ -106,6 +111,13 @@ export function RunMetricsStrip({ run }: { run: RunOperation | null }): ReactEle
             <span><small>输出</small><strong>{formatTokens(metrics.usage.output)}</strong></span>
             <span><small>缓存读取</small><strong>{formatTokens(metrics.usage.cacheRead)}</strong></span>
             <span><small>推理</small><strong>{formatTokens(metrics.usage.reasoning)}</strong></span>
+            <span>
+              <small>上下文</small>
+              <strong>{run.contextTokens !== undefined
+                ? `${formatTokens(run.contextTokens)}${run.contextWindow !== undefined ? ` / ${formatTokens(run.contextWindow)}` : ''}`
+                : '未知'}</strong>
+            </span>
+            <span><small>费用</small><strong>{cost > 0 ? `$${cost.toFixed(cost < 0.01 ? 4 : 3)}` : '$0'}</strong></span>
             <span><small>工具</small><strong>{run.tools.length}</strong></span>
             <span><small>工具耗时</small><strong>{formatDuration(metrics.toolDuration)}</strong></span>
             <span><small>压缩</small><strong>{run.compactions.length}</strong></span>

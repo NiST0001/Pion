@@ -12,9 +12,39 @@ function git(cwd: string, ...args: string[]): void {
 test('boots the Electron shell with an immediately editable composer', async ({}, testInfo) => {
   const userData = testInfo.outputPath('user-data')
   const piAgentDir = join(userData, 'pi-agent')
+  const workspace = testInfo.outputPath('workspace')
   await Promise.all([
     mkdir(userData, { recursive: true }),
-    mkdir(piAgentDir, { recursive: true })
+    mkdir(piAgentDir, { recursive: true }),
+    mkdir(workspace, { recursive: true })
+  ])
+  const now = Date.now()
+  await Promise.all([
+    writeFile(join(userData, 'projects.json'), JSON.stringify({
+      projects: [{ cwd: workspace, name: 'workspace', addedAt: now, lastUsedAt: now }]
+    })),
+    writeFile(join(userData, 'pion-runs.json'), JSON.stringify({
+      version: 1,
+      runs: [{
+        id: 'e2e-run',
+        cwd: workspace,
+        kind: 'prompt',
+        state: 'completed',
+        createdAt: now - 31_000,
+        agentStartedAt: now - 31_000,
+        settledAt: now,
+        modelId: 'e2e-model',
+        prompt: { message: 'metrics fixture', images: [] },
+        promptPreview: 'metrics fixture',
+        usage: { input: 20_000, output: 3_000, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 23_000, costUsd: 0.06 },
+        contextTokens: 42_000,
+        contextWindow: 100_000,
+        contextPressure: 0.42,
+        tools: [],
+        compactions: [],
+        revision: 1
+      }]
+    }))
   ])
 
   const app = await electron.launch({
@@ -40,6 +70,14 @@ test('boots the Electron shell with an immediately editable composer', async ({}
     await expect(page.locator('.sidebar')).toBeVisible()
     await expect(page.locator('.workflow-panel')).toHaveCount(0)
     await expect(page.locator('.verification-panel')).toHaveCount(0)
+    const metrics = page.locator('.main > .run-metrics-strip')
+    await expect(metrics).toContainText('23k tokens')
+    await expect(metrics).toContainText('$0.060')
+    await expect(page.locator('.composer-dock .run-metrics-strip')).toHaveCount(0)
+    const contextRing = page.locator('.send-context-ring')
+    await expect(contextRing).toHaveAttribute('role', 'progressbar')
+    await expect(contextRing).toHaveAttribute('aria-valuenow', '42')
+    await expect(page.locator('.send-button-context')).toHaveAttribute('title', /42%.*42,000 \/ 100,000 tokens/)
 
     await composer.fill('/agents')
     await composer.press('Enter')

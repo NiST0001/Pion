@@ -13,6 +13,7 @@ import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
 import type {
+  ExtensionUiResponse,
   GitDiffScope,
   GitSelectionRequest,
   ImageContent,
@@ -285,6 +286,12 @@ function registerIpc(): void {
     IPC.ToolPermissionResolve,
     (_event, requestId: string, resolution: ToolPermissionResolution) =>
       bridge.resolveToolPermission(requestId, resolution)
+  )
+  ipcMain.handle(IPC.ExtensionUiPending, () => bridge.getPendingExtensionUiRequests())
+  ipcMain.handle(
+    IPC.ExtensionUiResolve,
+    (_event, requestId: string, response: ExtensionUiResponse) =>
+      bridge.resolveExtensionUiRequest(requestId, response)
   )
 
   // agent settings ----------------------------------------------------------------

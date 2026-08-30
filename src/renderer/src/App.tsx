@@ -8,8 +8,11 @@ import { useVerification } from './hooks/useVerification'
 import { useWorkflows } from './hooks/useWorkflows'
 import { useGitWorkspace } from './hooks/useGitWorkspace'
 import { deriveAgentTodos, deriveLatestRunChanges } from './agent/timeline'
+import { deriveWorkingStatus } from './agent/workingStatus'
 import type { FileChange } from './agent/types'
 import type {
+  ExtensionUiRequest,
+  ExtensionUiResponse,
   ImageContent,
   ProjectToolPermissionPolicy,
   ProjectTrustInfo,
@@ -33,6 +36,7 @@ import { ProjectTrustBanner } from './components/ProjectTrustBanner'
 import { HistoryNavigator } from './components/HistoryNavigator'
 import { ModifiedFilesCard } from './components/ModifiedFilesCard'
 import { ToolPermissionModal } from './components/ToolPermissionModal'
+import { ExtensionUiModal } from './components/ExtensionUiModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { RunMetricsStrip } from './components/RunMetricsStrip'
 import { RunRecoveryBanner } from './components/RunRecoveryBanner'
@@ -105,6 +109,7 @@ export function App(): ReactElement {
     sessionPath: state.session?.sessionFile,
     cwd: state.status.cwd
   })
+  const displayedRun = runTelemetry.activeRun ?? runTelemetry.latestRun
   const runRecovery = useRunRecovery({
     hasBridge,
     sessionPath: state.session?.sessionFile,
@@ -136,6 +141,9 @@ export function App(): ReactElement {
   const [toolPermissionRequests, setToolPermissionRequests] = useState<ToolPermissionRequest[]>([])
   const [toolPermissionResolveBusy, setToolPermissionResolveBusy] = useState(false)
   const [toolPermissionResolveError, setToolPermissionResolveError] = useState('')
+  const [extensionUiRequests, setExtensionUiRequests] = useState<ExtensionUiRequest[]>([])
+  const [extensionUiResolveBusy, setExtensionUiResolveBusy] = useState(false)
+  const [extensionUiResolveError, setExtensionUiResolveError] = useState('')
   const [branchDialogCwd, setBranchDialogCwd] = useState<string | null>(null)
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -153,6 +161,7 @@ export function App(): ReactElement {
     const raw = Number(localStorage.getItem('pion:history-nav-gap'))
     return Number.isFinite(raw) && raw >= 2 && raw <= 16 ? raw : 10
   })
+  const [historyNavTaskOffset, setHistoryNavTaskOffset] = useState(0)
   const [newSessionCwd, setNewSessionCwd] = useState('')
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
   const [visibleHistoryEntryId, setVisibleHistoryEntryId] = useState<string | undefined>()
@@ -245,6 +254,25 @@ export function App(): ReactElement {
     setToolPermissionResolveError('')
   }, [toolPermissionRequests[0]?.id])
 
+  useEffect(() => {
+    if (!hasBridge) return
+    let active = true
+    const off = window.pion.onExtensionUiRequests((requests) => {
+      if (active) setExtensionUiRequests(requests)
+    })
+    void window.pion.getPendingExtensionUiRequests().then((requests) => {
+      if (active) setExtensionUiRequests(requests)
+    })
+    return () => {
+      active = false
+      off()
+    }
+  }, [hasBridge])
+
+  useEffect(() => {
+    setExtensionUiResolveError('')
+  }, [extensionUiRequests[0]?.id])
+
   const handleCompletionNotificationsChange = useCallback(async (enabled: boolean): Promise<void> => {
     if (!hasBridge) return
     try {
@@ -263,6 +291,12 @@ export function App(): ReactElement {
   const handleHistoryNavGapChange = useCallback((gap: number): void => {
     setHistoryNavGap(gap)
     localStorage.setItem('pion:history-nav-gap', String(gap))
+  }, [])
+
+  const handleTaskPanelLayoutHeightChange = useCallback((height: number): void => {
+    // The bottom dock shortens chat-stage by this amount. Moving the rail by
+    // half of it cancels the stage-center shift across mount, expand and fold.
+    setHistoryNavTaskOffset(Math.max(0, height / 2))
   }, [])
 
   const handleProjectTrustChange = useCallback(async (decision: boolean | null): Promise<void> => {
@@ -335,6 +369,27 @@ export function App(): ReactElement {
       setToolPermissionResolveBusy(false)
     }
   }, [state.status.cwd, toolPermissionRequests, toolPermissionResolveBusy])
+
+  const handleExtensionUiResolve = useCallback(async (
+    response: ExtensionUiResponse
+  ): Promise<void> => {
+    const request = extensionUiRequests[0]
+    if (!request || extensionUiResolveBusy) return
+    setExtensionUiResolveBusy(true)
+    setExtensionUiResolveError('')
+    try {
+      await window.pion.resolveExtensionUiRequest(request.id, response)
+      setExtensionUiRequests((current) => current.filter((item) => item.id !== request.id))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setExtensionUiResolveError(message)
+      if (message.includes('已结束') || message.includes('已关闭')) {
+        setExtensionUiRequests((current) => current.filter((item) => item.id !== request.id))
+      }
+    } finally {
+      setExtensionUiResolveBusy(false)
+    }
+  }, [extensionUiRequests, extensionUiResolveBusy])
 
   useEffect(() => {
     saveFavoriteSessionPaths(favoriteSessionPaths)
@@ -779,15 +834,22 @@ export function App(): ReactElement {
   const latestRunChanges = useMemo(() => deriveLatestRunChanges(state.timeline), [state.timeline])
   const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
   const agentTodos = useMemo(() => deriveAgentTodos(state.timeline), [state.timeline])
-  const workingLabel = useMemo(() => {
-    for (let index = state.timeline.length - 1; index >= 0; index--) {
-      const item = state.timeline[index]
-      if (item.kind === 'tool' && item.tool.status === 'running') return '执行中'
-      if (item.kind === 'assistant' && item.streaming) return item.text === '' ? '思考中' : '输出中'
-      if (item.kind === 'user') break
+  const [workingCycle, setWorkingCycle] = useState(0)
+  useEffect(() => {
+    if (!state.busy) {
+      setWorkingCycle(0)
+      return
     }
-    return '思考中'
-  }, [state.timeline])
+    setWorkingCycle(0)
+    const timer = window.setInterval(() => setWorkingCycle((value) => value + 1), 7_000)
+    return () => window.clearInterval(timer)
+  }, [state.busy, state.session?.sessionId])
+  const workingStatus = useMemo(() => deriveWorkingStatus({
+    timeline: state.timeline,
+    mode: state.mode,
+    thinkingLevel: state.session?.thinkingLevel,
+    cycle: workingCycle
+  }), [state.mode, state.session?.thinkingLevel, state.timeline, workingCycle])
   const messageHistory = useMemo(
     () => state.timeline.flatMap((item) => (
       item.kind === 'user' && item.text.trim() ? [item.text] : []
@@ -954,6 +1016,8 @@ export function App(): ReactElement {
             </div>
           )}
 
+          <RunMetricsStrip run={displayedRun} />
+
           <ProjectTrustBanner
             trust={projectTrust}
             busy={projectTrustBusy || state.busy || state.status.phase === 'starting'}
@@ -967,6 +1031,7 @@ export function App(): ReactElement {
               activeEntryId={visibleHistoryEntryId}
               busy={state.timelineLoading || state.busy}
               gap={historyNavGap}
+              verticalOffset={historyNavTaskOffset}
               onJump={(landmark) => void actions.jumpToHistoryLandmark(landmark)}
             />
             <main className="chat-scroll" ref={scrollRef} onScroll={handleTimelineScroll}>
@@ -998,8 +1063,9 @@ export function App(): ReactElement {
                   )}
                   {state.busy && (
                     <div className="row row-agent-working">
-                      <span className="agent-working-text" role="status" aria-live="polite">
-                        {workingLabel}
+                      <span className="agent-working-text" role="status" aria-live="polite" aria-atomic="true">
+                        <span>{workingStatus.label}</span>
+                        {workingStatus.face && <span className="agent-working-face" aria-hidden="true">{workingStatus.face}</span>}
                       </span>
                     </div>
                   )}
@@ -1039,6 +1105,7 @@ export function App(): ReactElement {
               sessionKey={taskSessionKey}
               agentTodos={agentTodos}
               agentBusy={state.busy}
+              onLayoutHeightChange={handleTaskPanelLayoutHeightChange}
             />
             <RunRecoveryBanner
               candidates={runRecovery.candidates}
@@ -1049,7 +1116,6 @@ export function App(): ReactElement {
               onDiscard={(runId) => void runRecovery.discard(runId)}
               onRestoreCheckpoint={(runId) => void runRecovery.restoreCheckpoint(runId)}
             />
-            <RunMetricsStrip run={runTelemetry.activeRun ?? runTelemetry.latestRun} />
             <Composer
               busy={state.busy}
               queued={state.queued}
@@ -1058,6 +1124,9 @@ export function App(): ReactElement {
               prefill={prefill}
               history={messageHistory}
               commands={composerCommands}
+              contextPressure={displayedRun?.contextPressure}
+              contextTokens={displayedRun?.contextTokens}
+              contextWindow={displayedRun?.contextWindow}
               localCommandNames={LOCAL_SLASH_COMMAND_NAMES}
               mode={state.mode}
               onModeChange={(mode) => void actions.setMode(mode)}
@@ -1128,6 +1197,16 @@ export function App(): ReactElement {
           />
         )}
       </div>
+
+      {extensionUiRequests[0] && (
+        <ExtensionUiModal
+          request={extensionUiRequests[0]}
+          queueLength={extensionUiRequests.length}
+          busy={extensionUiResolveBusy}
+          error={extensionUiResolveError}
+          onResolve={handleExtensionUiResolve}
+        />
+      )}
 
       {operationsPanel && (
         <OperationsModal kind={operationsPanel} onClose={closeOperationsPanel}>

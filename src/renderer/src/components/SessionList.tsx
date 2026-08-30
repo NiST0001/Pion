@@ -121,14 +121,14 @@ export function SessionItems({
         <div
           key={session.path}
           data-session-path={session.path}
-          className={`side-item side-session side-session-${previewDensity}${onReorder ? ' reorderable' : ''}${session.path === activePath ? ' active' : ''}${runningSessionPaths.has(session.path) ? ' running' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
-          aria-busy={runningSessionPaths.has(session.path)}
-          draggable={Boolean(onReorder)}
+          className={`side-item side-session side-session-${previewDensity}${onReorder && !session.optimistic ? ' reorderable' : ''}${session.path === activePath ? ' active' : ''}${runningSessionPaths.has(session.path) || session.optimistic ? ' running' : ''}${session.optimistic ? ' optimistic' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
+          aria-busy={runningSessionPaths.has(session.path) || session.optimistic}
+          draggable={Boolean(onReorder && !session.optimistic)}
           onDragStart={(event) => {
-            if (onReorder) handleDragStart(event, session)
+            if (onReorder && !session.optimistic) handleDragStart(event, session)
           }}
           onDragOver={(event) => {
-            if (!onReorder) return
+            if (!onReorder || session.optimistic) return
             event.preventDefault()
             event.dataTransfer.dropEffect = 'move'
             if (session.path !== draggedPath) setDragOverPath(session.path)
@@ -136,17 +136,23 @@ export function SessionItems({
           onDragLeave={() => {
             if (session.path === dragOverPath) setDragOverPath(null)
           }}
-          onDrop={(event) => handleDrop(event, session.path)}
+          onDrop={(event) => {
+            if (!session.optimistic) handleDrop(event, session.path)
+          }}
           onDragEnd={clearDragState}
           onClick={() => {
             setContextMenu(null)
-            onSelect(session.path)
+            if (!session.optimistic) onSelect(session.path)
           }}
-          onContextMenu={(event) => openContextMenu(event, session)}
-          title={`${session.path}\n${onReorder ? '拖拽调整顺序 · ' : ''}点击星标收藏 · 右键查看更多操作`}
+          onContextMenu={(event) => {
+            if (!session.optimistic) openContextMenu(event, session)
+          }}
+          title={session.optimistic
+            ? '正在保存新会话…'
+            : `${session.path}\n${onReorder ? '拖拽调整顺序 · ' : ''}点击星标收藏 · 右键查看更多操作`}
         >
           <div className="side-session-content">
-            {onReorder && <GripVertical size={13} className="side-session-drag" aria-hidden="true" />}
+            {onReorder && !session.optimistic && <GripVertical size={13} className="side-session-drag" aria-hidden="true" />}
             <div className="side-session-main">
               <span className="side-item-label">
                 {session.name || session.preview || '未命名会话'}
@@ -160,19 +166,25 @@ export function SessionItems({
                 </span>
               )}
             </div>
-            <button
-              type="button"
-              className={`side-session-favorite${favoritePaths.has(session.path) ? ' active' : ''}`}
-              aria-label={favoritePaths.has(session.path) ? '取消收藏会话' : '收藏会话'}
-              aria-pressed={favoritePaths.has(session.path)}
-              title={favoritePaths.has(session.path) ? '取消收藏' : '收藏会话'}
-              onClick={(event) => {
-                event.stopPropagation()
-                onToggleFavorite(session.path)
-              }}
-            >
-              <Star size={13} fill={favoritePaths.has(session.path) ? 'currentColor' : 'none'} />
-            </button>
+            {session.optimistic ? (
+              <span className="side-session-persisting" aria-label="正在保存新会话">
+                <Loader2 size={13} className="spin" aria-hidden="true" />
+              </span>
+            ) : (
+              <button
+                type="button"
+                className={`side-session-favorite${favoritePaths.has(session.path) ? ' active' : ''}`}
+                aria-label={favoritePaths.has(session.path) ? '取消收藏会话' : '收藏会话'}
+                aria-pressed={favoritePaths.has(session.path)}
+                title={favoritePaths.has(session.path) ? '取消收藏' : '收藏会话'}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onToggleFavorite(session.path)
+                }}
+              >
+                <Star size={13} fill={favoritePaths.has(session.path) ? 'currentColor' : 'none'} />
+              </button>
+            )}
           </div>
         </div>
       ))}

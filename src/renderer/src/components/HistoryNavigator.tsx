@@ -57,6 +57,8 @@ interface HistoryNavigatorProps {
   busy: boolean
   /** Vertical gap between bars, px (user-adjustable in settings). */
   gap?: number
+  /** Compensates for dock panels so the rail stays fixed while they expand. */
+  verticalOffset?: number
   onJump: (landmark: HistoryLandmark) => void
 }
 
@@ -65,6 +67,7 @@ export function HistoryNavigator({
   activeEntryId,
   busy,
   gap = 10,
+  verticalOffset = 0,
   onJump
 }: HistoryNavigatorProps): ReactElement | null {
   const [preview, setPreview] = useState<HistoryLandmark | null>(null)
@@ -164,6 +167,7 @@ export function HistoryNavigator({
   return (
     <aside
       className={`history-navigator${busy ? ' busy' : ''}`}
+      style={{ '--history-navigator-task-offset': `${Math.max(0, verticalOffset)}px` } as CSSProperties}
       aria-label="会话历史快速导航"
     >
       <div

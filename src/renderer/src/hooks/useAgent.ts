@@ -12,7 +12,8 @@ import type {
   HistoryLandmark,
   ForkMessageOption,
   ImageContent,
-  ProjectTrustInfo
+  ProjectTrustInfo,
+  SessionMeta
 } from '../../../shared/types'
 import { reducer } from '../agent/reducer'
 import {
@@ -39,6 +40,7 @@ export function useAgent() {
   const historyCursor = useRef<HistoryCursor | null>(null)
   const timelineOwnerPath = useRef<string | undefined>(undefined)
   const expectedTimeline = useRef<{ path: string; items: TimelineItem[] } | null>(null)
+  const optimisticSessionTimers = useRef(new Map<string, number>())
 
   const showTimeline = useCallback((path: string, items: TimelineItem[], mode: AgentMode): void => {
     timelineOwnerPath.current = path
@@ -82,6 +84,25 @@ export function useAgent() {
       mode: state.mode
     })
   }, [state.mode, state.timeline])
+
+  useEffect(() => () => {
+    for (const timer of optimisticSessionTimers.current.values()) window.clearTimeout(timer)
+    optimisticSessionTimers.current.clear()
+  }, [])
+
+  useEffect(() => {
+    const persisted = new Set<string>()
+    for (const [cwd, sessions] of Object.entries(state.sessionsByProject)) {
+      for (const session of sessions) {
+        if (!session.optimistic) persisted.add(`${cwd}\u0000${session.id}`)
+      }
+    }
+    for (const [key, timer] of optimisticSessionTimers.current) {
+      if (!persisted.has(key)) continue
+      window.clearTimeout(timer)
+      optimisticSessionTimers.current.delete(key)
+    }
+  }, [state.sessionsByProject])
 
   useEffect(() => {
     if (!api) return
@@ -429,11 +450,55 @@ export function useAgent() {
 
   const send = useCallback(
     async (message: string, images: ImageContent[] = []) => {
-      if (!api || (message.trim() === '' && images.length === 0)) return
-      await api.send(message.trim(), images)
-      await refreshModels()
+      const prompt = message.trim()
+      if (!api || (prompt === '' && images.length === 0)) return
+
+      const cwd = state.status.cwd
+      const session = state.session
+      const alreadyListed = Boolean(cwd && session && state.sessionsByProject[cwd]?.some((item) => (
+        item.id === session.sessionId && !item.optimistic
+      )))
+      const shouldProject = Boolean(cwd && session && session.messageCount === 0 && !alreadyListed)
+      const optimisticKey = shouldProject && cwd && session
+        ? `${cwd}\u0000${session.sessionId}`
+        : null
+      if (shouldProject && cwd && session && optimisticKey) {
+        const now = Date.now()
+        const preview = prompt.replace(/\s+/g, ' ').slice(0, 90) || '图片消息'
+        const optimisticSession: SessionMeta = {
+          projectCwd: cwd,
+          path: session.sessionFile ?? `pion:pending:${session.sessionId}`,
+          id: session.sessionId,
+          name: session.sessionName,
+          timestamp: new Date(now).toISOString(),
+          mtime: now,
+          preview,
+          messageCount: 1,
+          optimistic: true
+        }
+        dispatch({ type: 'optimisticSession', session: optimisticSession })
+        const existingTimer = optimisticSessionTimers.current.get(optimisticKey)
+        if (existingTimer) window.clearTimeout(existingTimer)
+        optimisticSessionTimers.current.set(optimisticKey, window.setTimeout(() => {
+          optimisticSessionTimers.current.delete(optimisticKey)
+          dispatch({ type: 'removeOptimisticSession', cwd, id: session.sessionId })
+        }, 30_000))
+      }
+
+      try {
+        await api.send(prompt, images)
+        await refreshModels()
+      } catch (error) {
+        if (optimisticKey && cwd && session) {
+          const timer = optimisticSessionTimers.current.get(optimisticKey)
+          if (timer) window.clearTimeout(timer)
+          optimisticSessionTimers.current.delete(optimisticKey)
+          dispatch({ type: 'removeOptimisticSession', cwd, id: session.sessionId })
+        }
+        throw error
+      }
     },
-    [api, refreshModels]
+    [api, refreshModels, state.session, state.sessionsByProject, state.status.cwd]
   )
 
   const queue = useCallback(

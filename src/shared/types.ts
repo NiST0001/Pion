@@ -330,6 +330,28 @@ export interface ToolPermissionRequest {
   timeoutAt: number
 }
 
+export type ExtensionUiMethod = 'select' | 'confirm' | 'input' | 'editor'
+
+/** Interactive Pi extension UI request projected into a native Pion dialog. */
+export interface ExtensionUiRequest {
+  id: string
+  cwd: string
+  sessionPath?: string
+  method: ExtensionUiMethod
+  title: string
+  options?: string[]
+  message?: string
+  placeholder?: string
+  prefill?: string
+  createdAt: number
+  timeoutAt: number
+}
+
+export type ExtensionUiResponse =
+  | { value: string }
+  | { confirmed: boolean }
+  | { cancelled: true }
+
 export interface BranchInfo {
   /** Display name of the Git branch. */
   name: string
@@ -353,6 +375,8 @@ export interface SessionMeta {
   /** First user message snippet */
   preview: string
   messageCount: number
+  /** Renderer-only projection shown while Pi persists a new first message. */
+  optimistic?: boolean
 }
 
 export interface ForkMessageOption {
@@ -622,6 +646,8 @@ export interface PionApi {
     requestId: string,
     resolution: ToolPermissionResolution
   ): Promise<ProjectToolPermissionPolicy | null>
+  getPendingExtensionUiRequests(): Promise<ExtensionUiRequest[]>
+  resolveExtensionUiRequest(requestId: string, response: ExtensionUiResponse): Promise<void>
 
   // projects ----------------------------------------------------------------
   listProjects(): Promise<ProjectMeta[]>
@@ -678,4 +704,6 @@ export interface PionApi {
   onProjects(listener: (projects: ProjectMeta[]) => void): () => void
   /** Subscribe to the global queue of tool calls awaiting permission. */
   onToolPermissionRequests(listener: (requests: ToolPermissionRequest[]) => void): () => void
+  /** Subscribe to interactive requests emitted by Pi extensions in RPC mode. */
+  onExtensionUiRequests(listener: (requests: ExtensionUiRequest[]) => void): () => void
 }

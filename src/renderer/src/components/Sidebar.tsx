@@ -392,7 +392,7 @@ function ProjectBranch({
               favoritePaths={favoritePaths}
               onToggleFavorite={onToggleFavorite}
               onSelect={(path) => onSelectSession(branch.cwd, path)}
-              onReorder={handleReorder}
+              onReorder={sessions.some((session) => session.optimistic) ? undefined : handleReorder}
               onDelete={(path) => onDelete(branch.cwd, path)}
               onCopy={(path) => onCopy(branch.cwd, path)}
               onOpenTaskHistory={onOpenTaskHistory}

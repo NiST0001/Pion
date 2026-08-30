@@ -19,6 +19,13 @@ import {
 } from './timeline'
 import type { Action, AgentState, TimelineItem, ToolItem } from './types'
 
+/** Keep a just-sent empty session visible until Pi's JSONL index catches up. */
+function reconcileSessionProjection(incoming: AgentState['sessions'], previous: AgentState['sessions']): AgentState['sessions'] {
+  const persistedIds = new Set(incoming.map((session) => session.id))
+  const pending = previous.filter((session) => session.optimistic && !persistedIds.has(session.id))
+  return orderSessions([...incoming, ...pending], previous)
+}
+
 export function reducer(state: AgentState, action: Action): AgentState {
   switch (action.type) {
     case 'status': {
@@ -52,7 +59,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
     case 'sessions': {
       const projectCwd = action.sessions[0]?.projectCwd ?? state.status.cwd
       const previous = projectCwd ? state.sessionsByProject[projectCwd] ?? [] : []
-      const sessions = orderSessions(action.sessions, previous)
+      const sessions = reconcileSessionProjection(action.sessions, previous)
       return {
         ...state,
         sessions,
@@ -65,13 +72,40 @@ export function reducer(state: AgentState, action: Action): AgentState {
       const sessionsByProject = Object.fromEntries(
         Object.entries(action.sessionsByProject).map(([cwd, sessions]) => [
           cwd,
-          orderSessions(sessions, state.sessionsByProject[cwd] ?? [])
+          reconcileSessionProjection(sessions, state.sessionsByProject[cwd] ?? [])
         ])
       )
       return { ...state, sessionsByProject }
     }
     case 'projectSessionsUpdate': {
-      const sessions = orderSessions(action.sessions, state.sessionsByProject[action.cwd] ?? [])
+      const sessions = reconcileSessionProjection(
+        action.sessions,
+        state.sessionsByProject[action.cwd] ?? []
+      )
+      return {
+        ...state,
+        sessions: state.status.cwd === action.cwd ? sessions : state.sessions,
+        sessionsByProject: { ...state.sessionsByProject, [action.cwd]: sessions }
+      }
+    }
+    case 'optimisticSession': {
+      const cwd = action.session.projectCwd
+      if (!cwd) return state
+      const previous = state.sessionsByProject[cwd] ?? []
+      const withoutDuplicate = previous.filter((session) => session.id !== action.session.id)
+      const sessions = orderSessions([...withoutDuplicate, action.session], previous)
+      return {
+        ...state,
+        sessions: state.status.cwd === cwd ? sessions : state.sessions,
+        sessionsByProject: { ...state.sessionsByProject, [cwd]: sessions }
+      }
+    }
+    case 'removeOptimisticSession': {
+      const previous = state.sessionsByProject[action.cwd] ?? []
+      const sessions = previous.filter((session) => (
+        session.id !== action.id || !session.optimistic
+      ))
+      if (sessions.length === previous.length) return state
       return {
         ...state,
         sessions: state.status.cwd === action.cwd ? sessions : state.sessions,

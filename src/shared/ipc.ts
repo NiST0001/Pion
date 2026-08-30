@@ -86,6 +86,8 @@ export const IPC = {
   ToolPermissionPolicySet: 'pion:tool-permission-policy-set',
   ToolPermissionPending: 'pion:tool-permission-pending',
   ToolPermissionResolve: 'pion:tool-permission-resolve',
+  ExtensionUiPending: 'pion:extension-ui-pending',
+  ExtensionUiResolve: 'pion:extension-ui-resolve',
 
   // plugin store
   PluginsCatalog: 'pion:plugins-catalog',
@@ -140,5 +142,6 @@ export const IPC_EVENTS = {
   AgentTree: 'pion:agent-tree',
   Projects: 'pion:projects',
   ToolPermissionRequests: 'pion:tool-permission-requests',
+  ExtensionUiRequests: 'pion:extension-ui-requests',
   WindowState: 'pion:window-state'
 } as const

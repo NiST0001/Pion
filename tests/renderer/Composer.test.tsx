@@ -22,6 +22,9 @@ describe('Composer local slash commands', () => {
         prefill=""
         history={[]}
         commands={[{ name: 'agents', description: 'open agents', source: 'pion' }]}
+        contextPressure={0.42}
+        contextTokens={42_000}
+        contextWindow={100_000}
         localCommandNames={['agents']}
         mode="build"
         onModeChange={vi.fn()}
@@ -31,6 +34,8 @@ describe('Composer local slash commands', () => {
       />
     )
 
+    expect(screen.getByRole('progressbar', { name: /上下文已使用 42%/ })).toHaveAttribute('aria-valuenow', '42')
+    expect(document.querySelector('.send-context-progress')).toHaveStyle('stroke-dashoffset: 58')
     const input = screen.getByRole('textbox')
     fireEvent.change(input, { target: { value: '/agents' } })
     expect(screen.getByRole('button', { name: /Enter 直接发送/ })).toBeEnabled()

@@ -4,6 +4,8 @@ import type {
   AgentCapabilities,
   AgentMode,
   AgentStatus,
+  ExtensionUiRequest,
+  ExtensionUiResponse,
   GitCommitResult,
   GitConflictContent,
   GitDiffScope,
@@ -162,6 +164,10 @@ const api: PionApi = {
     ipcRenderer.invoke(IPC.ToolPermissionPending) as Promise<ToolPermissionRequest[]>,
   resolveToolPermission: (requestId, resolution: ToolPermissionResolution) =>
     ipcRenderer.invoke(IPC.ToolPermissionResolve, requestId, resolution) as Promise<ProjectToolPermissionPolicy | null>,
+  getPendingExtensionUiRequests: () =>
+    ipcRenderer.invoke(IPC.ExtensionUiPending) as Promise<ExtensionUiRequest[]>,
+  resolveExtensionUiRequest: (requestId, response: ExtensionUiResponse) =>
+    ipcRenderer.invoke(IPC.ExtensionUiResolve, requestId, response) as Promise<void>,
 
   // window
   minimizeWindow: () => ipcRenderer.send(IPC.WindowControl, 'minimize'),
@@ -232,6 +238,8 @@ const api: PionApi = {
   onProjects: (listener) => subscribe<ProjectMeta[]>(IPC_EVENTS.Projects, listener),
   onToolPermissionRequests: (listener) =>
     subscribe<ToolPermissionRequest[]>(IPC_EVENTS.ToolPermissionRequests, listener),
+  onExtensionUiRequests: (listener) =>
+    subscribe<ExtensionUiRequest[]>(IPC_EVENTS.ExtensionUiRequests, listener),
   onWindowState: (listener) => subscribe<boolean>(IPC_EVENTS.WindowState, listener)
 }
 

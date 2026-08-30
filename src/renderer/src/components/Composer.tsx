@@ -43,6 +43,10 @@ interface ComposerProps {
   /** 嵌入输入框底部的控制区（模型/思考级别选择器等） */
   controls?: ReactNode
   commands: SlashCommandInfo[]
+  /** Latest model request pressure for the selected session's context window. */
+  contextPressure?: number
+  contextTokens?: number
+  contextWindow?: number
   /** Renderer-owned commands that stay available while the Agent backend prepares. */
   localCommandNames?: string[]
   mode: AgentMode
@@ -62,6 +66,9 @@ export function Composer({
   projectSelector,
   controls,
   commands,
+  contextPressure,
+  contextTokens,
+  contextWindow,
   localCommandNames = [],
   mode,
   onModeChange,
@@ -203,6 +210,14 @@ export function Composer({
   const invokedCommandName = value.trim().match(/^\/([^\s]+)(?:\s+[\s\S]*)?$/)?.[1]?.toLocaleLowerCase()
   const localCommandReady = Boolean(invokedCommandName && localCommandNames.includes(invokedCommandName))
   const activeCommandIndex = Math.min(commandIndex, Math.max(0, commandOptions.length - 1))
+  const contextPercent = contextPressure === undefined
+    ? null
+    : Math.round(Math.max(0, Math.min(contextPressure, 1)) * 100)
+  const contextLabel = contextPercent === null
+    ? '上下文占用尚不可用'
+    : `当前会话上下文已使用 ${contextPercent}%${contextTokens !== undefined && contextWindow
+      ? `（${Math.round(contextTokens).toLocaleString()} / ${Math.round(contextWindow).toLocaleString()} tokens）`
+      : ''}`
 
   useEffect(() => {
     setCommandIndex(0)
@@ -453,14 +468,40 @@ export function Composer({
             {controls}
           </div>
         </div>
-        <button
-          className="send-button"
-          onClick={submit}
-          disabled={disabled || (sendDisabled && !localCommandReady) || (value.trim() === '' && pendingImages.length === 0)}
-          title={sendDisabled && !localCommandReady ? 'Agent 正在准备，输入内容会保留' : 'Enter 直接发送'}
+        <div
+          className={`send-button-context${contextPercent !== null && contextPercent >= 80 ? ' pressure-high' : ''}`}
+          title={contextLabel}
         >
-          <ArrowUp size={16} />
-        </button>
+          <svg
+            className="send-context-ring"
+            viewBox="0 0 48 48"
+            role={contextPercent === null ? undefined : 'progressbar'}
+            aria-label={contextPercent === null ? undefined : contextLabel}
+            aria-valuemin={contextPercent === null ? undefined : 0}
+            aria-valuemax={contextPercent === null ? undefined : 100}
+            aria-valuenow={contextPercent ?? undefined}
+          >
+            <circle className="send-context-track" cx="24" cy="24" r="22" pathLength="100" />
+            {contextPercent !== null && (
+              <circle
+                className="send-context-progress"
+                cx="24"
+                cy="24"
+                r="22"
+                pathLength="100"
+                style={{ strokeDashoffset: 100 - contextPercent }}
+              />
+            )}
+          </svg>
+          <button
+            className="send-button"
+            onClick={submit}
+            disabled={disabled || (sendDisabled && !localCommandReady) || (value.trim() === '' && pendingImages.length === 0)}
+            title={`${sendDisabled && !localCommandReady ? 'Agent 正在准备，输入内容会保留' : 'Enter 直接发送'} · ${contextLabel}`}
+          >
+            <ArrowUp size={16} />
+          </button>
+        </div>
       </div>
       {busy && (
         <div className="composer-status-row">

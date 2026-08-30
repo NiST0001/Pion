@@ -21,6 +21,8 @@ import type {
   AgentStatus,
   BranchInfo,
   DeleteSessionResult,
+  ExtensionUiRequest,
+  ExtensionUiResponse,
   ForkMessageOption,
   ImageContent,
   ModelOption,
@@ -84,6 +86,7 @@ const EVENT_CHANNEL = IPC_EVENTS.AgentEvent
 const STATUS_CHANNEL = IPC_EVENTS.AgentStatus
 const CHECKPOINT_CHANNEL = IPC_EVENTS.AgentRunCheckpoint
 const TOOL_PERMISSION_CHANNEL = IPC_EVENTS.ToolPermissionRequests
+const EXTENSION_UI_CHANNEL = IPC_EVENTS.ExtensionUiRequests
 const STATE_CHANNEL = IPC_EVENTS.AgentState
 const SESSIONS_CHANNEL = IPC_EVENTS.AgentSessions
 const RUNNING_SESSIONS_CHANNEL = IPC_EVENTS.AgentRunningSessions
@@ -92,6 +95,7 @@ const TREE_CHANNEL = IPC_EVENTS.AgentTree
 const PLAN_EXTENSION_PATH = resolve(MODULE_DIR, '../../node_modules/@narumitw/pi-plan-mode/dist/index.ts')
 /** Global pool size shared by every project and worktree. */
 const MAX_RETAINED_BACKENDS = 10
+const EXTENSION_UI_TIMEOUT_MS = 10 * 60 * 1000
 
 /** Pi's RPC get_commands intentionally returns only extensions, prompts, and
     skills. Merge the built-ins that Pion can execute with equivalent native
@@ -121,6 +125,13 @@ type BackendPhase = 'starting' | 'running' | 'error'
 
 interface PendingToolPermission {
   request: ToolPermissionRequest
+  backendKey: string
+  extensionRequestId: string
+  timeout: ReturnType<typeof setTimeout>
+}
+
+interface PendingExtensionUi {
+  request: ExtensionUiRequest
   backendKey: string
   extensionRequestId: string
   timeout: ReturnType<typeof setTimeout>
@@ -224,6 +235,7 @@ export class AgentBridge {
   private readonly projectTrustStore = new ProjectTrustStore(getAgentDir())
   private readonly toolPermissionStore = new ToolPermissionStore()
   private readonly pendingToolPermissions = new Map<string, PendingToolPermission>()
+  private readonly pendingExtensionUi = new Map<string, PendingExtensionUi>()
   private newSessionInFlight: Promise<void> | null = null
   private sessionSelectionGeneration = 0
   private activeKey: string | null = null
@@ -253,6 +265,7 @@ export class AgentBridge {
     this.win.webContents.send(STATUS_CHANNEL, this.status)
     this.pushRunCheckpoint()
     this.pushToolPermissionRequests()
+    this.pushExtensionUiRequests()
     this.pushRunningSessionPaths()
   }
 
@@ -315,6 +328,10 @@ export class AgentBridge {
     this.win?.webContents.send(TOOL_PERMISSION_CHANNEL, this.getPendingToolPermissionRequests())
   }
 
+  private pushExtensionUiRequests(): void {
+    this.win?.webContents.send(EXTENSION_UI_CHANNEL, this.getPendingExtensionUiRequests())
+  }
+
   async loadToolPermissions(): Promise<void> {
     await Promise.all([this.toolPermissionStore.load(), this.runStore.load()])
     await this.toolPermissionStore.ensureExtension()
@@ -323,6 +340,12 @@ export class AgentBridge {
   getPendingToolPermissionRequests(): ToolPermissionRequest[] {
     return [...this.pendingToolPermissions.values()]
       .map(({ request }) => ({ ...request }))
+      .sort((a, b) => a.createdAt - b.createdAt)
+  }
+
+  getPendingExtensionUiRequests(): ExtensionUiRequest[] {
+    return [...this.pendingExtensionUi.values()]
+      .map(({ request }) => ({ ...request, options: request.options ? [...request.options] : undefined }))
       .sort((a, b) => a.createdAt - b.createdAt)
   }
 
@@ -357,7 +380,27 @@ export class AgentBridge {
     if (changed) this.pushToolPermissionRequests()
   }
 
-  private respondToExtensionUi(client: RpcClient, id: string, value: string): void {
+  private clearExtensionUiRequest(id: string): PendingExtensionUi | null {
+    const pending = this.pendingExtensionUi.get(id)
+    if (!pending) return null
+    clearTimeout(pending.timeout)
+    this.pendingExtensionUi.delete(id)
+    this.pushExtensionUiRequests()
+    return pending
+  }
+
+  private clearBackendExtensionUiRequests(backendKey: string): void {
+    let changed = false
+    for (const [id, pending] of this.pendingExtensionUi) {
+      if (pending.backendKey !== backendKey) continue
+      clearTimeout(pending.timeout)
+      this.pendingExtensionUi.delete(id)
+      changed = true
+    }
+    if (changed) this.pushExtensionUiRequests()
+  }
+
+  private respondToExtensionUi(client: RpcClient, id: string, response: ExtensionUiResponse): void {
     // Pi 0.84 documents extension_ui_response but RpcClient does not expose a
     // public sender for it. Write the documented JSONL frame to its child stdin
     // until the SDK provides a first-class method.
@@ -372,9 +415,9 @@ export class AgentBridge {
     }).process
     const stdin = process?.stdin
     if (!stdin || stdin.destroyed || stdin.writable === false) {
-      throw new Error('Agent 权限请求已失效')
+      throw new Error('Agent 交互请求已失效')
     }
-    stdin.write(`${JSON.stringify({ type: 'extension_ui_response', id, value })}\n`)
+    stdin.write(`${JSON.stringify({ type: 'extension_ui_response', id, ...response })}\n`)
   }
 
   async resolveToolPermission(
@@ -406,12 +449,35 @@ export class AgentBridge {
       this.clearToolPermissionRequest(requestId)
       throw new Error('发起请求的 Agent 会话已关闭')
     }
-    this.respondToExtensionUi(backend.client, pending.extensionRequestId, resolution)
+    this.respondToExtensionUi(backend.client, pending.extensionRequestId, { value: resolution })
     this.clearToolPermissionRequest(requestId)
     return policy
   }
 
-  private handleExtensionUiRequest(backend: BackendRecord, event: unknown): boolean {
+  async resolveExtensionUiRequest(requestId: string, response: ExtensionUiResponse): Promise<void> {
+    const pending = this.pendingExtensionUi.get(requestId)
+    if (!pending) throw new Error('扩展交互请求已结束')
+    if (!response || typeof response !== 'object') throw new Error('无效的扩展交互响应')
+    const cancelled = 'cancelled' in response && response.cancelled === true
+    const hasValue = 'value' in response
+      && typeof response.value === 'string'
+      && response.value.length <= 256_000
+    const valid = cancelled || (pending.request.method === 'confirm'
+      ? 'confirmed' in response && typeof response.confirmed === 'boolean'
+      : pending.request.method === 'select'
+        ? hasValue && Boolean(pending.request.options?.includes(response.value))
+        : hasValue)
+    if (!valid) throw new Error('无效的扩展交互响应')
+    const backend = this.backends.get(pending.backendKey)
+    if (!backend) {
+      this.clearExtensionUiRequest(requestId)
+      throw new Error('发起请求的 Agent 会话已关闭')
+    }
+    this.respondToExtensionUi(backend.client, pending.extensionRequestId, response)
+    this.clearExtensionUiRequest(requestId)
+  }
+
+  private handleToolPermissionExtensionRequest(backend: BackendRecord, event: unknown): boolean {
     if (typeof event !== 'object' || event === null) return false
     const request = event as {
       type?: string
@@ -496,8 +562,89 @@ export class AgentBridge {
       this.pushToolPermissionRequests()
     } catch (error) {
       console.error('[pion] invalid tool permission request:', error)
-      this.respondToExtensionUi(backend.client, request.id, 'deny')
+      this.respondToExtensionUi(backend.client, request.id, { value: 'deny' })
     }
+    return true
+  }
+
+  private handleExtensionUiRequest(backend: BackendRecord, event: unknown): boolean {
+    if (this.handleToolPermissionExtensionRequest(backend, event)) return true
+    if (typeof event !== 'object' || event === null) return false
+    const source = event as {
+      type?: string
+      id?: string
+      method?: string
+      title?: string
+      options?: unknown
+      message?: unknown
+      placeholder?: unknown
+      prefill?: unknown
+      timeout?: unknown
+    }
+    if (source.type !== 'extension_ui_request') return false
+    if (!['select', 'confirm', 'input', 'editor'].includes(source.method ?? '')) return false
+    if (typeof source.id !== 'string') return true
+
+    const cancelInvalidRequest = (message: string): true => {
+      console.error(`[pion] invalid extension UI request: ${message}`)
+      try {
+        this.respondToExtensionUi(backend.client, source.id as string, { cancelled: true })
+      } catch (error) {
+        console.error('[pion] failed to cancel invalid extension UI request:', error)
+      }
+      return true
+    }
+    if (typeof source.title !== 'string' || !source.title.trim()) {
+      return cancelInvalidRequest('missing title')
+    }
+
+    const method = source.method as ExtensionUiRequest['method']
+    const options = method === 'select' && Array.isArray(source.options)
+      ? source.options.filter((option): option is string => typeof option === 'string' && option.trim().length > 0).slice(0, 20)
+      : undefined
+    if (method === 'select' && (!options || options.length === 0)) {
+      return cancelInvalidRequest('select request has no options')
+    }
+    if (method === 'confirm' && typeof source.message !== 'string') {
+      return cancelInvalidRequest('confirm request has no message')
+    }
+
+    const id = randomUUID()
+    const createdAt = Date.now()
+    const requestedTimeout = typeof source.timeout === 'number' && Number.isFinite(source.timeout)
+      ? source.timeout
+      : EXTENSION_UI_TIMEOUT_MS
+    const timeoutMs = Math.min(Math.max(requestedTimeout, 1_000), EXTENSION_UI_TIMEOUT_MS)
+    const request: ExtensionUiRequest = {
+      id,
+      cwd: backend.cwd,
+      sessionPath: backend.sessionPath,
+      method,
+      title: source.title.trim().slice(0, 4_000),
+      options,
+      message: typeof source.message === 'string' ? source.message.slice(0, 8_000) : undefined,
+      placeholder: typeof source.placeholder === 'string' ? source.placeholder.slice(0, 500) : undefined,
+      prefill: typeof source.prefill === 'string' ? source.prefill.slice(0, 8_000) : undefined,
+      createdAt,
+      timeoutAt: createdAt + timeoutMs
+    }
+    const timeout = setTimeout(() => {
+      const pending = this.pendingExtensionUi.get(id)
+      if (!pending) return
+      try {
+        this.respondToExtensionUi(backend.client, pending.extensionRequestId, { cancelled: true })
+      } catch (error) {
+        console.error('[pion] failed to time out extension UI request:', error)
+      }
+      this.clearExtensionUiRequest(id)
+    }, timeoutMs)
+    this.pendingExtensionUi.set(id, {
+      request,
+      backendKey: backend.key,
+      extensionRequestId: source.id,
+      timeout
+    })
+    this.pushExtensionUiRequests()
     return true
   }
 
@@ -1201,6 +1348,7 @@ export class AgentBridge {
       .catch((error: unknown) => {
         backend.phase = 'error'
         this.clearBackendToolPermissionRequests(key)
+        this.clearBackendExtensionUiRequests(key)
         this.backends.delete(key)
         this.removeBackendFromOrder(key)
         this.pushRunningSessionPaths()
@@ -1326,6 +1474,9 @@ export class AgentBridge {
     for (const pending of this.pendingToolPermissions.values()) clearTimeout(pending.timeout)
     this.pendingToolPermissions.clear()
     this.pushToolPermissionRequests()
+    for (const pending of this.pendingExtensionUi.values()) clearTimeout(pending.timeout)
+    this.pendingExtensionUi.clear()
+    this.pushExtensionUiRequests()
     this.backends.clear()
     this.backendStarts.clear()
     this.backendOrder.length = 0
@@ -1373,6 +1524,9 @@ export class AgentBridge {
       }
     }
     await this.syncBackendSession(backend)
+    if (this.activeKey === backend.key) {
+      await Promise.all([this.pushSessionInfo(), this.refreshSidebarSessions()])
+    }
   }
 
   /** Queue a follow-up while running; starts this session's backend if needed. */
@@ -1627,6 +1781,7 @@ export class AgentBridge {
       await this.runStore.markInterrupted(backend.activeRunId, 'Agent 后端已停止；本轮未自动重放。')
     }
     this.clearBackendToolPermissionRequests(key)
+    this.clearBackendExtensionUiRequests(key)
     this.backends.delete(key)
     this.removeBackendFromOrder(key)
     this.pushRunningSessionPaths()

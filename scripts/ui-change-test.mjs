@@ -7,6 +7,13 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
 
 const PORT = '9344'
+// Legacy CDP probes are full Electron tests: isolate both Pion state and Pi
+// sessions/extensions so this script never reads or mutates the real profile.
+const TEST_RUNTIME_ROOT = mkdtempSync(join(tmpdir(), 'pion-ui-runtime-'))
+process.env.PION_USER_DATA_DIR = join(TEST_RUNTIME_ROOT, 'user-data')
+process.env.PI_CODING_AGENT_DIR = join(TEST_RUNTIME_ROOT, 'pi-agent')
+mkdirSync(process.env.PION_USER_DATA_DIR, { recursive: true })
+mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true })
 // 测试工作区用独立临时 git 仓库，避免与本机正在使用的项目会话互相干扰
 const TEST_WORKSPACE = mkdtempSync(join(tmpdir(), 'pion-ui-test-'))
 execSync('git init -q -b main && git config user.email nist@localhost && git config user.name nist && git commit -q --allow-empty -m init', { cwd: TEST_WORKSPACE })
@@ -27,6 +34,50 @@ const ORDER_SESSION_PATHS = ['A', 'B'].map((label) => {
     stopReason: 'stop',
     timestamp: Date.now() + 1
   })
+  // Keep one deterministic long fixture in the isolated test workspace. The
+  // navigator probes must never depend on sessions from the developer's real
+  // PI_CODING_AGENT_DIR.
+  if (label === 'B') {
+    for (let index = 1; index < 28; index++) {
+      manager.appendMessage({
+        role: 'user',
+        content: [{ type: 'text', text: `Pion history prompt ${index}` }],
+        timestamp: Date.now() + index * 2
+      })
+      manager.appendMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: `Pion history response ${index}` }],
+        provider: 'test',
+        model: 'test',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: 'stop',
+        timestamp: Date.now() + index * 2 + 1
+      })
+    }
+    manager.appendMessage({
+      role: 'user',
+      content: [{ type: 'text', text: 'Pion navigator task-panel probe' }],
+      timestamp: Date.now() + 60
+    })
+    manager.appendMessage({
+      role: 'assistant',
+      content: [{ type: 'toolCall', id: 'pion-nav-task-call', name: 'pion_task', arguments: { action: 'create', subject: '固定会话跳转条' } }],
+      provider: 'test',
+      model: 'test',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: 'toolUse',
+      timestamp: Date.now() + 61
+    })
+    manager.appendMessage({
+      role: 'toolResult',
+      toolCallId: 'pion-nav-task-call',
+      toolName: 'pion_task',
+      content: [{ type: 'text', text: 'Created Pion task #1' }],
+      details: { action: 'create', tasks: [{ id: 1, subject: '固定会话跳转条', status: 'pending' }], nextId: 2, native: 'pion' },
+      isError: false,
+      timestamp: Date.now() + 62
+    })
+  }
   const path = manager.getSessionFile()
   if (!path) throw new Error('failed to create reorder probe session')
   return path
@@ -80,6 +131,7 @@ process.on('exit', () => {
   rmSync(NATIVE_TASK_SESSION_PATH, { force: true })
   rmSync(NATIVE_TASK_WORKSPACE, { recursive: true, force: true })
   rmSync(TEST_WORKSPACE, { recursive: true, force: true })
+  rmSync(TEST_RUNTIME_ROOT, { recursive: true, force: true })
 })
 
 async function getPage() {
@@ -118,16 +170,19 @@ const evaluate = async (expression) => {
 }
 
 let ok = 0
+let failed = 0
 const check = async (name, expr) => {
   const value = await evaluate(expr)
   const pass = value === true || value === 'PASS'
   console.log(`${pass ? '✓' : '✗'} ${name}${pass ? '' : ` -> ${JSON.stringify(value)}`}`)
   if (pass) ok++
+  else failed++
 }
 
 const checkHost = (name, value) => {
   console.log(`${value ? '✓' : '✗'} ${name}`)
   if (value) ok++
+  else failed++
 }
 
 // 等待 agent 运行
@@ -333,6 +388,8 @@ await check('动画系统支持减少动态效果', `(() => { try { return [...d
 checkHost('缓存和短会话重播首次加载渐显', (() => { const source = readFileSync('src/renderer/src/hooks/useAgent.ts', 'utf8'); const restore = source.slice(source.indexOf('const restoreCachedTimeline'), source.indexOf('// Keep a loaded session')); return restore.includes("historical: true") && restore.includes('showTimeline(path, items, revealedCache.mode)'); })())
 checkHost('进行中任务只旋转状态圆圈', (() => { const css = readFileSync('src/renderer/src/styles/task-panel.css', 'utf8'); return css.includes('@keyframes task-status-spin') && css.includes('.task-panel.running .task-item.active .task-status-spinner') && !css.includes('task-active-sweep'); })())
 checkHost('任务旋转动效绑定真实会话运行状态', (() => { const panel = readFileSync('src/renderer/src/components/TaskPanel.tsx', 'utf8'); const app = readFileSync('src/renderer/src/App.tsx', 'utf8'); return panel.includes("agentBusy ? ' running' : ''") && app.includes('agentBusy={state.busy}'); })())
+checkHost('工作状态按模式思考与工具动态推导', (() => { const status = readFileSync('src/renderer/src/agent/workingStatus.ts', 'utf8'); const app = readFileSync('src/renderer/src/App.tsx', 'utf8'); return status.includes('deriveWorkingStatus') && status.includes('深度思考中...') && status.includes('操作工具中...') && app.includes('workingStatus.face') && app.includes('aria-hidden="true"'); })())
+checkHost('会话跳转条补偿任务面板布局变化', (() => { const task = readFileSync('src/renderer/src/components/TaskPanel.tsx', 'utf8'); const nav = readFileSync('src/renderer/src/components/HistoryNavigator.tsx', 'utf8'); const app = readFileSync('src/renderer/src/App.tsx', 'utf8'); const css = readFileSync('src/renderer/src/styles/history-navigator.css', 'utf8'); return task.includes('onLayoutHeightChange') && nav.includes('verticalOffset') && app.includes('setHistoryNavTaskOffset') && css.includes('--history-navigator-task-offset'); })())
 await evaluate(`(() => { const root = document.documentElement; root.classList.remove('pion-keyboard-focus'); const control = document.querySelector('.tool-head') ?? document.querySelector('button'); control?.focus(); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift' })); window.__pionShiftFocusProbe = { active: document.activeElement === control, outline: control ? getComputedStyle(control).outlineStyle : '', keyboard: root.classList.contains('pion-keyboard-focus') }; return true; })()`)
 await check('单按 Shift 不显示复选框式焦点框', `window.__pionShiftFocusProbe?.active && window.__pionShiftFocusProbe.outline === 'none' && window.__pionShiftFocusProbe.keyboard === false`)
 await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab' }))`)
@@ -360,12 +417,14 @@ if (await evaluate(`!!document.querySelector('.task-panel')`)) {
   await check('AI 任务条目只读无勾选按钮', `document.querySelectorAll('.task-panel .task-item button.task-check').length === 0`)
   await check('任务行无扫光且圆圈仅在运行时旋转', `(() => { const panel = document.querySelector('.task-panel'); const active = panel?.querySelector('.task-item.active'); const spinner = active?.querySelector('.task-status-spinner'); if (!panel || !active || !spinner) return true; const wasRunning = panel.classList.contains('running'); panel.classList.remove('running'); const idleAnimation = getComputedStyle(spinner).animationName; panel.classList.add('running'); const runningAnimation = getComputedStyle(spinner).animationName; panel.classList.toggle('running', wasRunning); return idleAnimation === 'none' && runningAnimation === 'task-status-spin' && getComputedStyle(active, '::before').animationName === 'none' ? true : { idleAnimation, runningAnimation, rowAnimation: getComputedStyle(active, '::before').animationName }; })()`)
   await check('任务面板不再显示独立折叠按钮', `!document.querySelector('.task-panel-toggle')`)
-  await evaluate(`(() => { const head = document.querySelector('.task-panel-head'); window.__pionTaskExpandedBefore = head?.getAttribute('aria-expanded'); head?.click(); return true })()`)
+  await evaluate(`(() => { const head = document.querySelector('.task-panel-head'); const nav = document.querySelector('.history-navigator'); window.__pionTaskExpandedBefore = head?.getAttribute('aria-expanded'); window.__pionNavigatorBeforeTaskToggle = nav ? (() => { const rect = nav.getBoundingClientRect(); const task = document.querySelector('.task-panel'); const stage = document.querySelector('.chat-stage'); const dock = document.querySelector('.composer-dock'); return { center: rect.top + rect.height / 2, top: rect.top, height: rect.height, offset: nav.style.getPropertyValue('--history-navigator-task-offset'), stageHeight: stage?.getBoundingClientRect().height, dockHeight: dock?.getBoundingClientRect().height, taskHeight: task?.getBoundingClientRect().height, taskMargin: task ? getComputedStyle(task).marginBottom : null }; })() : null; head?.click(); return true })()`)
   for (let i = 0; i < 20; i++) {
     await sleep(50)
     if (await evaluate(`!document.querySelector('.task-panel-card')?.classList.contains('task-animating')`)) break
   }
   await check('点击任务面板顶栏可切换折叠状态', `(() => { const head = document.querySelector('.task-panel-head'); const now = head?.getAttribute('aria-expanded'); return head?.tagName === 'BUTTON' && now !== null && now !== window.__pionTaskExpandedBefore && !document.querySelector('.task-panel-card')?.classList.contains('task-animating'); })()`)
+  await sleep(300)
+  await check('任务面板折叠展开不移动会话跳转条', `(() => { const before = window.__pionNavigatorBeforeTaskToggle; const nav = document.querySelector('.history-navigator'); if (before === null || !nav) return true; const rect = nav.getBoundingClientRect(); const task = document.querySelector('.task-panel'); const stage = document.querySelector('.chat-stage'); const dock = document.querySelector('.composer-dock'); const after = { center: rect.top + rect.height / 2, top: rect.top, height: rect.height, offset: nav.style.getPropertyValue('--history-navigator-task-offset'), stageHeight: stage?.getBoundingClientRect().height, dockHeight: dock?.getBoundingClientRect().height, taskHeight: task?.getBoundingClientRect().height, taskMargin: task ? getComputedStyle(task).marginBottom : null }; return Math.abs(after.center - before.center) <= 1.5 ? true : { before, after }; })()`)
   await check('任务面板保留展开动画且顶栏覆盖折叠面板', `(() => { const head = document.querySelector('.task-panel-head'); const card = document.querySelector('.task-panel-card'); const panel = document.querySelector('.task-panel'); if (!head || !card || !panel) return false; const cardDurations = getComputedStyle(card).transitionDuration.split(',').map(parseFloat); const panelDurations = getComputedStyle(panel).transitionDuration.split(',').map(parseFloat); const fillsCollapsedCard = panel.classList.contains('collapsed') ? Math.abs(head.getBoundingClientRect().height - card.getBoundingClientRect().height) <= 1 : true; return cardDurations.some((value) => value > 0) && panelDurations.some((value) => value > 0) && fillsCollapsedCard; })()`)
   await evaluate(`document.querySelector('.task-panel-head')?.click()`)
   for (let i = 0; i < 20; i++) {
@@ -405,12 +464,16 @@ if (hasModifiedFilesCard) {
   await check('修改摘要可打开审查栏（当前历史无修改，跳过）', `true`)
   await check('修改摘要审查栏可关闭', `!document.querySelector('.review-panel')`)
 }
-await evaluate(`document.querySelector('.history-navigator-marker')?.click()`)
+for (let i = 0; i < 40; i++) {
+  if (await evaluate(`!!document.querySelector('.history-navigator-marker:not(:disabled)')`)) break
+  await sleep(60)
+}
+await evaluate(`(() => { const marker = document.querySelector('.history-navigator-marker:not(:disabled)'); window.__pionNavigatorTarget = marker?.dataset.entryId ?? null; marker?.click(); return Boolean(marker); })()`)
 for (let i = 0; i < 40; i++) {
   await sleep(60)
   if (await evaluate(`!![...document.querySelectorAll('.row-user[data-entry-id]')].find((row) => row.dataset.entryId === window.__pionNavigatorTarget)?.classList.contains('history-jump-target')`)) break
 }
-await check('点击历史标记可加载并定位消息', `(() => { const id = window.__pionNavigatorTarget; const row = [...document.querySelectorAll('.row-user[data-entry-id]')].find((item) => item.dataset.entryId === id); const marker = [...document.querySelectorAll('.history-navigator-marker')].find((item) => item.dataset.entryId === id); const viewport = document.querySelector('.chat-scroll')?.getBoundingClientRect(); const rect = row?.getBoundingClientRect(); return !!row && marker?.classList.contains('active') && !!viewport && !!rect && rect.top >= viewport.top && rect.bottom <= viewport.bottom; })()`)
+await check('点击历史标记可加载并定位消息', `(() => { const id = window.__pionNavigatorTarget; const row = [...document.querySelectorAll('.row-user[data-entry-id]')].find((item) => item.dataset.entryId === id); const marker = [...document.querySelectorAll('.history-navigator-marker')].find((item) => item.dataset.entryId === id); const viewport = document.querySelector('.chat-scroll')?.getBoundingClientRect(); const rect = row?.getBoundingClientRect(); const selected = marker?.classList.contains('active') || row?.classList.contains('history-jump-target'); const pass = !!row && !!marker && selected && !!viewport && !!rect && rect.top >= viewport.top && rect.bottom <= viewport.bottom; return pass ? true : { id, row: !!row, marker: !!marker, active: marker?.classList.contains('active'), highlighted: row?.classList.contains('history-jump-target'), disabled: marker?.disabled, viewport: viewport ? { top: viewport.top, bottom: viewport.bottom } : null, rect: rect ? { top: rect.top, bottom: rect.bottom } : null, loadError: document.querySelector('.session-load-error')?.textContent ?? null }; })()`)
 await evaluate(`document.querySelector('.sidebar-tools-button')?.click()`)
 // 能力清单来自当前后台，大会话后台启动慢时多等一会
 for (let i = 0; i < 60; i++) {
@@ -476,6 +539,10 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`!!document.querySelector('.composer-inline-controls .thinking-trigger')`)) break
 }
 await check('composer 输入框存在', `!!document.querySelector('.composer-row textarea')`)
+await check('发送按钮外围保留会话上下文进度环', `(() => { const wrap = document.querySelector('.send-button-context'); return !!wrap?.querySelector('.send-context-ring .send-context-track') && !!wrap.querySelector(':scope > .send-button') && wrap.getAttribute('title')?.includes('上下文'); })()`)
+checkHost('完整运行统计位于工作区顶部', (() => { const app = readFileSync('src/renderer/src/App.tsx', 'utf8'); const metrics = app.indexOf('<RunMetricsStrip run={displayedRun} />'); const chat = app.indexOf('<div className={`chat-stage'); const composer = app.indexOf('<div className="composer-dock">'); return metrics >= 0 && metrics < chat && chat < composer && app.indexOf('<RunMetricsStrip run={displayedRun} />', metrics + 1) < 0; })())
+checkHost('计划模式交互请求始终回写 RPC 结果', (() => { const bridge = readFileSync('src/main/agent-bridge.ts', 'utf8'); const preload = readFileSync('src/preload/index.ts', 'utf8'); const modal = readFileSync('src/renderer/src/components/ExtensionUiModal.tsx', 'utf8'); return bridge.includes('pendingExtensionUi') && bridge.includes("type: 'extension_ui_response'") && bridge.includes('{ cancelled: true }') && preload.includes('resolveExtensionUiRequest:') && modal.includes("method === 'select'"); })())
+checkHost('新会话首条消息立即乐观投影并按 ID 对账', (() => { const hook = readFileSync('src/renderer/src/hooks/useAgent.ts', 'utf8'); const reducer = readFileSync('src/renderer/src/agent/reducer.ts', 'utf8'); const list = readFileSync('src/renderer/src/components/SessionList.tsx', 'utf8'); const sidebar = readFileSync('src/renderer/src/components/Sidebar.tsx', 'utf8'); return hook.includes("type: 'optimisticSession'") && hook.includes('pion:pending:') && reducer.includes('reconcileSessionProjection') && reducer.includes('persistedIds') && list.includes('session.optimistic') && sidebar.includes('sessions.some((session) => session.optimistic) ? undefined : handleReorder'); })())
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); if (!input || typeof DataTransfer === 'undefined' || typeof ClipboardEvent === 'undefined') return false; const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), (char) => char.charCodeAt(0)); const file = new File([bytes], 'pasted.png', { type: 'image/png' }); const transfer = new DataTransfer(); transfer.items.add(file); input.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: transfer })); return true })()`)
 await sleep(220)
 await check('粘贴图像显示待发送附件', `document.querySelectorAll('.composer-attachment').length === 1`)
@@ -593,7 +660,7 @@ await sleep(120)
 await check('卸载插件使用主题确认框', `(() => { const installedButton = document.querySelector('.plugin-install-button.installed'); if (!installedButton) return true; return document.querySelector('.confirm-dialog')?.textContent?.includes('卸载插件') && document.querySelector('.confirm-dialog-confirm')?.textContent?.includes('确认卸载'); })()`)
 await evaluate(`document.querySelector('.confirm-dialog-cancel')?.click()`)
 await sleep(100)
-checkHost('插件卸载支持 Pi 与无 npm 回退', (() => { const manager = readFileSync('src/main/plugin-manager.ts', 'utf8'); return manager.includes("runPackageAction('remove', normalized)") && manager.includes('DefaultPackageManager') && manager.includes("findExecutable('bun')") && readFileSync('src/preload/index.ts', 'utf8').includes('uninstallPlugin:'); })())
+checkHost('插件卸载支持 Pi 与无 npm 回退', (() => { const manager = readFileSync('src/main/plugin-manager.ts', 'utf8'); return manager.includes("runPackageAction('remove', normalized)") && manager.includes('DefaultPackageManager') && manager.includes("resolveExecutable('bun')") && readFileSync('src/preload/index.ts', 'utf8').includes('uninstallPlugin:'); })())
 await evaluate(`document.querySelector('[data-filter="not-installed"]')?.click()`)
 await sleep(120)
 await check('插件商店可筛选未安装', `document.querySelector('[data-filter="not-installed"]')?.classList.contains('active')`)
@@ -705,7 +772,7 @@ for (let i = 0; i < 20; i++) {
 await check('会话项存在', `document.querySelectorAll('.side-session').length > 0`)
 await check('运行会话行使用克制扫光', `(() => { const row = document.querySelector('.side-session'); if (!row) return false; const alreadyRunning = row.classList.contains('running'); row.classList.add('running'); const style = getComputedStyle(row, '::after'); const result = style.animationName === 'session-running-sweep' && style.pointerEvents === 'none' && style.backgroundImage !== 'none'; if (!alreadyRunning) row.classList.remove('running'); return result; })()`)
 await check('运行会话路径 API 可用', `(async () => Array.isArray(await window.pion.getRunningSessionPaths()))()`)
-checkHost('后台会话同样会推送运行状态', (() => { const bridge = readFileSync('src/main/agent-bridge.ts', 'utf8'); const list = readFileSync('src/renderer/src/components/SessionList.tsx', 'utf8'); const css = readFileSync('src/renderer/src/styles/refinements.css', 'utf8'); return bridge.indexOf('backend.busy = true') < bridge.indexOf('if (this.activeKey !== backend.key) return') && bridge.includes('pushRunningSessionPaths()') && list.includes("runningSessionPaths.has(session.path) ? ' running' : ''") && list.includes('aria-busy={runningSessionPaths.has(session.path)}') && css.includes('@media (prefers-reduced-motion: reduce)'); })())
+checkHost('后台会话同样会推送运行状态', (() => { const bridge = readFileSync('src/main/agent-bridge.ts', 'utf8'); const list = readFileSync('src/renderer/src/components/SessionList.tsx', 'utf8'); const css = readFileSync('src/renderer/src/styles/refinements.css', 'utf8'); return bridge.indexOf('backend.busy = true') < bridge.indexOf('if (this.activeKey !== backend.key) return') && bridge.includes('pushRunningSessionPaths()') && list.includes("runningSessionPaths.has(session.path) || session.optimistic ? ' running' : ''") && list.includes('aria-busy={runningSessionPaths.has(session.path) || session.optimistic}') && css.includes('@media (prefers-reduced-motion: reduce)'); })())
 await check('左侧会话栏已移除变更', `!document.querySelector('.side-change') && !Array.from(document.querySelectorAll('.side-section-title')).some(e => e.textContent?.trim() === '变更')`)
 await check('项目下默认存在 main 分支', `(() => { const folders = [...document.querySelectorAll('.project-folder')]; const withBranches = folders.filter((folder) => folder.querySelector('.project-branch-name')); return folders.length > 0 && withBranches.length > 0 && withBranches.every((folder) => [...folder.querySelectorAll('.project-branch-name')].some((name) => name.textContent?.trim() === 'main')); })()`)
 await check('项目右侧提供新建分支按钮', `document.querySelectorAll('.project-folder-new-branch').length === document.querySelectorAll('.project-folder').length && Array.from(document.querySelectorAll('.project-folder-new-branch')).every(e => e.getAttribute('title')?.includes('Git 分支'))`)
@@ -803,5 +870,5 @@ await evaluate(`window.pion.removeProject(${JSON.stringify(TEST_WORKSPACE)}).the
 
 ws.close()
 child.kill('SIGTERM')
-console.log(`\n${ok} 项通过`)
-process.exit(0)
+console.log(`\n${ok} 项通过${failed > 0 ? `，${failed} 项失败` : ''}`)
+process.exit(failed > 0 ? 1 : 0)

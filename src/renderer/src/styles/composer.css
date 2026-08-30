@@ -294,7 +294,50 @@
   opacity: 0.5;
 }
 
+.send-button-context {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 48px;
+}
+
+.send-context-ring {
+  position: absolute;
+  inset: 0;
+  width: 48px;
+  height: 48px;
+  overflow: visible;
+  pointer-events: none;
+  transform: rotate(-90deg);
+}
+
+.send-context-track,
+.send-context-progress {
+  fill: none;
+  stroke-width: 1.6;
+}
+
+.send-context-track {
+  stroke: var(--border);
+  opacity: 0.58;
+}
+
+.send-context-progress {
+  stroke: var(--accent-strong);
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  transition: stroke-dashoffset var(--motion-normal) var(--motion-ease-out), stroke var(--motion-fast) ease;
+}
+
+.send-button-context.pressure-high .send-context-progress {
+  stroke: var(--danger);
+}
+
 .send-button {
+  position: relative;
+  z-index: 1;
   flex-shrink: 0;
   width: 34px;
   height: 34px;

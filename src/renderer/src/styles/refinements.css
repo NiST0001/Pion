@@ -1842,7 +1842,23 @@ html.pion-keyboard-focus .side-session-favorite:focus-visible,
   color: var(--accent-strong);
 }
 
-.side-session:not(.reorderable) {
+.side-session-persisting {
+  width: 22px;
+  height: 22px;
+  margin-top: -2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--accent-strong);
+}
+
+.side-session.optimistic,
+.side-session.optimistic:active {
+  cursor: default;
+}
+
+.side-session:not(.reorderable):not(.optimistic) {
   cursor: pointer;
 }
 

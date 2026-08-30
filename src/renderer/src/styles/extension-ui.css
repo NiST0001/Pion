@@ -1,0 +1,210 @@
+.extension-ui-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 330;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.34);
+  animation: pion-fade-in var(--motion-normal) ease both;
+}
+
+.extension-ui-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 40px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 15px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  box-shadow: var(--shadow-pop);
+  animation: pion-pop-in var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.extension-ui-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 14px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-tint);
+}
+
+.extension-ui-icon {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
+  color: var(--accent-strong);
+}
+
+.extension-ui-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.extension-ui-head span {
+  color: var(--fg-faint);
+  font-size: 10px;
+}
+
+.extension-ui-head h2 {
+  margin: 0;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.extension-ui-head > button {
+  width: 29px;
+  height: 29px;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-faint);
+}
+
+.extension-ui-head > button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.extension-ui-body {
+  min-height: 72px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.extension-ui-options {
+  display: grid;
+  gap: 7px;
+}
+
+.extension-ui-options button {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--surface-tint);
+  color: var(--fg);
+  text-align: left;
+}
+
+.extension-ui-options button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-elev));
+}
+
+.extension-ui-options strong {
+  font-size: 11.5px;
+  font-weight: 620;
+}
+
+.extension-ui-options span,
+.extension-ui-confirm-message {
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.extension-ui-body input,
+.extension-ui-body textarea {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: 0;
+  background: var(--bg-input);
+  color: var(--fg);
+  font: inherit;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.extension-ui-body input:focus,
+.extension-ui-body textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.extension-ui-error {
+  margin-top: 8px;
+  color: var(--danger);
+  font-size: 10.5px;
+}
+
+.extension-ui-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.extension-ui-actions button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-tint);
+  color: var(--fg-dim);
+}
+
+.extension-ui-actions .extension-ui-submit {
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--border));
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.extension-ui-dialog button:disabled,
+.extension-ui-dialog input:disabled,
+.extension-ui-dialog textarea:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+html.pion-keyboard-focus .extension-ui-dialog button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 58%, transparent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 680px) {
+  .extension-ui-backdrop {
+    align-items: flex-end;
+    padding: 10px;
+  }
+
+  .extension-ui-dialog {
+    width: 100%;
+    max-height: calc(100vh - 20px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .extension-ui-backdrop,
+  .extension-ui-dialog {
+    animation: none;
+  }
+}

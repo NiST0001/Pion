@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import { Check, Circle, ListTodo, Loader2 } from 'lucide-react'
 import type { AgentTodo } from '../agent/types'
@@ -36,11 +36,14 @@ function saveExpanded(sessionKey: string, expanded: boolean): void {
 export function TaskPanel({
   sessionKey,
   agentTodos,
-  agentBusy = false
+  agentBusy = false,
+  onLayoutHeightChange
 }: {
   sessionKey: string
   agentTodos?: AgentTodo[] | null
   agentBusy?: boolean
+  /** Reports this docked panel's current layout height to stable workspace overlays. */
+  onLayoutHeightChange?: (height: number) => void
 }): ReactElement | null {
   const [expanded, setExpanded] = useState(() => loadExpanded(sessionKey))
   const todos = agentTodos ?? []
@@ -52,6 +55,11 @@ export function TaskPanel({
   useEffect(() => {
     saveExpanded(sessionKey, expanded)
   }, [sessionKey, expanded])
+
+  useLayoutEffect(() => {
+    if (!onLayoutHeightChange) return
+    onLayoutHeightChange(todos.length === 0 ? 0 : expanded ? expandedHeight + 14 : 28)
+  }, [expanded, expandedHeight, onLayoutHeightChange, todos.length])
 
   if (todos.length === 0) return null
 

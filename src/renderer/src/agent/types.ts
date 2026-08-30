@@ -143,6 +143,8 @@ export type Action =
   | { type: 'sessions'; sessions: SessionMeta[] }
   | { type: 'projectSessions'; sessionsByProject: Record<string, SessionMeta[]> }
   | { type: 'projectSessionsUpdate'; cwd: string; sessions: SessionMeta[] }
+  | { type: 'optimisticSession'; session: SessionMeta }
+  | { type: 'removeOptimisticSession'; cwd: string; id: string }
   | { type: 'branches'; cwd: string; branches: BranchInfo[] }
   | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
   | { type: 'historyIndex'; index: SessionHistoryIndex | null }
