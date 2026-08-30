@@ -73,6 +73,7 @@ export function HistoryNavigator({
   const trackRef = useRef<HTMLDivElement>(null)
   const scrubbingRef = useRef(false)
   const lastScrubJumpRef = useRef(0)
+  const lastScrubEntryRef = useRef<string | null>(null)
   const markers = useMemo(
     () => sampleLandmarks(index?.landmarks ?? [], activeEntryId),
     [activeEntryId, index?.landmarks]
@@ -80,23 +81,31 @@ export function HistoryNavigator({
 
   if (!index || index.landmarks.length < 2) return null
 
+  /** Map against the bars' rendered span, not the full-height rail. The marker
+      stack can occupy only part of the rail when there are few messages or a
+      small user-selected gap, so a track-height ratio visibly misses the cursor. */
   const nearestIndexAt = (clientY: number): number => {
     const track = trackRef.current
     if (!track) return 0
-    const rect = track.getBoundingClientRect()
-    const ratio = Math.min(Math.max((clientY - rect.top) / Math.max(rect.height, 1), 0), 1)
-    return Math.round(ratio * (markers.length - 1))
+    const elements = track.querySelectorAll<HTMLElement>('.history-navigator-marker')
+    if (elements.length < 2) return 0
+    const firstRect = elements[0].getBoundingClientRect()
+    const lastRect = elements[elements.length - 1].getBoundingClientRect()
+    const firstCenter = firstRect.top + firstRect.height / 2
+    const lastCenter = lastRect.top + lastRect.height / 2
+    const renderedSpan = lastCenter - firstCenter
+    if (renderedSpan <= 0) return 0
+    const ratio = Math.min(Math.max((clientY - firstCenter) / renderedSpan, 0), 1)
+    return Math.round(ratio * (elements.length - 1))
   }
 
-  /** Hover follows the cursor anywhere on the rail — gaps between bars count too. */
-  const hoverAt = (clientY: number): void => {
-    const markerIndex = nearestIndexAt(clientY)
+  const showMarkerPreview = (markerIndex: number): void => {
     const landmark = markers[markerIndex]
     if (!landmark) return
     setHoverIndex(markerIndex)
     setPreview(landmark)
     const track = trackRef.current
-    const bar = track?.querySelectorAll('.history-navigator-marker')[markerIndex]
+    const bar = track?.querySelectorAll<HTMLElement>('.history-navigator-marker')[markerIndex]
     if (track && bar) {
       const trackRect = track.getBoundingClientRect()
       const barRect = bar.getBoundingClientRect()
@@ -105,10 +114,21 @@ export function HistoryNavigator({
     }
   }
 
+  /** Hover follows the cursor anywhere on the rail — gaps between bars count too. */
+  const hoverAt = (clientY: number): void => {
+    showMarkerPreview(nearestIndexAt(clientY))
+  }
+
   const handleTrackPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
-    if (busy || event.target !== event.currentTarget) return
+    if (busy) return
     scrubbingRef.current = true
-    event.currentTarget.setPointerCapture(event.pointerId)
+    lastScrubJumpRef.current = 0
+    lastScrubEntryRef.current = null
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // Synthetic pointer events used by tests do not own a native pointer.
+    }
     hoverAt(event.clientY)
   }
 
@@ -117,17 +137,28 @@ export function HistoryNavigator({
     if (!scrubbingRef.current || busy) return
     const now = Date.now()
     if (now - lastScrubJumpRef.current < 200) return
-    lastScrubJumpRef.current = now
     const landmark = markers[nearestIndexAt(event.clientY)]
-    if (landmark) onJump(landmark)
+    if (!landmark || landmark.entryId === lastScrubEntryRef.current) return
+    lastScrubJumpRef.current = now
+    lastScrubEntryRef.current = landmark.entryId
+    onJump(landmark)
   }
 
   const handleTrackPointerUp = (event: ReactPointerEvent<HTMLDivElement>): void => {
-    if (scrubbingRef.current && !busy) {
-      const landmark = markers[nearestIndexAt(event.clientY)]
-      if (landmark) onJump(landmark)
-    }
+    const wasScrubbing = scrubbingRef.current
     scrubbingRef.current = false
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      }
+    } catch {
+      // The pointer may already have been released by the platform.
+    }
+    if (wasScrubbing && !busy) {
+      const landmark = markers[nearestIndexAt(event.clientY)]
+      if (landmark && landmark.entryId !== lastScrubEntryRef.current) onJump(landmark)
+    }
+    lastScrubEntryRef.current = null
   }
 
   return (
@@ -143,7 +174,10 @@ export function HistoryNavigator({
         onPointerDown={handleTrackPointerDown}
         onPointerMove={handleTrackPointerMove}
         onPointerUp={handleTrackPointerUp}
-        onPointerCancel={() => { scrubbingRef.current = false }}
+        onPointerCancel={() => {
+          scrubbingRef.current = false
+          lastScrubEntryRef.current = null
+        }}
         onMouseLeave={() => {
           if (scrubbingRef.current) return
           setHoverIndex(null)
@@ -157,34 +191,23 @@ export function HistoryNavigator({
             <button
               type="button"
               key={landmark.entryId}
-              className={`history-navigator-marker${active ? ' active' : ''}`}
+              className={`history-navigator-marker${active ? ' active' : ''}${markerIndex === hoverIndex ? ' hovered' : ''}`}
               data-entry-id={landmark.entryId}
               data-entry-index={landmark.entryIndex}
               style={{ transform: `scaleX(${scale.toFixed(3)})` }}
               aria-label={`跳到第 ${landmark.ordinal} 条历史消息：${landmark.snippet}`}
               disabled={busy}
-              onMouseEnter={(event) => {
-                setHoverIndex(markerIndex)
-                setPreview(landmark)
-                const track = event.currentTarget.parentElement
-                if (track) {
-                  const trackRect = track.getBoundingClientRect()
-                  const barRect = event.currentTarget.getBoundingClientRect()
-                  const center = barRect.top + barRect.height / 2 - trackRect.top
-                  setPreviewTop(Math.min(Math.max(center / Math.max(trackRect.height, 1), 0.08), 0.92))
-                }
-              }}
-              onFocus={() => {
-                setHoverIndex(markerIndex)
-                setPreview(landmark)
-              }}
+              onFocus={() => showMarkerPreview(markerIndex)}
               onBlur={() => {
                 setHoverIndex(null)
                 setPreview(null)
               }}
               onClick={(event) => {
                 event.stopPropagation()
-                onJump(landmark)
+                // Pointer activation is handled by the rail's pointer-up logic so
+                // dragging can begin on a bar. detail=0 preserves keyboard and
+                // programmatic activation without issuing a duplicate jump.
+                if (event.detail === 0) onJump(landmark)
               }}
             />
           )

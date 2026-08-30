@@ -58,18 +58,13 @@
   box-shadow: none;
   opacity: 0.42;
   transform-origin: left center;
-  pointer-events: auto;
+  /* The rail owns pointer hit-testing. Individual enlarged hit areas overlap
+     at small gap settings and can select a different bar than the cursor. */
+  pointer-events: none;
   transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.18s ease, background 0.18s ease;
 }
 
-/* Expand the hover hit area without changing the bar's visual size. */
-.history-navigator-marker::before {
-  content: '';
-  position: absolute;
-  inset: -5px -4px;
-}
-
-.history-navigator-marker:hover,
+.history-navigator-marker.hovered,
 html.pion-keyboard-focus .history-navigator-marker:focus-visible {
   outline: none;
   background: var(--fg-dim);
