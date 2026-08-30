@@ -5,6 +5,7 @@ import { useAgent } from './hooks/useAgent'
 import { deriveAgentTodos, deriveChanges, deriveLatestRunChanges } from './agent/timeline'
 import type { FileChange } from './agent/types'
 import type {
+  ImageContent,
   ProjectToolPermissionPolicy,
   ProjectTrustInfo,
   SessionMeta,
@@ -585,6 +586,13 @@ export function App(): ReactElement {
     setBranchDialogCwd(null)
   }, [])
 
+  // Keep modal callbacks stable while streaming events rerender the app. Some
+  // panels load resources on open and must not interpret every token as reopen.
+  const closeTaskHistory = useCallback(() => setTaskHistorySession(null), [])
+  const closeCapabilities = useCallback(() => setCapabilitiesOpen(false), [])
+  const closePluginStore = useCallback(() => setPluginStoreOpen(false), [])
+  const closeSettings = useCallback(() => setSettingsOpen(false), [])
+
   const handleSelectSession = useCallback(
     async (cwd: string, path: string) => {
       if (
@@ -650,6 +658,37 @@ export function App(): ReactElement {
     },
     [actions]
   )
+
+  const handleComposerSend = useCallback(async (
+    text: string,
+    images: ImageContent[]
+  ): Promise<void> => {
+    const match = images.length === 0
+      ? text.trim().match(/^\/(compact|new|name|clone)(?:\s+([\s\S]*))?$/i)
+      : null
+    if (!match) {
+      await actions.send(text, images)
+      return
+    }
+
+    const command = match[1].toLowerCase()
+    const argument = (match[2] ?? '').trim()
+    try {
+      if (command === 'compact') {
+        await actions.compactNow(argument || undefined)
+      } else if (command === 'new') {
+        await handleNewSession()
+      } else if (command === 'name') {
+        await actions.renameSession(argument)
+      } else if (command === 'clone') {
+        const path = state.session?.sessionFile
+        if (!path) throw new Error('当前会话尚未持久化，无法复制')
+        await handleCopySession(state.status.cwd ?? '', path)
+      }
+    } catch (error) {
+      console.error(`[pion] /${command} 执行失败`, error)
+    }
+  }, [actions, handleCopySession, handleNewSession, state.session?.sessionFile, state.status.cwd])
 
   const sessionChanges = useMemo(() => deriveChanges(state.timeline), [state.timeline])
   const latestRunChanges = useMemo(() => deriveLatestRunChanges(state.timeline), [state.timeline])
@@ -945,7 +984,7 @@ export function App(): ReactElement {
                   />
                 </>
               }
-              onSend={(text, images) => void actions.send(text, images)}
+              onSend={(text, images) => void handleComposerSend(text, images)}
               onQueue={(text, images) => void actions.queue(text, images)}
               onAbort={() => void actions.abort()}
             />
@@ -984,15 +1023,15 @@ export function App(): ReactElement {
       />
       <TaskHistoryPanel
         session={taskHistorySession}
-        onClose={() => setTaskHistorySession(null)}
+        onClose={closeTaskHistory}
       />
       <SkillsToolsModal
         open={capabilitiesOpen}
-        onClose={() => setCapabilitiesOpen(false)}
+        onClose={closeCapabilities}
       />
       <PluginStoreModal
         open={pluginStoreOpen}
-        onClose={() => setPluginStoreOpen(false)}
+        onClose={closePluginStore}
       />
       <BranchCreateModal
         open={branchDialogCwd !== null}
@@ -1020,7 +1059,7 @@ export function App(): ReactElement {
         toolPermissionError={toolPermissionError}
         onToolPermissionChange={(category, decision) => void handleToolPermissionChange(category, decision)}
         onToolPermissionReset={() => void handleToolPermissionReset()}
-        onClose={() => setSettingsOpen(false)}
+        onClose={closeSettings}
         actions={{
           setModel: actions.setModel,
           setAutoCompaction: actions.setAutoCompaction,

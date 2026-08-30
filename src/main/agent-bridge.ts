@@ -78,6 +78,16 @@ const PLAN_EXTENSION_PATH = resolve(MODULE_DIR, '../../node_modules/@narumitw/pi
 /** Global pool size shared by every project and worktree. */
 const MAX_RETAINED_BACKENDS = 10
 
+/** Pi's RPC get_commands intentionally returns only extensions, prompts, and
+    skills. Merge the built-ins that Pion can execute with equivalent native
+    behavior so autocomplete does not silently omit core commands. */
+const BUILTIN_SLASH_COMMANDS: SlashCommandInfo[] = [
+  { name: 'compact', description: '手动压缩上下文，可附加摘要要求', source: 'builtin' },
+  { name: 'new', description: '在当前项目中新建会话', source: 'builtin' },
+  { name: 'name', description: '设置或清除当前会话名称', source: 'builtin' },
+  { name: 'clone', description: '复制当前活动分支为新会话', source: 'builtin' }
+]
+
 /** Events after which derived state (model/session/tree) is re-pushed. */
 const STATE_REFRESH_EVENTS = new Set([
   'agent_settled',
@@ -1250,14 +1260,18 @@ export class AgentBridge {
   // ---------------------------------------------------------------- commands & modes
 
   async getCommands(): Promise<SlashCommandInfo[]> {
+    const merged = new Map(BUILTIN_SLASH_COMMANDS.map((command) => [command.name, command]))
     const backend = await this.waitForActiveBackend()
-    if (!backend) return []
+    if (!backend) return [...merged.values()]
     try {
       const commands = await backend.client.getCommands()
-      return commands.map(({ name, description, source }) => ({ name, description, source }))
+      for (const { name, description, source } of commands) {
+        if (!merged.has(name)) merged.set(name, { name, description, source })
+      }
     } catch {
-      return []
+      // Built-ins remain available even while extension command discovery fails.
     }
+    return [...merged.values()]
   }
 
   async setMode(mode: AgentMode): Promise<void> {
@@ -1387,9 +1401,9 @@ export class AgentBridge {
     await this.client.setAutoRetry(enabled)
   }
 
-  async compactNow(): Promise<void> {
+  async compactNow(customInstructions?: string): Promise<void> {
     if (!this.client) throw new Error('agent 未启动')
-    await this.client.compact()
+    await this.client.compact(customInstructions?.trim() || undefined)
     await this.refresh()
   }
 

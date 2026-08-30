@@ -56,6 +56,9 @@ export function SkillsToolsModal({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  // Capability discovery is intentionally tied only to an open transition.
+  // Streaming agent updates rerender App frequently; an inline onClose callback
+  // must never reset this page or launch another resource-loader scan.
   useEffect(() => {
     if (!open) return
     setPage('skills')
@@ -75,15 +78,18 @@ export function SkillsToolsModal({
         if (active) setLoading(false)
       })
 
+    return () => {
+      active = false
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') onClose()
     }
     window.addEventListener('keydown', handleKeyDown)
-
-    return () => {
-      active = false
-      window.removeEventListener('keydown', handleKeyDown)
-    }
+    return () => window.removeEventListener('keydown', handleKeyDown)
   }, [open, onClose])
 
   if (!open) return null

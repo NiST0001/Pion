@@ -353,7 +353,12 @@ export interface PluginInstallResult {
   output: string
 }
 
-export type SlashCommandSource = 'extension' | 'prompt' | 'skill'
+export interface PluginUninstallResult {
+  source: string
+  output: string
+}
+
+export type SlashCommandSource = 'builtin' | 'extension' | 'prompt' | 'skill'
 
 export interface SlashCommandInfo {
   /** Command name without the leading slash. */
@@ -475,6 +480,7 @@ export interface PionApi {
   getPluginCatalog(): Promise<PluginCatalogItem[]>
   getInstalledPlugins(): Promise<string[]>
   installPlugin(source: string): Promise<PluginInstallResult>
+  uninstallPlugin(source: string): Promise<PluginUninstallResult>
   setMode(mode: AgentMode): Promise<void>
   setModel(provider: string, modelId: string): Promise<void>
   getThinkingLevels(): Promise<string[]>
@@ -484,7 +490,7 @@ export interface PionApi {
   setAutoCompaction(enabled: boolean): Promise<void>
   setAutoRetry(enabled: boolean): Promise<void>
   /** Compact the session context now (LLM summarization). */
-  compactNow(): Promise<void>
+  compactNow(customInstructions?: string): Promise<void>
   /** Export the session to HTML; resolves with the output path. */
   exportSessionHtml(): Promise<string>
   renameSession(name: string): Promise<void>

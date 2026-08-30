@@ -200,6 +200,10 @@
   flex-shrink: 0;
 }
 
+.plugin-store-warning {
+  color: var(--warn);
+}
+
 .plugin-store-manual-error {
   margin: 6px 16px 0;
   color: var(--danger);
@@ -295,9 +299,15 @@
 }
 
 .plugin-install-button.installed {
-  border: 1px solid rgba(var(--ok-rgb), 0.35);
+  border: 1px solid var(--border);
   background: transparent;
-  color: var(--ok);
+  color: var(--fg-dim);
+}
+
+.plugin-install-button.installed:hover:not(:disabled) {
+  border-color: rgba(var(--danger-rgb), 0.38);
+  background: rgba(var(--danger-rgb), 0.08);
+  color: var(--danger);
 }
 
 .plugin-card-description {

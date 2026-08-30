@@ -1,9 +1,17 @@
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
-import { getPackageDir } from '@earendil-works/pi-coding-agent'
-import type { PluginCatalogItem, PluginInstallResult } from '../shared/types'
+import {
+  getAgentDir,
+  getPackageDir,
+  SettingsManager
+} from '@earendil-works/pi-coding-agent'
+import type {
+  PluginCatalogItem,
+  PluginInstallResult,
+  PluginUninstallResult
+} from '../shared/types'
 
 const execFileAsync = promisify(execFile)
 const PI_PLUGIN_STORE_URL = 'https://pi.dev/packages'
@@ -72,13 +80,13 @@ function parsePackageCatalog(html: string): PluginCatalogItem[] {
   return items
 }
 
-function normalizeInstallSource(source: string): string {
+function normalizePackageSource(source: string): string {
   const value = source.trim()
   if (!value || value.startsWith('-') || /\s/.test(value)) {
     throw new Error('请输入有效的 npm: 包名、Git 地址或本地路径')
   }
   if (!/^(npm:|git:|https?:\/\/|ssh:\/\/|git:\/\/|\.?\.?(?:\/|$)|\/)/i.test(value)) {
-    throw new Error('安装源必须以 npm:、git:、URL 或本地路径开头')
+    throw new Error('插件源必须以 npm:、git:、URL 或本地路径开头')
   }
   return value
 }
@@ -115,16 +123,25 @@ export class PluginManager {
   }
 
   async getInstalled(): Promise<string[]> {
-    const result = await this.runPiCommand(['list'])
-    return result.stdout
-      .split(/\r?\n/)
-      .map((line) => line.match(/^\s{2}(\S+)(?:\s+\(filtered\))?$/)?.[1])
-      .filter((source): source is string => Boolean(source))
+    const agentDir = getAgentDir()
+    const settings = SettingsManager.create(homedir(), agentDir)
+    return [...new Set(settings.getPackages().map((entry) => {
+      const source = typeof entry === 'string' ? entry : entry.source
+      if (isAbsolute(source)) return source
+      if (source.startsWith('./') || source.startsWith('../')) return resolve(agentDir, source)
+      return source
+    }))]
   }
 
   async install(source: string): Promise<PluginInstallResult> {
-    const normalized = normalizeInstallSource(source)
+    const normalized = normalizePackageSource(source)
     const result = await this.runPiCommand(['install', normalized])
+    return { source: normalized, output: formatCommandOutput(result.stdout, result.stderr) }
+  }
+
+  async uninstall(source: string): Promise<PluginUninstallResult> {
+    const normalized = normalizePackageSource(source)
+    const result = await this.runPiCommand(['remove', normalized])
     return { source: normalized, output: formatCommandOutput(result.stdout, result.stderr) }
   }
 

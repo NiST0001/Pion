@@ -38,7 +38,7 @@ export interface SettingsActions {
   setModel(provider: string, modelId: string): Promise<void>
   setAutoCompaction(enabled: boolean): Promise<void>
   setAutoRetry(enabled: boolean): Promise<void>
-  compactNow(): Promise<void>
+  compactNow(customInstructions?: string): Promise<void>
   exportSessionHtml(): Promise<string>
   renameSession(name: string): Promise<void>
   setSteeringMode(mode: 'all' | 'one-at-a-time'): Promise<void>

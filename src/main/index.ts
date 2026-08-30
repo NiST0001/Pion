@@ -178,6 +178,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.PluginsCatalog, () => plugins.getCatalog())
   ipcMain.handle(IPC.PluginsInstalled, () => plugins.getInstalled())
   ipcMain.handle(IPC.PluginsInstall, (_event, source: string) => plugins.install(source))
+  ipcMain.handle(IPC.PluginsUninstall, (_event, source: string) => plugins.uninstall(source))
 
   // app settings ------------------------------------------------------------------
   ipcMain.handle(IPC.GetCompletionNotifications, () => completionNotificationsEnabled)
@@ -211,7 +212,9 @@ function registerIpc(): void {
   ipcMain.handle(IPC.AgentSetAutoRetry, (_event, enabled: boolean) =>
     bridge.setAutoRetry(enabled)
   )
-  ipcMain.handle(IPC.AgentCompact, () => bridge.compactNow())
+  ipcMain.handle(IPC.AgentCompact, (_event, customInstructions?: string) =>
+    bridge.compactNow(customInstructions)
+  )
   ipcMain.handle(IPC.AgentExportHtml, () => bridge.exportSessionHtml())
   ipcMain.handle(IPC.AgentRenameSession, (_event, name: string) => bridge.renameSession(name))
   ipcMain.handle(IPC.AgentSetSteeringMode, (_event, mode: 'all' | 'one-at-a-time') =>

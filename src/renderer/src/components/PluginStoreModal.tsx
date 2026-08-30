@@ -10,9 +10,11 @@ import {
   RefreshCw,
   Search,
   Store,
+  Trash2,
   X
 } from 'lucide-react'
 import type { PluginCatalogItem } from '../../../shared/types'
+import { ConfirmDialog } from './ConfirmDialog'
 
 export const PI_PLUGIN_STORE_URL = 'https://pi.dev/packages'
 
@@ -49,6 +51,20 @@ function formatDownloads(downloads?: number): string {
   return `${downloads} 次下载`
 }
 
+function packageNameFromSource(source: string): string {
+  const normalized = source.replace(/^(?:npm:|git:)/, '').replace(/\/$/, '')
+  return normalized.split('/').filter(Boolean).at(-1)?.replace(/\.git$/, '') || source
+}
+
+/** Match Pi's package identity rules: npm versions and git refs do not create
+    a second installed package. Local paths arrive canonicalized from main. */
+function packageIdentity(source: string): string {
+  if (!/^(?:npm:|git:|https?:\/\/|ssh:\/\/|git:\/\/)/i.test(source)) return source
+  const refAt = source.lastIndexOf('@')
+  const pathBoundary = Math.max(source.lastIndexOf('/'), source.lastIndexOf(':'))
+  return refAt > pathBoundary ? source.slice(0, refAt) : source
+}
+
 /** Direct installer for the official pi package catalog. */
 export function PluginStoreModal({
   open,
@@ -68,6 +84,8 @@ export function PluginStoreModal({
   const [filter, setFilter] = useState<PackageFilter>('all')
   const [manualSource, setManualSource] = useState('')
   const [installing, setInstalling] = useState('')
+  const [uninstalling, setUninstalling] = useState('')
+  const [uninstallTarget, setUninstallTarget] = useState<PluginCatalogItem | null>(null)
   const [installedSources, setInstalledSources] = useState<Set<string>>(new Set())
   const [installErrors, setInstallErrors] = useState<Record<string, string>>({})
   const [notice, setNotice] = useState('')
@@ -76,12 +94,18 @@ export function PluginStoreModal({
     setCatalogLoading(true)
     setCatalogError('')
     try {
-      const [items, installed] = await Promise.all([
+      const [catalogResult, installedResult] = await Promise.allSettled([
         window.pion.getPluginCatalog(),
-        window.pion.getInstalledPlugins().catch(() => [])
+        window.pion.getInstalledPlugins()
       ])
-      setPackages(items)
-      setInstalledSources(new Set(installed))
+      if (installedResult.status === 'fulfilled') {
+        setInstalledSources(new Set(installedResult.value))
+      }
+      if (catalogResult.status === 'fulfilled') {
+        setPackages(catalogResult.value)
+      } else {
+        throw catalogResult.reason
+      }
     } catch (error) {
       setCatalogError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -102,11 +126,11 @@ export function PluginStoreModal({
   useEffect(() => {
     if (!open) return
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose()
+      if (event.key === 'Escape' && !uninstallTarget && !uninstalling) onClose()
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [open, onClose])
+  }, [open, onClose, uninstallTarget, uninstalling])
 
   useEffect(() => {
     if (!open) return
@@ -138,20 +162,40 @@ export function PluginStoreModal({
     }
   }, [open])
 
+  const installedIdentities = useMemo(
+    () => new Set([...installedSources].map(packageIdentity)),
+    [installedSources]
+  )
+
+  const displayPackages = useMemo(() => {
+    const catalogIdentities = new Set(packages.map((item) => packageIdentity(item.source)))
+    const installedOnly = [...installedSources]
+      .filter((source) => !catalogIdentities.has(packageIdentity(source)))
+      .map((source): PluginCatalogItem => ({
+        name: packageNameFromSource(source),
+        description: '已通过 Pi 安装，但当前不在官方插件目录中。',
+        type: 'package',
+        source,
+        packageUrl: PI_PLUGIN_STORE_URL
+      }))
+    return [...packages, ...installedOnly]
+  }, [installedSources, packages])
+
   const filteredPackages = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase()
-    return packages.filter((item) => {
-      if (filter === 'installed' && !installedSources.has(item.source)) return false
-      if (filter === 'not-installed' && installedSources.has(item.source)) return false
+    return displayPackages.filter((item) => {
+      const installed = installedIdentities.has(packageIdentity(item.source))
+      if (filter === 'installed' && !installed) return false
+      if (filter === 'not-installed' && installed) return false
       if (isPackageTypeFilter(filter) && item.type !== filter) return false
       if (!normalizedQuery) return true
       return `${item.name} ${item.description} ${item.source}`.toLowerCase().includes(normalizedQuery)
     })
-  }, [filter, installedSources, packages, query])
+  }, [displayPackages, filter, installedIdentities, query])
 
   const install = useCallback(async (source: string, label: string): Promise<boolean> => {
     const normalized = source.trim()
-    if (!normalized || installing) return false
+    if (!normalized || installing || uninstalling) return false
     setInstalling(normalized)
     setInstallErrors((current) => {
       const next = { ...current }
@@ -161,7 +205,8 @@ export function PluginStoreModal({
     setNotice('')
     try {
       await window.pion.installPlugin(normalized)
-      setInstalledSources((current) => new Set(current).add(normalized))
+      const installed = await window.pion.getInstalledPlugins().catch(() => [normalized])
+      setInstalledSources(new Set(installed))
       setNotice(`${label} 已安装`)
       return true
     } catch (error) {
@@ -173,7 +218,35 @@ export function PluginStoreModal({
     } finally {
       setInstalling('')
     }
-  }, [installing])
+  }, [installing, uninstalling])
+
+  const confirmUninstall = useCallback(async (): Promise<void> => {
+    if (!uninstallTarget || installing || uninstalling) return
+    const { source, name } = uninstallTarget
+    setUninstalling(source)
+    setInstallErrors((current) => {
+      const next = { ...current }
+      delete next[source]
+      return next
+    })
+    setNotice('')
+    try {
+      await window.pion.uninstallPlugin(source)
+      const installed = await window.pion.getInstalledPlugins().catch(() => (
+        [...installedSources].filter((item) => item !== source)
+      ))
+      setInstalledSources(new Set(installed))
+      setNotice(`${name} 已卸载；正在运行的旧会话将在重新加载后释放该插件`)
+      setUninstallTarget(null)
+    } catch (error) {
+      setInstallErrors((current) => ({
+        ...current,
+        [source]: error instanceof Error ? error.message : String(error)
+      }))
+    } finally {
+      setUninstalling('')
+    }
+  }, [installedSources, installing, uninstallTarget, uninstalling])
 
   const handleManualInstall = (): void => {
     const source = manualSource.trim()
@@ -191,7 +264,8 @@ export function PluginStoreModal({
   if (!open) return null
 
   return (
-    <div className="modal-backdrop plugin-store-backdrop" onClick={onClose}>
+    <>
+      <div className="modal-backdrop plugin-store-backdrop" onClick={onClose}>
       <div
         className="modal plugin-store-modal"
         role="dialog"
@@ -291,7 +365,7 @@ export function PluginStoreModal({
               <button
                 type="button"
                 className="ghost-button"
-                disabled={!manualSource.trim() || Boolean(installing)}
+                disabled={!manualSource.trim() || Boolean(installing || uninstalling)}
                 onClick={handleManualInstall}
               >
                 {installing === manualSource.trim() ? <Loader2 size={13} className="spin" /> : <Download size={13} />}
@@ -309,7 +383,7 @@ export function PluginStoreModal({
                 <span>正在读取官方插件目录…</span>
               </div>
             )}
-            {catalogError && (
+            {catalogError && displayPackages.length === 0 && (
               <div className="plugin-store-state plugin-store-error">
                 <strong>插件目录暂时无法加载</strong>
                 <span>{catalogError}</span>
@@ -318,7 +392,12 @@ export function PluginStoreModal({
                 </button>
               </div>
             )}
-            {!catalogLoading && !catalogError && filteredPackages.length === 0 && (
+            {catalogError && displayPackages.length > 0 && (
+              <div className="plugin-store-notice plugin-store-warning">
+                官方目录暂时无法加载；仍可管理本机已安装插件。
+              </div>
+            )}
+            {!catalogLoading && filteredPackages.length === 0 && (
               <div className="plugin-store-empty">
                 <PackageOpen size={22} />
                 <span>{packages.length === 0 ? '暂无可用插件' : '没有匹配的插件'}</span>
@@ -330,10 +409,19 @@ export function PluginStoreModal({
                   <PluginCard
                     key={item.source}
                     item={item}
-                    installed={installedSources.has(item.source)}
+                    installed={installedIdentities.has(packageIdentity(item.source))}
                     installing={installing === item.source}
+                    uninstalling={uninstalling === item.source}
                     error={installErrors[item.source]}
                     onInstall={() => void install(item.source, item.name)}
+                    onUninstall={() => {
+                      setInstallErrors((current) => {
+                        const next = { ...current }
+                        delete next[item.source]
+                        return next
+                      })
+                      setUninstallTarget(item)
+                    }}
                     onOpen={() => openPackageInBrowser(item)}
                   />
                 ))}
@@ -367,7 +455,24 @@ export function PluginStoreModal({
           </div>
         </div>
       </div>
-    </div>
+      </div>
+      <ConfirmDialog
+        open={Boolean(uninstallTarget)}
+        title="卸载插件"
+        message={uninstallTarget ? <>确定卸载 <strong>{uninstallTarget.name}</strong>？</> : ''}
+        detail={uninstallTarget
+          ? installErrors[uninstallTarget.source]
+            || '将通过 Pi 原生包管理器移除全局插件配置与安装内容；正在运行的旧会话需要重新加载。'
+          : undefined}
+        confirmLabel="确认卸载"
+        busy={Boolean(uninstalling)}
+        tone="danger"
+        onConfirm={() => void confirmUninstall()}
+        onCancel={() => {
+          if (!uninstalling) setUninstallTarget(null)
+        }}
+      />
+    </>
   )
 }
 
@@ -375,15 +480,19 @@ function PluginCard({
   item,
   installed,
   installing,
+  uninstalling,
   error,
   onInstall,
+  onUninstall,
   onOpen
 }: {
   item: PluginCatalogItem
   installed: boolean
   installing: boolean
+  uninstalling: boolean
   error?: string
   onInstall: () => void
+  onUninstall: () => void
   onOpen: () => void
 }): ReactElement {
   const type = (item.type in TYPE_LABELS ? TYPE_LABELS[item.type as PackageTypeFilter] : item.type) || '包'
@@ -397,11 +506,16 @@ function PluginCard({
         <button
           type="button"
           className={`plugin-install-button${installed ? ' installed' : ''}`}
-          disabled={installed || installing}
-          onClick={onInstall}
+          disabled={installing || uninstalling}
+          title={installed ? `卸载 ${item.name}` : `安装 ${item.name}`}
+          onClick={installed ? onUninstall : onInstall}
         >
-          {installing ? <Loader2 size={13} className="spin" /> : installed ? <Check size={13} /> : <Download size={13} />}
-          {installing ? '安装中' : installed ? '已安装' : '安装'}
+          {installing || uninstalling
+            ? <Loader2 size={13} className="spin" />
+            : installed
+              ? <Trash2 size={13} />
+              : <Download size={13} />}
+          {installing ? '安装中' : uninstalling ? '卸载中' : installed ? '卸载' : '安装'}
         </button>
       </div>
       <p className="plugin-card-description">{item.description || 'Pi 扩展包'}</p>

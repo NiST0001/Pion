@@ -757,9 +757,13 @@ export function useAgent() {
     },
     [api]
   )
-  const compactNow = useCallback(async () => {
-    await api?.compactNow()
-  }, [api])
+  const compactNow = useCallback(async (customInstructions?: string) => {
+    if (!api) return
+    await api.compactNow(customInstructions)
+    const path = timelineOwnerPath.current
+    await reloadTimeline(path)
+    if (path) void refreshHistoryIndex(path)
+  }, [api, refreshHistoryIndex, reloadTimeline])
   const exportHtml = useCallback(
     async (): Promise<string> => (await api?.exportSessionHtml()) ?? '',
     [api]

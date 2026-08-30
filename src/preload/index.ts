@@ -9,6 +9,7 @@ import type {
   PionApi,
   PluginCatalogItem,
   PluginInstallResult,
+  PluginUninstallResult,
   ProjectMeta,
   ProjectToolPermissionPolicy,
   ProjectTrustInfo,
@@ -70,6 +71,8 @@ const api: PionApi = {
   getPluginCatalog: () => ipcRenderer.invoke(IPC.PluginsCatalog) as Promise<PluginCatalogItem[]>,
   getInstalledPlugins: () => ipcRenderer.invoke(IPC.PluginsInstalled) as Promise<string[]>,
   installPlugin: (source) => ipcRenderer.invoke(IPC.PluginsInstall, source) as Promise<PluginInstallResult>,
+  uninstallPlugin: (source) =>
+    ipcRenderer.invoke(IPC.PluginsUninstall, source) as Promise<PluginUninstallResult>,
   setMode: (mode: AgentMode) => ipcRenderer.invoke(IPC.AgentSetMode, mode),
   getAvailableModels: () => ipcRenderer.invoke(IPC.AgentModels),
   getSkills: () => ipcRenderer.invoke(IPC.AgentSkills) as Promise<SkillInfo[]>,
@@ -81,7 +84,7 @@ const api: PionApi = {
   // agent settings
   setAutoCompaction: (enabled) => ipcRenderer.invoke(IPC.AgentSetAutoCompaction, enabled),
   setAutoRetry: (enabled) => ipcRenderer.invoke(IPC.AgentSetAutoRetry, enabled),
-  compactNow: () => ipcRenderer.invoke(IPC.AgentCompact),
+  compactNow: (customInstructions) => ipcRenderer.invoke(IPC.AgentCompact, customInstructions),
   exportSessionHtml: () => ipcRenderer.invoke(IPC.AgentExportHtml),
   renameSession: (name) => ipcRenderer.invoke(IPC.AgentRenameSession, name),
   setSteeringMode: (mode) => ipcRenderer.invoke(IPC.AgentSetSteeringMode, mode),

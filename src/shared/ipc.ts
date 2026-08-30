@@ -64,6 +64,7 @@ export const IPC = {
   PluginsCatalog: 'pion:plugins-catalog',
   PluginsInstalled: 'pion:plugins-installed',
   PluginsInstall: 'pion:plugins-install',
+  PluginsUninstall: 'pion:plugins-uninstall',
 
   // window controls
   WindowControl: 'pion:window-control',

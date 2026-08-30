@@ -354,6 +354,12 @@ for (let i = 0; i < 60; i++) {
 }
 await check('工具页可切换', `document.querySelector('.capabilities-nav-item[data-page="tools"]')?.classList.contains('active') && !!document.querySelector('.capabilities-page[data-page="tools"]') && document.querySelectorAll('.tool-card').length >= 4`)
 await check('工具卡片显示来源', `document.querySelectorAll('.capabilities-page[data-page="tools"] .capability-card-source').length > 0`)
+await evaluate(`window.pion.toggleMaximizeWindow()`)
+await sleep(180)
+await evaluate(`window.pion.toggleMaximizeWindow()`)
+await sleep(180)
+await check('运行中父级刷新不会重置技能工具面板', `document.querySelector('.capabilities-nav-item[data-page="tools"]')?.classList.contains('active') && !!document.querySelector('.capabilities-page[data-page="tools"]') && !document.querySelector('.capabilities-count')?.textContent?.includes('正在读取')`)
+checkHost('能力扫描只在打开面板时执行一次', readFileSync('src/renderer/src/components/SkillsToolsModal.tsx', 'utf8').includes('}, [open])'))
 await evaluate(`document.querySelector('.capabilities-close')?.click()`)
 await sleep(100)
 await check('技能与工具界面可关闭', `!document.querySelector('.capabilities-modal')`)
@@ -422,12 +428,20 @@ for (let i = 0; i < 50; i++) {
   if (await evaluate(`!!document.querySelector('.slash-command-menu') && document.querySelectorAll('.slash-command-option').length > 0`)) break
 }
 await check('斜杠命令菜单可打开', `!!document.querySelector('.slash-command-menu') && document.querySelectorAll('.slash-command-option').length > 0`)
+await check('斜杠命令含 Pi 内置命令', `(() => { const names = [...document.querySelectorAll('.slash-command-name')].map((element) => element.textContent); const builtin = [...document.querySelectorAll('.slash-command-option')].filter((element) => element.querySelector('.slash-command-source')?.textContent === 'Pi 内置').map((element) => element.querySelector('.slash-command-name')?.textContent); return ['/compact', '/new', '/name', '/clone'].every((name) => names.includes(name) && builtin.includes(name)); })()`)
 await check('斜杠命令含计划模式', `Array.from(document.querySelectorAll('.slash-command-name')).some((element) => element.textContent === '/plan')`)
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, '/pl'); input?.dispatchEvent(new Event('input', { bubbles: true })); input?.focus(); return true })()`)
 await sleep(120)
 await evaluate(`document.querySelector('.composer-row textarea')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))`)
 await sleep(120)
 await check('斜杠命令 Tab 可补齐', `document.querySelector('.composer-row textarea')?.value === '/plan '`)
+checkHost('/compact 支持传递自定义压缩要求', readFileSync('src/main/agent-bridge.ts', 'utf8').includes("this.client.compact(customInstructions?.trim() || undefined)"))
+await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, '/name Pion slash probe'); input?.dispatchEvent(new Event('input', { bubbles: true })); input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); return true })()`)
+for (let i = 0; i < 30; i++) {
+  await sleep(100)
+  if (await evaluate(`(async () => (await window.pion.getState())?.sessionName === 'Pion slash probe')()`)) break
+}
+await check('Pi 内置 /name 可直接执行', `(async () => (await window.pion.getState())?.sessionName === 'Pion slash probe')()`)
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, ''); input?.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
 await check('快捷键提示含上下键历史编辑',  `document.querySelector('.composer-row textarea')?.getAttribute('placeholder')?.includes('↑↓ 编辑历史') && document.querySelector('.composer-row textarea')?.getAttribute('aria-keyshortcuts')?.includes('Control+Tab')`)
 await check('快捷键提示含 Ctrl+Tab 模式切换', `document.querySelector('.composer-row textarea')?.getAttribute('placeholder')?.includes('Ctrl+Tab 切换模式')`)
@@ -490,6 +504,13 @@ await check('插件商店提供安装状态筛选', `(() => { const filters = do
 await evaluate(`document.querySelector('[data-filter="installed"]')?.click()`)
 await sleep(120)
 await check('插件商店可筛选已安装', `document.querySelector('[data-filter="installed"]')?.classList.contains('active')`)
+await check('已安装插件提供卸载入口', `(async () => { const installed = await window.pion.getInstalledPlugins(); const buttons = [...document.querySelectorAll('.plugin-install-button.installed')]; return installed.length === 0 || (buttons.length > 0 && buttons.every((button) => button.textContent?.includes('卸载'))); })()`)
+await evaluate(`document.querySelector('.plugin-install-button.installed')?.click()`)
+await sleep(120)
+await check('卸载插件使用主题确认框', `(() => { const installedButton = document.querySelector('.plugin-install-button.installed'); if (!installedButton) return true; return document.querySelector('.confirm-dialog')?.textContent?.includes('卸载插件') && document.querySelector('.confirm-dialog-confirm')?.textContent?.includes('确认卸载'); })()`)
+await evaluate(`document.querySelector('.confirm-dialog-cancel')?.click()`)
+await sleep(100)
+checkHost('插件卸载打通原生 Pi remove IPC', readFileSync('src/main/plugin-manager.ts', 'utf8').includes("runPiCommand(['remove', normalized])") && readFileSync('src/preload/index.ts', 'utf8').includes('uninstallPlugin:'))
 await evaluate(`document.querySelector('[data-filter="not-installed"]')?.click()`)
 await sleep(120)
 await check('插件商店可筛选未安装', `document.querySelector('[data-filter="not-installed"]')?.classList.contains('active')`)

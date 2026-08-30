@@ -316,6 +316,7 @@ export function Composer({
   }
 
   const sourceLabel = (source: SlashCommandInfo['source']): string => {
+    if (source === 'builtin') return 'Pi 内置'
     if (source === 'skill') return '技能'
     if (source === 'prompt') return '提示词'
     return '扩展'
