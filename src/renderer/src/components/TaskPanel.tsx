@@ -10,14 +10,14 @@ function taskPanelStateKey(sessionKey: string): string {
 }
 
 function loadExpanded(sessionKey: string): boolean {
-  if (typeof window === 'undefined') return true
+  if (typeof window === 'undefined') return false
   try {
     const raw = window.localStorage.getItem(taskPanelStateKey(sessionKey))
-    if (raw === null) return true
+    if (raw === null) return false
     const saved = JSON.parse(raw)
-    return typeof saved === 'boolean' ? saved : true
+    return typeof saved === 'boolean' ? saved : false
   } catch {
-    return true
+    return false
   }
 }
 

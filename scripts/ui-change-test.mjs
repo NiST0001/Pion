@@ -265,12 +265,13 @@ await check('导航条悬停呈现波形放大', `(() => { const markers = [...d
 if (await evaluate(`!!document.querySelector('.task-panel')`)) {
   await check('任务面板显示 AI 工作计划', `(() => { const panel = document.querySelector('.task-panel'); return panel?.classList.contains('task-panel-agent') && panel.querySelector('.task-panel-caption')?.textContent === 'AI 工作计划' && panel.querySelectorAll('.task-item[data-task-status]').length > 0; })()`)
   await check('AI 任务条目只读无勾选按钮', `document.querySelectorAll('.task-panel .task-item button.task-check').length === 0`)
+  await evaluate(`(() => { const t = document.querySelector('.task-panel-toggle'); window.__pionTaskExpandedBefore = t?.getAttribute('aria-expanded'); t?.click(); return true })()`)
+  await sleep(200)
+  await check('任务面板可切换折叠状态', `(() => { const t = document.querySelector('.task-panel-toggle'); const now = t?.getAttribute('aria-expanded'); return now !== null && now !== window.__pionTaskExpandedBefore && !document.querySelector('.task-panel-card')?.classList.contains('task-animating'); })()`)
+  await check('任务面板切换无位移动画', `(() => { const icon = document.querySelector('.task-panel-toggle-icon'); const card = document.querySelector('.task-panel-card'); return !!icon && !!card && getComputedStyle(icon).transitionDuration === '0s' && parseFloat(getComputedStyle(card).transitionDuration || '0') === 0; })()`)
   await evaluate(`document.querySelector('.task-panel-toggle')?.click()`)
-  await sleep(420)
-  await check('任务面板可折叠', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === 'false' && document.querySelector('.task-panel')?.classList.contains('collapsed')`)
-  await evaluate(`document.querySelector('.task-panel-toggle')?.click()`)
-  await sleep(420)
-  await check('任务面板可重新展开', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === 'true'`)
+  await sleep(200)
+  await check('任务面板可切回原状态', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === window.__pionTaskExpandedBefore`)
   await check('任务面板折叠状态按会话持久化', `(() => { const key = document.querySelector('.task-panel')?.dataset.sessionKey; if (!key) return false; return localStorage.getItem('pion:session-task-panel-state:' + encodeURIComponent(key)) !== null; })()`)
 } else {
   await check('任务面板在有 AI 任务时显示（本会话窗口无 todo，跳过）', `!document.querySelector('.task-panel')`)
