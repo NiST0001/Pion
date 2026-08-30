@@ -23,7 +23,11 @@ FONT_BOLD="/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"
 
 if [ "${1:-}" != "--no-build" ]; then
   echo "[install] 编译（electron-vite build）..."
-  npm run build
+  if command -v npm >/dev/null 2>&1; then
+    npm run build
+  else
+    node node_modules/electron-vite/bin/electron-vite.js build
+  fi
 fi
 
 if [ ! -f out/main/index.js ]; then
@@ -37,7 +41,9 @@ rsync -a --delete out package.json "$APP_DIR/"
 
 echo "[install] 同步运行时依赖（剔除开发依赖）..."
 LIST="$(mktemp)"
-npm ls --omit=dev --parseable --all 2>/dev/null | tail -n +2 | sed "s|^$PWD/||" > "$LIST" || true
+if command -v npm >/dev/null 2>&1; then
+  npm ls --omit=dev --parseable --all 2>/dev/null | tail -n +2 | sed "s|^$PWD/||" > "$LIST" || true
+fi
 if [ -s "$LIST" ]; then
   rm -rf "$APP_DIR/node_modules"
   mkdir -p "$APP_DIR/node_modules"
