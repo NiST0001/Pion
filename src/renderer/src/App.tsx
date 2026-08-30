@@ -394,7 +394,7 @@ export function App(): ReactElement {
       if (wasNearBottom || previousHeight === 0) el.scrollTop = el.scrollHeight
     }
     previousTimelineHeight.current = el.scrollHeight
-  }, [lastGrow, lastItemId, state.timelineMutation, timelineLength])
+  }, [lastGrow, lastItemId, state.busy, state.timelineMutation, timelineLength])
 
   const updateVisibleHistoryEntry = useCallback((): void => {
     const container = scrollRef.current
@@ -842,7 +842,7 @@ export function App(): ReactElement {
               onJump={(landmark) => void actions.jumpToHistoryLandmark(landmark)}
             />
             <main className="chat-scroll" ref={scrollRef} onScroll={handleTimelineScroll}>
-              {state.timeline.length === 0 ? (
+              {state.timeline.length === 0 && !state.busy ? (
                 <EmptyState
                   cwd={state.status.cwd}
                   starting={state.status.phase === 'starting'}
@@ -867,6 +867,13 @@ export function App(): ReactElement {
                       />
                     )
                   )}
+                  {state.busy && (
+                    <div className="row row-agent-working">
+                      <span className="agent-working-text" role="status" aria-live="polite">
+                        {workingLabel}
+                      </span>
+                    </div>
+                  )}
                   {!state.busy
                     && state.runCheckpoint?.state !== 'rolled-back'
                     && latestRunChanges.length > 0
@@ -888,11 +895,6 @@ export function App(): ReactElement {
                 </div>
               )}
             </main>
-            {state.busy && (
-              <div className="agent-working-text" role="status" aria-live="polite">
-                {workingLabel}
-              </div>
-            )}
             <ToolPermissionModal
               request={toolPermissionRequests[0] ?? null}
               queueLength={toolPermissionRequests.length}

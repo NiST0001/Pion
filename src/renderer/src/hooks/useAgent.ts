@@ -48,11 +48,18 @@ export function useAgent() {
 
   const restoreCachedTimeline = useCallback((path: string, cached: TimelineCacheEntry): void => {
     const loadId = ++timelineLoadId.current
-    const cursor: HistoryCursor | null = cached.complete && cached.newerComplete
+    // Cached snapshots may contain live-created rows without `historical`, or
+    // rows whose first reveal already ran before they were cached. Clone the
+    // snapshot for each revisit so short and second-load sessions replay the
+    // same restrained opacity cascade as a cold history load.
+    const items = cached.items.map((item) => ({ ...item, historical: true }))
+    const revealedCache = { ...cached, items }
+    const cursor: HistoryCursor | null = revealedCache.complete && revealedCache.newerComplete
       ? null
-      : { path, ...cached, loading: false, loadId }
+      : { path, ...revealedCache, loading: false, loadId }
     historyCursor.current = cursor
-    showTimeline(path, cached.items, cached.mode)
+    storeTimelineCache(timelineCache.current, path, revealedCache)
+    showTimeline(path, items, revealedCache.mode)
   }, [showTimeline])
 
   // Keep a loaded session's rendered timeline in memory. Switching back to a

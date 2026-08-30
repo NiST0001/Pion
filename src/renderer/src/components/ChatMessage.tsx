@@ -42,6 +42,10 @@ export function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactE
     )
   }
 
+  // The timeline-level working status occupies this slot until the assistant
+  // has actual thinking, text, or an error to show. Avoid a duplicate dots row.
+  if (item.streaming && item.text === '' && item.thinking === '' && !item.error) return null
+
   return (
     <div className={`row row-assistant${item.historical ? ' history-reveal' : ''}${item.streaming ? ' streaming-reveal' : ''}`}>
       <div className="bubble bubble-assistant">
@@ -52,13 +56,6 @@ export function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactE
           </details>
         )}
         {item.text !== '' && <Markdown text={item.text} />}
-        {item.streaming && item.text === '' && item.thinking === '' && (
-          <span className="typing">
-            <span />
-            <span />
-            <span />
-          </span>
-        )}
         {item.streaming && item.text !== '' && <span className="caret" />}
         {item.error && <div className="bubble-error">{item.error}</div>}
       </div>
