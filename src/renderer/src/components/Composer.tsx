@@ -31,7 +31,10 @@ function fileToImageContent(file: File): Promise<ImageContent> {
 interface ComposerProps {
   busy: boolean
   queued: { steering: number; followUp: number }
+  /** No workspace is available, so even drafting is unavailable. */
   disabled: boolean
+  /** The draft stays editable while the backend/trust gate is preparing. */
+  sendDisabled: boolean
   prefill: string
   /** 当前会话中的用户消息，按时间顺序用于上下键导航。 */
   history: string[]
@@ -51,6 +54,7 @@ export function Composer({
   busy,
   queued,
   disabled,
+  sendDisabled,
   prefill,
   history,
   projectSelector,
@@ -201,19 +205,19 @@ export function Composer({
 
   const submit = useCallback(() => {
     const text = value.trim()
-    if ((text === '' && pendingImages.length === 0) || disabled) return
+    if ((text === '' && pendingImages.length === 0) || disabled || sendDisabled) return
     onSend(text, pendingImages)
     clearValue()
     clearImages()
-  }, [value, pendingImages, disabled, onSend, clearValue, clearImages])
+  }, [value, pendingImages, disabled, sendDisabled, onSend, clearValue, clearImages])
 
   const queue = useCallback(() => {
     const text = value.trim()
-    if ((text === '' && pendingImages.length === 0) || disabled) return
+    if ((text === '' && pendingImages.length === 0) || disabled || sendDisabled) return
     onQueue(text, pendingImages)
     clearValue()
     clearImages()
-  }, [value, pendingImages, disabled, onQueue, clearValue, clearImages])
+  }, [value, pendingImages, disabled, sendDisabled, onQueue, clearValue, clearImages])
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (showCommandMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
@@ -247,7 +251,7 @@ export function Composer({
       !event.altKey
     ) {
       event.preventDefault()
-      if (!disabled && !busy) onModeChange(mode === 'build' ? 'plan' : 'build')
+      if (!disabled && !sendDisabled && !busy) onModeChange(mode === 'build' ? 'plan' : 'build')
       return
     }
 
@@ -353,8 +357,10 @@ export function Composer({
             ref={textareaRef}
             value={value}
             placeholder={disabled
-              ? 'agent 未运行…'
-              : mode === 'plan'
+              ? '请选择项目目录…'
+              : sendDisabled
+                ? 'Agent 正在准备，可先输入任务…'
+                : mode === 'plan'
                 ? '计划模式：描述要探索和设计的目标… (↑↓ 编辑历史 / Tab 排队 / Ctrl+Tab 切换模式 / Enter 直接发送)'
                 : '描述任务… (↑↓ 编辑历史 / Tab 排队 / Ctrl+Tab 切换模式 / Enter 直接发送)'}
             disabled={disabled}
@@ -406,7 +412,7 @@ export function Composer({
                 data-mode="build"
                 className={`composer-mode-option${mode === 'build' ? ' active' : ''}`}
                 aria-pressed={mode === 'build'}
-                disabled={disabled || busy}
+                disabled={disabled || sendDisabled || busy}
                 title="构建模式：允许修改项目文件"
                 onClick={() => onModeChange('build')}
               >
@@ -418,7 +424,7 @@ export function Composer({
                 data-mode="plan"
                 className={`composer-mode-option${mode === 'plan' ? ' active' : ''}`}
                 aria-pressed={mode === 'plan'}
-                disabled={disabled || busy}
+                disabled={disabled || sendDisabled || busy}
                 title="计划模式：只读探索并制定实现方案"
                 onClick={() => onModeChange('plan')}
               >
@@ -432,8 +438,8 @@ export function Composer({
         <button
           className="send-button"
           onClick={submit}
-          disabled={disabled || (value.trim() === '' && pendingImages.length === 0)}
-          title="Enter 直接发送"
+          disabled={disabled || sendDisabled || (value.trim() === '' && pendingImages.length === 0)}
+          title={sendDisabled ? 'Agent 正在准备，输入内容会保留' : 'Enter 直接发送'}
         >
           <ArrowUp size={16} />
         </button>

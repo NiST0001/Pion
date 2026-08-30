@@ -35,6 +35,7 @@ function formatTime(mtime: number): string {
 
 interface SessionItemActions {
   activePath?: string
+  runningSessionPaths: ReadonlySet<string>
   onSelect: (path: string) => void
   onReorder?: (sessions: SessionMeta[]) => void
   onDelete: (path: string) => Promise<void>
@@ -49,6 +50,7 @@ interface SessionItemActions {
 export function SessionItems({
   sessions,
   activePath,
+  runningSessionPaths,
   previewDensity,
   onSelect,
   onReorder,
@@ -119,7 +121,8 @@ export function SessionItems({
         <div
           key={session.path}
           data-session-path={session.path}
-          className={`side-item side-session side-session-${previewDensity}${onReorder ? ' reorderable' : ''}${session.path === activePath ? ' active' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
+          className={`side-item side-session side-session-${previewDensity}${onReorder ? ' reorderable' : ''}${session.path === activePath ? ' active' : ''}${runningSessionPaths.has(session.path) ? ' running' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
+          aria-busy={runningSessionPaths.has(session.path)}
           draggable={Boolean(onReorder)}
           onDragStart={(event) => {
             if (onReorder) handleDragStart(event, session)

@@ -11,7 +11,7 @@ export const SESSION_PREVIEW_OPTIONS: Array<{
 ]
 
 const SESSION_PREVIEW_STORAGE_KEY = 'pion:session-preview-density'
-const DEFAULT_SESSION_PREVIEW_DENSITY: SessionPreviewDensity = 'comfortable'
+const DEFAULT_SESSION_PREVIEW_DENSITY: SessionPreviewDensity = 'compact'
 
 export function readSessionPreviewDensity(): SessionPreviewDensity {
   try {

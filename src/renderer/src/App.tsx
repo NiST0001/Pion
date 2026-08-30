@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { FolderOpen, Settings, Sparkles, Store } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
@@ -15,28 +15,35 @@ import type {
   ToolPermissionResolution,
   ToolPermissionRules
 } from '../../shared/types'
-import { ChatMessage } from './components/ChatMessage'
 import { TaskPanel } from './components/TaskPanel'
 import { ToolCallItem } from './components/ToolCallItem'
 import { Composer } from './components/Composer'
-import { BranchCreateModal } from './components/BranchCreateModal'
 import { FavoriteSessions, ProjectList, SidebarToolbar } from './components/Sidebar'
 import { ReviewPanel } from './components/ReviewPanel'
 import { ModelPicker, ThinkingPicker } from './components/ModelPicker'
 import { TitleBar } from './components/TitleBar'
-import { SettingsModal } from './components/SettingsModal'
-import { SkillsToolsModal } from './components/SkillsToolsModal'
-import { PluginStoreModal } from './components/PluginStoreModal'
 import { ProjectPicker } from './components/ProjectPicker'
 import { ProjectTrustBanner } from './components/ProjectTrustBanner'
 import { HistoryNavigator } from './components/HistoryNavigator'
 import { ModifiedFilesCard } from './components/ModifiedFilesCard'
 import { ToolPermissionModal } from './components/ToolPermissionModal'
-import { TaskHistoryPanel } from './components/TaskHistoryPanel'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
 import type { SessionPreviewDensity } from './utils/sessionPreview'
 import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
+
+const LazyChatMessage = lazy(() => import('./components/ChatMessage')
+  .then((module) => ({ default: module.ChatMessage })))
+const LazyBranchCreateModal = lazy(() => import('./components/BranchCreateModal')
+  .then((module) => ({ default: module.BranchCreateModal })))
+const LazySettingsModal = lazy(() => import('./components/SettingsModal')
+  .then((module) => ({ default: module.SettingsModal })))
+const LazySkillsToolsModal = lazy(() => import('./components/SkillsToolsModal')
+  .then((module) => ({ default: module.SkillsToolsModal })))
+const LazyPluginStoreModal = lazy(() => import('./components/PluginStoreModal')
+  .then((module) => ({ default: module.PluginStoreModal })))
+const LazyTaskHistoryPanel = lazy(() => import('./components/TaskHistoryPanel')
+  .then((module) => ({ default: module.TaskHistoryPanel })))
 
 type ResizeTarget = 'sidebar' | 'review'
 
@@ -63,6 +70,15 @@ function defaultReviewWidth(): number {
     MIN_REVIEW_WIDTH,
     MAX_REVIEW_WIDTH
   )
+}
+
+/** Delay a lazy panel's first download, then preserve its state across closes. */
+function useDeferredMount(open: boolean): boolean {
+  const [mounted, setMounted] = useState(open)
+  useEffect(() => {
+    if (open) setMounted(true)
+  }, [open])
+  return mounted || open
 }
 
 export function App(): ReactElement {
@@ -102,6 +118,11 @@ export function App(): ReactElement {
   const [newSessionCwd, setNewSessionCwd] = useState('')
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
   const [visibleHistoryEntryId, setVisibleHistoryEntryId] = useState<string | undefined>()
+  const taskHistoryMounted = useDeferredMount(taskHistorySession !== null)
+  const capabilitiesMounted = useDeferredMount(capabilitiesOpen)
+  const pluginStoreMounted = useDeferredMount(pluginStoreOpen)
+  const branchDialogMounted = useDeferredMount(branchDialogCwd !== null)
+  const settingsMounted = useDeferredMount(settingsOpen)
   const newSessionInFlight = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const panelResizeRef = useRef<PanelResizeState | null>(null)
@@ -277,6 +298,7 @@ export function App(): ReactElement {
   }, [favoriteSessionPaths])
 
   const favoritePathSet = useMemo(() => new Set(favoriteSessionPaths), [favoriteSessionPaths])
+  const runningSessionPathSet = useMemo(() => new Set(state.runningSessionPaths), [state.runningSessionPaths])
   const favoriteSessions = useMemo(() => {
     const sessions = Object.values(state.sessionsByProject).flat()
     return orderFavoriteSessions(sessions, favoriteSessionPaths)
@@ -797,6 +819,7 @@ export function App(): ReactElement {
               searchQuery={sessionQuery}
               previewDensity={sessionPreviewDensity}
               activePath={activePath}
+              runningSessionPaths={runningSessionPathSet}
               favoritePaths={favoritePathSet}
               onToggleFavorite={handleToggleFavorite}
               onSelectSession={(session) => void handleSelectSession(session.projectCwd ?? state.status.cwd ?? '', session.path)}
@@ -814,6 +837,7 @@ export function App(): ReactElement {
               previewDensity={sessionPreviewDensity}
               activeCwd={activeCwd}
               activePath={activePath}
+              runningSessionPaths={runningSessionPathSet}
               onSelect={(cwd) => void handleSelectProject(cwd)}
               onAdd={() => void handleAddProject()}
               onRemove={(cwd) => void actions.removeProject(cwd)}
@@ -898,12 +922,13 @@ export function App(): ReactElement {
                         {item.summary}
                       </div>
                     ) : (
-                      <ChatMessage
-                        key={item.id}
-                        item={item}
-                        canFork={state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
-                        onFork={(id) => void handleFork(id)}
-                      />
+                      <Suspense key={item.id} fallback={null}>
+                        <LazyChatMessage
+                          item={item}
+                          canFork={state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
+                          onFork={(id) => void handleFork(id)}
+                        />
+                      </Suspense>
                     )
                   )}
                   {state.busy && (
@@ -953,7 +978,8 @@ export function App(): ReactElement {
             <Composer
               busy={state.busy}
               queued={state.queued}
-              disabled={!state.status.cwd || state.status.phase === 'starting' || state.status.phase === 'error' || projectTrust?.decision === 'ask'}
+              disabled={!state.status.cwd}
+              sendDisabled={state.status.phase === 'starting' || state.status.phase === 'error' || projectTrust?.decision === 'ask'}
               prefill={prefill}
               history={messageHistory}
               commands={state.commands}
@@ -1021,56 +1047,76 @@ export function App(): ReactElement {
           if (!rollbackBusy) setRollbackConfirmOpen(false)
         }}
       />
-      <TaskHistoryPanel
-        session={taskHistorySession}
-        onClose={closeTaskHistory}
-      />
-      <SkillsToolsModal
-        open={capabilitiesOpen}
-        onClose={closeCapabilities}
-      />
-      <PluginStoreModal
-        open={pluginStoreOpen}
-        onClose={closePluginStore}
-      />
-      <BranchCreateModal
-        open={branchDialogCwd !== null}
-        projectName={state.projects.find((project) => project.cwd === branchDialogCwd)?.name ?? '当前项目'}
-        projectCwd={branchDialogCwd ?? ''}
-        onClose={closeBranchDialog}
-        onSubmit={handleCreateBranch}
-      />
-      <SettingsModal
-        open={settingsOpen}
-        session={state.session}
-        models={state.models}
-        completionNotificationsEnabled={completionNotificationsEnabled}
-        onCompletionNotificationsChange={(enabled) => void handleCompletionNotificationsChange(enabled)}
-        sessionPreviewDensity={sessionPreviewDensity}
-        onSessionPreviewDensityChange={handleSessionPreviewDensityChange}
-        historyNavGap={historyNavGap}
-        onHistoryNavGapChange={handleHistoryNavGapChange}
-        projectTrust={projectTrust}
-        projectTrustBusy={projectTrustBusy || state.busy || state.status.phase === 'starting'}
-        projectTrustError={projectTrustError}
-        onProjectTrustChange={(decision) => void handleProjectTrustChange(decision)}
-        toolPermissionPolicy={toolPermissionPolicy}
-        toolPermissionBusy={toolPermissionBusy}
-        toolPermissionError={toolPermissionError}
-        onToolPermissionChange={(category, decision) => void handleToolPermissionChange(category, decision)}
-        onToolPermissionReset={() => void handleToolPermissionReset()}
-        onClose={closeSettings}
-        actions={{
-          setModel: actions.setModel,
-          setAutoCompaction: actions.setAutoCompaction,
-          setAutoRetry: actions.setAutoRetry,
-          compactNow: actions.compactNow,
-          exportSessionHtml: actions.exportHtml,
-          renameSession: actions.renameSession,
-          setSteeringMode: actions.setSteeringMode,
-          setFollowUpMode: actions.setFollowUpMode
-        }}
-      />
+      {taskHistoryMounted && (
+        <Suspense fallback={null}>
+          <LazyTaskHistoryPanel
+            session={taskHistorySession}
+            onClose={closeTaskHistory}
+          />
+        </Suspense>
+      )}
+      {capabilitiesMounted && (
+        <Suspense fallback={null}>
+          <LazySkillsToolsModal
+            open={capabilitiesOpen}
+            onClose={closeCapabilities}
+          />
+        </Suspense>
+      )}
+      {pluginStoreMounted && (
+        <Suspense fallback={null}>
+          <LazyPluginStoreModal
+            open={pluginStoreOpen}
+            onClose={closePluginStore}
+          />
+        </Suspense>
+      )}
+      {branchDialogMounted && (
+        <Suspense fallback={null}>
+          <LazyBranchCreateModal
+            open={branchDialogCwd !== null}
+            projectName={state.projects.find((project) => project.cwd === branchDialogCwd)?.name ?? '当前项目'}
+            projectCwd={branchDialogCwd ?? ''}
+            onClose={closeBranchDialog}
+            onSubmit={handleCreateBranch}
+          />
+        </Suspense>
+      )}
+      {settingsMounted && (
+        <Suspense fallback={null}>
+          <LazySettingsModal
+            open={settingsOpen}
+            session={state.session}
+            models={state.models}
+            completionNotificationsEnabled={completionNotificationsEnabled}
+            onCompletionNotificationsChange={(enabled) => void handleCompletionNotificationsChange(enabled)}
+            sessionPreviewDensity={sessionPreviewDensity}
+            onSessionPreviewDensityChange={handleSessionPreviewDensityChange}
+            historyNavGap={historyNavGap}
+            onHistoryNavGapChange={handleHistoryNavGapChange}
+            projectTrust={projectTrust}
+            projectTrustBusy={projectTrustBusy || state.busy || state.status.phase === 'starting'}
+            projectTrustError={projectTrustError}
+            onProjectTrustChange={(decision) => void handleProjectTrustChange(decision)}
+            toolPermissionPolicy={toolPermissionPolicy}
+            toolPermissionBusy={toolPermissionBusy}
+            toolPermissionError={toolPermissionError}
+            onToolPermissionChange={(category, decision) => void handleToolPermissionChange(category, decision)}
+            onToolPermissionReset={() => void handleToolPermissionReset()}
+            onClose={closeSettings}
+            actions={{
+              setModel: actions.setModel,
+              setAutoCompaction: actions.setAutoCompaction,
+              setAutoRetry: actions.setAutoRetry,
+              compactNow: actions.compactNow,
+              exportSessionHtml: actions.exportHtml,
+              renameSession: actions.renameSession,
+              setSteeringMode: actions.setSteeringMode,
+              setFollowUpMode: actions.setFollowUpMode
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   )
 }

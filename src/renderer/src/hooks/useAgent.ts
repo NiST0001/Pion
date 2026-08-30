@@ -90,10 +90,14 @@ export function useAgent() {
       api.onRunCheckpoint((checkpoint) => dispatch({ type: 'runCheckpoint', checkpoint })),
       api.onState((session) => dispatch({ type: 'session', session })),
       api.onSessions((sessions) => dispatch({ type: 'sessions', sessions })),
+      api.onRunningSessionPaths((paths) => dispatch({ type: 'runningSessionPaths', paths })),
       api.onTree((tree) => dispatch({ type: 'tree', tree })),
       api.onProjects((projects) => dispatch({ type: 'projects', projects })),
       api.onEvent((event) => dispatch({ type: 'event', event }))
     ]
+    void api.getRunningSessionPaths()
+      .then((paths) => dispatch({ type: 'runningSessionPaths', paths }))
+      .catch(() => undefined)
     return () => offs.forEach((off) => off())
   }, [api])
 

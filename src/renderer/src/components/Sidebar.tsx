@@ -114,6 +114,7 @@ export function FavoriteSessions({
   sessions,
   searchQuery,
   activePath,
+  runningSessionPaths,
   previewDensity,
   favoritePaths,
   onToggleFavorite,
@@ -127,6 +128,7 @@ export function FavoriteSessions({
   sessions: SessionMeta[]
   searchQuery: string
   activePath?: string
+  runningSessionPaths: ReadonlySet<string>
   previewDensity: SessionPreviewDensity
   favoritePaths: ReadonlySet<string>
   onToggleFavorite: (path: string) => void
@@ -151,6 +153,7 @@ export function FavoriteSessions({
         <SessionItems
           sessions={visibleSessions}
           activePath={activePath}
+          runningSessionPaths={runningSessionPaths}
           previewDensity={previewDensity}
           favoritePaths={favoritePaths}
           onToggleFavorite={onToggleFavorite}
@@ -198,6 +201,7 @@ export function ProjectList({
   searchQuery,
   activeCwd,
   activePath,
+  runningSessionPaths,
   previewDensity,
   onSelect,
   onAdd,
@@ -220,6 +224,7 @@ export function ProjectList({
   searchQuery: string
   activeCwd?: string
   activePath?: string
+  runningSessionPaths: ReadonlySet<string>
   previewDensity: SessionPreviewDensity
   onSelect: (cwd: string) => void
   onAdd: () => void
@@ -275,6 +280,7 @@ export function ProjectList({
           branches={branches}
           activeCwd={activeCwd}
           activePath={activePath}
+          runningSessionPaths={runningSessionPaths}
           previewDensity={previewDensity}
           searchActive={Boolean(normalizedQuery)}
           canRemove={projects.length > 1}
@@ -302,6 +308,7 @@ function ProjectBranch({
   sessions,
   allSessions,
   activePath,
+  runningSessionPaths,
   previewDensity,
   onNewSession,
   onReorder,
@@ -318,6 +325,7 @@ function ProjectBranch({
   sessions: SessionMeta[]
   allSessions: SessionMeta[]
   activePath?: string
+  runningSessionPaths: ReadonlySet<string>
   previewDensity: SessionPreviewDensity
   onNewSession: (cwd: string) => void
   onReorder: (cwd: string, paths: string[]) => void
@@ -379,6 +387,7 @@ function ProjectBranch({
             <SessionItems
               sessions={sessions}
               activePath={activePath}
+              runningSessionPaths={runningSessionPaths}
               previewDensity={previewDensity}
               favoritePaths={favoritePaths}
               onToggleFavorite={onToggleFavorite}
@@ -402,6 +411,7 @@ function ProjectFolder({
   branches,
   activeCwd,
   activePath,
+  runningSessionPaths,
   searchActive,
   canRemove,
   previewDensity,
@@ -423,6 +433,7 @@ function ProjectFolder({
   branches: ProjectBranchView[]
   activeCwd?: string
   activePath?: string
+  runningSessionPaths: ReadonlySet<string>
   searchActive: boolean
   canRemove: boolean
   previewDensity: SessionPreviewDensity
@@ -501,6 +512,7 @@ function ProjectFolder({
               sessions={sessions}
               allSessions={allSessions}
               activePath={activePath}
+              runningSessionPaths={runningSessionPaths}
               previewDensity={previewDensity}
               onNewSession={onNewSession}
               onReorder={onReorder}

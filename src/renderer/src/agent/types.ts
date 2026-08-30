@@ -104,6 +104,7 @@ export interface AgentState {
   thinkingLevels: string[]
   commands: SlashCommandInfo[]
   mode: AgentMode
+  runningSessionPaths: string[]
   timeline: TimelineItem[]
   timelineMutation: 'replace' | 'prepend' | 'append' | null
   timelineLoading: boolean
@@ -127,6 +128,7 @@ export const initialState: AgentState = {
   thinkingLevels: [],
   commands: [],
   mode: 'build',
+  runningSessionPaths: [],
   timeline: [],
   timelineMutation: null,
   timelineLoading: false,
@@ -151,6 +153,7 @@ export type Action =
   | { type: 'thinkingLevels'; levels: string[] }
   | { type: 'commands'; commands: SlashCommandInfo[] }
   | { type: 'mode'; mode: AgentMode }
+  | { type: 'runningSessionPaths'; paths: string[] }
   | { type: 'event'; event: WireEventInput }
   | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode }
   | { type: 'prependEntries'; items: TimelineItem[] }

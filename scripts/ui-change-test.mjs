@@ -228,7 +228,10 @@ await check('全局字体提升至清晰中等字重', `(() => { const style = g
 await check('Linux 字体恢复系统子像素渲染', `getComputedStyle(document.body).webkitFontSmoothing === 'auto'`)
 await check('主输入区使用大号正文', `parseFloat(getComputedStyle(document.querySelector('.composer textarea')).fontSize) >= 16`)
 await check('侧栏项目标签不再使用小字号', `parseFloat(getComputedStyle(document.querySelector('.project-folder-name')).fontSize) >= 14`)
-await check('旧 header 已移除', `!document.querySelector('.app-header')`)
+checkHost('后台准备期间输入框保持可编辑', (() => { const app = readFileSync('src/renderer/src/App.tsx', 'utf8'); const composer = readFileSync('src/renderer/src/components/Composer.tsx', 'utf8'); return app.includes('disabled={!state.status.cwd}') && app.includes('sendDisabled={state.status.phase') && composer.includes('Agent 正在准备，可先输入任务') && composer.includes('disabled || sendDisabled'); })())
+checkHost('非首屏面板与消息 Markdown 按需加载', (() => { const app = readFileSync('src/renderer/src/App.tsx', 'utf8'); return app.includes("lazy(() => import('./components/ChatMessage')") && app.includes("lazy(() => import('./components/SettingsModal')") && !app.includes("import { ChatMessage } from './components/ChatMessage'"); })())
+checkHost('首屏主脚本压缩到 1MB 以内', (() => { const sizes = execSync("find out/renderer/assets -maxdepth 1 -type f -name 'index-*.js' -printf '%s\\n'").toString().trim().split(/\s+/).map(Number).filter(Number.isFinite); return sizes.length === 1 && sizes[0] < 1_000_000; })())
+await check('旧 header 已移除',  `!document.querySelector('.app-header')`)
 await check('窗口控制三键（最小/最大/关闭）', `document.querySelectorAll('.titlebar-btn').length >= 3`)
 await check('关闭按钮样式', `!!document.querySelector('.titlebar-close')`)
 await check('标题栏含品牌', `document.querySelector('.titlebar-brand .brand-name')?.textContent === 'Pion'`)
@@ -620,6 +623,7 @@ await evaluate(`Array.from(document.querySelectorAll('.settings-nav-item')).find
 await sleep(200)
 await check('会话页可切换', `document.querySelectorAll('.settings-page .toggle').length >= 2 && document.querySelectorAll('.settings-page .segmented').length >= 2`)
 await check('会话预览程度设置可见', `(() => { const row = document.querySelector('[data-setting="session-preview-density"]'); const labels = [...(row?.querySelectorAll('.segmented button') ?? [])].map((button) => button.textContent?.trim()); return labels.join('|') === '紧凑|舒适|详细'; })()`)
+checkHost('新安装默认使用紧凑会话', readFileSync('src/renderer/src/utils/sessionPreview.ts', 'utf8').includes("DEFAULT_SESSION_PREVIEW_DENSITY: SessionPreviewDensity = 'compact'"))
 await evaluate(`document.querySelector('[data-setting="session-preview-density"] .segmented button:nth-child(1)')?.click()`)
 await sleep(120)
 await check('紧凑预览即时应用', `document.querySelectorAll('.side-session-compact').length === document.querySelectorAll('.side-session').length`)
@@ -631,6 +635,9 @@ await check('详细预览即时应用', `document.querySelectorAll('.side-sessio
 await evaluate(`document.querySelector('[data-setting="session-preview-density"] .segmented button:nth-child(2)')?.click()`)
 await sleep(120)
 await check('舒适预览可恢复', `document.querySelectorAll('.side-session-comfortable').length === document.querySelectorAll('.side-session').length`)
+await evaluate(`document.querySelector('[data-setting="session-preview-density"] .segmented button:nth-child(1)')?.click()`)
+await sleep(120)
+await check('会话预览最终恢复为默认紧凑', `document.querySelectorAll('.side-session-compact').length === document.querySelectorAll('.side-session').length && localStorage.getItem('pion:session-preview-density') === 'compact'`)
 await check('历史导航条间距设置可见', `(() => { const row = document.querySelector('[data-setting="history-nav-gap"]'); return !!row && !!row.querySelector('input[type="range"]') && row.querySelector('.setting-range-value')?.textContent?.includes('px'); })()`)
 await evaluate(`(() => { const input = document.querySelector('[data-setting="history-nav-gap"] input[type="range"]'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set; setter?.call(input, '4'); input?.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
 await sleep(180)
@@ -677,11 +684,17 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`document.querySelectorAll('.side-session').length > 0`)) break
 }
 await check('会话项存在', `document.querySelectorAll('.side-session').length > 0`)
+await check('运行会话行使用克制扫光', `(() => { const row = document.querySelector('.side-session'); if (!row) return false; const alreadyRunning = row.classList.contains('running'); row.classList.add('running'); const style = getComputedStyle(row, '::after'); const result = style.animationName === 'session-running-sweep' && style.pointerEvents === 'none' && style.backgroundImage !== 'none'; if (!alreadyRunning) row.classList.remove('running'); return result; })()`)
+await check('运行会话路径 API 可用', `(async () => Array.isArray(await window.pion.getRunningSessionPaths()))()`)
+checkHost('后台会话同样会推送运行状态', (() => { const bridge = readFileSync('src/main/agent-bridge.ts', 'utf8'); const list = readFileSync('src/renderer/src/components/SessionList.tsx', 'utf8'); const css = readFileSync('src/renderer/src/styles/refinements.css', 'utf8'); return bridge.indexOf('backend.busy = true') < bridge.indexOf('if (this.activeKey !== backend.key) return') && bridge.includes('pushRunningSessionPaths()') && list.includes("runningSessionPaths.has(session.path) ? ' running' : ''") && list.includes('aria-busy={runningSessionPaths.has(session.path)}') && css.includes('@media (prefers-reduced-motion: reduce)'); })())
 await check('左侧会话栏已移除变更', `!document.querySelector('.side-change') && !Array.from(document.querySelectorAll('.side-section-title')).some(e => e.textContent?.trim() === '变更')`)
 await check('项目下默认存在 main 分支', `(() => { const folders = [...document.querySelectorAll('.project-folder')]; const withBranches = folders.filter((folder) => folder.querySelector('.project-branch-name')); return folders.length > 0 && withBranches.length > 0 && withBranches.every((folder) => [...folder.querySelectorAll('.project-branch-name')].some((name) => name.textContent?.trim() === 'main')); })()`)
 await check('项目右侧提供新建分支按钮', `document.querySelectorAll('.project-folder-new-branch').length === document.querySelectorAll('.project-folder').length && Array.from(document.querySelectorAll('.project-folder-new-branch')).every(e => e.getAttribute('title')?.includes('Git 分支'))`)
 await evaluate(`document.querySelector('.project-folder-new-branch')?.click()`)
-await sleep(160)
+for (let i = 0; i < 20; i++) {
+  await sleep(100)
+  if (await evaluate(`!!document.querySelector('.branch-create-modal')`)) break
+}
 await check('创建分支对话框可打开', `!!document.querySelector('.branch-create-modal') && !!document.querySelector('.branch-create-input')`)
 await check('创建分支默认名称可编辑', `document.querySelector('.branch-create-input')?.value === 'feature/new-branch'`)
 await evaluate(`document.querySelector('.branch-create-cancel')?.click()`)

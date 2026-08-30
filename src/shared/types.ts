@@ -463,6 +463,8 @@ export interface PionApi {
   getHistoryIndex(sessionPath?: string): Promise<SessionHistoryIndex | null>
   /** Compact per-user-message todo history, parsed without transferring full entries. */
   getSessionTaskHistory(sessionPath: string): Promise<SessionTaskRun[]>
+  /** Persisted session paths whose retained backends are actively processing a run. */
+  getRunningSessionPaths(): Promise<string[]>
   /** Load a bounded history window; omit before for the newest window. */
   getEntriesPage(
     before?: number,
@@ -552,6 +554,8 @@ export interface PionApi {
   onState(listener: (state: SessionInfo | null) => void): () => void
   /** Subscribe to session-list pushes for the active cwd. */
   onSessions(listener: (sessions: SessionMeta[]) => void): () => void
+  /** Subscribe whenever any retained session starts or finishes a run. */
+  onRunningSessionPaths(listener: (sessionPaths: string[]) => void): () => void
   /** Subscribe to branch-tree pushes. */
   onTree(listener: (tree: { tree: TreeNodeLite[]; leafId: string | null } | null) => void): () => void
   /** Subscribe to project-list pushes. */

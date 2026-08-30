@@ -1752,6 +1752,56 @@ html.pion-keyboard-focus .composer-project-option:focus-visible {
   transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease, outline-color 0.12s ease;
 }
 
+.side-session.running {
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.side-session.running::after {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 42%;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    104deg,
+    transparent 0%,
+    rgba(var(--accent-rgb), 0.035) 25%,
+    rgba(var(--accent-rgb), 0.16) 50%,
+    rgba(var(--accent-rgb), 0.035) 75%,
+    transparent 100%
+  );
+  transform: translateX(-135%);
+  will-change: transform;
+  animation: session-running-sweep 2.15s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.side-session.running > * {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes session-running-sweep {
+  0%,
+  16% {
+    transform: translateX(-135%);
+  }
+  76%,
+  100% {
+    transform: translateX(345%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-session.running::after {
+    display: none;
+  }
+}
+
 .side-session:active {
   cursor: grabbing;
 }

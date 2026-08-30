@@ -77,6 +77,7 @@ const CHECKPOINT_CHANNEL = IPC_EVENTS.AgentRunCheckpoint
 const TOOL_PERMISSION_CHANNEL = IPC_EVENTS.ToolPermissionRequests
 const STATE_CHANNEL = IPC_EVENTS.AgentState
 const SESSIONS_CHANNEL = IPC_EVENTS.AgentSessions
+const RUNNING_SESSIONS_CHANNEL = IPC_EVENTS.AgentRunningSessions
 const TREE_CHANNEL = IPC_EVENTS.AgentTree
 const PLAN_EXTENSION_PATH = resolve(MODULE_DIR, '../../node_modules/@narumitw/pi-plan-mode/dist/index.ts')
 /** Global pool size shared by every project and worktree. */
@@ -119,6 +120,7 @@ interface BackendRecord {
   sessionPath?: string
   client: RpcClient
   phase: BackendPhase
+  busy: boolean
   modePrimed?: AgentMode
   completionState?: 'completed' | 'aborted'
   checkpoint?: GitRunCheckpoint
@@ -183,6 +185,7 @@ export class AgentBridge {
     this.win.webContents.send(STATUS_CHANNEL, this.status)
     this.pushRunCheckpoint()
     this.pushToolPermissionRequests()
+    this.pushRunningSessionPaths()
   }
 
   unbind(win: BrowserWindow): void {
@@ -191,6 +194,18 @@ export class AgentBridge {
 
   getStatus(): AgentStatus {
     return this.status
+  }
+
+  getRunningSessionPaths(): string[] {
+    return [...new Set(
+      [...this.backends.values()]
+        .filter((backend) => backend.busy && backend.sessionPath)
+        .map((backend) => resolve(backend.sessionPath as string))
+    )]
+  }
+
+  private pushRunningSessionPaths(): void {
+    this.win?.webContents.send(RUNNING_SESSIONS_CHANNEL, this.getRunningSessionPaths())
   }
 
   onSessionCompleted(listener: SessionCompletedListener): () => void {
@@ -625,9 +640,12 @@ export class AgentBridge {
     backend.client.onEvent((event) => {
       const type = (event as { type?: string }).type
       if (type === 'extension_ui_request' && this.handleExtensionUiRequest(backend, event)) return
+      let runningStateChanged = false
       if (type === 'agent_start') {
         backend.phase = 'running'
+        backend.busy = true
         backend.completionState = undefined
+        runningStateChanged = true
       }
       if (type === 'agent_end') {
         const endEvent = event as {
@@ -639,9 +657,13 @@ export class AgentBridge {
             .reverse()
             .find((message) => message.role === 'assistant')
           backend.completionState = assistant?.stopReason === 'aborted' ? 'aborted' : 'completed'
+          if (backend.busy) runningStateChanged = true
+          backend.busy = false
         }
       }
       if (type === 'agent_settled') {
+        if (backend.busy) runningStateChanged = true
+        backend.busy = false
         if (backend.completionState === 'completed') {
           for (const listener of this.sessionCompletedListeners) {
             try {
@@ -654,9 +676,11 @@ export class AgentBridge {
         backend.completionState = undefined
         void this.refreshRunCheckpoint(backend)
       }
+      if (runningStateChanged) this.pushRunningSessionPaths()
       if (type === 'agent_start' || type === 'message_start' || type === 'agent_settled') {
         // Keep persisted history fresh even when this backend finishes while a
-        // different project or session is selected.
+        // different project or session is selected. A first prompt can also
+        // create the session file needed by the sidebar running indicator.
         void this.syncBackendSession(backend)
       }
       if (this.activeKey !== backend.key) return
@@ -688,6 +712,7 @@ export class AgentBridge {
       sessionPath,
       client,
       phase: 'starting' as BackendPhase,
+      busy: false,
       startPromise: Promise.resolve()
     }
     this.backends.set(key, backend)
@@ -713,6 +738,7 @@ export class AgentBridge {
         this.clearBackendToolPermissionRequests(key)
         this.backends.delete(key)
         this.removeBackendFromOrder(key)
+        this.pushRunningSessionPaths()
         if (sessionPath && this.backendKeysBySessionPath.get(resolve(sessionPath)) === key) {
           this.backendKeysBySessionPath.delete(resolve(sessionPath))
         }
@@ -816,6 +842,7 @@ export class AgentBridge {
     this.sessionManagers.delete(normalizedPath)
     this.backendKeysBySessionPath.set(normalizedPath, backend.key)
     if (this.activeKey === backend.key) this.activeSessionPath = normalizedPath
+    this.pushRunningSessionPaths()
   }
 
   async stop(): Promise<void> {
@@ -830,6 +857,7 @@ export class AgentBridge {
     this.backendStarts.clear()
     this.backendOrder.length = 0
     this.backendKeysBySessionPath.clear()
+    this.pushRunningSessionPaths()
     this.backendPoolQueue = Promise.resolve()
     this.activeKey = null
     this.activeCwd = undefined
@@ -1033,6 +1061,7 @@ export class AgentBridge {
     this.clearBackendToolPermissionRequests(key)
     this.backends.delete(key)
     this.removeBackendFromOrder(key)
+    this.pushRunningSessionPaths()
     if (backend.sessionPath && this.backendKeysBySessionPath.get(resolve(backend.sessionPath)) === key) {
       this.backendKeysBySessionPath.delete(resolve(backend.sessionPath))
     }
