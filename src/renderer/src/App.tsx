@@ -903,7 +903,12 @@ export function App(): ReactElement {
           </div>
 
           <div className="composer-dock">
-            <TaskPanel key={taskSessionKey} sessionKey={taskSessionKey} agentTodos={agentTodos} />
+            <TaskPanel
+              key={taskSessionKey}
+              sessionKey={taskSessionKey}
+              agentTodos={agentTodos}
+              agentBusy={state.busy}
+            />
             <Composer
               busy={state.busy}
               queued={state.queued}

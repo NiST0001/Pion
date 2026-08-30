@@ -33,7 +33,15 @@ function saveExpanded(sessionKey: string, expanded: boolean): void {
 /** The latest user message's unfinished AI plan, docked above the composer.
     Completed tasks leave this live panel immediately and remain available in
     the session's task-history view. */
-export function TaskPanel({ sessionKey, agentTodos }: { sessionKey: string; agentTodos?: AgentTodo[] | null }): ReactElement | null {
+export function TaskPanel({
+  sessionKey,
+  agentTodos,
+  agentBusy = false
+}: {
+  sessionKey: string
+  agentTodos?: AgentTodo[] | null
+  agentBusy?: boolean
+}): ReactElement | null {
   const [expanded, setExpanded] = useState(() => loadExpanded(sessionKey))
   const todos = agentTodos ?? []
   const expandedHeight = Math.min(265, Math.max(102, 52 + todos.length * 30))
@@ -49,7 +57,7 @@ export function TaskPanel({ sessionKey, agentTodos }: { sessionKey: string; agen
 
   return (
     <section
-      className={`task-panel task-panel-agent${expanded ? ' expanded' : ' collapsed'}`}
+      className={`task-panel task-panel-agent${expanded ? ' expanded' : ' collapsed'}${agentBusy ? ' running' : ''}`}
       data-session-key={sessionKey}
       style={panelStyle}
     >
@@ -77,7 +85,7 @@ export function TaskPanel({ sessionKey, agentTodos }: { sessionKey: string; agen
                   {task.status === 'completed'
                     ? <Check size={12} />
                     : task.status === 'in_progress'
-                      ? <Loader2 size={11} className="spin" />
+                      ? <Loader2 size={11} className="task-status-spinner" />
                       : <Circle size={11} />}
                 </span>
                 <span className="task-index">{String(index + 1).padStart(2, '0')}</span>
