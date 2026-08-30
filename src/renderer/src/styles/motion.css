@@ -242,9 +242,13 @@ button:not(:disabled),
     box-shadow var(--motion-fast) ease;
 }
 
+/* Press feedback composes with any base transform via the independent
+   translate/scale properties — never overwrite `transform` itself,
+   or centered elements (translateX(-50%)) would jump sideways. */
 button:not(:disabled):active,
 [role='button']:active {
-  transform: translateY(1px) scale(0.985);
+  translate: 0 1px;
+  scale: 0.985;
 }
 
 .project-folder-toggle svg,

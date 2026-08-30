@@ -221,6 +221,18 @@
   color: var(--accent);
 }
 
+.task-panel-toggle:focus,
+.task-panel-toggle:active {
+  outline: none;
+  box-shadow: none;
+}
+
+.task-panel-toggle:focus-visible {
+  outline: none;
+  box-shadow: none;
+  border-color: var(--fg-dim);
+}
+
 .task-panel-toggle > svg {
   width: 15px;
   height: 15px;

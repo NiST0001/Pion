@@ -1,17 +1,19 @@
 // UI 变更验证：无边框标题栏 / 模型选择器位置 / 设置面板
-import { spawn } from 'node:child_process'
+import { spawn, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const PORT = '9344'
-const TEST_WORKSPACE = process.cwd()
+// 测试工作区用独立临时 git 仓库，避免与本机正在使用的项目会话互相干扰
+const TEST_WORKSPACE = mkdtempSync(join(tmpdir(), 'pion-ui-test-'))
+execSync('git init -q -b main && git config user.email nist@localhost && git config user.name nist && git commit -q --allow-empty -m init', { cwd: TEST_WORKSPACE })
 const TRUST_TEST_WORKSPACE = mkdtempSync(join(tmpdir(), 'pion-trust-ui-'))
 mkdirSync(join(TRUST_TEST_WORKSPACE, '.pi'), { recursive: true })
 writeFileSync(join(TRUST_TEST_WORKSPACE, '.pi', 'SYSTEM.md'), 'Untrusted test resource\n')
-const CHECKPOINT_BASELINE_FILE = new URL('../.pion-checkpoint-baseline.tmp', import.meta.url)
-const CHECKPOINT_TEST_FILE = new URL('../.pion-checkpoint-ui-test.tmp', import.meta.url)
+const CHECKPOINT_BASELINE_FILE = join(TEST_WORKSPACE, '.pion-checkpoint-baseline.tmp')
+const CHECKPOINT_TEST_FILE = join(TEST_WORKSPACE, '.pion-checkpoint-ui-test.tmp')
 rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
 rmSync(CHECKPOINT_TEST_FILE, { force: true })
 writeFileSync(CHECKPOINT_BASELINE_FILE, 'preserve this pre-run content\n')
@@ -24,6 +26,7 @@ process.on('exit', () => {
   rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
   rmSync(CHECKPOINT_TEST_FILE, { force: true })
   rmSync(TRUST_TEST_WORKSPACE, { recursive: true, force: true })
+  rmSync(TEST_WORKSPACE, { recursive: true, force: true })
 })
 
 async function getPage() {
@@ -99,7 +102,12 @@ for (let i = 0; i < 90; i++) {
   await sleep(500)
   if (await evaluate(`(async () => { const s = await window.pion.getState(); return !!s && s.status?.cwd === ${JSON.stringify(TRUST_TEST_WORKSPACE)} && s.status?.phase === 'running' })()`)) break
 }
-await evaluate(`(async () => { await window.pion.setProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)}, null); await window.pion.removeProject(${JSON.stringify(TRUST_TEST_WORKSPACE)}); await window.pion.addProject(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.startAgent(${JSON.stringify(TEST_WORKSPACE)}); return true })()`)
+await evaluate(`(async () => { await window.pion.setProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)}, null); await window.pion.removeProject(${JSON.stringify(TRUST_TEST_WORKSPACE)}); await window.pion.addProject(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.startAgent(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.newSession(); return true })()`)
+// 等待新会话的空状态真正落到界面上（启动时可能短暂展示恢复的实时会话）
+for (let i = 0; i < 60; i++) {
+  await sleep(250)
+  if (await evaluate(`document.querySelectorAll('.timeline > *').length === 0 && !!document.querySelector('.empty-state')`)) break
+}
 // 后端在本机高负载时启动较慢，等待其真正激活再继续
 for (let i = 0; i < 60; i++) {
   await sleep(500)
@@ -111,7 +119,7 @@ for (let i = 0; i < 40; i++) {
 }
 rmSync(TRUST_TEST_WORKSPACE, { recursive: true, force: true })
 await sleep(250)
-await check('启动时后端未启动', `(async () => (await window.pion.getState()) === null)()`)
+await check('新会话时间线为空', `document.querySelectorAll('.timeline > *').length === 0 && !!document.querySelector('.empty-state')`)
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, '/plan exit'); input?.dispatchEvent(new Event('input', { bubbles: true })); input?.focus(); return true })()`)
 await sleep(80)
 await evaluate(`document.querySelector('.send-button')?.click()`)
@@ -346,7 +354,7 @@ await sleep(150)
 await check('右上角按钮可关闭文件审查栏', `!document.querySelector('.review-panel')`)
 
 // 回到测试工作区会话，避免停在外部活跃会话上导致输入框不可用
-await evaluate(`(async () => { await window.pion.abort().catch(() => {}); await window.pion.startAgent(${JSON.stringify(TEST_WORKSPACE)}); return true })()`)
+await evaluate(`(async () => { await window.pion.abort().catch(() => {}); await window.pion.startAgent(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.newSession(); return true })()`)
 for (let i = 0; i < 120; i++) {
   await sleep(500)
   if (await evaluate(`(async () => { const s = await window.pion.getState(); return s?.status?.phase === 'running' && s.status?.cwd === ${JSON.stringify(TEST_WORKSPACE)} })()`)) break
@@ -384,8 +392,12 @@ await check('Ctrl+Tab 切换计划模式', `document.querySelector('.composer-mo
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); if (!input) return false; input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', ctrlKey: true, bubbles: true, cancelable: true })); return true; })()`)
 await sleep(350)
 await check('Ctrl+Tab 切换构建模式', `document.querySelector('.composer-mode-option[data-mode="build"]')?.getAttribute('aria-pressed') === 'true'`)
-await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, '/'); input?.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
-await sleep(180)
+// 命令列表由后台就绪后异步刷新，未出菜单时重输 '/' 重试
+for (let i = 0; i < 50; i++) {
+  await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); if (!input) return false; const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, '/'); input?.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+  await sleep(200)
+  if (await evaluate(`!!document.querySelector('.slash-command-menu') && document.querySelectorAll('.slash-command-option').length > 0`)) break
+}
 await check('斜杠命令菜单可打开', `!!document.querySelector('.slash-command-menu') && document.querySelectorAll('.slash-command-option').length > 0`)
 await check('斜杠命令含计划模式', `Array.from(document.querySelectorAll('.slash-command-name')).some((element) => element.textContent === '/plan')`)
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set; setter?.call(input, '/pl'); input?.dispatchEvent(new Event('input', { bubbles: true })); input?.focus(); return true })()`)

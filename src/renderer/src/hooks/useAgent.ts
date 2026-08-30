@@ -336,15 +336,17 @@ export function useAgent() {
   const refreshModels = useCallback(async () => {
     if (!api) return
     const refreshId = ++modelRefreshId.current
+    // Fetch independently: one failing/slow RPC (e.g. models on a cold backend)
+    // must not discard the others, or slash commands and pickers go empty.
     const [models, levels, commands] = await Promise.all([
-      api.getAvailableModels(),
-      api.getThinkingLevels(),
-      api.getCommands()
+      api.getAvailableModels().catch(() => null),
+      api.getThinkingLevels().catch(() => null),
+      api.getCommands().catch(() => null)
     ])
     if (refreshId !== modelRefreshId.current) return
-    dispatch({ type: 'models', models })
-    dispatch({ type: 'thinkingLevels', levels })
-    dispatch({ type: 'commands', commands })
+    if (models) dispatch({ type: 'models', models })
+    if (levels) dispatch({ type: 'thinkingLevels', levels })
+    if (commands) dispatch({ type: 'commands', commands })
   }, [api])
 
   useEffect(() => {
@@ -382,6 +384,28 @@ export function useAgent() {
     dispatch({ type: 'projects', projects })
     await start(cwd)
   }, [api, start])
+
+  // Models/commands load best-effort at session switch time and can arrive before
+  // the fresh backend has registered its extensions. Re-refresh once the backend
+  // reports it is running so pickers never get stuck empty.
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    const running = state.status.phase === 'running'
+    if (running && !wasRunning.current) void refreshModels().catch(() => undefined)
+    wasRunning.current = running
+  }, [state.status.phase, refreshModels])
+
+  // Session info is pushed only after its backend exists; a new sessionId means
+  // the backend just came up, so re-refresh pickers (commands/models) that may
+  // have been cleared by the intermediate 'ready' status or arrived empty early.
+  const lastRefreshSessionId = useRef<string | null>(null)
+  useEffect(() => {
+    const sessionId = state.session?.sessionId ?? null
+    if (sessionId && sessionId !== lastRefreshSessionId.current) {
+      lastRefreshSessionId.current = sessionId
+      void refreshModels().catch(() => undefined)
+    }
+  }, [state.session?.sessionId, refreshModels])
 
   const send = useCallback(
     async (message: string, images: ImageContent[] = []) => {
