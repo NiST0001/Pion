@@ -145,6 +145,25 @@ export interface SessionEntriesPage {
   mode: AgentMode
 }
 
+/** One normalized rpiv-todo task persisted in a session transcript. */
+export interface SessionTask {
+  id: number | string
+  title: string
+  status: 'pending' | 'in_progress' | 'completed' | 'deleted'
+  activeForm?: string
+  description?: string
+}
+
+/** A task plan attributed to one user-message run. */
+export interface SessionTaskRun {
+  key: string
+  entryId?: string
+  ordinal: number
+  prompt: string
+  timestamp?: string
+  tasks: SessionTask[]
+}
+
 /** One user-message marker in the full persisted session history. */
 export interface HistoryLandmark {
   entryId: string
@@ -437,6 +456,8 @@ export interface PionApi {
   getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null>
   /** User-message landmarks spanning the full persisted session. */
   getHistoryIndex(sessionPath?: string): Promise<SessionHistoryIndex | null>
+  /** Compact per-user-message todo history, parsed without transferring full entries. */
+  getSessionTaskHistory(sessionPath: string): Promise<SessionTaskRun[]>
   /** Load a bounded history window; omit before for the newest window. */
   getEntriesPage(
     before?: number,

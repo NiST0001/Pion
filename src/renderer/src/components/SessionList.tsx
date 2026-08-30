@@ -6,12 +6,14 @@ import {
   Copy,
   GitBranch,
   GripVertical,
+  History,
   Loader2,
   Star,
   Trash2
 } from 'lucide-react'
 import type { ForkMessageOption, SessionMeta } from '../../../shared/types'
 import type { SessionPreviewDensity } from '../utils/sessionPreview'
+import { ConfirmDialog } from './ConfirmDialog'
 
 export function sessionMatchesQuery(session: SessionMeta, query: string): boolean {
   const haystack = [session.name, session.preview, session.path]
@@ -37,6 +39,7 @@ interface SessionItemActions {
   onReorder?: (sessions: SessionMeta[]) => void
   onDelete: (path: string) => Promise<void>
   onCopy: (path: string) => Promise<void>
+  onOpenTaskHistory: (session: SessionMeta) => void
   getForkMessages: (path: string) => Promise<ForkMessageOption[]>
   onFork: (path: string, entryId: string) => Promise<string>
   favoritePaths: ReadonlySet<string>
@@ -51,6 +54,7 @@ export function SessionItems({
   onReorder,
   onDelete,
   onCopy,
+  onOpenTaskHistory,
   getForkMessages,
   onFork,
   favoritePaths,
@@ -70,7 +74,7 @@ export function SessionItems({
     event.preventDefault()
     event.stopPropagation()
     const width = 246
-    const height = 390
+    const height = 430
     setContextMenu({
       session,
       x: Math.min(event.clientX, Math.max(8, window.innerWidth - width)),
@@ -177,6 +181,7 @@ export function SessionItems({
           onClose={() => setContextMenu(null)}
           onDelete={onDelete}
           onCopy={onCopy}
+          onOpenTaskHistory={onOpenTaskHistory}
           getForkMessages={getForkMessages}
           onFork={onFork}
           favorite={favoritePaths.has(contextMenu.session.path)}
@@ -201,6 +206,7 @@ function SessionContextMenu({
   onClose,
   onDelete,
   onCopy,
+  onOpenTaskHistory,
   getForkMessages,
   onFork,
   favorite,
@@ -209,6 +215,7 @@ function SessionContextMenu({
   onClose: () => void
   onDelete: (path: string) => Promise<void>
   onCopy: (path: string) => Promise<void>
+  onOpenTaskHistory: (session: SessionMeta) => void
   getForkMessages: (path: string) => Promise<ForkMessageOption[]>
   onFork: (path: string, entryId: string) => Promise<string>
   favorite: boolean
@@ -218,14 +225,17 @@ function SessionContextMenu({
   const [branchOpen, setBranchOpen] = useState(false)
   const [forkMessages, setForkMessages] = useState<ForkMessageOption[] | null>(null)
   const [loadingForks, setLoadingForks] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent): void => {
+      if (confirmDelete) return
       if (!menuRef.current?.contains(event.target as Node)) onClose()
     }
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (confirmDelete) return
       if (event.key === 'Escape') onClose()
     }
     const handleResize = (): void => onClose()
@@ -237,7 +247,7 @@ function SessionContextMenu({
       document.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('resize', handleResize)
     }
-  }, [onClose])
+  }, [confirmDelete, onClose])
 
   const runAction = async (action: () => Promise<unknown>): Promise<void> => {
     setBusy(true)
@@ -304,6 +314,17 @@ function SessionContextMenu({
         <span>从会话复制</span>
       </button>
       <button
+        className="context-menu-item"
+        disabled={busy}
+        onClick={() => {
+          onOpenTaskHistory(session)
+          onClose()
+        }}
+      >
+        <History size={14} />
+        <span>历史任务</span>
+      </button>
+      <button
         className={`context-menu-item${branchOpen ? ' active' : ''}`}
         disabled={busy}
         aria-expanded={branchOpen}
@@ -340,15 +361,28 @@ function SessionContextMenu({
         className="context-menu-item context-menu-danger"
         disabled={busy}
         onClick={() => {
-          if (window.confirm(`确定删除会话“${title}”？此操作不可撤销。`)) {
-            void runAction(() => onDelete(session.path))
-          }
+          setError('')
+          setConfirmDelete(true)
         }}
       >
         <Trash2 size={14} />
         <span>删除会话</span>
       </button>
-      {error && <div className="context-menu-error">{error}</div>}
+      {error && !confirmDelete && <div className="context-menu-error">{error}</div>}
+      <ConfirmDialog
+        open={confirmDelete}
+        title="删除会话"
+        message={<>确定删除 <strong>“{title}”</strong>？</>}
+        detail={error || '此操作不可撤销，会话文件及其历史任务入口将被移除。'}
+        confirmLabel="确认删除"
+        busy={busy}
+        onConfirm={() => void runAction(() => onDelete(session.path))}
+        onCancel={() => {
+          if (busy) return
+          setConfirmDelete(false)
+          setError('')
+        }}
+      />
     </div>
   )
 }

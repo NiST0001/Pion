@@ -119,6 +119,7 @@ body,
 .review-panel,
 .modal,
 .context-menu,
+.confirm-dialog,
 .tool-permission-modal {
   transition:
     background-color var(--motion-normal) var(--motion-ease-standard),
@@ -201,7 +202,8 @@ body,
 .plugin-store-notice,
 .plugin-store-state,
 .settings-inline-error,
-.context-menu-error {
+.context-menu-error,
+.task-history-tasks {
   transform-origin: top center;
   animation: pion-expand-in var(--motion-normal) var(--motion-ease-out) both;
 }

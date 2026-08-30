@@ -120,6 +120,7 @@ export function FavoriteSessions({
   onSelectSession,
   onDelete,
   onCopy,
+  onOpenTaskHistory,
   getForkMessages,
   onFork
 }: {
@@ -132,6 +133,7 @@ export function FavoriteSessions({
   onSelectSession: (session: SessionMeta) => void
   onDelete: (session: SessionMeta) => Promise<void>
   onCopy: (session: SessionMeta) => Promise<void>
+  onOpenTaskHistory: (session: SessionMeta) => void
   getForkMessages: (session: SessionMeta) => Promise<ForkMessageOption[]>
   onFork: (session: SessionMeta, entryId: string) => Promise<string>
 }): ReactElement {
@@ -164,6 +166,7 @@ export function FavoriteSessions({
             const session = findSession(path)
             return session ? onCopy(session) : Promise.resolve()
           }}
+          onOpenTaskHistory={onOpenTaskHistory}
           getForkMessages={(path) => {
             const session = findSession(path)
             return session ? getForkMessages(session) : Promise.resolve([])
@@ -205,6 +208,7 @@ export function ProjectList({
   onSelectSession,
   onDelete,
   onCopy,
+  onOpenTaskHistory,
   getForkMessages,
   onFork,
   favoritePaths,
@@ -226,6 +230,7 @@ export function ProjectList({
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
   onCopy: (cwd: string, path: string) => Promise<void>
+  onOpenTaskHistory: (session: SessionMeta) => void
   getForkMessages: (cwd: string, path: string) => Promise<ForkMessageOption[]>
   onFork: (cwd: string, path: string, entryId: string) => Promise<string>
   favoritePaths: ReadonlySet<string>
@@ -281,6 +286,7 @@ export function ProjectList({
           onSelectSession={onSelectSession}
           onDelete={onDelete}
           onCopy={onCopy}
+          onOpenTaskHistory={onOpenTaskHistory}
           getForkMessages={getForkMessages}
           onFork={onFork}
           favoritePaths={favoritePaths}
@@ -302,6 +308,7 @@ function ProjectBranch({
   onSelectSession,
   onDelete,
   onCopy,
+  onOpenTaskHistory,
   getForkMessages,
   onFork,
   favoritePaths,
@@ -317,6 +324,7 @@ function ProjectBranch({
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
   onCopy: (cwd: string, path: string) => Promise<void>
+  onOpenTaskHistory: (session: SessionMeta) => void
   getForkMessages: (cwd: string, path: string) => Promise<ForkMessageOption[]>
   onFork: (cwd: string, path: string, entryId: string) => Promise<string>
   favoritePaths: ReadonlySet<string>
@@ -378,6 +386,7 @@ function ProjectBranch({
               onReorder={handleReorder}
               onDelete={(path) => onDelete(branch.cwd, path)}
               onCopy={(path) => onCopy(branch.cwd, path)}
+              onOpenTaskHistory={onOpenTaskHistory}
               getForkMessages={(path) => getForkMessages(branch.cwd, path)}
               onFork={(path, entryId) => onFork(branch.cwd, path, entryId)}
             />
@@ -404,6 +413,7 @@ function ProjectFolder({
   onSelectSession,
   onDelete,
   onCopy,
+  onOpenTaskHistory,
   getForkMessages,
   onFork,
   favoritePaths,
@@ -424,6 +434,7 @@ function ProjectFolder({
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
   onCopy: (cwd: string, path: string) => Promise<void>
+  onOpenTaskHistory: (session: SessionMeta) => void
   getForkMessages: (cwd: string, path: string) => Promise<ForkMessageOption[]>
   onFork: (cwd: string, path: string, entryId: string) => Promise<string>
   favoritePaths: ReadonlySet<string>
@@ -496,6 +507,7 @@ function ProjectFolder({
               onSelectSession={onSelectSession}
               onDelete={onDelete}
               onCopy={onCopy}
+              onOpenTaskHistory={onOpenTaskHistory}
               getForkMessages={getForkMessages}
               onFork={onFork}
               favoritePaths={favoritePaths}

@@ -1,6 +1,6 @@
 /* ==========================================================================
-   任务面板：停靠在输入框上方的工作计划清单（按会话持久化）
-   恢复自 c710c8b 删除前的版本；唯一适配：开关按钮文字色改用 --on-accent。
+   任务面板：停靠在输入框上方的本轮工作计划。
+   高度按未完成任务数自适应；展开内容有动画，圆形开关本身不漂移。
    ========================================================================== */
 
 .task-panel {
@@ -13,10 +13,13 @@
   border: 0;
   border-radius: 0;
   box-shadow: none;
+  transition:
+    height var(--motion-slow) var(--motion-ease-out),
+    margin-bottom var(--motion-slow) var(--motion-ease-out);
 }
 
 .task-panel.expanded {
-  height: 272px;
+  height: calc(var(--task-panel-expanded-height, 265px) + 7px);
   margin-bottom: 7px;
 }
 
@@ -37,11 +40,15 @@
   border: 1px solid var(--border);
   border-radius: 16px;
   box-shadow: 0 -4px 14px rgba(0, 0, 0, 0.08), 0 3px 10px rgba(0, 0, 0, 0.04);
+  will-change: height, bottom;
+  transition:
+    height var(--motion-slow) var(--motion-ease-out),
+    bottom var(--motion-slow) var(--motion-ease-out);
 }
 
 .task-panel.expanded .task-panel-card {
   bottom: 0;
-  height: 265px;
+  height: var(--task-panel-expanded-height, 265px);
 }
 
 .task-panel-head {
@@ -93,9 +100,16 @@
 
 .task-panel-list-shell {
   position: relative;
-  height: 226px;
+  height: calc(var(--task-panel-expanded-height, 265px) - 39px);
   overflow: hidden;
   border-top: 1px solid var(--border-soft);
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+  transition:
+    opacity var(--motion-normal) ease 45ms,
+    transform var(--motion-normal) var(--motion-ease-out) 45ms,
+    visibility 0s linear 0s;
 }
 
 .task-panel-list {
@@ -105,8 +119,12 @@
   scrollbar-width: thin;
 }
 
-.task-panel.collapsed .task-panel-list {
-  display: none;
+.task-panel.collapsed .task-panel-list-shell {
+  opacity: 0;
+  transform: translateY(7px);
+  visibility: hidden;
+  pointer-events: none;
+  transition-delay: 0s, 0s, var(--motion-normal);
 }
 
 .task-item {
@@ -222,9 +240,12 @@
 }
 
 .task-panel-toggle:focus,
-.task-panel-toggle:active {
+.task-panel-toggle:active,
+.task-panel .task-panel-toggle:active {
   outline: none;
   box-shadow: none;
+  translate: none;
+  scale: 1;
 }
 
 .task-panel-toggle:focus-visible {
@@ -257,14 +278,14 @@
   }
 
   .task-panel.expanded {
-    height: 260px;
+    max-height: 260px;
   }
 
   .task-panel.expanded .task-panel-card {
-    height: 253px;
+    max-height: 253px;
   }
 
   .task-panel-list-shell {
-    height: 214px;
+    max-height: 214px;
   }
 }

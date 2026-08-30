@@ -7,6 +7,7 @@ import type { FileChange } from './agent/types'
 import type {
   ProjectToolPermissionPolicy,
   ProjectTrustInfo,
+  SessionMeta,
   ToolPermissionCategory,
   ToolPermissionDecision,
   ToolPermissionRequest,
@@ -30,6 +31,8 @@ import { ProjectTrustBanner } from './components/ProjectTrustBanner'
 import { HistoryNavigator } from './components/HistoryNavigator'
 import { ModifiedFilesCard } from './components/ModifiedFilesCard'
 import { ToolPermissionModal } from './components/ToolPermissionModal'
+import { TaskHistoryPanel } from './components/TaskHistoryPanel'
+import { ConfirmDialog } from './components/ConfirmDialog'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
 import type { SessionPreviewDensity } from './utils/sessionPreview'
 import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
@@ -42,6 +45,7 @@ interface PanelResizeState {
   startWidth: number
 }
 
+const DEFAULT_SIDEBAR_WIDTH = 276
 const MIN_SIDEBAR_WIDTH = 220
 const MAX_SIDEBAR_WIDTH = 2200
 const MIN_REVIEW_WIDTH = 300
@@ -51,6 +55,15 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
 }
 
+function defaultReviewWidth(): number {
+  const viewportWidth = typeof window === 'undefined' ? 1280 : window.innerWidth
+  return clamp(
+    Math.round((viewportWidth - DEFAULT_SIDEBAR_WIDTH) / 2),
+    MIN_REVIEW_WIDTH,
+    MAX_REVIEW_WIDTH
+  )
+}
+
 export function App(): ReactElement {
   const { state, actions, hasBridge } = useAgent()
   const [prefill, setPrefill] = useState('')
@@ -58,6 +71,7 @@ export function App(): ReactElement {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [pluginStoreOpen, setPluginStoreOpen] = useState(false)
+  const [taskHistorySession, setTaskHistorySession] = useState<SessionMeta | null>(null)
   const [completionNotificationsEnabled, setCompletionNotificationsEnabled] = useState(true)
   const [projectTrust, setProjectTrust] = useState<ProjectTrustInfo | null>(null)
   const [projectTrustBusy, setProjectTrustBusy] = useState(false)
@@ -72,10 +86,11 @@ export function App(): ReactElement {
   const [maximized, setMaximized] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [reviewOpen, setReviewOpen] = useState(true)
+  const [rollbackConfirmOpen, setRollbackConfirmOpen] = useState(false)
   const [rollbackBusy, setRollbackBusy] = useState(false)
   const [rollbackError, setRollbackError] = useState('')
-  const [sidebarWidth, setSidebarWidth] = useState(276)
-  const [reviewWidth, setReviewWidth] = useState(390)
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH)
+  const [reviewWidth, setReviewWidth] = useState(defaultReviewWidth)
   const [sessionQuery, setSessionQuery] = useState('')
   const [favoriteSessionPaths, setFavoriteSessionPaths] = useState<string[]>(readFavoriteSessionPaths)
   const [sessionPreviewDensity, setSessionPreviewDensity] = useState<SessionPreviewDensity>(readSessionPreviewDensity)
@@ -89,6 +104,7 @@ export function App(): ReactElement {
   const newSessionInFlight = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const panelResizeRef = useRef<PanelResizeState | null>(null)
+  const reviewWidthCustomized = useRef(false)
   const sessionSelectionId = useRef(0)
   const historyScrollFrame = useRef<number | null>(null)
   const highlightedHistoryRow = useRef<HTMLElement | null>(null)
@@ -275,6 +291,7 @@ export function App(): ReactElement {
   const handleResizeStart = useCallback(
     (target: ResizeTarget, event: ReactPointerEvent<HTMLDivElement>) => {
       event.preventDefault()
+      if (target === 'review') reviewWidthCustomized.current = true
       panelResizeRef.current = {
         target,
         startX: event.clientX,
@@ -284,6 +301,21 @@ export function App(): ReactElement {
     },
     [reviewWidth, sidebarWidth]
   )
+
+  useLayoutEffect(() => {
+    const syncDefaultReviewWidth = (): void => {
+      if (reviewWidthCustomized.current) return
+      const occupiedWidth = sidebarOpen ? sidebarWidth : 0
+      setReviewWidth(clamp(
+        Math.round((window.innerWidth - occupiedWidth) / 2),
+        MIN_REVIEW_WIDTH,
+        MAX_REVIEW_WIDTH
+      ))
+    }
+    syncDefaultReviewWidth()
+    window.addEventListener('resize', syncDefaultReviewWidth)
+    return () => window.removeEventListener('resize', syncDefaultReviewWidth)
+  }, [sidebarOpen, sidebarWidth])
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent): void => {
@@ -661,21 +693,28 @@ export function App(): ReactElement {
 
   useEffect(() => {
     setRollbackError('')
-    if (state.runCheckpoint?.state === 'rolled-back') setReviewChange(null)
+    if (state.runCheckpoint?.state === 'rolled-back') {
+      setReviewChange(null)
+      setRollbackConfirmOpen(false)
+    }
   }, [state.runCheckpoint?.id, state.runCheckpoint?.state])
 
-  const handleRollbackRun = useCallback(async (): Promise<void> => {
+  const handleRollbackRun = useCallback((): void => {
     const checkpoint = state.runCheckpoint
     if (!checkpoint || checkpoint.state !== 'ready' || !checkpoint.hasChanges || state.busy) return
-    const confirmed = window.confirm(
-      '确定撤销本轮修改？\n\n工作区将恢复到发送本轮任务之前。发送前已有的暂存、未暂存和未跟踪文件会保留；本轮开始后的手动修改也会一并撤销。'
-    )
-    if (!confirmed) return
+    setRollbackError('')
+    setRollbackConfirmOpen(true)
+  }, [state.busy, state.runCheckpoint])
+
+  const confirmRollbackRun = useCallback(async (): Promise<void> => {
+    const checkpoint = state.runCheckpoint
+    if (!checkpoint || checkpoint.state !== 'ready' || !checkpoint.hasChanges || state.busy) return
     setRollbackBusy(true)
     setRollbackError('')
     try {
       await actions.rollbackRunCheckpoint()
       setReviewChange(null)
+      setRollbackConfirmOpen(false)
     } catch (error) {
       setRollbackError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -728,6 +767,7 @@ export function App(): ReactElement {
               onSelectSession={(session) => void handleSelectSession(session.projectCwd ?? state.status.cwd ?? '', session.path)}
               onDelete={(session) => handleDeleteSession(session.projectCwd ?? state.status.cwd ?? '', session.path)}
               onCopy={(session) => handleCopySession(session.projectCwd ?? state.status.cwd ?? '', session.path)}
+              onOpenTaskHistory={setTaskHistorySession}
               getForkMessages={(session) => handleGetForkMessages(session.projectCwd ?? state.status.cwd ?? '', session.path)}
               onFork={(session, entryId) => handleForkSession(session.projectCwd ?? state.status.cwd ?? '', session.path, entryId)}
             />
@@ -748,6 +788,7 @@ export function App(): ReactElement {
               onSelectSession={(cwd, path) => void handleSelectSession(cwd, path)}
               onDelete={handleDeleteSession}
               onCopy={handleCopySession}
+              onOpenTaskHistory={setTaskHistorySession}
               getForkMessages={handleGetForkMessages}
               onFork={handleForkSession}
               favoritePaths={favoritePathSet}
@@ -925,6 +966,23 @@ export function App(): ReactElement {
         )}
       </div>
 
+      <ConfirmDialog
+        open={rollbackConfirmOpen}
+        title="撤销本轮修改"
+        message="工作区将恢复到发送本轮任务之前。"
+        detail={rollbackError || '发送前已有的暂存、未暂存和未跟踪文件会保留；本轮开始后的手动修改也会一并撤销。'}
+        confirmLabel="确认撤销"
+        tone="accent"
+        busy={rollbackBusy}
+        onConfirm={() => void confirmRollbackRun()}
+        onCancel={() => {
+          if (!rollbackBusy) setRollbackConfirmOpen(false)
+        }}
+      />
+      <TaskHistoryPanel
+        session={taskHistorySession}
+        onClose={() => setTaskHistorySession(null)}
+      />
       <SkillsToolsModal
         open={capabilitiesOpen}
         onClose={() => setCapabilitiesOpen(false)}

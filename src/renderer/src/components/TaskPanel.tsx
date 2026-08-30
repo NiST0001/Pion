@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { ReactElement } from 'react'
+import type { CSSProperties, ReactElement } from 'react'
 import { ArrowDown, Check, Circle, ListTodo, Loader2 } from 'lucide-react'
 import type { AgentTodo } from '../agent/types'
 
@@ -30,13 +30,16 @@ function saveExpanded(sessionKey: string, expanded: boolean): void {
   }
 }
 
-/** The agent's real work plan, docked above the composer.
-    Mirrors the todo tool: the agent plans and executes, the panel follows.
-    Hidden entirely when the session has no AI task list. */
+/** The latest user message's unfinished AI plan, docked above the composer.
+    Completed tasks leave this live panel immediately and remain available in
+    the session's task-history view. */
 export function TaskPanel({ sessionKey, agentTodos }: { sessionKey: string; agentTodos?: AgentTodo[] | null }): ReactElement | null {
   const [expanded, setExpanded] = useState(() => loadExpanded(sessionKey))
   const todos = agentTodos ?? []
-  const completed = todos.filter((task) => task.status === 'completed').length
+  const expandedHeight = Math.min(265, Math.max(102, 52 + todos.length * 30))
+  const panelStyle = {
+    '--task-panel-expanded-height': `${expandedHeight}px`
+  } as CSSProperties
 
   useEffect(() => {
     saveExpanded(sessionKey, expanded)
@@ -48,19 +51,20 @@ export function TaskPanel({ sessionKey, agentTodos }: { sessionKey: string; agen
     <section
       className={`task-panel task-panel-agent${expanded ? ' expanded' : ' collapsed'}`}
       data-session-key={sessionKey}
+      style={panelStyle}
     >
       <div className="task-panel-card">
         <div className="task-panel-head">
           <div className="task-panel-summary">
             <ListTodo size={15} />
-            <span className="task-panel-title">任务目标</span>
-            <span className="task-panel-count">{completed}/{todos.length}</span>
+            <span className="task-panel-title">本轮任务</span>
+            <span className="task-panel-count">{todos.length} 项</span>
           </div>
-          <span className="task-panel-caption">AI 工作计划</span>
+          <span className="task-panel-caption">当前对话</span>
         </div>
 
         <div className="task-panel-list-shell">
-          <div id="task-target-list" className="task-panel-list" role="list" aria-label="AI 任务目标列表">
+          <div id="task-target-list" className="task-panel-list" role="list" aria-label="本轮 AI 任务列表">
             {todos.map((task, index) => (
               <div
                 key={task.id}

@@ -11,7 +11,9 @@ import type {
   WireMessage
 } from '../../../shared/types'
 import { messageImages, messageText, messageThinking, messageToolCalls } from '../../../shared/types'
-import type { AgentTodo, FileChange, TimelineItem, ToolItem } from './types'
+import { deriveSessionTaskRuns, normalizeSessionTasks } from '../../../shared/task-history'
+import type { SessionTaskHistoryEvent } from '../../../shared/task-history'
+import type { AgentTaskRun, AgentTodo, FileChange, TimelineItem, ToolItem } from './types'
 
 // ---------------------------------------------------------------------------
 // Timeline id allocation (shared by live events and session replay)
@@ -65,45 +67,47 @@ export function applyToolResult(tool: ToolItem, result: unknown, isError: boolea
   const details = payload.details
   if (typeof details?.diff === 'string') next.diff = details.diff
   if (tool.name === 'todo') {
-    const todos = parseAgentTodos(details?.tasks)
+    const todos = normalizeSessionTasks(details?.tasks)
     if (todos) next.todos = todos
   }
   // bash output lives in content text
   return next
 }
 
-/** Validate and normalize the task snapshot carried by todo tool results. */
-function parseAgentTodos(raw: unknown): AgentTodo[] | undefined {
-  if (!Array.isArray(raw)) return undefined
-  const todos: AgentTodo[] = []
-  for (const entry of raw) {
-    if (!entry || typeof entry !== 'object') return undefined
-    const record = entry as Record<string, unknown>
-    if ((typeof record.id !== 'number' && typeof record.id !== 'string') || typeof record.subject !== 'string') return undefined
-    const status = record.status === 'in_progress' || record.status === 'completed' || record.status === 'deleted'
-      ? record.status
-      : 'pending'
-    todos.push({
-      id: record.id,
-      title: record.subject,
-      status,
-      activeForm: typeof record.activeForm === 'string' ? record.activeForm : undefined,
-      description: typeof record.description === 'string' ? record.description : undefined
-    })
-  }
-  return todos
-}
-
-/** Latest task snapshot from the agent's todo tool, if the timeline has one. */
-export function deriveAgentTodos(timeline: TimelineItem[]): AgentTodo[] | null {
-  for (let index = timeline.length - 1; index >= 0; index--) {
-    const item = timeline[index]
-    if (item.kind === 'tool' && item.tool.todos) {
-      const visible = item.tool.todos.filter((todo) => todo.status !== 'deleted')
-      return visible
+/** Group todo snapshots by the user message that caused them. */
+export function deriveAgentTaskRuns(timeline: TimelineItem[]): AgentTaskRun[] {
+  const events: SessionTaskHistoryEvent[] = []
+  for (const item of timeline) {
+    if (item.kind === 'user') {
+      events.push({
+        kind: 'user',
+        key: item.entryId ?? `timeline-${item.id}`,
+        entryId: item.entryId,
+        prompt: item.text,
+        timestamp: item.timestamp
+      })
+    } else if (item.kind === 'tool' && item.tool.todos !== undefined) {
+      events.push({ kind: 'snapshot', tasks: item.tool.todos })
     }
   }
-  return null
+  return deriveSessionTaskRuns(events)
+}
+
+/** Incomplete tasks created or changed by the most recent user-message run. */
+export function deriveAgentTodos(timeline: TimelineItem[]): AgentTodo[] | null {
+  let latestUserKey: string | null = null
+  for (let index = timeline.length - 1; index >= 0; index--) {
+    const item = timeline[index]
+    if (item.kind !== 'user') continue
+    latestUserKey = item.entryId ?? `timeline-${item.id}`
+    break
+  }
+  if (!latestUserKey) return null
+
+  const run = deriveAgentTaskRuns(timeline).find((candidate) => candidate.key === latestUserKey)
+  if (!run) return null
+  const active = run.tasks.filter((todo) => todo.status === 'pending' || todo.status === 'in_progress')
+  return active.length > 0 ? active : null
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +223,8 @@ export function entriesToTimeline(
         id: nextTimelineId(),
         entryId: entry.id,
         text: messageText(message),
-        images: messageImages(message)
+        images: messageImages(message),
+        timestamp: entry.timestamp
       })
       continue
     }

@@ -17,6 +17,7 @@ import type {
   SessionHistoryIndex,
   SessionInfo,
   SessionMeta,
+  SessionTaskRun,
   SkillInfo,
   SlashCommandInfo,
   ToolPermissionRequest,
@@ -58,6 +59,8 @@ const api: PionApi = {
   getEntries: () => ipcRenderer.invoke(IPC.AgentEntries),
   getHistoryIndex: (sessionPath) =>
     ipcRenderer.invoke(IPC.AgentHistoryIndex, sessionPath) as Promise<SessionHistoryIndex | null>,
+  getSessionTaskHistory: (sessionPath) =>
+    ipcRenderer.invoke(IPC.AgentTaskHistory, sessionPath) as Promise<SessionTaskRun[]>,
   getEntriesPage: (before, limit, sessionPath) =>
     ipcRenderer.invoke(IPC.AgentEntriesPage, before, limit, sessionPath) as Promise<SessionEntriesPage | null>,
   getTree: () => ipcRenderer.invoke(IPC.AgentTree),

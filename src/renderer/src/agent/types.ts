@@ -15,6 +15,8 @@ import type {
   SessionHistoryIndex,
   SessionInfo,
   SessionMeta,
+  SessionTask,
+  SessionTaskRun,
   SlashCommandInfo,
   TreeNodeLite,
   WireEventInput
@@ -43,18 +45,20 @@ export interface ToolItem {
   todos?: AgentTodo[]
 }
 
-/** A task entry from the agent's todo tool (rpiv-todo). */
-export interface AgentTodo {
-  id: number | string
-  title: string
-  status: 'pending' | 'in_progress' | 'completed' | 'deleted'
-  /** Present-continuous label shown while in_progress */
-  activeForm?: string
-  description?: string
-}
+/** Renderer aliases for the shared transcript task-history shapes. */
+export type AgentTodo = SessionTask
+export type AgentTaskRun = SessionTaskRun
 
 export type TimelineItem =
-  | { kind: 'user'; id: number; entryId?: string; text: string; images?: ImageContent[]; historical?: boolean }
+  | {
+      kind: 'user'
+      id: number
+      entryId?: string
+      text: string
+      images?: ImageContent[]
+      timestamp?: string
+      historical?: boolean
+    }
   | {
       kind: 'assistant'
       id: number

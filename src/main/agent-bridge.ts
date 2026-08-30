@@ -31,6 +31,7 @@ import type {
   SessionHistoryIndex,
   SessionInfo,
   SessionMeta,
+  SessionTaskRun,
   SkillInfo,
   SlashCommandInfo,
   ToolPermissionCategory,
@@ -42,6 +43,8 @@ import type {
   WireMessage
 } from '../shared/types'
 import { messageText } from '../shared/types'
+import { deriveSessionTaskRuns, normalizeSessionTasks } from '../shared/task-history'
+import type { SessionTaskHistoryEvent } from '../shared/task-history'
 import { createWorktreeBranch, listBranchInfos } from './git'
 import {
   createGitRunCheckpoint,
@@ -54,6 +57,7 @@ import {
   TOOL_PERMISSION_TIMEOUT_MS,
   ToolPermissionStore
 } from './tool-permissions'
+import { ensureTaskPlanningExtension } from './task-planning'
 import {
   filterToolResults,
   sessionMode,
@@ -569,9 +573,10 @@ export class AgentBridge {
   }
 
   private async backendArgs(cwd: string, sessionPath?: string): Promise<string[]> {
-    const [hasPlanExtension, permissionExtensionPath] = await Promise.all([
+    const [hasPlanExtension, permissionExtensionPath, taskPlanningExtensionPath] = await Promise.all([
       pathExists(PLAN_EXTENSION_PATH),
-      this.toolPermissionStore.ensureExtension()
+      this.toolPermissionStore.ensureExtension(),
+      ensureTaskPlanningExtension()
     ])
     if (!hasPlanExtension) {
       console.warn('[pion] plan mode extension not found:', PLAN_EXTENSION_PATH)
@@ -583,6 +588,7 @@ export class AgentBridge {
     return [
       trust.decision === 'trusted' ? '--approve' : '--no-approve',
       '--extension', permissionExtensionPath,
+      '--extension', taskPlanningExtensionPath,
       ...(hasPlanExtension ? ['--extension', PLAN_EXTENSION_PATH] : []),
       ...(sessionPath ? ['--session', sessionPath] : [])
     ]
@@ -1163,6 +1169,37 @@ export class AgentBridge {
     } catch {
       return null
     }
+  }
+
+  async getSessionTaskHistory(sessionPath: string): Promise<SessionTaskRun[]> {
+    const target = await this.resolveListedSession(sessionPath)
+    const manager = SessionManager.open(target)
+    this.sessionManagers.set(resolve(target), manager)
+    const events: SessionTaskHistoryEvent[] = []
+
+    for (const entry of manager.getEntries()) {
+      if (entry.type !== 'message') continue
+      if (entry.message.role === 'user') {
+        events.push({
+          kind: 'user',
+          key: entry.id,
+          entryId: entry.id,
+          prompt: messageText(entry.message as unknown as WireMessage),
+          timestamp: String(entry.timestamp)
+        })
+        continue
+      }
+      if (entry.message.role !== 'toolResult') continue
+      const message = entry.message as unknown as {
+        toolName?: unknown
+        details?: { tasks?: unknown }
+      }
+      if (message.toolName !== 'todo') continue
+      const tasks = normalizeSessionTasks(message.details?.tasks)
+      if (tasks) events.push({ kind: 'snapshot', tasks })
+    }
+
+    return deriveSessionTaskRuns(events)
   }
 
   async getEntriesPage(

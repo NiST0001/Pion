@@ -149,6 +149,9 @@ function registerIpc(): void {
   ipcMain.handle(IPC.AgentHistoryIndex, (_event, sessionPath?: string) =>
     bridge.getHistoryIndex(sessionPath)
   )
+  ipcMain.handle(IPC.AgentTaskHistory, (_event, sessionPath: string) =>
+    bridge.getSessionTaskHistory(sessionPath)
+  )
   ipcMain.handle(
     IPC.AgentEntriesPage,
     (_event, before?: number, limit?: number, sessionPath?: string) =>

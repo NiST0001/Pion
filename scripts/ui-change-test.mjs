@@ -82,6 +82,9 @@ for (let i = 0; i < 40; i++) {
   await sleep(500)
   if (await evaluate(`!!document.querySelector('.composer-row textarea')`)) break
 }
+// Previous interrupted runs may have left deleted temp workspaces in the
+// persistent project list. Remove only this test suite's own path prefix.
+await evaluate(`(async () => { const projects = await window.pion.listProjects(); for (const project of projects) { if (/^\\/tmp\\/pion-(?:ui-test|trust-ui)-/.test(project.cwd)) await window.pion.removeProject(project.cwd); } return true; })()`)
 
 await evaluate(`(async () => { await window.pion.addProject(${JSON.stringify(TRUST_TEST_WORKSPACE)}); await window.pion.setProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)}, false); await window.pion.startAgent(${JSON.stringify(TRUST_TEST_WORKSPACE)}); return true })()`)
 for (let i = 0; i < 20; i++) {
@@ -171,6 +174,7 @@ await check('标题栏已移除状态圆点', `!document.querySelector('.titleba
 await check('左上角会话栏开关', `!!document.querySelector('.titlebar-panel-btn')`)
 await check('右上角文件审查栏开关', `!!document.querySelector('.titlebar-review-btn')`)
 await check('审查面板默认打开', `!!document.querySelector('.review-panel')`)
+await check('审查面板默认占工作区一半', `(() => { const body = document.querySelector('.app-body')?.getBoundingClientRect(); const sidebar = document.querySelector('.sidebar')?.getBoundingClientRect(); const review = document.querySelector('.review-panel')?.getBoundingClientRect(); if (!body || !sidebar || !review) return false; const available = body.width - sidebar.width; const ratio = review.width / available; return Math.abs(ratio - 0.5) <= 0.035 ? true : { ratio, review: review.width, available }; })()`)
 await sleep(180)
 await check('发送任务前自动创建运行检查点', `document.querySelector('.review-checkpoint')?.classList.contains('review-checkpoint-ready') && !!document.querySelector('.review-checkpoint-rollback')`)
 writeFileSync(CHECKPOINT_BASELINE_FILE, 'changed after Pion run checkpoint\n')
@@ -181,12 +185,15 @@ for (let i = 0; i < 20; i++) {
   if (await evaluate(`document.querySelector('.review-checkpoint-rollback')?.disabled === false`)) break
 }
 await check('检查点检测本轮工作区修改', `document.querySelector('.review-checkpoint-rollback')?.disabled === false && document.querySelector('.review-checkpoint-copy')?.textContent?.includes('可恢复')`)
-await evaluate(`(() => { window.__pionOriginalConfirm = window.confirm; window.confirm = () => true; document.querySelector('.review-checkpoint-rollback')?.click(); return true })()`)
+await evaluate(`document.querySelector('.review-checkpoint-rollback')?.click()`)
+await sleep(120)
+await check('本轮回滚使用主题确认框', `(() => { const dialog = document.querySelector('.confirm-dialog'); const probe = document.createElement('i'); probe.style.background = 'var(--bg-elev)'; document.body.appendChild(probe); const expected = getComputedStyle(probe).backgroundColor; probe.remove(); return !!dialog && dialog.getAttribute('role') === 'alertdialog' && dialog.textContent?.includes('撤销本轮修改') && getComputedStyle(dialog).backgroundColor === expected; })()`)
+await evaluate(`document.querySelector('.confirm-dialog-confirm')?.click()`)
 for (let i = 0; i < 30; i++) {
   await sleep(120)
   if (await evaluate(`document.querySelector('.review-checkpoint')?.classList.contains('review-checkpoint-rolled-back')`)) break
 }
-await check('一键恢复本轮检查点', `document.querySelector('.review-checkpoint')?.classList.contains('review-checkpoint-rolled-back') && document.querySelector('.review-checkpoint-copy')?.textContent?.includes('已恢复')`)
+await check('一键恢复本轮检查点', `document.querySelector('.review-checkpoint')?.classList.contains('review-checkpoint-rolled-back') && document.querySelector('.review-checkpoint-copy')?.textContent?.includes('已恢复') && !document.querySelector('.confirm-dialog')`)
 checkHost('检查点移除本轮新增文件', !existsSync(CHECKPOINT_TEST_FILE))
 checkHost(
   '检查点保留并恢复发送前已有文件',
@@ -194,7 +201,7 @@ checkHost(
     && readFileSync(CHECKPOINT_BASELINE_FILE, 'utf8') === 'preserve this pre-run content\n'
 )
 rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
-await evaluate(`(() => { if (window.__pionOriginalConfirm) window.confirm = window.__pionOriginalConfirm; document.querySelector('.titlebar-review-btn')?.click(); return true })()`)
+await evaluate(`document.querySelector('.titlebar-review-btn')?.click()`)
 await sleep(120)
 await check('左侧会话栏默认打开', `!!document.querySelector('.sidebar')`)
 await check('会话栏含宽度拖拽手柄', `document.querySelector('.sidebar-resizer')?.getAttribute('role') === 'separator'`)
@@ -271,12 +278,13 @@ await sleep(120)
 await check('导航条间距适中', `(() => { const track = document.querySelector('.history-navigator-track'); const m = [...document.querySelectorAll('.history-navigator-marker')]; if (!track || m.length < 10) return true; const gap = parseFloat(getComputedStyle(track).rowGap) || 0; const barH = m[0].getBoundingClientRect().height; const tops = m.map((el) => el.getBoundingClientRect().top); let sum = 0; for (let i = 1; i < tops.length; i++) sum += tops[i] - tops[i - 1]; const avg = sum / (tops.length - 1); return Math.abs(avg - (gap + barH)) <= 1.5 ? true : { avg: Math.round(avg * 10) / 10, gap, barH }; })()`)
 await check('导航条悬停呈现波形放大', `(() => { const markers = [...document.querySelectorAll('.history-navigator-marker')]; const scale = (el) => { const m = /scaleX\\(([^)]+)\\)/.exec(el?.style?.transform || ''); return m ? parseFloat(m[1]) : 1; }; const mid = Math.floor(markers.length / 2); const center = scale(markers[mid]); const d1 = scale(markers[mid + 1] ?? markers[mid]); const near = scale(markers[mid + 2] ?? markers[mid]); const far = scale(markers[Math.min(markers.length - 1, mid + 12)]); return markers.length > 8 && center > 2.6 && center - d1 > 0.6 && near < d1 && far <= near ? true : { count: markers.length, center, d1, near, far }; })()`)
 if (await evaluate(`!!document.querySelector('.task-panel')`)) {
-  await check('任务面板显示 AI 工作计划', `(() => { const panel = document.querySelector('.task-panel'); return panel?.classList.contains('task-panel-agent') && panel.querySelector('.task-panel-caption')?.textContent === 'AI 工作计划' && panel.querySelectorAll('.task-item[data-task-status]').length > 0; })()`)
+  await check('任务面板显示本轮 AI 计划', `(() => { const panel = document.querySelector('.task-panel'); return panel?.classList.contains('task-panel-agent') && panel.querySelector('.task-panel-title')?.textContent === '本轮任务' && panel.querySelector('.task-panel-caption')?.textContent === '当前对话' && panel.querySelectorAll('.task-item[data-task-status]').length > 0; })()`)
+  await check('当前任务自动清理已完成项', `document.querySelectorAll('.task-panel .task-item[data-task-status="completed"], .task-panel .task-item[data-task-status="deleted"]').length === 0`)
   await check('AI 任务条目只读无勾选按钮', `document.querySelectorAll('.task-panel .task-item button.task-check').length === 0`)
   await evaluate(`(() => { const t = document.querySelector('.task-panel-toggle'); window.__pionTaskExpandedBefore = t?.getAttribute('aria-expanded'); t?.click(); return true })()`)
   await sleep(200)
   await check('任务面板可切换折叠状态', `(() => { const t = document.querySelector('.task-panel-toggle'); const now = t?.getAttribute('aria-expanded'); return now !== null && now !== window.__pionTaskExpandedBefore && !document.querySelector('.task-panel-card')?.classList.contains('task-animating'); })()`)
-  await check('任务面板切换无位移动画', `(() => { const icon = document.querySelector('.task-panel-toggle-icon'); const card = document.querySelector('.task-panel-card'); return !!icon && !!card && getComputedStyle(icon).transitionDuration === '0s' && parseFloat(getComputedStyle(card).transitionDuration || '0') === 0; })()`)
+  await check('任务面板恢复展开动画且按钮不漂移', `(() => { const icon = document.querySelector('.task-panel-toggle-icon'); const card = document.querySelector('.task-panel-card'); const panel = document.querySelector('.task-panel'); if (!icon || !card || !panel) return false; const cardDurations = getComputedStyle(card).transitionDuration.split(',').map(parseFloat); const panelDurations = getComputedStyle(panel).transitionDuration.split(',').map(parseFloat); let stablePress = false; try { stablePress = [...document.styleSheets].some((sheet) => [...sheet.cssRules].some((rule) => rule.cssText.includes('.task-panel-toggle:active') && rule.cssText.includes('translate: none') && rule.cssText.includes('scale: 1'))); } catch {} return getComputedStyle(icon).transitionDuration === '0s' && cardDurations.some((value) => value > 0) && panelDurations.some((value) => value > 0) && stablePress; })()`)
   await evaluate(`document.querySelector('.task-panel-toggle')?.click()`)
   await sleep(200)
   await check('任务面板可切回原状态', `document.querySelector('.task-panel-toggle')?.getAttribute('aria-expanded') === window.__pionTaskExpandedBefore`)
@@ -622,15 +630,37 @@ await sleep(180)
 await evaluate(`document.querySelector('.project-branch-sessions .side-session')?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 120, clientY: 160 }))`)
 await sleep(300)
 await check('右键菜单打开', `!!document.querySelector('.context-menu')`)
+await check('右键菜单使用当前主题', `(() => { const menu = document.querySelector('.context-menu'); const probe = document.createElement('i'); probe.style.background = 'var(--bg-elev)'; document.body.appendChild(probe); const expected = getComputedStyle(probe).backgroundColor; probe.remove(); return !!menu && getComputedStyle(menu).backgroundColor === expected; })()`)
 await check('菜单含复制会话', `Array.from(document.querySelectorAll('.context-menu-item')).some(e => e.textContent?.includes('从会话复制'))`)
 await check('菜单含分支会话', `Array.from(document.querySelectorAll('.context-menu-item')).some(e => e.textContent?.includes('从会话分支'))`)
+await check('菜单含历史任务', `Array.from(document.querySelectorAll('.context-menu-item')).some(e => e.textContent?.includes('历史任务'))`)
 await check('菜单含删除会话', `Array.from(document.querySelectorAll('.context-menu-item')).some(e => e.textContent?.includes('删除会话'))`)
+await evaluate(`Array.from(document.querySelectorAll('.context-menu-item')).find(e => e.textContent?.includes('历史任务'))?.click()`)
+for (let i = 0; i < 40; i++) {
+  await sleep(120)
+  if (await evaluate(`!!document.querySelector('.task-history-modal') && !document.querySelector('.task-history-state .spin')`)) break
+}
+await check('右键可打开大历史任务面板', `document.querySelector('.task-history-modal')?.textContent?.includes('历史任务') && document.querySelector('.task-history-modal')?.getAttribute('role') === 'dialog'`)
+await check('历史任务按用户消息分段', `(() => { const runs = [...document.querySelectorAll('.task-history-run')]; if (runs.length === 0) return document.querySelector('.task-history-state')?.textContent?.includes('没有由 AI 创建'); return runs.every((run) => !!run.querySelector('.task-history-run-toggle')) && runs.filter((run) => run.classList.contains('expanded')).length === 1 && !!document.querySelector('.task-history-run.expanded .task-history-tasks'); })()`)
+await evaluate(`document.querySelector('.task-history-head .icon-button')?.click()`)
+await sleep(180)
+await check('历史任务面板可关闭', `!document.querySelector('.task-history-modal')`)
+await evaluate(`document.querySelector('.project-branch-sessions .side-session')?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 120, clientY: 160 }))`)
+await sleep(220)
+await evaluate(`Array.from(document.querySelectorAll('.context-menu-item')).find(e => e.textContent?.includes('删除会话'))?.click()`)
+await sleep(120)
+await check('删除会话使用主题确认框', `document.querySelector('.confirm-dialog')?.textContent?.includes('删除会话') && document.querySelector('.confirm-dialog')?.textContent?.includes('确认删除')`)
+await evaluate(`document.querySelector('.confirm-dialog-cancel')?.click()`)
+await sleep(120)
+await check('删除确认可安全取消', `!document.querySelector('.confirm-dialog') && !!document.querySelector('.context-menu')`)
 await evaluate(`Array.from(document.querySelectorAll('.context-menu-item')).find(e => e.textContent?.includes('从会话分支'))?.click()`)
 await sleep(500)
 await check('分支菜单展开', `!!document.querySelector('.context-submenu')`)
 await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
 await sleep(200)
 await check('右键菜单可关闭', `!document.querySelector('.context-menu')`)
+checkHost('源码不再使用原生 window.confirm', !readFileSync('src/renderer/src/App.tsx', 'utf8').includes('window.confirm') && !readFileSync('src/renderer/src/components/SessionList.tsx', 'utf8').includes('window.confirm'))
+await evaluate(`window.pion.removeProject(${JSON.stringify(TEST_WORKSPACE)}).then(() => true).catch(() => false)`)
 
 ws.close()
 child.kill('SIGTERM')
