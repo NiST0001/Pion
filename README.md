@@ -65,12 +65,20 @@
 - 新建会话；RPC 子进程每次启动为新会话，落盘懒持久化（空会话不产生文件）
 - 原生任务系统：Pion 自带 `pion_task` 工具，不依赖外部 todo 插件；当前轮任务停靠在输入框上方，完成项按用户消息归档到历史任务面板
 
-### 审查
-- 对话末尾以 Codex 风格卡片汇总本轮 edit/write：文件数、总增删、紧凑文件列表、展开、撤销、审查
-- 「变更」面板默认打开：聚合本会话所有 edit/write 触及的文件，+/- 统计
-- 每轮空闲会话发送任务前自动创建 Git 工作区检查点；审查栏可一键撤销本轮开始后的全部非忽略文件修改
-- 检查点会完整保留发送前已有的暂存、未暂存和未跟踪文件状态；未解决 Git 冲突或非 Git 目录会明确显示为不可用
-- 点击卡片或面板中的文件直接在审查栏查看：彩色 Diff 视图（新增/删除/上下文/省略行）或新文件全文预览
+### 审查与运行闭环
+- 对话末尾以 Codex 风格卡片汇总本轮 edit/write；审查栏以实时 Git porcelain-v2 状态为准，不依赖聊天历史重建工作区
+- 支持未暂存/已暂存 diff、整文件及 hunk/行级暂存与撤销、stage/unstage、带 hooks 的 commit，以及 merge/rebase/cherry-pick 冲突读取、显式解决、continue/abort
+- 所有 Git 修改携带乐观 `snapshotId`；工作区变化后拒绝旧操作。文件撤销、操作中止和工作流合并/清理使用主题确认界面
+- 每轮发送前自动创建 Git 检查点，可恢复发送前已有的 staged/unstaged/untracked 状态；重启后中断运行不会隐式重放
+- 主进程持久化每轮 token、费用、时长、工具耗时、上下文压力和压缩指标，并在输入区显示紧凑运行摘要
+- 自动发现 `typecheck / lint / test / build`，按 argv 顺序执行、流式显示有界日志、支持取消/重跑，并可把失败诊断回填给 Agent 进行有上限的修复
+
+### 有边界多 Agent
+- 原生 Planner → Implementer → Reviewer → Tester 工作流；每个角色和状态、权限信封、输出、失败与 worktree 路径均对用户可见
+- Planner/Reviewer 只读；Implementer 只能使用候选 worktree 内的内置读写工具；Shell、网络、外部插件、项目扩展、递归委派与 push 禁用
+- Tester 只运行 Pion 确定性发现的验证命令；缺少验证时必须由用户明确豁免，审查失败和测试失败最多允许两轮显式修复
+- 候选修改保留在独立 Git 分支；只有目标仍等于捕获基准、工作区干净、Reviewer 通过且验证通过/已豁免时，用户才能确认 `git merge --ff-only`
+- 取消会终止当前 Agent/命令但保留隔离资源供检查；清理是独立确认操作。应用重启只标记 interrupted，绝不隐藏恢复模型执行
 
 ### 模型
 - 模型选择器：按 provider 分组，显示上下文窗口与推理能力标记
@@ -84,19 +92,25 @@
 ./dev.sh --x11           # 经 XWayland 运行（规避 wayland+vulkan 告警）
 ./dev.sh --debug-port 9333  # 附带 CDP 调试端口（配 scripts/gui-inspect.mjs）
 
-npm run build      # 产物输出到 out/
-npm run start      # 运行构建产物（preview 模式）
-npm run typecheck  # 主进程 + 渲染进程 TS 类型检查
+npm run build          # 产物输出到 out/
+npm run start          # 运行构建产物（preview 模式）
+npm run typecheck      # main + renderer + test TS 类型检查
+npm test               # Vitest 单元与 React Testing Library 组件测试
+npm run test:coverage  # V8 覆盖率（coverage/）
+npm run test:e2e       # 构建后运行隔离 profile 的 Playwright Electron 测试
 
-# 验证脚本
+# 诊断/遗留验证脚本（真实模型链路默认不进入 CI）
 node scripts/rpc-smoke.mjs       # RPC 基础链路（不经 GUI）
 node scripts/rpc-smoke-full.mjs [cwd]  # 会话/条目/树/模型/分叉全链路
-node scripts/gui-cdp-test.mjs node_modules/electron/dist/electron .  # GUI 端到端（CDP 驱动真实界面+真实对话）
-node scripts/ui-change-test.mjs   # 完整 UI 回归（含检查点、项目信任与工具权限确认）
+node scripts/gui-cdp-test.mjs node_modules/electron/dist/electron .  # GUI + 真实对话诊断
+npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 Playwright
 ```
 
 > 注：pi RPC 子进程启动后会把进程标题改写为 `pi`（`process.title`），
 > `ps`/`pgrep` 按 `cli.js --mode rpc` 检索会扑空，检查存活请用 `pgrep -x pi`。
+
+平台升级的进程边界、安全规则与状态机见
+[`docs/coding-agent-platform.md`](docs/coding-agent-platform.md)。
 
 ## 环境要求与坑位说明
 
@@ -119,6 +133,10 @@ src/
 │   ├── agent-bridge.ts   # RpcClient 生命周期、后台池、会话与模型桥接
 │   ├── git.ts            # Git 分支与 worktree 操作
 │   ├── checkpoints.ts    # 每轮工作区快照、差异检测与安全恢复
+│   ├── run-store.ts      # 运行遥测、队列和重启恢复持久化
+│   ├── verification.ts   # 命令发现、取消、日志与有界修复
+│   ├── git-service.ts    # 实时 Git diff/stage/commit/conflict 工作流
+│   ├── workflow-manager.ts # 隔离多 Agent 状态机、合并与清理
 │   ├── tool-permissions.ts # 项目策略存储与 Pi 全局权限门扩展
 │   ├── wire.ts           # pi SDK -> renderer wire 映射
 │   ├── plugin-manager.ts # 官方插件目录与 pi install
@@ -127,6 +145,8 @@ src/
 │   └── index.ts          # contextBridge -> window.pion
 ├── shared/
 │   ├── types.ts          # IPC 契约（主/预加载/渲染共享，SDK 无关）
+│   ├── operations.ts     # 运行、验证与 Git 领域类型
+│   ├── workflows.ts      # 多 Agent 状态机投影
 │   └── ipc.ts            # IPC 频道一事实来源
 └── renderer/
     ├── index.html
@@ -151,9 +171,11 @@ src/
             ├── ToolPermissionModal.tsx # 工具调用授权队列
             ├── ToolPermissionSettings.tsx # 项目工具策略设置
             ├── ModelPicker.tsx   # 模型 + 思考级别选择器
+            ├── GitDiffView.tsx   # Git hunk/行级审查操作
+            ├── VerificationPanel.tsx # 自动验证状态与日志
+            ├── WorkflowPanel.tsx # 有边界多 Agent 工作流
             ├── PluginStoreModal.tsx # pi 插件目录 / 安装 / 状态筛选
-            ├── SkillsToolsModal.tsx # 内置与插件技能/工具
-            └── StatusBar.tsx
+            └── SkillsToolsModal.tsx # 内置与插件技能/工具
 ```
 
 ## 说明

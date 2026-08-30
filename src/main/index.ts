@@ -1,21 +1,45 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification } from 'electron'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { AgentBridge } from './agent-bridge'
 import { AppSettings } from './app-settings'
+import { RunStore } from './run-store'
+import { VerificationService } from './verification'
+import { GitService } from './git-service'
+import { ToolPermissionStore } from './tool-permissions'
+import { VerificationWorkflowRunner, WorkflowManager } from './workflow-manager'
 import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
 import type {
+  GitDiffScope,
+  GitSelectionRequest,
   ImageContent,
   ProjectMeta,
+  RunTelemetryQuery,
+  StartVerificationOptions,
   ToolPermissionResolution,
+  VerificationPolicy,
   ToolPermissionRules
 } from '../shared/types'
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url))
-const bridge = new AgentBridge()
+const userDataOverride = process.env.PION_USER_DATA_DIR?.trim()
+if (userDataOverride) app.setPath('userData', resolve(userDataOverride))
+
+const runStore = new RunStore(join(app.getPath('userData'), 'pion-runs.json'))
+const bridge = new AgentBridge(runStore)
+const verification = new VerificationService(join(app.getPath('userData'), 'pion-verification.json'))
+const workflowPermissionStore = new ToolPermissionStore()
+const workflows = new WorkflowManager({
+  filePath: join(app.getPath('userData'), 'pion-workflows.json'),
+  worktreeRoot: join(app.getPath('userData'), 'workflow-worktrees'),
+  permissionExtensionPath: () => workflowPermissionStore.ensureExtension(),
+  verification: new VerificationWorkflowRunner(verification),
+  projectTrusted: (cwd) => bridge.getProjectTrust(cwd).decision === 'trusted'
+})
+const git = new GitService()
 const plugins = new PluginManager()
 const projects = new ProjectStore()
 const appSettings = new AppSettings()
@@ -43,6 +67,10 @@ function showSessionCompletionNotification({ cwd }: { cwd: string; sessionPath?:
 }
 
 bridge.onSessionCompleted(showSessionCompletionNotification)
+bridge.onRunCompleted((run) => verification.handleAgentRunCompleted(run))
+verification.setAutoRepairHandler((run, prompt) =>
+  bridge.startVerificationRepair(run.sessionPath, run.cwd, prompt)
+)
 
 let projectsPush = (list: ProjectMeta[]): void => {
   // replaced once a window exists
@@ -88,8 +116,16 @@ function createWindow(): void {
     win.show()
     pushMaximized()
   })
-  win.on('closed', () => bridge.unbind(win))
+  win.on('closed', () => {
+    bridge.unbind(win)
+    verification.unbind(win)
+    workflows.unbind(win)
+    git.unbind(win)
+  })
   bridge.bind(win)
+  verification.bind(win)
+  workflows.bind(win)
+  git.bind(win)
 
   win.webContents.on('did-fail-load', (_e, code, desc, url) => {
     console.error(`[pion] page load FAILED: ${code} ${desc} ${url}`)
@@ -124,8 +160,53 @@ function registerIpc(): void {
   ipcMain.handle(IPC.AgentAbort, () => bridge.abort())
   ipcMain.handle(IPC.AgentRunCheckpoint, () => bridge.getRunCheckpoint())
   ipcMain.handle(IPC.AgentRollbackCheckpoint, () => bridge.rollbackRunCheckpoint())
+  ipcMain.handle(IPC.AgentRunTelemetry, (_event, query?: RunTelemetryQuery) =>
+    bridge.getRunTelemetry(query)
+  )
+  ipcMain.handle(IPC.AgentRunRecovery, (_event, query?: RunTelemetryQuery) =>
+    bridge.getRunRecoveryCandidates(query)
+  )
+  ipcMain.handle(IPC.AgentResumeRun, (_event, runId: string) => bridge.resumeRun(runId))
+  ipcMain.handle(IPC.AgentDiscardRunRecovery, (_event, runId: string) =>
+    bridge.discardRunRecovery(runId)
+  )
+  ipcMain.handle(IPC.AgentRestoreRecoveredCheckpoint, (_event, runId: string) =>
+    bridge.restoreRecoveredCheckpoint(runId)
+  )
   ipcMain.handle(IPC.AgentState, () => bridge.getSessionInfo())
   ipcMain.handle(IPC.AgentStderr, () => bridge.getStderr())
+
+  // automatic verification --------------------------------------------------
+  ipcMain.handle(IPC.VerificationDiscover, (_event, cwd: string, force?: boolean) =>
+    verification.discover(cwd, force)
+  )
+  ipcMain.handle(IPC.VerificationRuns, (_event, cwd?: string, sessionPath?: string) =>
+    verification.listRuns(cwd, sessionPath)
+  )
+  ipcMain.handle(
+    IPC.VerificationStart,
+    (_event, cwd: string, options?: StartVerificationOptions) => verification.start(cwd, options)
+  )
+  ipcMain.handle(IPC.VerificationRerun, (_event, runId: string) => verification.rerun(runId))
+  ipcMain.handle(IPC.VerificationCancel, (_event, runId: string) => verification.cancel(runId))
+  ipcMain.handle(IPC.VerificationPolicyGet, (_event, cwd: string) => verification.getPolicy(cwd))
+  ipcMain.handle(
+    IPC.VerificationPolicySet,
+    (_event, cwd: string, updates: Partial<Omit<VerificationPolicy, 'cwd'>>) =>
+      verification.setPolicy(cwd, updates)
+  )
+
+  // bounded multi-agent workflows ------------------------------------------
+  ipcMain.handle(IPC.WorkflowList, (_event, cwd?: string) => workflows.list(cwd))
+  ipcMain.handle(IPC.WorkflowCreate, (_event, request) => workflows.create(request))
+  ipcMain.handle(IPC.WorkflowStart, (_event, id: string) => workflows.start(id))
+  ipcMain.handle(IPC.WorkflowApprovePlan, (_event, id: string) => workflows.approvePlan(id))
+  ipcMain.handle(IPC.WorkflowRepair, (_event, id: string) => workflows.repair(id))
+  ipcMain.handle(IPC.WorkflowWaiveTests, (_event, id: string) => workflows.waiveTests(id))
+  ipcMain.handle(IPC.WorkflowResume, (_event, id: string) => workflows.resume(id))
+  ipcMain.handle(IPC.WorkflowCancel, (_event, id: string) => workflows.cancel(id))
+  ipcMain.handle(IPC.WorkflowMerge, (_event, id: string) => workflows.merge(id))
+  ipcMain.handle(IPC.WorkflowCleanup, (_event, id: string) => workflows.cleanup(id))
 
   // session management ----------------------------------------------------------
   ipcMain.handle(IPC.AgentNewSession, () => bridge.newSession())
@@ -248,6 +329,39 @@ function registerIpc(): void {
   )
   ipcMain.handle(IPC.BranchesList, (_event, cwd: string) => bridge.listBranches(cwd))
   ipcMain.handle(IPC.BranchCreate, (_event, cwd: string, name: string) => bridge.createBranch(cwd, name))
+  ipcMain.handle(IPC.GitStatus, (_event, cwd: string) => git.getStatus(cwd))
+  ipcMain.handle(IPC.GitDiff, (_event, cwd: string, path: string, scope: GitDiffScope) =>
+    git.getDiff(cwd, path, scope)
+  )
+  ipcMain.handle(IPC.GitStagePaths, (_event, cwd: string, snapshotId: string, paths: string[]) =>
+    git.stagePaths(cwd, snapshotId, paths)
+  )
+  ipcMain.handle(IPC.GitUnstagePaths, (_event, cwd: string, snapshotId: string, paths: string[]) =>
+    git.unstagePaths(cwd, snapshotId, paths)
+  )
+  ipcMain.handle(IPC.GitDiscardPaths, (_event, cwd: string, snapshotId: string, paths: string[]) =>
+    git.discardPaths(cwd, snapshotId, paths)
+  )
+  ipcMain.handle(IPC.GitApplySelection, (_event, request: GitSelectionRequest) =>
+    git.applySelection(request)
+  )
+  ipcMain.handle(IPC.GitCommit, (_event, cwd: string, snapshotId: string, message: string) =>
+    git.commit(cwd, snapshotId, message)
+  )
+  ipcMain.handle(IPC.GitConflictRead, (_event, cwd: string, path: string) =>
+    git.readConflict(cwd, path)
+  )
+  ipcMain.handle(
+    IPC.GitConflictResolve,
+    (_event, cwd: string, snapshotId: string, path: string, strategy: 'ours' | 'theirs' | 'content', content?: string) =>
+      git.resolveConflict(cwd, snapshotId, path, strategy, content)
+  )
+  ipcMain.handle(IPC.GitOperationContinue, (_event, cwd: string, snapshotId: string) =>
+    git.continueOperation(cwd, snapshotId)
+  )
+  ipcMain.handle(IPC.GitOperationAbort, (_event, cwd: string, snapshotId: string) =>
+    git.abortOperation(cwd, snapshotId)
+  )
   ipcMain.handle(IPC.ProjectsAdd, (_event, cwd: string) => {
     projects.touch(cwd)
     pushProjects()
@@ -285,7 +399,7 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(async () => {
-  await Promise.all([appSettings.load(), bridge.loadToolPermissions()])
+  await Promise.all([appSettings.load(), bridge.loadToolPermissions(), verification.load(), workflows.load()])
   completionNotificationsEnabled = appSettings.completionNotificationsEnabled
   registerIpc()
   createWindow()
@@ -296,10 +410,10 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  void bridge.stop()
+  void Promise.all([bridge.stop(), verification.flush(), workflows.shutdown()])
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', () => {
-  void bridge.stop()
+  void Promise.all([bridge.stop(), verification.flush(), workflows.shutdown()])
 })

@@ -6,6 +6,63 @@
  * wire format into the `WireEvent` subset defined here.
  */
 
+import type {
+  GitCommitResult,
+  GitConflictContent,
+  GitDiffScope,
+  GitFileDiff,
+  GitSelectionRequest,
+  GitSnapshotUpdate,
+  GitWorkspaceSnapshot,
+  RunOperation,
+  RunRecoveryCandidate,
+  RunTelemetryQuery,
+  RunTelemetryUpdate,
+  StartVerificationOptions,
+  VerificationLogUpdate,
+  VerificationPlan,
+  VerificationPolicy,
+  VerificationRun,
+  VerificationSnapshotUpdate
+} from './operations'
+import type { CreateWorkflowRequest, WorkflowSnapshot, WorkflowUpdate } from './workflows'
+export type {
+  DurableRunCheckpoint,
+  GitCommitResult,
+  GitConflictContent,
+  GitDiffHunk,
+  GitDiffLine,
+  GitDiffLineKind,
+  GitDiffScope,
+  GitFileDiff,
+  GitFileKind,
+  GitFileStatus,
+  GitOperation,
+  GitSelectionRequest,
+  GitSnapshotUpdate,
+  GitWorkspaceSnapshot,
+  RunCompactionMetric,
+  RunOperation,
+  RunOperationState,
+  RunPromptImage,
+  RunPromptPayload,
+  RunRecoveryCandidate,
+  RunTelemetryQuery,
+  RunTelemetryUpdate,
+  RunToolTiming,
+  StartVerificationOptions,
+  TokenUsage,
+  VerificationCommand,
+  VerificationKind,
+  VerificationLogUpdate,
+  VerificationPlan,
+  VerificationPolicy,
+  VerificationRun,
+  VerificationRunState,
+  VerificationSnapshotUpdate,
+  VerificationStepResult
+} from './operations'
+
 // ---------------------------------------------------------------------------
 // Agent lifecycle
 // ---------------------------------------------------------------------------
@@ -439,6 +496,59 @@ export interface PionApi {
   getRunCheckpoint(): Promise<RunCheckpointStatus | null>
   /** Restore the selected workspace to the current run checkpoint. */
   rollbackRunCheckpoint(): Promise<RunCheckpointStatus>
+  /** Durable token/cost/timing snapshots for recent runs. */
+  getRunTelemetry(query?: RunTelemetryQuery): Promise<RunOperation[]>
+  /** Interrupted runs and durable queued prompts that require a user decision. */
+  getRunRecoveryCandidates(query?: RunTelemetryQuery): Promise<RunRecoveryCandidate[]>
+  /** Continue an interrupted run as a linked, safety-prefaced new run. */
+  resumeRun(runId: string): Promise<RunOperation>
+  /** Resolve a recovery candidate without executing it. */
+  discardRunRecovery(runId: string): Promise<RunOperation>
+  /** Restore the durable pre-run Git checkpoint of a recovery candidate. */
+  restoreRecoveredCheckpoint(runId: string): Promise<RunCheckpointStatus>
+
+  // verification -----------------------------------------------------------
+  discoverVerification(cwd: string, force?: boolean): Promise<VerificationPlan>
+  listVerificationRuns(cwd?: string, sessionPath?: string): Promise<VerificationRun[]>
+  startVerification(cwd: string, options?: StartVerificationOptions): Promise<VerificationRun>
+  rerunVerification(runId: string): Promise<VerificationRun>
+  cancelVerification(runId: string): Promise<VerificationRun>
+  getVerificationPolicy(cwd: string): Promise<VerificationPolicy>
+  setVerificationPolicy(
+    cwd: string,
+    updates: Partial<Omit<VerificationPolicy, 'cwd'>>
+  ): Promise<VerificationPolicy>
+
+  // bounded multi-agent workflows -------------------------------------------
+  listWorkflows(cwd?: string): Promise<WorkflowSnapshot[]>
+  createWorkflow(request: CreateWorkflowRequest): Promise<WorkflowSnapshot>
+  startWorkflow(id: string): Promise<WorkflowSnapshot>
+  approveWorkflowPlan(id: string): Promise<WorkflowSnapshot>
+  repairWorkflow(id: string): Promise<WorkflowSnapshot>
+  waiveWorkflowTests(id: string): Promise<WorkflowSnapshot>
+  resumeWorkflow(id: string): Promise<WorkflowSnapshot>
+  cancelWorkflow(id: string): Promise<WorkflowSnapshot>
+  mergeWorkflow(id: string): Promise<WorkflowSnapshot>
+  cleanupWorkflow(id: string): Promise<WorkflowSnapshot>
+
+  // Git workspace -----------------------------------------------------------
+  getGitStatus(cwd: string): Promise<GitWorkspaceSnapshot>
+  getGitDiff(cwd: string, path: string, scope: GitDiffScope): Promise<GitFileDiff>
+  stageGitPaths(cwd: string, snapshotId: string, paths: string[]): Promise<GitWorkspaceSnapshot>
+  unstageGitPaths(cwd: string, snapshotId: string, paths: string[]): Promise<GitWorkspaceSnapshot>
+  discardGitPaths(cwd: string, snapshotId: string, paths: string[]): Promise<GitWorkspaceSnapshot>
+  applyGitSelection(request: GitSelectionRequest): Promise<GitWorkspaceSnapshot>
+  commitGit(cwd: string, snapshotId: string, message: string): Promise<GitCommitResult>
+  readGitConflict(cwd: string, path: string): Promise<GitConflictContent>
+  resolveGitConflict(
+    cwd: string,
+    snapshotId: string,
+    path: string,
+    strategy: 'ours' | 'theirs' | 'content',
+    content?: string
+  ): Promise<GitWorkspaceSnapshot>
+  continueGitOperation(cwd: string, snapshotId: string): Promise<GitWorkspaceSnapshot>
+  abortGitOperation(cwd: string, snapshotId: string): Promise<GitWorkspaceSnapshot>
 
   // session management ------------------------------------------------------
   /** Current session info, or null when no session is selected. */
@@ -550,6 +660,12 @@ export interface PionApi {
   onStatus(listener: (status: AgentStatus) => void): () => void
   /** Subscribe to run-checkpoint changes for the selected session. */
   onRunCheckpoint(listener: (checkpoint: RunCheckpointStatus | null) => void): () => void
+  /** Subscribe to throttled main-process run telemetry updates. */
+  onRunTelemetry(listener: (update: RunTelemetryUpdate) => void): () => void
+  onVerificationRuns(listener: (update: VerificationSnapshotUpdate) => void): () => void
+  onVerificationLog(listener: (update: VerificationLogUpdate) => void): () => void
+  onWorkflowUpdate(listener: (update: WorkflowUpdate) => void): () => void
+  onGitSnapshot(listener: (update: GitSnapshotUpdate) => void): () => void
   /** Subscribe to session info pushes; returns an unsubscribe function. */
   onState(listener: (state: SessionInfo | null) => void): () => void
   /** Subscribe to session-list pushes for the active cwd. */

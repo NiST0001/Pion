@@ -1,0 +1,228 @@
+.verification-panel {
+  margin: 0 18px 7px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-elev) 86%, transparent);
+  color: var(--fg-muted);
+  overflow: hidden;
+}
+
+.verification-summary-row,
+.verification-summary,
+.verification-primary-actions,
+.verification-options,
+.verification-kinds,
+.verification-toggles,
+.verification-step,
+.verification-repair {
+  display: flex;
+  align-items: center;
+}
+
+.verification-summary-row {
+  min-height: 31px;
+}
+
+.verification-summary {
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
+  padding: 6px 9px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verification-summary strong {
+  color: var(--fg);
+}
+
+.verification-panel.state-running .verification-summary > svg:first-child,
+.verification-panel.state-queued .verification-summary > svg:first-child {
+  color: var(--accent);
+}
+
+.verification-panel.state-passed .verification-summary > svg:first-child {
+  color: var(--success, #5f9d73);
+}
+
+.verification-panel.state-failed .verification-summary > svg:first-child,
+.verification-panel.state-infrastructure-error .verification-summary > svg:first-child {
+  color: var(--danger, #c85d52);
+}
+
+.verification-chevron {
+  margin-left: auto;
+  transition: transform var(--motion-fast) var(--motion-ease-out);
+}
+
+.verification-panel.expanded .verification-chevron {
+  transform: rotate(180deg);
+}
+
+.verification-primary-actions {
+  gap: 5px;
+  padding-right: 7px;
+}
+
+.verification-primary-actions button,
+.verification-kinds button,
+.verification-toggles button,
+.verification-repair button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.verification-primary-actions button:hover:not(:disabled),
+.verification-kinds button:hover:not(:disabled),
+.verification-toggles button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  color: var(--fg);
+}
+
+.verification-primary-actions button:disabled,
+.verification-kinds button:disabled,
+.verification-toggles button:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.verification-primary-actions .verification-stop {
+  color: var(--danger, #c85d52);
+}
+
+.verification-detail {
+  padding: 2px 9px 10px;
+  animation: pion-expand-in var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.verification-options {
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 7px;
+}
+
+.verification-kinds,
+.verification-toggles {
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.verification-kinds button,
+.verification-toggles button {
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  color: var(--fg-faint);
+}
+
+.verification-kinds button[aria-pressed='true'],
+.verification-toggles button.active {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--accent);
+}
+
+.verification-steps {
+  display: grid;
+  gap: 3px;
+}
+
+.verification-step {
+  min-height: 24px;
+  gap: 7px;
+  padding: 3px 4px;
+}
+
+.verification-step-state {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg-faint);
+}
+
+.verification-step.state-running .verification-step-state {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.verification-step.state-passed .verification-step-state {
+  background: var(--success, #5f9d73);
+}
+
+.verification-step.state-failed .verification-step-state,
+.verification-step.state-infrastructure-error .verification-step-state {
+  background: var(--danger, #c85d52);
+}
+
+.verification-step strong {
+  min-width: 38px;
+  color: var(--fg);
+}
+
+.verification-step small {
+  margin-left: auto;
+  color: var(--fg-faint);
+}
+
+.verification-log {
+  max-height: 210px;
+  margin: 8px 0 0;
+  padding: 8px 9px;
+  overflow: auto;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.verification-error,
+.verification-warning,
+.verification-security-note {
+  margin-top: 7px;
+  line-height: 1.45;
+}
+
+.verification-error {
+  color: var(--danger, #c85d52);
+}
+
+.verification-warning,
+.verification-security-note {
+  color: var(--fg-faint);
+}
+
+.verification-repair {
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--fg-muted);
+}
+
+.verification-repair button {
+  flex: none;
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+}
+
+@media (max-width: 1080px) {
+  .verification-options {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verification-chevron {
+    transition: none;
+  }
+}

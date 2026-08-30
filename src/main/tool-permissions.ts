@@ -173,7 +173,7 @@ export class ToolPermissionStore {
  */
 function toolPermissionExtensionSource(): string {
   return String.raw`import { readFileSync, realpathSync } from "node:fs";
-import { basename, resolve, sep } from "node:path";
+import { basename, dirname, resolve, sep } from "node:path";
 
 const MARKER = "__PION_TOOL_PERMISSION__:";
 const TIMEOUT = 120000;
@@ -189,7 +189,16 @@ const sessionAllows = new Set();
 
 function canonical(path) {
   const absolute = resolve(path);
-  try { return realpathSync.native(absolute); } catch { return absolute; }
+  let cursor = absolute;
+  const suffix = [];
+  while (true) {
+    try { return resolve(realpathSync.native(cursor), ...suffix.reverse()); } catch {
+      const parent = dirname(cursor);
+      if (parent === cursor) return absolute;
+      suffix.push(basename(cursor));
+      cursor = parent;
+    }
+  }
 }
 
 function readPolicy(cwd) {

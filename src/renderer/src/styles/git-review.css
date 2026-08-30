@@ -1,0 +1,344 @@
+.git-operation-banner {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px 5px 13px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--fg-muted);
+}
+
+.git-operation-banner > svg {
+  color: var(--danger);
+}
+
+.git-operation-banner > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.git-operation-banner button,
+.git-file-actions button,
+.git-scope-tabs button,
+.git-line-action-tabs button,
+.git-apply-lines,
+.git-conflict-actions button,
+.git-conflict-save,
+.git-commit-box button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.git-operation-banner button:hover:not(:disabled),
+.git-file-actions button:hover:not(:disabled),
+.git-scope-tabs button:hover:not(:disabled),
+.git-line-action-tabs button:hover:not(:disabled),
+.git-conflict-actions button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  color: var(--fg);
+}
+
+.git-operation-banner button:disabled,
+.git-file-actions button:disabled,
+.git-scope-tabs button:disabled,
+.git-line-action-tabs button:disabled,
+.git-apply-lines:disabled,
+.git-conflict-actions button:disabled,
+.git-conflict-save:disabled,
+.git-commit-box button:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.git-file-group + .git-file-group {
+  margin-top: 13px;
+}
+
+.review-file-item.conflicted,
+.review-file-item.conflicted svg {
+  color: var(--danger);
+}
+
+.git-file-code {
+  min-width: 15px;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  text-align: center;
+}
+
+.git-commit-box {
+  display: grid;
+  gap: 6px;
+  margin-top: 15px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.git-commit-box textarea {
+  width: 100%;
+  min-height: 62px;
+  resize: vertical;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  outline: none;
+  background: var(--bg-input);
+  color: var(--fg);
+}
+
+.git-commit-box button,
+.git-conflict-save {
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+}
+
+.git-action-result,
+.git-action-error {
+  margin-top: 8px;
+  padding: 0 4px;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.git-action-result {
+  color: var(--success, #5f9d73);
+}
+
+.git-action-error {
+  color: var(--danger);
+}
+
+.git-file-actions,
+.git-scope-tabs,
+.git-line-action-tabs {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.git-file-actions .danger,
+.git-line-action-tabs .danger,
+.git-apply-lines.danger {
+  color: var(--danger);
+}
+
+.git-diff-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 8px;
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
+  border-bottom: 1px solid var(--border-soft);
+  backdrop-filter: blur(10px);
+}
+
+.git-scope-tabs button,
+.git-line-action-tabs button {
+  color: var(--fg-faint);
+}
+
+.git-scope-tabs button.active,
+.git-line-action-tabs button.active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
+}
+
+.git-line-action-tabs {
+  padding-left: 6px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.git-apply-lines {
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+}
+
+.git-apply-lines.danger {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.git-diff-toolbar .tool-stats {
+  display: flex;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.git-diff-view {
+  min-width: max-content;
+  padding-bottom: 20px;
+  font-family: var(--mono);
+}
+
+.git-diff-hunk > header {
+  position: sticky;
+  top: 34px;
+  z-index: 2;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: color-mix(in srgb, var(--bg-elev) 96%, transparent);
+  color: var(--fg-faint);
+}
+
+.git-diff-hunk > header code {
+  flex: 1;
+  min-width: 0;
+}
+
+.git-diff-hunk > header button {
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.git-diff-hunk > header button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent-strong);
+}
+
+.git-diff-hunk table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.git-diff-hunk td {
+  height: 20px;
+  padding: 0;
+  vertical-align: top;
+}
+
+.git-diff-select {
+  width: 24px;
+  padding-left: 6px !important;
+}
+
+.git-diff-select input {
+  width: 12px;
+  height: 12px;
+  accent-color: var(--accent);
+}
+
+.git-diff-old,
+.git-diff-new {
+  width: 37px;
+  padding: 0 5px !important;
+  color: var(--fg-faint);
+  text-align: right;
+  user-select: none;
+}
+
+.git-diff-marker {
+  width: 18px;
+  color: var(--fg-faint);
+  text-align: center;
+  user-select: none;
+}
+
+.git-diff-code {
+  min-width: 320px;
+  padding-right: 16px !important;
+  white-space: pre;
+}
+
+.git-diff-add {
+  background: color-mix(in srgb, var(--success, #5f9d73) 10%, transparent);
+}
+
+.git-diff-delete {
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+}
+
+.git-diff-add .git-diff-marker {
+  color: var(--success, #5f9d73);
+}
+
+.git-diff-delete .git-diff-marker {
+  color: var(--danger);
+}
+
+.git-diff-meta {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
+.git-diff-binary {
+  padding: 24px;
+  color: var(--fg-faint);
+  line-height: 1.5;
+  text-align: center;
+}
+
+.git-conflict-editor {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  overflow: auto;
+}
+
+.git-conflict-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.git-conflict-actions button {
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+}
+
+.git-conflict-editor p {
+  margin: 0;
+  color: var(--fg-faint);
+  line-height: 1.45;
+}
+
+.git-conflict-editor textarea {
+  flex: 1;
+  min-height: 240px;
+  resize: none;
+  padding: 10px;
+  border: 0;
+  border-radius: 8px;
+  outline: none;
+  background: var(--bg-input);
+  color: var(--fg);
+  font-family: var(--mono);
+  line-height: 1.55;
+  tab-size: 2;
+}
+
+.git-conflict-save {
+  align-self: flex-end;
+}
+
+@media (max-width: 1120px) {
+  .git-file-actions button {
+    width: 24px;
+    overflow: hidden;
+    padding: 3px 6px;
+    white-space: nowrap;
+  }
+
+  .git-diff-toolbar {
+    flex-wrap: wrap;
+  }
+}

@@ -56,6 +56,15 @@ import {
   rollbackGitRunCheckpoint
 } from './checkpoints'
 import type { GitRunCheckpoint } from './checkpoints'
+import type {
+  RunOperation,
+  RunOperationState,
+  RunRecoveryCandidate,
+  RunTelemetryQuery,
+  RunTelemetryUpdate,
+  TokenUsage
+} from '../shared/operations'
+import { EMPTY_TOKEN_USAGE, RunStore } from './run-store'
 import {
   TOOL_PERMISSION_MARKER,
   TOOL_PERMISSION_TIMEOUT_MS,
@@ -78,6 +87,7 @@ const TOOL_PERMISSION_CHANNEL = IPC_EVENTS.ToolPermissionRequests
 const STATE_CHANNEL = IPC_EVENTS.AgentState
 const SESSIONS_CHANNEL = IPC_EVENTS.AgentSessions
 const RUNNING_SESSIONS_CHANNEL = IPC_EVENTS.AgentRunningSessions
+const RUN_TELEMETRY_CHANNEL = IPC_EVENTS.AgentRunTelemetry
 const TREE_CHANNEL = IPC_EVENTS.AgentTree
 const PLAN_EXTENSION_PATH = resolve(MODULE_DIR, '../../node_modules/@narumitw/pi-plan-mode/dist/index.ts')
 /** Global pool size shared by every project and worktree. */
@@ -122,13 +132,17 @@ interface BackendRecord {
   phase: BackendPhase
   busy: boolean
   modePrimed?: AgentMode
-  completionState?: 'completed' | 'aborted'
+  completionState?: 'completed' | 'aborted' | 'failed'
   checkpoint?: GitRunCheckpoint
   checkpointStatus?: RunCheckpointStatus
+  checkpointRunId?: string
+  activeRunId?: string
+  pendingRunIds: string[]
   startPromise: Promise<void>
 }
 
 type SessionCompletedListener = (info: { cwd: string; sessionPath?: string }) => void
+type RunCompletedListener = (run: RunOperation) => void | Promise<void>
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -137,6 +151,51 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+function finiteMetric(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+}
+
+/** Pi usage objects are cumulative snapshots for one assistant model call. */
+function normalizeTokenUsage(value: unknown): TokenUsage | null {
+  if (!value || typeof value !== 'object') return null
+  const usage = value as Record<string, unknown>
+  const cost = usage.cost && typeof usage.cost === 'object'
+    ? usage.cost as Record<string, unknown>
+    : {}
+  const input = finiteMetric(usage.input)
+  const output = finiteMetric(usage.output)
+  const cacheRead = finiteMetric(usage.cacheRead)
+  const cacheWrite = finiteMetric(usage.cacheWrite)
+  const reasoning = finiteMetric(usage.reasoning)
+  const total = finiteMetric(usage.totalTokens) || input + output + cacheRead + cacheWrite
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    reasoning,
+    total,
+    costUsd: finiteMetric(cost.total)
+  }
+}
+
+function addTokenUsage(left: TokenUsage, right: TokenUsage): TokenUsage {
+  return {
+    input: left.input + right.input,
+    output: left.output + right.output,
+    cacheRead: left.cacheRead + right.cacheRead,
+    cacheWrite: left.cacheWrite + right.cacheWrite,
+    reasoning: left.reasoning + right.reasoning,
+    total: left.total + right.total,
+    costUsd: left.costUsd + right.costUsd
+  }
+}
+
+function promptPreview(message: string): string {
+  const normalized = message.replace(/\s+/g, ' ').trim()
+  return normalized.length > 160 ? `${normalized.slice(0, 159)}…` : normalized
 }
 
 /**
@@ -159,6 +218,7 @@ export class AgentBridge {
   private readonly desiredModes = new Map<string, AgentMode>()
   private readonly sessionManagers = new Map<string, SessionManager>()
   private readonly sessionCompletedListeners = new Set<SessionCompletedListener>()
+  private readonly runCompletedListeners = new Set<RunCompletedListener>()
   private readonly projectTrustStore = new ProjectTrustStore(getAgentDir())
   private readonly toolPermissionStore = new ToolPermissionStore()
   private readonly pendingToolPermissions = new Map<string, PendingToolPermission>()
@@ -169,6 +229,12 @@ export class AgentBridge {
   private activeSessionPath: string | undefined
   private win: BrowserWindow | null = null
   private status: AgentStatus = { phase: 'stopped' }
+  private readonly pendingTelemetryPushes = new Map<string, RunOperation>()
+  private telemetryPushTimer: ReturnType<typeof setTimeout> | null = null
+
+  constructor(private readonly runStore: RunStore) {
+    this.runStore.onChanged((run) => this.scheduleRunTelemetry(run))
+  }
 
   private getActiveBackend(): BackendRecord | null {
     return this.activeKey ? this.backends.get(this.activeKey) ?? null : null
@@ -204,6 +270,21 @@ export class AgentBridge {
     )]
   }
 
+  getRunTelemetry(query: RunTelemetryQuery = {}): RunOperation[] {
+    return this.runStore.list(query)
+  }
+
+  private scheduleRunTelemetry(run: RunOperation): void {
+    this.pendingTelemetryPushes.set(run.id, run)
+    if (this.telemetryPushTimer) return
+    this.telemetryPushTimer = setTimeout(() => {
+      this.telemetryPushTimer = null
+      const update: RunTelemetryUpdate = { runs: [...this.pendingTelemetryPushes.values()] }
+      this.pendingTelemetryPushes.clear()
+      this.win?.webContents.send(RUN_TELEMETRY_CHANNEL, update)
+    }, 160)
+  }
+
   private pushRunningSessionPaths(): void {
     this.win?.webContents.send(RUNNING_SESSIONS_CHANNEL, this.getRunningSessionPaths())
   }
@@ -211,6 +292,11 @@ export class AgentBridge {
   onSessionCompleted(listener: SessionCompletedListener): () => void {
     this.sessionCompletedListeners.add(listener)
     return () => this.sessionCompletedListeners.delete(listener)
+  }
+
+  onRunCompleted(listener: RunCompletedListener): () => void {
+    this.runCompletedListeners.add(listener)
+    return () => this.runCompletedListeners.delete(listener)
   }
 
   private setStatus(patch: Partial<AgentStatus>): void {
@@ -228,7 +314,7 @@ export class AgentBridge {
   }
 
   async loadToolPermissions(): Promise<void> {
-    await this.toolPermissionStore.load()
+    await Promise.all([this.toolPermissionStore.load(), this.runStore.load()])
     await this.toolPermissionStore.ensureExtension()
   }
 
@@ -414,6 +500,7 @@ export class AgentBridge {
   }
 
   private async prepareRunCheckpoint(backend: BackendRecord): Promise<void> {
+    backend.checkpointRunId = undefined
     try {
       const checkpoint = await createGitRunCheckpoint(backend.cwd)
       backend.checkpoint = checkpoint
@@ -486,6 +573,11 @@ export class AgentBridge {
       hasChanges: false,
       changedFileCount: 0,
       error: undefined
+    }
+    if (backend.checkpointRunId) {
+      this.runStore.update(backend.checkpointRunId, (run) => {
+        if (run.checkpoint) run.checkpoint.state = 'rolled-back'
+      })
     }
     this.pushRunCheckpoint()
     return backend.checkpointStatus
@@ -581,6 +673,372 @@ export class AgentBridge {
     return trust
   }
 
+  private createRun(
+    backend: BackendRecord,
+    state: {
+      sessionId?: string
+      model?: { provider?: string; id?: string; contextWindow?: number }
+    } | null,
+    message: string,
+    images: ImageContent[],
+    kind: RunOperation['kind'],
+    initialState: Extract<RunOperationState, 'queued' | 'dispatching'>
+  ): RunOperation {
+    const run = this.runStore.create({
+      id: randomUUID(),
+      cwd: resolve(backend.cwd),
+      sessionPath: backend.sessionPath ? resolve(backend.sessionPath) : undefined,
+      sessionId: state?.sessionId,
+      kind,
+      state: initialState,
+      createdAt: Date.now(),
+      provider: state?.model?.provider,
+      modelId: state?.model?.id,
+      contextWindow: state?.model?.contextWindow,
+      prompt: { message, images },
+      promptPreview: promptPreview(message),
+      checkpoint: initialState === 'dispatching' && backend.checkpoint
+        ? { ...backend.checkpoint, state: 'ready' }
+        : undefined,
+      usage: { ...EMPTY_TOKEN_USAGE },
+      tools: [],
+      compactions: [],
+      revision: 0
+    })
+    if (initialState === 'dispatching' && backend.checkpoint) backend.checkpointRunId = run.id
+    if (initialState === 'queued') backend.pendingRunIds.push(run.id)
+    else backend.activeRunId = run.id
+    return run
+  }
+
+  private updateRunSession(backend: BackendRecord, sessionPath: string, sessionId?: string): void {
+    const ids = [backend.activeRunId, ...backend.pendingRunIds]
+    for (const id of ids) {
+      if (!id) continue
+      this.runStore.update(id, (run) => {
+        run.sessionPath = resolve(sessionPath)
+        if (sessionId) run.sessionId = sessionId
+      })
+    }
+  }
+
+  private trackBackendEvent(backend: BackendRecord, event: unknown, type: string | undefined): void {
+    if (!type) return
+    if (type === 'agent_start') {
+      if (!backend.activeRunId) backend.activeRunId = backend.pendingRunIds.shift()
+      if (!backend.activeRunId) return
+      this.runStore.update(backend.activeRunId, (run) => {
+        run.state = 'running'
+        run.agentStartedAt ??= Date.now()
+        run.interruptedAt = undefined
+        run.error = undefined
+      })
+      return
+    }
+
+    const runId = backend.activeRunId
+    if (!runId) return
+    const now = Date.now()
+
+    if (type === 'message_update') {
+      const usage = normalizeTokenUsage((event as { usage?: unknown }).usage)
+      if (!usage) return
+      this.runStore.update(runId, (run) => {
+        run.liveUsage = usage
+        const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite
+        run.contextTokens = contextTokens
+        run.contextPressure = run.contextWindow && run.contextWindow > 0
+          ? contextTokens / run.contextWindow
+          : undefined
+      })
+      return
+    }
+
+    if (type === 'message_end') {
+      const message = (event as { message?: Record<string, unknown> }).message
+      if (message?.role !== 'assistant') return
+      const usage = normalizeTokenUsage(message.usage)
+      if (!usage) return
+      this.runStore.update(runId, (run) => {
+        run.usage = addTokenUsage(run.usage, usage)
+        run.liveUsage = undefined
+        const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite
+        run.contextTokens = contextTokens
+        run.contextPressure = run.contextWindow && run.contextWindow > 0
+          ? contextTokens / run.contextWindow
+          : undefined
+      })
+      return
+    }
+
+    if (type === 'tool_execution_start') {
+      const tool = event as { toolCallId?: unknown; toolName?: unknown }
+      if (typeof tool.toolCallId !== 'string' || typeof tool.toolName !== 'string') return
+      this.runStore.update(runId, (run) => {
+        const existing = run.tools.find((candidate) => candidate.toolCallId === tool.toolCallId)
+        if (existing) {
+          existing.name = tool.toolName as string
+          existing.state = 'running'
+          existing.startedAt = now
+          existing.endedAt = undefined
+          existing.durationMs = undefined
+          return
+        }
+        run.tools.push({
+          toolCallId: tool.toolCallId as string,
+          name: tool.toolName as string,
+          state: 'running',
+          startedAt: now
+        })
+        if (run.tools.length > 80) run.tools.splice(0, run.tools.length - 80)
+      })
+      return
+    }
+
+    if (type === 'tool_execution_end') {
+      const tool = event as { toolCallId?: unknown; toolName?: unknown; isError?: unknown }
+      if (typeof tool.toolCallId !== 'string') return
+      this.runStore.update(runId, (run) => {
+        let timing = run.tools.find((candidate) => candidate.toolCallId === tool.toolCallId)
+        if (!timing) {
+          timing = {
+            toolCallId: tool.toolCallId as string,
+            name: typeof tool.toolName === 'string' ? tool.toolName : 'unknown',
+            state: 'running',
+            startedAt: now
+          }
+          run.tools.push(timing)
+        }
+        timing.state = tool.isError ? 'failed' : 'completed'
+        timing.isError = Boolean(tool.isError)
+        timing.endedAt = now
+        timing.durationMs = Math.max(0, now - timing.startedAt)
+      })
+      return
+    }
+
+    if (type === 'compaction_end') {
+      const compaction = event as {
+        reason?: unknown
+        aborted?: unknown
+        willRetry?: unknown
+        errorMessage?: unknown
+      }
+      this.runStore.update(runId, (run) => {
+        run.compactions.push({
+          id: randomUUID(),
+          reason: typeof compaction.reason === 'string' ? compaction.reason : 'unknown',
+          state: compaction.aborted ? 'aborted' : compaction.errorMessage ? 'failed' : 'completed',
+          endedAt: now,
+          willRetry: Boolean(compaction.willRetry),
+          error: typeof compaction.errorMessage === 'string' ? compaction.errorMessage : undefined
+        })
+      })
+      return
+    }
+
+    if (type === 'agent_end') {
+      const end = event as { messages?: Array<Record<string, unknown>>; willRetry?: boolean }
+      if (end.willRetry) return
+      const assistant = [...(end.messages ?? [])].reverse().find((message) => message.role === 'assistant')
+      const stopReason = typeof assistant?.stopReason === 'string' ? assistant.stopReason : undefined
+      this.runStore.update(runId, (run) => {
+        run.state = 'ending'
+        run.agentEndedAt = now
+        run.stopReason = stopReason
+        if (typeof assistant?.errorMessage === 'string') run.error = assistant.errorMessage
+      })
+      return
+    }
+
+    if (type === 'agent_settled') {
+      const terminal = backend.completionState ?? 'completed'
+      const completed = this.runStore.update(runId, (run) => {
+        run.state = terminal
+        run.settledAt = now
+        run.liveUsage = undefined
+        run.tools = run.tools.map((tool) => tool.state === 'running'
+          ? { ...tool, state: 'interrupted', endedAt: now, durationMs: Math.max(0, now - tool.startedAt) }
+          : tool)
+      })
+      backend.activeRunId = undefined
+      if (terminal === 'completed' && completed) {
+        void this.refreshRunCheckpoint(backend).then(() => {
+          for (const listener of this.runCompletedListeners) {
+            Promise.resolve(listener(completed)).catch((error) => {
+              console.error('[pion] run completion listener failed:', error)
+            })
+          }
+        })
+      }
+    }
+  }
+
+  private queuedPromptWasPersisted(run: RunOperation): boolean {
+    if (!run.sessionPath || run.prompt.message.trim() === '') return false
+    try {
+      const manager = this.openSessionManager(run.sessionPath)
+      return manager.getEntries().some((entry) => {
+        if (entry.type !== 'message' || entry.message.role !== 'user') return false
+        const timestamp = Date.parse(entry.timestamp)
+        return messageText(entry.message as unknown as WireMessage) === run.prompt.message
+          && (!Number.isFinite(timestamp) || timestamp >= run.createdAt - 2_000)
+      })
+    } catch {
+      return false
+    }
+  }
+
+  async getRunRecoveryCandidates(query: RunTelemetryQuery = {}): Promise<RunRecoveryCandidate[]> {
+    const runs = this.runStore.list({ ...query, limit: Math.max(query.limit ?? 50, 50) })
+    const candidates: RunRecoveryCandidate[] = []
+    for (let run of runs) {
+      if (run.state === 'queued' && run.interruptedAt === undefined) continue
+      if (run.state === 'queued' && this.queuedPromptWasPersisted(run)) {
+        run = this.runStore.update(run.id, (current) => {
+          current.state = 'interrupted'
+          current.interruptedAt = Date.now()
+          current.error = '排队消息已出现在会话记录中；为避免重复执行，只能作为安全续接运行继续。'
+        }) ?? run
+      }
+      if (run.state !== 'queued' && run.state !== 'interrupted') continue
+      candidates.push({
+        run,
+        reason: run.state === 'queued' ? 'queued-prompt' : 'interrupted-run',
+        canResume: true,
+        canRestoreCheckpoint: run.checkpoint?.state === 'ready',
+        note: run.state === 'queued'
+          ? '这条排队消息尚未确认执行，可以恢复到当前会话队列。'
+          : '上一轮可能已执行部分工具。续接会先要求 Agent 检查当前工作区，且不会重放旧工具调用。'
+      })
+    }
+    return candidates
+  }
+
+  async discardRunRecovery(runId: string): Promise<RunOperation> {
+    const run = this.runStore.get(runId)
+    if (!run || (run.state !== 'interrupted' && !(run.state === 'queued' && run.interruptedAt !== undefined))) {
+      throw new Error('这条运行记录已不再等待恢复')
+    }
+    const updated = this.runStore.update(runId, (current) => {
+      current.state = 'discarded'
+      current.settledAt ??= Date.now()
+      current.stopReason = 'recovery-discarded'
+    })
+    if (!updated) throw new Error('运行记录不存在')
+    for (const backend of this.backends.values()) {
+      backend.pendingRunIds = backend.pendingRunIds.filter((id) => id !== runId)
+      if (backend.activeRunId === runId) backend.activeRunId = undefined
+    }
+    return updated
+  }
+
+  async resumeRun(runId: string): Promise<RunOperation> {
+    let source = this.runStore.get(runId)
+    if (!source || (source.state !== 'interrupted' && !(source.state === 'queued' && source.interruptedAt !== undefined))) {
+      throw new Error('这条运行记录已不再等待恢复')
+    }
+    if (source.state === 'queued' && this.queuedPromptWasPersisted(source)) {
+      source = this.runStore.update(runId, (current) => {
+        current.state = 'interrupted'
+        current.interruptedAt = Date.now()
+      }) ?? source
+    }
+
+    if (source.sessionPath) {
+      const target = resolve(source.sessionPath)
+      if (this.activeSessionPath !== target) {
+        const result = await this.switchSession(target)
+        if (result.cancelled) throw new Error('无法切换到待恢复的会话')
+      }
+    } else if (resolve(this.activeCwd ?? '') !== resolve(source.cwd)) {
+      await this.start(source.cwd)
+    }
+
+    const backend = await this.ensureActiveBackend()
+    if (resolve(backend.cwd) !== resolve(source.cwd)) throw new Error('待恢复运行不属于当前工作区')
+    const state = await backend.client.getState()
+    if (state.isStreaming) throw new Error('当前会话仍在运行，请完成或中止后再恢复')
+
+    await this.prepareRunCheckpoint(backend)
+    await this.applyDesiredMode(backend)
+    const interrupted = source.state === 'interrupted'
+    const message = interrupted
+      ? [
+          '请安全地续接一轮被中断的任务。',
+          `原始任务：${source.prompt.message || '（仅包含图像附件）'}`,
+          '上一轮可能已经修改文件或执行工具。请先检查会话记录、git status 和当前文件，不要重复不可逆或外部副作用操作；然后从尚未完成的部分继续，并在结束前验证结果。'
+        ].join('\n\n')
+      : source.prompt.message
+    const run = this.createRun(
+      backend,
+      state,
+      message,
+      source.prompt.images,
+      'recovery',
+      'dispatching'
+    )
+    this.runStore.update(run.id, (current) => {
+      current.recoveredFromRunId = source.id
+    })
+    try {
+      await backend.client.prompt(message, source.prompt.images)
+      this.runStore.update(run.id, (current) => {
+        current.dispatchedAt ??= Date.now()
+      })
+      this.runStore.update(source.id, (current) => {
+        current.state = 'discarded'
+        current.settledAt ??= Date.now()
+        current.stopReason = 'resumed-as-new-run'
+      })
+      await this.syncBackendSession(backend)
+      return this.runStore.get(run.id) ?? run
+    } catch (error) {
+      backend.activeRunId = undefined
+      this.runStore.update(run.id, (current) => {
+        current.state = 'failed'
+        current.settledAt = Date.now()
+        current.error = error instanceof Error ? error.message : String(error)
+      })
+      throw error
+    }
+  }
+
+  async restoreRecoveredCheckpoint(runId: string): Promise<RunCheckpointStatus> {
+    const run = this.runStore.get(runId)
+    const checkpoint = run?.checkpoint
+    if (!run || !checkpoint || checkpoint.state !== 'ready') {
+      throw new Error('这条运行没有可恢复的持久化检查点')
+    }
+    const busy = [...this.backends.values()].some((backend) => (
+      resolve(backend.cwd) === resolve(checkpoint.cwd) && backend.busy
+    ))
+    if (busy) throw new Error('项目中仍有 Agent 正在运行，请先等待完成或中止运行')
+    try {
+      await rollbackGitRunCheckpoint(checkpoint)
+      this.runStore.update(runId, (current) => {
+        if (current.checkpoint) current.checkpoint.state = 'rolled-back'
+      })
+      return {
+        id: checkpoint.id,
+        cwd: checkpoint.cwd,
+        createdAt: checkpoint.createdAt,
+        state: 'rolled-back',
+        hasChanges: false,
+        changedFileCount: 0
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.runStore.update(runId, (current) => {
+        if (current.checkpoint) {
+          current.checkpoint.state = 'unavailable'
+          current.checkpoint.error = message
+        }
+      })
+      throw error
+    }
+  }
+
   // ---------------------------------------------------------------- lifecycle
 
   /** Select a workspace; an individual session backend loads when selected. */
@@ -656,7 +1114,11 @@ export class AgentBridge {
           const assistant = [...(endEvent.messages ?? [])]
             .reverse()
             .find((message) => message.role === 'assistant')
-          backend.completionState = assistant?.stopReason === 'aborted' ? 'aborted' : 'completed'
+          backend.completionState = assistant?.stopReason === 'aborted'
+            ? 'aborted'
+            : assistant?.stopReason === 'error'
+              ? 'failed'
+              : 'completed'
           if (backend.busy) runningStateChanged = true
           backend.busy = false
         }
@@ -673,9 +1135,9 @@ export class AgentBridge {
             }
           }
         }
-        backend.completionState = undefined
-        void this.refreshRunCheckpoint(backend)
       }
+      this.trackBackendEvent(backend, event, type)
+      if (type === 'agent_settled') backend.completionState = undefined
       if (runningStateChanged) this.pushRunningSessionPaths()
       if (type === 'agent_start' || type === 'message_start' || type === 'agent_settled') {
         // Keep persisted history fresh even when this backend finishes while a
@@ -713,6 +1175,7 @@ export class AgentBridge {
       client,
       phase: 'starting' as BackendPhase,
       busy: false,
+      pendingRunIds: [],
       startPromise: Promise.resolve()
     }
     this.backends.set(key, backend)
@@ -761,8 +1224,12 @@ export class AgentBridge {
   /** Stop the oldest retained backend before opening another one. */
   private async evictOldestBackend(excludeKey?: string): Promise<void> {
     while (this.backends.size >= MAX_RETAINED_BACKENDS) {
-      const victim = this.backendOrder.find((key) => key !== excludeKey && this.backends.has(key))
-      if (!victim) throw new Error('无法为新的会话后端腾出空间')
+      const victim = this.backendOrder.find((key) => {
+        if (key === excludeKey) return false
+        const backend = this.backends.get(key)
+        return Boolean(backend && !backend.busy && backend.phase !== 'starting' && backend.pendingRunIds.length === 0)
+      })
+      if (!victim) throw new Error('后台运行会话已达上限，请等待一个会话完成后再打开新会话')
       console.log('[pion] evicting oldest session backend:', victim)
       await this.stopBackend(victim)
     }
@@ -839,6 +1306,7 @@ export class AgentBridge {
     if (!sessionPath) return
     const normalizedPath = resolve(sessionPath)
     backend.sessionPath = normalizedPath
+    this.updateRunSession(backend, normalizedPath, state.sessionId)
     this.sessionManagers.delete(normalizedPath)
     this.backendKeysBySessionPath.set(normalizedPath, backend.key)
     if (this.activeKey === backend.key) this.activeSessionPath = normalizedPath
@@ -850,6 +1318,9 @@ export class AgentBridge {
     const pendingStarts = [...this.backendStarts.values()]
     await Promise.allSettled(pendingStarts)
     const backends = [...this.backends.values()]
+    await Promise.all(backends.map((backend) => backend.activeRunId
+      ? this.runStore.markInterrupted(backend.activeRunId, 'Pion 已退出；本轮可安全地作为新运行继续。')
+      : Promise.resolve(null)))
     for (const pending of this.pendingToolPermissions.values()) clearTimeout(pending.timeout)
     this.pendingToolPermissions.clear()
     this.pushToolPermissionRequests()
@@ -871,6 +1342,7 @@ export class AgentBridge {
     }))
     this.setStatus({ phase: 'stopped', cwd: undefined })
     this.pushRunCheckpoint()
+    await this.runStore.flush()
   }
 
   /** Prompt when idle, steer when mid-run. Starts only this session's backend. */
@@ -882,7 +1354,21 @@ export class AgentBridge {
     } else {
       await this.prepareRunCheckpoint(backend)
       await this.applyDesiredMode(backend)
-      await backend.client.prompt(message, images)
+      const run = this.createRun(backend, state, message, images, 'prompt', 'dispatching')
+      try {
+        await backend.client.prompt(message, images)
+        this.runStore.update(run.id, (current) => {
+          current.dispatchedAt ??= Date.now()
+        })
+      } catch (error) {
+        backend.activeRunId = undefined
+        this.runStore.update(run.id, (current) => {
+          current.state = 'failed'
+          current.settledAt = Date.now()
+          current.error = error instanceof Error ? error.message : String(error)
+        })
+        throw error
+      }
     }
     await this.syncBackendSession(backend)
   }
@@ -892,13 +1378,90 @@ export class AgentBridge {
     const backend = await this.ensureActiveBackend()
     const state = await backend.client.getState().catch(() => null)
     if (state?.isStreaming) {
-      await backend.client.followUp(message, images)
+      const run = this.createRun(backend, state, message, images, 'follow-up', 'queued')
+      try {
+        await backend.client.followUp(message, images)
+        this.runStore.update(run.id, (current) => {
+          current.dispatchedAt ??= Date.now()
+        })
+      } catch (error) {
+        backend.pendingRunIds = backend.pendingRunIds.filter((id) => id !== run.id)
+        this.runStore.update(run.id, (current) => {
+          current.state = 'failed'
+          current.settledAt = Date.now()
+          current.error = error instanceof Error ? error.message : String(error)
+        })
+        throw error
+      }
     } else {
       await this.prepareRunCheckpoint(backend)
       await this.applyDesiredMode(backend)
-      await backend.client.prompt(message, images)
+      const run = this.createRun(backend, state, message, images, 'follow-up', 'dispatching')
+      try {
+        await backend.client.prompt(message, images)
+        this.runStore.update(run.id, (current) => {
+          current.dispatchedAt ??= Date.now()
+        })
+      } catch (error) {
+        backend.activeRunId = undefined
+        this.runStore.update(run.id, (current) => {
+          current.state = 'failed'
+          current.settledAt = Date.now()
+          current.error = error instanceof Error ? error.message : String(error)
+        })
+        throw error
+      }
     }
     await this.syncBackendSession(backend)
+  }
+
+  async startVerificationRepair(
+    sessionPath: string | undefined,
+    cwd: string,
+    message: string
+  ): Promise<RunOperation | null> {
+    if (!sessionPath) return null
+    const target = resolve(sessionPath)
+    let key = this.backendKeysBySessionPath.get(target) ?? target
+    let backend = this.backends.get(key)
+    if (!backend) {
+      const pending = this.backendStarts.get(key)
+      if (pending) {
+        backend = await pending
+      } else {
+        const start = this.startBackendWithLimit(key, resolve(cwd), target)
+        this.backendStarts.set(key, start)
+        try {
+          backend = await start
+          key = backend.key
+        } finally {
+          if (this.backendStarts.get(key) === start) this.backendStarts.delete(key)
+        }
+      }
+    } else {
+      await backend.startPromise
+    }
+    const state = await backend.client.getState()
+    if (state.isStreaming || backend.busy) return null
+    await this.prepareRunCheckpoint(backend)
+    await this.applyDesiredMode(backend)
+    const run = this.createRun(backend, state, message, [], 'verification-repair', 'dispatching')
+    try {
+      await backend.client.prompt(message)
+      this.runStore.update(run.id, (current) => {
+        current.dispatchedAt ??= Date.now()
+      })
+      await this.syncBackendSession(backend)
+      return this.runStore.get(run.id) ?? run
+    } catch (error) {
+      backend.activeRunId = undefined
+      this.runStore.update(run.id, (current) => {
+        current.state = 'failed'
+        current.settledAt = Date.now()
+        current.error = error instanceof Error ? error.message : String(error)
+      })
+      throw error
+    }
   }
 
   private async applyDesiredMode(backend: BackendRecord): Promise<void> {
@@ -1058,6 +1621,9 @@ export class AgentBridge {
   private async stopBackend(key: string): Promise<void> {
     const backend = this.backends.get(key)
     if (!backend) return
+    if (backend.activeRunId) {
+      await this.runStore.markInterrupted(backend.activeRunId, 'Agent 后端已停止；本轮未自动重放。')
+    }
     this.clearBackendToolPermissionRequests(key)
     this.backends.delete(key)
     this.removeBackendFromOrder(key)

@@ -10,8 +10,12 @@
 @import './styles/settings.css';
 @import './styles/permissions.css';
 @import './styles/changes.css';
+@import './styles/git-review.css';
 @import './styles/modified-files.css';
 @import './styles/task-panel.css';
+@import './styles/run-metrics.css';
+@import './styles/workflow.css';
+@import './styles/verification.css';
 @import './styles/task-history.css';
 @import './styles/confirm-dialog.css';
 @import './styles/chrome.css';

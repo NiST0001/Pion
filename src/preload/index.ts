@@ -4,6 +4,13 @@ import type {
   AgentCapabilities,
   AgentMode,
   AgentStatus,
+  GitCommitResult,
+  GitConflictContent,
+  GitDiffScope,
+  GitFileDiff,
+  GitSelectionRequest,
+  GitSnapshotUpdate,
+  GitWorkspaceSnapshot,
   ImageContent,
   BranchInfo,
   PionApi,
@@ -14,7 +21,12 @@ import type {
   ProjectToolPermissionPolicy,
   ProjectTrustInfo,
   RunCheckpointStatus,
+  RunOperation,
+  RunRecoveryCandidate,
+  RunTelemetryQuery,
+  RunTelemetryUpdate,
   SessionEntriesPage,
+  StartVerificationOptions,
   SessionHistoryIndex,
   SessionInfo,
   SessionMeta,
@@ -25,8 +37,14 @@ import type {
   ToolPermissionResolution,
   ToolPermissionRules,
   TreeNodeLite,
+  VerificationLogUpdate,
+  VerificationPlan,
+  VerificationPolicy,
+  VerificationRun,
+  VerificationSnapshotUpdate,
   WireEventInput
 } from '../shared/types'
+import type { WorkflowSnapshot, WorkflowUpdate } from '../shared/workflows'
 
 function subscribe<T>(channel: string, listener: (payload: T) => void): () => void {
   const wrapped = (_event: Electron.IpcRendererEvent, payload: T): void => listener(payload)
@@ -45,6 +63,47 @@ const api: PionApi = {
     ipcRenderer.invoke(IPC.AgentRunCheckpoint) as Promise<RunCheckpointStatus | null>,
   rollbackRunCheckpoint: () =>
     ipcRenderer.invoke(IPC.AgentRollbackCheckpoint) as Promise<RunCheckpointStatus>,
+  getRunTelemetry: (query?: RunTelemetryQuery) =>
+    ipcRenderer.invoke(IPC.AgentRunTelemetry, query) as Promise<RunOperation[]>,
+  getRunRecoveryCandidates: (query?: RunTelemetryQuery) =>
+    ipcRenderer.invoke(IPC.AgentRunRecovery, query) as Promise<RunRecoveryCandidate[]>,
+  resumeRun: (runId) => ipcRenderer.invoke(IPC.AgentResumeRun, runId) as Promise<RunOperation>,
+  discardRunRecovery: (runId) =>
+    ipcRenderer.invoke(IPC.AgentDiscardRunRecovery, runId) as Promise<RunOperation>,
+  restoreRecoveredCheckpoint: (runId) =>
+    ipcRenderer.invoke(IPC.AgentRestoreRecoveredCheckpoint, runId) as Promise<RunCheckpointStatus>,
+
+  // verification
+  discoverVerification: (cwd, force) =>
+    ipcRenderer.invoke(IPC.VerificationDiscover, cwd, force) as Promise<VerificationPlan>,
+  listVerificationRuns: (cwd, sessionPath) =>
+    ipcRenderer.invoke(IPC.VerificationRuns, cwd, sessionPath) as Promise<VerificationRun[]>,
+  startVerification: (cwd, options?: StartVerificationOptions) =>
+    ipcRenderer.invoke(IPC.VerificationStart, cwd, options) as Promise<VerificationRun>,
+  rerunVerification: (runId) =>
+    ipcRenderer.invoke(IPC.VerificationRerun, runId) as Promise<VerificationRun>,
+  cancelVerification: (runId) =>
+    ipcRenderer.invoke(IPC.VerificationCancel, runId) as Promise<VerificationRun>,
+  getVerificationPolicy: (cwd) =>
+    ipcRenderer.invoke(IPC.VerificationPolicyGet, cwd) as Promise<VerificationPolicy>,
+  setVerificationPolicy: (cwd, updates) =>
+    ipcRenderer.invoke(IPC.VerificationPolicySet, cwd, updates) as Promise<VerificationPolicy>,
+
+  // bounded multi-agent workflows
+  listWorkflows: (cwd) =>
+    ipcRenderer.invoke(IPC.WorkflowList, cwd) as Promise<WorkflowSnapshot[]>,
+  createWorkflow: (request) =>
+    ipcRenderer.invoke(IPC.WorkflowCreate, request) as Promise<WorkflowSnapshot>,
+  startWorkflow: (id) => ipcRenderer.invoke(IPC.WorkflowStart, id) as Promise<WorkflowSnapshot>,
+  approveWorkflowPlan: (id) =>
+    ipcRenderer.invoke(IPC.WorkflowApprovePlan, id) as Promise<WorkflowSnapshot>,
+  repairWorkflow: (id) => ipcRenderer.invoke(IPC.WorkflowRepair, id) as Promise<WorkflowSnapshot>,
+  waiveWorkflowTests: (id) =>
+    ipcRenderer.invoke(IPC.WorkflowWaiveTests, id) as Promise<WorkflowSnapshot>,
+  resumeWorkflow: (id) => ipcRenderer.invoke(IPC.WorkflowResume, id) as Promise<WorkflowSnapshot>,
+  cancelWorkflow: (id) => ipcRenderer.invoke(IPC.WorkflowCancel, id) as Promise<WorkflowSnapshot>,
+  mergeWorkflow: (id) => ipcRenderer.invoke(IPC.WorkflowMerge, id) as Promise<WorkflowSnapshot>,
+  cleanupWorkflow: (id) => ipcRenderer.invoke(IPC.WorkflowCleanup, id) as Promise<WorkflowSnapshot>,
 
   // session management
   getState: () => ipcRenderer.invoke(IPC.AgentState),
@@ -118,6 +177,27 @@ const api: PionApi = {
     ipcRenderer.invoke(IPC.ProjectTrustSet, cwd, decision) as Promise<ProjectTrustInfo>,
   listBranches: (cwd) => ipcRenderer.invoke(IPC.BranchesList, cwd) as Promise<BranchInfo[]>,
   createBranch: (cwd, name) => ipcRenderer.invoke(IPC.BranchCreate, cwd, name) as Promise<BranchInfo>,
+  getGitStatus: (cwd) => ipcRenderer.invoke(IPC.GitStatus, cwd) as Promise<GitWorkspaceSnapshot>,
+  getGitDiff: (cwd, path, scope: GitDiffScope) =>
+    ipcRenderer.invoke(IPC.GitDiff, cwd, path, scope) as Promise<GitFileDiff>,
+  stageGitPaths: (cwd, snapshotId, paths) =>
+    ipcRenderer.invoke(IPC.GitStagePaths, cwd, snapshotId, paths) as Promise<GitWorkspaceSnapshot>,
+  unstageGitPaths: (cwd, snapshotId, paths) =>
+    ipcRenderer.invoke(IPC.GitUnstagePaths, cwd, snapshotId, paths) as Promise<GitWorkspaceSnapshot>,
+  discardGitPaths: (cwd, snapshotId, paths) =>
+    ipcRenderer.invoke(IPC.GitDiscardPaths, cwd, snapshotId, paths) as Promise<GitWorkspaceSnapshot>,
+  applyGitSelection: (request: GitSelectionRequest) =>
+    ipcRenderer.invoke(IPC.GitApplySelection, request) as Promise<GitWorkspaceSnapshot>,
+  commitGit: (cwd, snapshotId, message) =>
+    ipcRenderer.invoke(IPC.GitCommit, cwd, snapshotId, message) as Promise<GitCommitResult>,
+  readGitConflict: (cwd, path) =>
+    ipcRenderer.invoke(IPC.GitConflictRead, cwd, path) as Promise<GitConflictContent>,
+  resolveGitConflict: (cwd, snapshotId, path, strategy, content) =>
+    ipcRenderer.invoke(IPC.GitConflictResolve, cwd, snapshotId, path, strategy, content) as Promise<GitWorkspaceSnapshot>,
+  continueGitOperation: (cwd, snapshotId) =>
+    ipcRenderer.invoke(IPC.GitOperationContinue, cwd, snapshotId) as Promise<GitWorkspaceSnapshot>,
+  abortGitOperation: (cwd, snapshotId) =>
+    ipcRenderer.invoke(IPC.GitOperationAbort, cwd, snapshotId) as Promise<GitWorkspaceSnapshot>,
   addProject: (cwd) => ipcRenderer.invoke(IPC.ProjectsAdd, cwd),
   removeProject: (cwd) => ipcRenderer.invoke(IPC.ProjectsRemove, cwd),
   listSessions: (cwd) => ipcRenderer.invoke(IPC.AgentSessions, cwd),
@@ -133,6 +213,16 @@ const api: PionApi = {
   onStatus: (listener) => subscribe<AgentStatus>(IPC_EVENTS.AgentStatus, listener),
   onRunCheckpoint: (listener) =>
     subscribe<RunCheckpointStatus | null>(IPC_EVENTS.AgentRunCheckpoint, listener),
+  onRunTelemetry: (listener) =>
+    subscribe<RunTelemetryUpdate>(IPC_EVENTS.AgentRunTelemetry, listener),
+  onVerificationRuns: (listener) =>
+    subscribe<VerificationSnapshotUpdate>(IPC_EVENTS.VerificationRuns, listener),
+  onVerificationLog: (listener) =>
+    subscribe<VerificationLogUpdate>(IPC_EVENTS.VerificationLog, listener),
+  onWorkflowUpdate: (listener) =>
+    subscribe<WorkflowUpdate>(IPC_EVENTS.WorkflowUpdated, listener),
+  onGitSnapshot: (listener) =>
+    subscribe<GitSnapshotUpdate>(IPC_EVENTS.GitSnapshot, listener),
   onState: (listener) => subscribe<SessionInfo | null>(IPC_EVENTS.AgentState, listener),
   onSessions: (listener) => subscribe<SessionMeta[]>(IPC_EVENTS.AgentSessions, listener),
   onRunningSessionPaths: (listener) =>

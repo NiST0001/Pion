@@ -12,6 +12,11 @@ release/
 npm-debug.log*
 logs/
 
+# test artifacts
+coverage/
+playwright-report/
+test-results/
+
 # env
 .env
 .env.*

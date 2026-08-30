@@ -1,0 +1,393 @@
+.workflow-panel {
+  margin: 0 18px 7px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg-elev) 88%, transparent);
+  color: var(--fg-muted);
+}
+
+.workflow-toggle,
+.workflow-topbar,
+.workflow-body > header,
+.workflow-actions,
+.workflow-create > div,
+.workflow-verification,
+.workflow-worker summary,
+.workflow-worker-detail p {
+  display: flex;
+  align-items: center;
+}
+
+.workflow-toggle {
+  width: 100%;
+  min-height: 31px;
+  gap: 7px;
+  padding: 6px 9px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workflow-toggle strong,
+.workflow-body > header strong,
+.workflow-worker strong,
+.workflow-verification strong {
+  color: var(--fg);
+}
+
+.workflow-toggle > svg:first-child,
+.workflow-panel.running .workflow-toggle > svg:first-child {
+  color: var(--accent);
+}
+
+.workflow-role-count {
+  color: var(--fg-faint);
+}
+
+.workflow-toggle .spin {
+  margin-left: auto;
+  color: var(--accent);
+}
+
+.workflow-chevron {
+  margin-left: auto;
+  transition: transform var(--motion-fast) var(--motion-ease-out);
+}
+
+.workflow-toggle .spin + .workflow-chevron {
+  margin-left: 0;
+}
+
+.workflow-panel.open .workflow-chevron {
+  transform: rotate(180deg);
+}
+
+.workflow-content {
+  max-height: min(440px, 54vh);
+  padding: 2px 9px 10px;
+  overflow: auto;
+  animation: pion-expand-in var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.workflow-topbar {
+  position: sticky;
+  top: -2px;
+  z-index: 2;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0 7px;
+  background: color-mix(in srgb, var(--bg-elev) 96%, transparent);
+}
+
+.workflow-tabs {
+  min-width: 0;
+  display: flex;
+  gap: 3px;
+  overflow: auto;
+}
+
+.workflow-tabs button,
+.workflow-new,
+.workflow-actions button,
+.workflow-create button,
+.workflow-empty button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.workflow-tabs button {
+  max-width: 190px;
+  overflow: hidden;
+  color: var(--fg-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-tabs button.active {
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
+  color: var(--accent-strong);
+}
+
+.workflow-tabs button:hover,
+.workflow-new:hover:not(:disabled),
+.workflow-actions button:hover:not(:disabled),
+.workflow-empty button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  color: var(--fg);
+}
+
+.workflow-actions button:disabled,
+.workflow-new:disabled,
+.workflow-create button:disabled,
+.workflow-empty button:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+.workflow-create {
+  display: grid;
+  gap: 7px;
+}
+
+.workflow-create textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 8px;
+  outline: none;
+  background: var(--bg-input);
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+.workflow-create > div {
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--fg-faint);
+}
+
+.workflow-create button,
+.workflow-actions button.primary {
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+}
+
+.workflow-body {
+  display: grid;
+  gap: 7px;
+}
+
+.workflow-body > header {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workflow-body > header > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.workflow-body > header strong {
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+.workflow-state {
+  color: var(--fg-faint);
+}
+
+.workflow-state.awaiting_merge,
+.workflow-state.completed {
+  color: var(--success, #5f9d73);
+}
+
+.workflow-state.blocked,
+.workflow-state.failed,
+.workflow-state.stale,
+.workflow-state.interrupted {
+  color: var(--danger, #c85d52);
+}
+
+.workflow-actions {
+  flex: none;
+  justify-content: flex-end;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.workflow-actions button.danger {
+  color: var(--danger, #c85d52);
+}
+
+.workflow-actions button.danger.ghost {
+  width: 25px;
+  padding: 3px;
+}
+
+.workflow-workers {
+  display: grid;
+  gap: 3px;
+}
+
+.workflow-workers > span {
+  color: var(--fg-faint);
+}
+
+.workflow-worker {
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--fg) 3.5%, transparent);
+}
+
+.workflow-worker summary {
+  min-height: 27px;
+  gap: 7px;
+  padding: 4px 7px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.workflow-worker summary::-webkit-details-marker {
+  display: none;
+}
+
+.workflow-worker-icon {
+  width: 16px;
+  display: inline-flex;
+  justify-content: center;
+  color: var(--fg-faint);
+}
+
+.workflow-worker.running .workflow-worker-icon {
+  color: var(--accent);
+}
+
+.workflow-worker.completed .workflow-worker-icon {
+  color: var(--success, #5f9d73);
+}
+
+.workflow-worker.failed .workflow-worker-icon {
+  color: var(--danger, #c85d52);
+}
+
+.workflow-worker summary > span:not(.workflow-worker-icon):not(.workflow-worker-state) {
+  color: var(--fg-faint);
+}
+
+.workflow-worker-state {
+  margin-left: auto;
+  color: var(--fg-faint);
+}
+
+.workflow-worker-detail {
+  display: grid;
+  gap: 6px;
+  padding: 1px 8px 8px 30px;
+}
+
+.workflow-worker-detail p {
+  gap: 5px;
+  margin: 0;
+  color: var(--fg-faint);
+  line-height: 1.4;
+}
+
+.workflow-worker-detail code {
+  overflow: hidden;
+  color: var(--fg-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-worker-detail pre,
+.workflow-artifact pre {
+  max-height: 180px;
+  margin: 0;
+  padding: 7px 8px;
+  overflow: auto;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg) 74%, transparent);
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.workflow-artifact {
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--fg) 3.5%, transparent);
+}
+
+.workflow-artifact summary {
+  padding: 5px 7px;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+
+.workflow-artifact pre {
+  margin: 0 7px 7px;
+}
+
+.workflow-artifact.review-pass summary {
+  color: var(--success, #5f9d73);
+}
+
+.workflow-artifact.review-fail summary,
+.workflow-artifact.review-unknown summary {
+  color: var(--danger, #c85d52);
+}
+
+.workflow-verification {
+  gap: 7px;
+  padding: 6px 7px;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--fg) 3.5%, transparent);
+}
+
+.workflow-verification span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-verification.passed,
+.workflow-verification.waived {
+  color: var(--success, #5f9d73);
+}
+
+.workflow-verification.failed,
+.workflow-verification.infrastructure-error,
+.workflow-verification.not-found {
+  color: var(--danger, #c85d52);
+}
+
+.workflow-error {
+  color: var(--danger, #c85d52);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.workflow-empty {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--fg-faint);
+  text-align: center;
+}
+
+@media (max-width: 960px) {
+  .workflow-body > header {
+    flex-direction: column;
+  }
+
+  .workflow-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workflow-chevron {
+    transition: none;
+  }
+}

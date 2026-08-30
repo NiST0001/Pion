@@ -2,7 +2,12 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import { FolderOpen, Settings, Sparkles, Store } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
-import { deriveAgentTodos, deriveChanges, deriveLatestRunChanges } from './agent/timeline'
+import { useRunTelemetry } from './hooks/useRunTelemetry'
+import { useRunRecovery } from './hooks/useRunRecovery'
+import { useVerification } from './hooks/useVerification'
+import { useWorkflows } from './hooks/useWorkflows'
+import { useGitWorkspace } from './hooks/useGitWorkspace'
+import { deriveAgentTodos, deriveLatestRunChanges } from './agent/timeline'
 import type { FileChange } from './agent/types'
 import type {
   ImageContent,
@@ -28,6 +33,10 @@ import { HistoryNavigator } from './components/HistoryNavigator'
 import { ModifiedFilesCard } from './components/ModifiedFilesCard'
 import { ToolPermissionModal } from './components/ToolPermissionModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
+import { RunMetricsStrip } from './components/RunMetricsStrip'
+import { RunRecoveryBanner } from './components/RunRecoveryBanner'
+import { VerificationPanel } from './components/VerificationPanel'
+import { WorkflowPanel } from './components/WorkflowPanel'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
 import type { SessionPreviewDensity } from './utils/sessionPreview'
 import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
@@ -83,8 +92,28 @@ function useDeferredMount(open: boolean): boolean {
 
 export function App(): ReactElement {
   const { state, actions, hasBridge } = useAgent()
+  const runTelemetry = useRunTelemetry({
+    hasBridge,
+    sessionPath: state.session?.sessionFile,
+    cwd: state.status.cwd
+  })
+  const runRecovery = useRunRecovery({
+    hasBridge,
+    sessionPath: state.session?.sessionFile,
+    cwd: state.status.cwd
+  })
+  const verification = useVerification({
+    hasBridge,
+    sessionPath: state.session?.sessionFile,
+    cwd: state.status.cwd
+  })
+  const workflows = useWorkflows({
+    hasBridge,
+    cwd: state.status.cwd
+  })
   const [prefill, setPrefill] = useState('')
-  const [reviewChange, setReviewChange] = useState<FileChange | null>(null)
+  const [reviewPath, setReviewPath] = useState<string | null>(null)
+  const [reviewScope, setReviewScope] = useState<'unstaged' | 'staged'>('unstaged')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [pluginStoreOpen, setPluginStoreOpen] = useState(false)
@@ -118,6 +147,11 @@ export function App(): ReactElement {
   const [newSessionCwd, setNewSessionCwd] = useState('')
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
   const [visibleHistoryEntryId, setVisibleHistoryEntryId] = useState<string | undefined>()
+  const gitWorkspace = useGitWorkspace({
+    hasBridge,
+    cwd: state.status.cwd,
+    enabled: reviewOpen
+  })
   const taskHistoryMounted = useDeferredMount(taskHistorySession !== null)
   const capabilitiesMounted = useDeferredMount(capabilitiesOpen)
   const pluginStoreMounted = useDeferredMount(pluginStoreOpen)
@@ -712,9 +746,7 @@ export function App(): ReactElement {
     }
   }, [actions, handleCopySession, handleNewSession, state.session?.sessionFile, state.status.cwd])
 
-  const sessionChanges = useMemo(() => deriveChanges(state.timeline), [state.timeline])
   const latestRunChanges = useMemo(() => deriveLatestRunChanges(state.timeline), [state.timeline])
-  const changes = state.runCheckpoint?.state === 'rolled-back' ? [] : sessionChanges
   const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
   const agentTodos = useMemo(() => deriveAgentTodos(state.timeline), [state.timeline])
   const workingLabel = useMemo(() => {
@@ -735,23 +767,25 @@ export function App(): ReactElement {
 
   const handleToggleReview = useCallback(() => {
     setReviewOpen((open) => !open)
-    setReviewChange(null)
+    setReviewPath(null)
   }, [])
 
   const handleReviewLatestChanges = useCallback(() => {
     setReviewOpen(true)
-    setReviewChange(latestRunChanges[0] ?? null)
+    setReviewScope('unstaged')
+    setReviewPath(latestRunChanges[0]?.path ?? null)
   }, [latestRunChanges])
 
   const handleSelectInlineChange = useCallback((change: FileChange) => {
     setReviewOpen(true)
-    setReviewChange(change)
+    setReviewScope('unstaged')
+    setReviewPath(change.path)
   }, [])
 
   useEffect(() => {
     setRollbackError('')
     if (state.runCheckpoint?.state === 'rolled-back') {
-      setReviewChange(null)
+      setReviewPath(null)
       setRollbackConfirmOpen(false)
     }
   }, [state.runCheckpoint?.id, state.runCheckpoint?.state])
@@ -770,14 +804,15 @@ export function App(): ReactElement {
     setRollbackError('')
     try {
       await actions.rollbackRunCheckpoint()
-      setReviewChange(null)
+      setReviewPath(null)
+      await gitWorkspace.refresh()
       setRollbackConfirmOpen(false)
     } catch (error) {
       setRollbackError(error instanceof Error ? error.message : String(error))
     } finally {
       setRollbackBusy(false)
     }
-  }, [actions, state.busy, state.runCheckpoint])
+  }, [actions, gitWorkspace, state.busy, state.runCheckpoint])
 
   const activeCwd = selectedSession?.cwd ?? state.status.cwd
   const activePath = selectedSession?.path ?? state.session?.sessionFile
@@ -975,6 +1010,49 @@ export function App(): ReactElement {
               agentTodos={agentTodos}
               agentBusy={state.busy}
             />
+            <RunRecoveryBanner
+              candidates={runRecovery.candidates}
+              busyId={runRecovery.busyId}
+              agentBusy={state.busy}
+              error={runRecovery.error}
+              onResume={(runId) => void runRecovery.resume(runId)}
+              onDiscard={(runId) => void runRecovery.discard(runId)}
+              onRestoreCheckpoint={(runId) => void runRecovery.restoreCheckpoint(runId)}
+            />
+            <WorkflowPanel
+              cwd={state.status.cwd}
+              workflows={workflows.workflows}
+              selected={workflows.selected}
+              loading={workflows.loading}
+              busy={workflows.busy}
+              error={workflows.error}
+              onSelect={workflows.select}
+              onCreate={workflows.create}
+              onStart={workflows.start}
+              onApprovePlan={workflows.approvePlan}
+              onRepair={workflows.repair}
+              onWaiveTests={workflows.waiveTests}
+              onResume={workflows.resume}
+              onCancel={workflows.cancel}
+              onMerge={workflows.merge}
+              onCleanup={workflows.cleanup}
+            />
+            <VerificationPanel
+              plan={verification.plan}
+              policy={verification.policy}
+              run={verification.latestRun}
+              activeRun={verification.activeRun}
+              liveLog={verification.liveLog}
+              loading={verification.loading}
+              busy={verification.busy}
+              error={verification.error}
+              onStart={(kinds) => void verification.start(kinds)}
+              onRerun={(runId) => void verification.rerun(runId)}
+              onCancel={(runId) => void verification.cancel(runId)}
+              onPolicyChange={(updates) => void verification.updatePolicy(updates)}
+              onRepair={(prompt) => setPrefill(prompt)}
+            />
+            <RunMetricsStrip run={runTelemetry.activeRun ?? runTelemetry.latestRun} />
             <Composer
               busy={state.busy}
               queued={state.queued}
@@ -1019,14 +1097,33 @@ export function App(): ReactElement {
 
         {reviewOpen && (
           <ReviewPanel
-            changes={changes}
-            selectedChange={reviewChange}
+            snapshot={gitWorkspace.snapshot}
+            diff={gitWorkspace.diff}
+            conflict={gitWorkspace.conflict}
+            selectedPath={reviewPath}
+            scope={reviewScope}
             checkpoint={state.runCheckpoint}
             agentBusy={state.busy}
+            loading={gitWorkspace.loading}
+            diffLoading={gitWorkspace.diffLoading}
+            gitBusy={gitWorkspace.busy}
+            gitError={gitWorkspace.error}
+            gitResult={gitWorkspace.result}
             rollbackBusy={rollbackBusy}
             rollbackError={rollbackError}
             width={reviewWidth}
-            onSelect={setReviewChange}
+            onSelect={setReviewPath}
+            onScopeChange={setReviewScope}
+            onLoadDiff={(path, scope) => void gitWorkspace.loadDiff(path, scope)}
+            onStage={(paths) => void gitWorkspace.stage(paths)}
+            onUnstage={(paths) => void gitWorkspace.unstage(paths)}
+            onDiscard={(paths) => void gitWorkspace.discard(paths)}
+            onApplySelection={(request) => void gitWorkspace.applySelection(request)}
+            onCommit={async (message) => Boolean(await gitWorkspace.commit(message))}
+            onReadConflict={(path) => void gitWorkspace.readConflict(path)}
+            onResolveConflict={(path, strategy, content) => void gitWorkspace.resolveConflict(path, strategy, content)}
+            onContinueOperation={() => void gitWorkspace.continueOperation()}
+            onAbortOperation={() => void gitWorkspace.abortOperation()}
             onRollback={() => void handleRollbackRun()}
             onClose={handleToggleReview}
             onResizeStart={(event) => handleResizeStart('review', event)}
