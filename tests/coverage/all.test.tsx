@@ -6,6 +6,7 @@
 import '../unit/task-history.test'
 import '../unit/timeline.test'
 import '../unit/run-store.test'
+import '../unit/plugin-manager.test'
 import '../unit/verification.test'
 import '../unit/git-service.test'
 import '../unit/workflow-manager.test'

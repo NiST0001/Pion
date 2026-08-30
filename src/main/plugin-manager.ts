@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process'
+import { accessSync, constants } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join, resolve } from 'node:path'
+import { basename, delimiter, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import {
+  DefaultPackageManager,
   getAgentDir,
   getPackageDir,
   SettingsManager
@@ -22,6 +24,11 @@ const MAX_BUFFER = 4 * 1024 * 1024
 interface CatalogCache {
   loadedAt: number
   items: PluginCatalogItem[]
+}
+
+interface PluginManagerDependencies {
+  createSettingsManager?: (cwd: string, agentDir: string) => SettingsManager
+  findExecutable?: (command: string) => string | null
 }
 
 function decodeHtml(value: string): string {
@@ -95,9 +102,41 @@ function formatCommandOutput(stdout: string, stderr: string): string {
   return [stdout.trim(), stderr.trim()].filter(Boolean).join('\n').trim()
 }
 
+function findExecutable(command: string, pathValue = process.env.PATH ?? ''): string | null {
+  const extensions = process.platform === 'win32'
+    ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';')
+    : ['']
+  const candidates = isAbsolute(command)
+    ? [command]
+    : pathValue.split(delimiter).filter(Boolean).flatMap((directory) => (
+        extensions.map((extension) => join(directory, `${command}${extension}`))
+      ))
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, process.platform === 'win32' ? constants.F_OK : constants.X_OK)
+      return candidate
+    } catch {
+      // Continue through PATH candidates.
+    }
+  }
+  return null
+}
+
+function withPackageManagerCommand(settings: SettingsManager, command: string): SettingsManager {
+  return new Proxy(settings, {
+    get(target, property) {
+      if (property === 'getNpmCommand') return () => [command]
+      const value = Reflect.get(target, property, target) as unknown
+      return typeof value === 'function' ? value.bind(target) : value
+    }
+  })
+}
+
 /** Fetches the official catalog and installs packages through pi's own manager. */
 export class PluginManager {
   private catalogCache: CatalogCache | null = null
+
+  constructor(private readonly dependencies: PluginManagerDependencies = {}) {}
 
   async getCatalog(): Promise<PluginCatalogItem[]> {
     const now = Date.now()
@@ -124,7 +163,7 @@ export class PluginManager {
 
   async getInstalled(): Promise<string[]> {
     const agentDir = getAgentDir()
-    const settings = SettingsManager.create(homedir(), agentDir)
+    const settings = this.createSettingsManager(agentDir)
     return [...new Set(settings.getPackages().map((entry) => {
       const source = typeof entry === 'string' ? entry : entry.source
       if (isAbsolute(source)) return source
@@ -135,14 +174,67 @@ export class PluginManager {
 
   async install(source: string): Promise<PluginInstallResult> {
     const normalized = normalizePackageSource(source)
-    const result = await this.runPiCommand(['install', normalized])
-    return { source: normalized, output: formatCommandOutput(result.stdout, result.stderr) }
+    const output = await this.runPackageAction('install', normalized)
+    return { source: normalized, output }
   }
 
   async uninstall(source: string): Promise<PluginUninstallResult> {
     const normalized = normalizePackageSource(source)
-    const result = await this.runPiCommand(['remove', normalized])
-    return { source: normalized, output: formatCommandOutput(result.stdout, result.stderr) }
+    const output = await this.runPackageAction('remove', normalized)
+    return { source: normalized, output }
+  }
+
+  private async runPackageAction(action: 'install' | 'remove', source: string): Promise<string> {
+    const agentDir = getAgentDir()
+    const settings = this.createSettingsManager(agentDir)
+    const configuredCommand = settings.getNpmCommand()
+    const npmAvailable = configuredCommand?.length ? true : this.resolveExecutable('npm') !== null
+    if (npmAvailable) {
+      const result = await this.runPiCommand([action, source])
+      return formatCommandOutput(result.stdout, result.stderr)
+    }
+
+    const fallbackCommand = this.resolveExecutable('bun') ?? this.resolveExecutable('pnpm')
+    if (!fallbackCommand) {
+      if (!source.toLocaleLowerCase().startsWith('npm:')) {
+        const result = await this.runPiCommand([action, source])
+        return formatCommandOutput(result.stdout, result.stderr)
+      }
+      throw new Error('未找到 npm、bun 或 pnpm，无法管理 npm 插件。请安装任一包管理器，或在 Pi 设置中配置 npmCommand。')
+    }
+
+    const manager = new DefaultPackageManager({
+      cwd: homedir(),
+      agentDir,
+      settingsManager: withPackageManagerCommand(settings, fallbackCommand)
+    })
+    if (action === 'install') {
+      await manager.installAndPersist(source)
+    } else {
+      const removed = await manager.removeAndPersist(source)
+      if (!removed) throw new Error(`No matching package found for ${source}`)
+    }
+    await settings.flush()
+    const settingsErrors = settings.drainErrors()
+    if (settingsErrors.length > 0) {
+      const details = settingsErrors.map(({ scope, path, error }) => (
+        `${scope}${path ? ` (${path})` : ''}: ${error.message}`
+      )).join('\n')
+      throw new Error(`无法保存 Pi 插件设置：${details}`)
+    }
+    const label = basename(fallbackCommand)
+    return `系统未提供 npm，已使用 ${label} ${action === 'install' ? '安装' : '卸载'} ${source}`
+  }
+
+  private createSettingsManager(agentDir: string): SettingsManager {
+    return this.dependencies.createSettingsManager?.(homedir(), agentDir)
+      ?? SettingsManager.create(homedir(), agentDir)
+  }
+
+  private resolveExecutable(command: string): string | null {
+    return this.dependencies.findExecutable
+      ? this.dependencies.findExecutable(command)
+      : findExecutable(command)
   }
 
   private async runPiCommand(args: string[]): Promise<{ stdout: string; stderr: string }> {

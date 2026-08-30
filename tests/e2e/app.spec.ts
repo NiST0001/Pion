@@ -1,6 +1,6 @@
 import { _electron as electron, expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
 const projectRoot = resolve(import.meta.dirname, '../..')
@@ -53,6 +53,50 @@ test('boots the Electron shell with an immediately editable composer', async ({}
     await expect(page.locator('.operations-modal .verification-panel.embedded')).toBeVisible()
     await page.getByRole('button', { name: '关闭项目自动验证' }).click()
     await expect(page.locator('.operations-modal')).toHaveCount(0)
+  } finally {
+    await app.close()
+  }
+})
+
+test('uninstalls an npm plugin when npm is unavailable', async ({}, testInfo) => {
+  const userData = testInfo.outputPath('plugin-user-data')
+  const piAgentDir = join(userData, 'pi-agent')
+  const binDir = testInfo.outputPath('plugin-bin')
+  const logPath = testInfo.outputPath('package-manager.log')
+  await Promise.all([
+    mkdir(join(piAgentDir, 'npm'), { recursive: true }),
+    mkdir(binDir, { recursive: true })
+  ])
+  await writeFile(join(piAgentDir, 'settings.json'), JSON.stringify({ packages: ['npm:pi-subagents'] }))
+  await writeFile(join(piAgentDir, 'npm', 'package.json'), JSON.stringify({
+    private: true,
+    dependencies: { 'pi-subagents': '1.0.0' }
+  }))
+  const bunPath = join(binDir, 'bun')
+  await writeFile(bunPath, '#!/bin/sh\nprintf "%s\\n" "$@" > "$PION_FAKE_PM_LOG"\n')
+  await chmod(bunPath, 0o755)
+
+  const app = await electron.launch({
+    args: [projectRoot],
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      PATH: binDir,
+      PION_USER_DATA_DIR: userData,
+      PI_CODING_AGENT_DIR: piAgentDir,
+      PION_FAKE_PM_LOG: logPath,
+      PION_E2E: '1'
+    }
+  })
+
+  try {
+    const page = await app.firstWindow()
+    const result = await page.evaluate(() => window.pion.uninstallPlugin('npm:pi-subagents'))
+    expect(result.output).toContain('已使用 bun 卸载 npm:pi-subagents')
+    expect(await readFile(logPath, 'utf8')).toContain('uninstall\npi-subagents\n--cwd\n')
+    const settings = JSON.parse(await readFile(join(piAgentDir, 'settings.json'), 'utf8')) as { packages?: string[]; npmCommand?: string[] }
+    expect(settings.packages).toEqual([])
+    expect(settings.npmCommand).toBeUndefined()
   } finally {
     await app.close()
   }
