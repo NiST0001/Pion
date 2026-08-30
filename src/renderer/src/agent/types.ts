@@ -140,6 +140,7 @@ export type Action =
   | { type: 'runCheckpoint'; checkpoint: RunCheckpointStatus | null }
   | { type: 'sessions'; sessions: SessionMeta[] }
   | { type: 'projectSessions'; sessionsByProject: Record<string, SessionMeta[]> }
+  | { type: 'projectSessionsUpdate'; cwd: string; sessions: SessionMeta[] }
   | { type: 'branches'; cwd: string; branches: BranchInfo[] }
   | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
   | { type: 'historyIndex'; index: SessionHistoryIndex | null }

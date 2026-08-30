@@ -70,6 +70,14 @@ export function reducer(state: AgentState, action: Action): AgentState {
       )
       return { ...state, sessionsByProject }
     }
+    case 'projectSessionsUpdate': {
+      const sessions = orderSessions(action.sessions, state.sessionsByProject[action.cwd] ?? [])
+      return {
+        ...state,
+        sessions: state.status.cwd === action.cwd ? sessions : state.sessions,
+        sessionsByProject: { ...state.sessionsByProject, [action.cwd]: sessions }
+      }
+    }
     case 'branches':
       return { ...state, branchesByProject: { ...state.branchesByProject, [action.cwd]: action.branches } }
     case 'reorderSessions': {

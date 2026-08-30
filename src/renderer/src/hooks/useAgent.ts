@@ -144,8 +144,11 @@ export function useAgent() {
       ?? timelineOwnerPath.current
       ?? (await api.getState().catch(() => null))?.sessionFile
     const cached = path ? timelineCache.current.get(path) : undefined
+    const keepVisibleCache = Boolean(path && cached && timelineOwnerPath.current === path)
     historyCursor.current = null
-    if (path) dispatch({ type: 'timelineLoading', loading: true })
+    // A retained session is already fully paintable from memory. Revalidate its
+    // JSONL in the background without showing a loading state or blanking it.
+    if (path && !keepVisibleCache) dispatch({ type: 'timelineLoading', loading: true })
 
     let page = null
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -156,6 +159,10 @@ export function useAgent() {
     }
     if (loadId !== timelineLoadId.current) return
     if (!page) {
+      if (keepVisibleCache) {
+        console.warn('[pion] retained timeline revalidation failed; keeping cached view:', path)
+        return
+      }
       dispatch({
         type: 'timelineError',
         error: '会话历史加载失败，请重新选择该会话或检查会话文件是否仍然存在。'
@@ -165,7 +172,7 @@ export function useAgent() {
 
     if (
       path
-      && cached?.newerComplete
+      && cached
       && cached.leafId === page.leafId
       && cached.total === page.total
     ) {
@@ -174,7 +181,9 @@ export function useAgent() {
         : { path, ...cached, loading: false, loadId }
       historyCursor.current = cursor
       storeTimelineCache(timelineCache.current, path, cached)
-      showTimeline(path, cached.items, cached.mode)
+      // The exact snapshot is already on screen. Avoid a second replace action,
+      // which would reset scroll position and look like another session load.
+      if (!keepVisibleCache) showTimeline(path, cached.items, cached.mode)
       return
     }
 
@@ -472,13 +481,45 @@ export function useAgent() {
   const switchSession = useCallback(
     async (sessionPath: string): Promise<{ cancelled: boolean }> => {
       if (!api) return { cancelled: true }
-      const requestLoadId = ++timelineLoadId.current
+      const previousPath = timelineOwnerPath.current
+      const previousCached = previousPath ? timelineCache.current.get(previousPath) : undefined
       const cached = timelineCache.current.get(sessionPath)
+      ++historyIndexLoadId.current
+      dispatch({ type: 'historyIndex', index: null })
+
+      // Paint before the main-process switch. Opening a long SessionManager can
+      // take hundreds of milliseconds, but revisiting a retained session should
+      // still be frame-immediate regardless of project.
+      let requestLoadId: number
+      if (cached) {
+        restoreCachedTimeline(sessionPath, cached)
+        requestLoadId = timelineLoadId.current
+      } else {
+        requestLoadId = ++timelineLoadId.current
+        historyCursor.current = null
+        timelineOwnerPath.current = sessionPath
+        expectedTimeline.current = null
+        dispatch({ type: 'clearTimeline' })
+        dispatch({ type: 'timelineLoading', loading: true })
+      }
+
+      const restorePreviousTimeline = (): void => {
+        if (previousPath && previousCached) {
+          restoreCachedTimeline(previousPath, previousCached)
+        } else {
+          historyCursor.current = null
+          timelineOwnerPath.current = previousPath
+          expectedTimeline.current = null
+          dispatch({ type: 'clearTimeline' })
+        }
+      }
+
       let result: { cancelled: boolean }
       try {
         result = await api.switchSession(sessionPath)
       } catch (error) {
         if (requestLoadId === timelineLoadId.current) {
+          restorePreviousTimeline()
           dispatch({
             type: 'timelineError',
             error: error instanceof Error ? error.message : String(error)
@@ -487,20 +528,12 @@ export function useAgent() {
         throw error
       }
       if (result.cancelled || requestLoadId !== timelineLoadId.current) {
+        if (result.cancelled && requestLoadId === timelineLoadId.current) {
+          restorePreviousTimeline()
+        }
         return { cancelled: true }
       }
 
-      if (cached) {
-        // Paint the cached timeline immediately, then revalidate JSONL below in
-        // case this retained backend produced messages while it was hidden.
-        restoreCachedTimeline(sessionPath, cached)
-      } else {
-        historyCursor.current = null
-        timelineOwnerPath.current = sessionPath
-        expectedTimeline.current = null
-        dispatch({ type: 'clearTimeline' })
-        dispatch({ type: 'timelineLoading', loading: true })
-      }
       await reloadTimeline(sessionPath)
       void refreshHistoryIndex(sessionPath)
       // Session history comes from its JSONL file and must not wait for a cold
@@ -582,6 +615,12 @@ export function useAgent() {
     saveSessionOrder(cwd, paths)
     dispatch({ type: 'reorderSessions', cwd, paths })
   }, [])
+
+  const refreshProjectSessions = useCallback(async (cwd: string): Promise<void> => {
+    if (!api) return
+    const sessions = await api.listSessions(cwd)
+    dispatch({ type: 'projectSessionsUpdate', cwd, sessions })
+  }, [api])
 
   const deleteSession = useCallback(
     async (sessionPath: string) => {
@@ -752,6 +791,7 @@ export function useAgent() {
       forkAt,
       switchSession,
       reorderSessions,
+      refreshProjectSessions,
       deleteSession,
       copySession,
       getSessionForkMessages,
@@ -785,6 +825,7 @@ export function useAgent() {
       forkAt,
       switchSession,
       reorderSessions,
+      refreshProjectSessions,
       deleteSession,
       copySession,
       getSessionForkMessages,

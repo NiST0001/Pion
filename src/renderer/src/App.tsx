@@ -600,8 +600,9 @@ export function App(): ReactElement {
       setNewSessionCwd(cwd)
       setSelectedSession({ cwd, path })
       try {
-        await activateProject(cwd)
-        if (requestId !== sessionSelectionId.current) return
+        // Persisted sessions are global pool entries. switchSession resolves the
+        // session's cwd and activates its retained backend; starting the project
+        // first would blank the timeline and create a throwaway logical session.
         const result = await actions.switchSession(path)
         if (result.cancelled && requestId === sessionSelectionId.current) {
           setSelectedSession(previousSelection)
@@ -612,7 +613,7 @@ export function App(): ReactElement {
         console.error('[pion] 切换会话失败', error)
       }
     },
-    [actions, activateProject, selectedSession, state.session?.sessionFile, state.status.cwd]
+    [actions, selectedSession, state.session?.sessionFile, state.status.cwd]
   )
 
   const handleDeleteSession = useCallback(
@@ -621,38 +622,33 @@ export function App(): ReactElement {
       setFavoriteSessionPaths((current) => current.includes(path)
         ? current.filter((favoritePath) => favoritePath !== path)
         : current)
-      await activateProject(cwd)
       await actions.deleteSession(path)
+      await actions.refreshProjectSessions(cwd)
     },
-    [actions, activateProject, selectedSession?.path]
+    [actions, selectedSession?.path]
   )
 
   const handleCopySession = useCallback(
-    async (cwd: string, path: string) => {
+    async (_cwd: string, path: string) => {
       setSelectedSession(null)
-      await activateProject(cwd)
       await actions.copySession(path)
     },
-    [actions, activateProject]
+    [actions]
   )
 
   const handleGetForkMessages = useCallback(
-    async (cwd: string, path: string) => {
-      await activateProject(cwd)
-      return actions.getSessionForkMessages(path)
-    },
-    [actions, activateProject]
+    async (_cwd: string, path: string) => actions.getSessionForkMessages(path),
+    [actions]
   )
 
   const handleForkSession = useCallback(
-    async (cwd: string, path: string, entryId: string) => {
+    async (_cwd: string, path: string, entryId: string) => {
       setSelectedSession(null)
-      await activateProject(cwd)
       const text = await actions.forkSession(path, entryId)
       if (text) setPrefill(text)
       return text
     },
-    [actions, activateProject]
+    [actions]
   )
 
   const sessionChanges = useMemo(() => deriveChanges(state.timeline), [state.timeline])
