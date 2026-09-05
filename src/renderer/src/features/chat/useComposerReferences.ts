@@ -77,10 +77,15 @@ export function useComposerReferences({
     if (loaded.length > 0) {
       setPendingReferences((current) => [...current, ...loaded])
       if (triggerValue && valueRef.current === triggerValue) {
-        const match = triggerValue.match(/(^|\s)@([^\s]*)$/)
+        const match = triggerValue.match(REFERENCE_TRIGGER_RE)
         if (match && match.index !== undefined) {
           const start = match.index + match[1].length
-          const replacement = `${loaded.map((reference) => referenceToken(reference.name)).join(' ')} `
+          // Images show as thumbnails below the input; only text references
+          // need inline tokens.
+          const textReferences = loaded.filter((reference) => reference.kind === 'text')
+          const replacement = textReferences.length > 0
+            ? `${textReferences.map((reference) => referenceToken(reference.name)).join(' ')} `
+            : ''
           const nextValue = triggerValue.slice(0, start) + replacement
           valueRef.current = nextValue
           setValue(nextValue)

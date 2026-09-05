@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react'
-import { AtSign, FileText, ImagePlus } from 'lucide-react'
+import { AtSign, FileText } from 'lucide-react'
 import type { SlashCommandInfo } from '../../../../shared/types'
 import { referenceToken } from './composerReferences'
 import type { ReferenceAttachment } from './composerReferences'
@@ -36,7 +36,13 @@ export function ReferenceMenu({
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => onInsertToken(reference.name)}
         >
-          {reference.kind === 'image' ? <ImagePlus size={13} /> : <FileText size={13} />}
+          {reference.kind === 'image' ? (
+            <img
+              className="reference-menu-thumb"
+              src={`data:${reference.image.mimeType};base64,${reference.image.data}`}
+              alt=""
+            />
+          ) : <FileText size={13} />}
           <span>{referenceToken(reference.name)}</span>
           <small>已添加</small>
         </button>

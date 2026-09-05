@@ -14,7 +14,7 @@
 ### 对话
 - 流式输出 + 思考过程折叠 + 打字指示
 - Markdown 渲染（GFM、代码高亮、一键复制）
-- 输入框支持将剪贴板图像直接粘贴到输入框，也可使用“@ 参考”按钮、输入 @ 或拖拽选择图像/文本/常见代码文件（图像 ≤ 8 MB、文本 ≤ 1 MB）；图像按原生图像消息发送.
+- 输入框支持将剪贴板图像直接粘贴到输入框，也可使用“@ 参考”按钮、输入 @ 或拖拽选择图像/文本/常见代码文件（图像 ≤ 8 MB、文本 ≤ 1 MB）；图像按附加顺序编号发送（`[图像 N: 文件名]`），模型可据此引用.
 - 输入 `/` 打开动态斜杠命令菜单，支持 Pi 内置 `/compact`、`/new`、`/name`、`/clone`，Pion 内置 `/plan`、`/verify`、`/agents`、`/yolo`（自动批准本会话工具权限，开启需确认、不写入权限规则），以及扩展、提示词模板和技能命令
 - Pi 官方插件商店：原生目录可直接安装和卸载，支持全部/已安装/未安装筛选及目录外已安装包管理（`https://pi.dev/packages`）
 - 技能与工具中心：展示当前配置和已安装插件提供的技能、扩展工具及来源
@@ -33,6 +33,7 @@
 - 会话列表：按项目目录扫描 `~/.pi/agent/sessions/`，点击后只加载接近当前屏幕的一小段最新窗口；滚到顶部/底部才按需加载相邻历史，不会一次挂载整段会话
 - 会话支持复制与从任意用户消息处分叉（fork）；fork 后时间线回到分叉点，输入框自动预填原消息
 - 构建模式的原生任务系统,自带 `pion_task` 工具.
+
 ### 审查与运行闭环
 - 支持未暂存/已暂存 diff、整文件及 hunk/行级暂存与撤销、stage/unstage、带 hooks 的 commit，以及 merge/rebase/cherry-pick 冲突读取、显式解决、continue/abort
 - 所有 Git 修改携带 `snapshotId`；工作区变化后拒绝旧操作。文件撤销、操作中止和工作流合并/清理使用主题确认界面
@@ -45,6 +46,7 @@
 - Tester 只运行 Pion 确定性发现的验证命令；缺少验证时必须由用户明确豁免，审查失败和测试失败最多允许两轮显式修复
 - 候选修改保留在独立 Git 分支；只有目标仍等于捕获基准、工作区干净、Reviewer 通过且验证通过/已豁免时，用户才能确认 `git merge --ff-only`
 - 取消会终止当前 Agent/命令但保留隔离资源供检查；清理是独立确认操作。应用重启只标记 interrupted
+
 ### 模型
 - 模型选择器：按 provider 分组，显示上下文窗口与推理能力标记
 - 设置中心直接读取 Pi `ModelRuntime` 完整提供商目录，支持 API 密钥、订阅 OAuth、设备代码、浏览器回调、退出与取消；凭据仍由 Pi `auth.json` 管理且不会回传 renderer
@@ -177,8 +179,8 @@ src/
 ```
 
 旧 `renderer/src/components/*` 路径以及 `src/main/agent-bridge.ts`、
-`src/main/wire.ts`、`src/main/task-planning.ts` 保留轻量 re-export facade，
-便于外部扩展和旧测试平滑迁移。
+`src/main/wire.ts`、`src/main/task-planning.ts` 已在模块化整理中删除，
+请直接使用 `src/main/agent/`、`src/renderer/src/features/` 下的新路径。
 
 ## 说明
 

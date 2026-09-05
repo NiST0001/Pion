@@ -686,22 +686,22 @@ html.pion-keyboard-focus .composer-project-option:focus-visible {
   bottom: calc(100% + 10px);
   left: 0;
   display: flex;
-  width: min(460px, 100%);
-  max-height: min(360px, 46vh);
+  width: min(560px, 100%);
+  max-height: min(440px, 52vh);
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   overflow-y: auto;
-  padding: 7px;
+  padding: 9px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 13px;
+  border-radius: 14px;
   box-shadow: var(--shadow-pop);
 }
 
 .reference-menu-heading {
-  padding: 3px 8px 5px;
+  padding: 4px 9px 6px;
   color: var(--fg-faint);
-  font-size: 10px;
+  font-size: 11.5px;
   font-weight: 700;
   letter-spacing: 0.7px;
 }
@@ -711,14 +711,14 @@ html.pion-keyboard-focus .composer-project-option:focus-visible {
   align-items: center;
   width: 100%;
   min-width: 0;
-  gap: 8px;
-  padding: 7px 8px;
+  gap: 9px;
+  padding: 8px 10px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 9px;
   background: transparent;
   color: var(--fg-dim);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 12.5px;
   text-align: left;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
@@ -749,10 +749,19 @@ html.pion-keyboard-focus .composer-project-option:focus-visible {
 }
 
 .reference-menu-hint {
-  padding: 5px 8px 3px;
+  padding: 6px 9px 4px;
   color: var(--fg-faint);
-  font-size: 10px;
-  line-height: 1.4;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.reference-menu-thumb {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  border-radius: 6px;
+  object-fit: cover;
+  border: 1px solid var(--border-soft);
 }
 
 .slash-command-menu {
