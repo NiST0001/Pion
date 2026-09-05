@@ -1,11 +1,25 @@
 {
   "name": "pion",
-  "version": "0.1.16",
-  "description": "Pion — Electron desktop GUI for the pi coding agent (local secondary development)",
+  "version": "0.1.17",
+  "description": "Desktop app for the pi coding agent",
   "type": "module",
   "main": "out/main/index.js",
   "license": "MIT",
   "private": true,
+  "author": "NiST0001",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NiST0001/Pion.git"
+  },
+  "homepage": "https://github.com/NiST0001/Pion",
+  "bugs": "https://github.com/NiST0001/Pion/issues",
+  "keywords": [
+    "pi",
+    "coding-agent",
+    "electron",
+    "desktop",
+    "developer-tools"
+  ],
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
