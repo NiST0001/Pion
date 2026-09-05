@@ -123,7 +123,6 @@ select {
 .review-section-head,
 .review-detail-name,
 .review-detail-body .diff-view,
-.review-detail-body .file-preview,
 .context-menu-header small,
 .task-history-heading > span {
   font-size: 12px;
@@ -190,7 +189,6 @@ select {
 }
 
 /* Former 12–12.5px controls and content. */
-.file-preview,
 .project-trust-copy strong,
 .bubble-error,
 .thinking,

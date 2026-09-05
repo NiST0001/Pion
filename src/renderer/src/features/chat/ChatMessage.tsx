@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from 'react'
+import { memo, useLayoutEffect, useRef } from 'react'
 import type { ReactElement } from 'react'
 import { GitBranch } from 'lucide-react'
 import type { TimelineItem } from '../../agent/types'
@@ -22,7 +22,7 @@ interface ChatMessageProps {
   canFork: boolean
 }
 
-export function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactElement | null {
+export const ChatMessage = memo(function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactElement | null {
   const rowRef = useRef<HTMLDivElement>(null)
   // Paged history carries noReveal on the item itself; it never waterfalls.
   const revealSuppressed = item.noReveal === true
@@ -135,4 +135,4 @@ export function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactE
       </div>
     </div>
   )
-}
+})

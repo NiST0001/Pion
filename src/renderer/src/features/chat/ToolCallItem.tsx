@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { memo, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   ChevronDown,
@@ -43,7 +43,7 @@ function truncate(text: string, max: number): string {
   return `${text.slice(0, max)}…`
 }
 
-export function ToolCallItem({ tool, historical, noReveal }: { tool: ToolItem; historical?: boolean; noReveal?: boolean }): ReactElement {
+export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noReveal }: { tool: ToolItem; historical?: boolean; noReveal?: boolean }): ReactElement {
   const [open, setOpen] = useState(false)
   const rowRef = useRef<HTMLDivElement>(null)
   const revealSuppressed = noReveal === true
@@ -161,4 +161,4 @@ export function ToolCallItem({ tool, historical, noReveal }: { tool: ToolItem; h
       )}
     </div>
   )
-}
+})

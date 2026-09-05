@@ -230,11 +230,6 @@
   flex-shrink: 0;
 }
 
-.status-run {
-  color: var(--ok);
-  font-size: 12px;
-}
-
 .queued {
   color: var(--warn);
   font-size: 12px;

@@ -211,15 +211,6 @@
   font-size: 10.5px;
 }
 
-.review-detail-body .file-preview {
-  min-height: 100%;
-  margin: 0;
-  padding: 12px;
-  border: 0;
-  border-radius: 0;
-  font-size: 10.5px;
-}
-
 .review-empty-detail {
   display: flex;
   align-items: center;

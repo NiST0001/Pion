@@ -37,7 +37,6 @@ import type {
   SessionTaskRun,
   SkillInfo,
   SlashCommandInfo,
-  ToolPermissionCategory,
   ToolPermissionRequest,
   ToolPermissionResolution,
   ToolPermissionRules,
@@ -70,6 +69,7 @@ import {
   TOOL_PERMISSION_TIMEOUT_MS,
   ToolPermissionStore
 } from '../tool-permissions'
+import { parseToolPermissionMetadata } from './tool-permission-request'
 import { ensureNativeTaskExtension } from './task-planning'
 import { ensureNativePlanModeExtension } from './plan-mode'
 import { BackendPool } from './backend-pool'
@@ -448,33 +448,10 @@ export class AgentBridge {
     ) return false
 
     try {
-      const metadata = JSON.parse(request.title.slice(TOOL_PERMISSION_MARKER.length)) as {
-        cwd?: unknown
-        sessionPath?: unknown
-        toolName?: unknown
-        category?: unknown
-        policyCategories?: unknown
-        summary?: unknown
-        detail?: unknown
-        risks?: unknown
-        canRemember?: unknown
-      }
-      const categories = Array.isArray(metadata.policyCategories)
-        ? metadata.policyCategories.filter((value): value is ToolPermissionCategory => (
-            value === 'read' || value === 'write' || value === 'shell'
-            || value === 'network' || value === 'external'
-          ))
-        : []
-      const category = metadata.category
-      if (
-        typeof metadata.cwd !== 'string'
-        || typeof metadata.toolName !== 'string'
-        || typeof metadata.summary !== 'string'
-        || typeof metadata.detail !== 'string'
-        || categories.length === 0
-        || (category !== 'read' && category !== 'write' && category !== 'shell'
-          && category !== 'network' && category !== 'external')
-      ) throw new Error('权限请求元数据无效')
+      const parsed = parseToolPermissionMetadata(request.title)
+      if (!parsed) throw new Error('权限请求元数据无效')
+      const categories = parsed.policyCategories
+      const category = parsed.category
 
       // Yolo mode auto-approves every permission prompt for this session
       // without persisting any project rule or showing UI.
@@ -490,22 +467,15 @@ export class AgentBridge {
       )
       const permissionRequest: ToolPermissionRequest = {
         id,
-        cwd: resolve(metadata.cwd),
-        sessionPath: typeof metadata.sessionPath === 'string'
-          ? metadata.sessionPath
-          : backend.sessionPath,
-        toolName: metadata.toolName,
+        cwd: parsed.cwd,
+        sessionPath: parsed.sessionPath ?? backend.sessionPath,
+        toolName: parsed.toolName,
         category,
         policyCategories: [...new Set(categories)],
-        summary: metadata.summary.slice(0, 500),
-        detail: metadata.detail.slice(0, 4_000),
-        risks: Array.isArray(metadata.risks)
-          ? metadata.risks.filter((value): value is ToolPermissionRequest['risks'][number] => (
-              value === 'outside-workspace' || value === 'sensitive-path'
-              || value === 'destructive-command'
-            ))
-          : [],
-        canRemember: metadata.canRemember === true,
+        summary: parsed.summary,
+        detail: parsed.detail,
+        risks: parsed.risks,
+        canRemember: parsed.canRemember,
         createdAt,
         timeoutAt: createdAt + timeoutMs
       }

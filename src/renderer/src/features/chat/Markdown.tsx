@@ -145,16 +145,20 @@ function lineWrapper(
   }
 }
 
-/** Per-render line character bookkeeping for live mode. `committed` holds the
-    character counts from the last commit; `next` collects this render. The
-    ref is written only in a layout effect, keeping render side-effect free. */
-interface LiveCharTracker {
-  committed: number[]
-  next: number[]
+/** Per-render bookkeeping for live mode. Only the line currently being
+    streamed (the last one) wraps characters into spans; completed lines
+    render as plain text so long messages stay cheap to re-render. */
+interface LiveTailTracker {
+  /** Tail line length committed by the previous render. */
+  committed: { ordinal: number, length: number } | null
+  /** Tail line measured by this render, committed by the layout effect. */
+  current: { ordinal: number, length: number } | null
+  /** Line nodes in document order, collected during the walk. */
+  lines: Array<HastNode & { children: HastNode[] }>
 }
 
-/** Wrap every character of a live line in a stable per-position span; only
-    characters beyond the committed count carry the fade class. */
+/** Wrap every character of the tail line in a stable per-position span; only
+    characters beyond the committed length carry the fade class. */
 function wrapLiveLineChars(
   node: HastNode & { children: HastNode[] },
   state: { seen: number },
@@ -190,21 +194,13 @@ function wrapLiveLineChars(
   }
 }
 
-function wrapLiveLine(node: HastNode & { children: HastNode[] }, tracker: LiveCharTracker): void {
-  const ordinal = tracker.next.length
-  const startFrom = tracker.committed[ordinal] ?? 0
-  const state = { seen: 0 }
-  wrapLiveLineChars(node, state, startFrom)
-  tracker.next.push(state.seen)
-}
-
 function hasBlockChild(node: HastNode): boolean {
   return Boolean(node.children?.some((child) => (
     child.type === 'element' && BLOCK_ELEMENTS.has(child.tagName ?? '')
   )))
 }
 
-function wrapLineTree(node: HastNode, mode: TextRevealMode, liveChars?: LiveCharTracker): void {
+function wrapLineTree(node: HastNode, mode: TextRevealMode, liveTail?: LiveTailTracker): void {
   if (!hasChildren(node)) return
   if (node.type === 'element' && node.tagName === 'li') {
     const properties = lineProperties(mode)
@@ -219,7 +215,7 @@ function wrapLineTree(node: HastNode, mode: TextRevealMode, liveChars?: LiveChar
       ...properties,
       className: [...existingClasses, ...(properties.className as string[])]
     }
-    if (mode === 'live' && liveChars) wrapLiveLine(node, liveChars)
+    if (mode === 'live' && liveTail) liveTail.lines.push(node)
     return
   }
   if (
@@ -230,19 +226,28 @@ function wrapLineTree(node: HastNode, mode: TextRevealMode, liveChars?: LiveChar
     node.children = splitInlineChildren(node.children)
       .map((children) => {
         const wrapper = lineWrapper(children, mode)
-        if (mode === 'live' && liveChars) wrapLiveLine(wrapper, liveChars)
+        if (mode === 'live' && liveTail) liveTail.lines.push(wrapper)
         return wrapper
       })
     return
   }
-  node.children.forEach((child) => wrapLineTree(child, mode, liveChars))
+  node.children.forEach((child) => wrapLineTree(child, mode, liveTail))
 }
 
-function rehypeLineReveal(mode: TextRevealMode, liveChars?: LiveCharTracker) {
+function rehypeLineReveal(mode: TextRevealMode, liveTail?: LiveTailTracker) {
   return () => (tree: unknown): void => {
     if (typeof tree !== 'object' || tree === null) return
     const root = tree as HastNode
-    wrapLineTree(root, mode, liveChars)
+    wrapLineTree(root, mode, liveTail)
+    if (mode !== 'live' || !liveTail || liveTail.lines.length === 0) return
+    const tail = liveTail.lines[liveTail.lines.length - 1]
+    const ordinal = liveTail.lines.length - 1
+    const startFrom = liveTail.committed?.ordinal === ordinal
+      ? liveTail.committed.length
+      : 0
+    const state = { seen: 0 }
+    wrapLiveLineChars(tail, state, startFrom)
+    liveTail.current = { ordinal, length: state.seen }
   }
 }
 
@@ -315,13 +320,15 @@ export const Markdown = memo(function Markdown({
   text: string
   revealMode?: TextRevealMode
 }): React.ReactElement {
-  // Live mode additionally fades newly streamed characters within each line.
-  // The committed counts are read during render and written back only after
+  // Live mode additionally fades newly streamed characters, but only inside
+  // the line currently being streamed (the last one). Completed lines render
+  // as plain text so long answers stay cheap to re-render on every token.
+  // The committed tail is read during render and written back only after
   // commit, so StrictMode double renders cannot skip or replay the fade.
-  const committedLineCharsRef = useRef<number[]>([])
-  const nextLineChars: number[] = []
+  const committedTailRef = useRef<{ ordinal: number, length: number } | null>(null)
+  const liveTail: LiveTailTracker = { committed: committedTailRef.current, current: null, lines: [] }
   useLayoutEffect(() => {
-    committedLineCharsRef.current = nextLineChars
+    committedTailRef.current = liveTail.current
   })
 
   return (
@@ -329,7 +336,7 @@ export const Markdown = memo(function Markdown({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={revealMode
-          ? [rehypeHighlight, rehypeLineReveal(revealMode, { committed: committedLineCharsRef.current, next: nextLineChars })]
+          ? [rehypeHighlight, rehypeLineReveal(revealMode, liveTail)]
           : [rehypeHighlight]}
         components={MARKDOWN_COMPONENTS}
       >

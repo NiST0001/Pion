@@ -175,7 +175,7 @@ test('reviews, stages, and commits a live Git worktree', async ({}, testInfo) =>
   try {
     const page = await app.firstWindow()
     await expect(page.getByRole('tree', { name: '修改文件树' })).toBeVisible()
-    await expect(page.getByRole('treeitem', { name: '收起目录 src' })).toBeVisible()
+    await expect(page.getByRole('treeitem', { name: '收起目录 src', exact: true })).toBeVisible()
     await expect(page.getByRole('treeitem', { name: '收起目录 src/components' })).toBeVisible()
     const file = page.getByTitle('src/components/file.txt').last()
     await expect(file).toBeVisible()

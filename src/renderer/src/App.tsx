@@ -13,11 +13,11 @@ import { useGitWorkspace } from './hooks/useGitWorkspace'
 import { usePanelLayout } from './hooks/usePanelLayout'
 import { useDeferredMount } from './hooks/useDeferredMount'
 import { useSessionResourceStage } from './hooks/useSessionResourceStage'
+import { useSessionModes } from './hooks/useSessionModes'
 import { deriveAgentTodos, deriveLatestRunChanges } from './agent/timeline'
 import { deriveWorkingStatus } from './agent/workingStatus'
 import type { FileChange } from './agent/types'
 import type {
-  AgentMode,
   BranchInfo,
   GitDiffScope,
   ImageContent,
@@ -82,13 +82,16 @@ export function App(): ReactElement {
   const resourceKey = resourceCwd
     ? `${resourceCwd}\u0000${resourceSessionPath ?? 'new'}`
     : ''
+  // Secondary resources load in timed waves after the conversation paints.
+  // They must not wait for a live backend: run metrics, Git status and panels
+  // are local reads that stay useful for idle or offline projects too.
   const resourceStage = useSessionResourceStage(
     resourceKey,
     !state.timelineLoading
       && !state.timelineError
       && (resourceSessionPath
         ? state.historyIndex?.sessionPath === resourceSessionPath
-        : state.status.phase === 'running')
+        : true)
   )
   const policyResourcesEnabled = resourceStage >= 2
   const gitResourcesEnabled = resourceStage >= 3
@@ -129,12 +132,6 @@ export function App(): ReactElement {
   const [branchDialogCwd, setBranchDialogCwd] = useState<string | null>(null)
   const [rollbackConfirmOpen, setRollbackConfirmOpen] = useState(false)
   const [rollbackBusy, setRollbackBusy] = useState(false)
-  const [planModeExitConfirmOpen, setPlanModeExitConfirmOpen] = useState(false)
-  const [planModeExitBusy, setPlanModeExitBusy] = useState(false)
-  const [planModeExitError, setPlanModeExitError] = useState('')
-  const [yoloConfirmOpen, setYoloConfirmOpen] = useState(false)
-  const [yoloBusy, setYoloBusy] = useState(false)
-  const [yoloError, setYoloError] = useState('')
   const [rollbackError, setRollbackError] = useState('')
   const {
     maximized,
@@ -470,47 +467,18 @@ export function App(): ReactElement {
     [actions]
   )
 
-  const handleModeChange = useCallback((mode: AgentMode): void => {
-    if (state.busy) {
-      console.warn('[pion] 会话运行中，暂不能切换工作模式')
-      return
-    }
-    if (mode === 'build' && state.mode === 'plan') {
-      setPlanModeExitError('')
-      setPlanModeExitConfirmOpen(true)
-      return
-    }
-    void actions.setMode(mode).catch((error: unknown) => {
-      console.error('[pion] 模式切换失败', error)
-    })
-  }, [actions, state.busy, state.mode])
-
-  const applyYoloMode = useCallback(async (enabled: boolean): Promise<void> => {
-    setYoloBusy(true)
-    setYoloError('')
-    try {
-      await actions.setYoloMode(enabled)
-      setYoloConfirmOpen(false)
-    } catch (error) {
-      setYoloError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setYoloBusy(false)
-    }
-  }, [actions])
-
-  const requestYoloMode = useCallback((enabled: boolean): void => {
-    if (enabled === state.yolo) return
-    if (enabled) {
-      setYoloError('')
-      setYoloConfirmOpen(true)
-      return
-    }
-    void applyYoloMode(false)
-  }, [applyYoloMode, state.yolo])
-
-  useEffect(() => {
-    if (state.yolo) setYoloConfirmOpen(false)
-  }, [state.yolo])
+  const {
+    handleModeChange,
+    requestYoloMode,
+    planModeExitDialog,
+    yoloDialog
+  } = useSessionModes({
+    busy: state.busy,
+    mode: state.mode,
+    yolo: state.yolo,
+    setMode: actions.setMode,
+    setYoloMode: actions.setYoloMode
+  })
 
   const handleComposerSend = useCallback(async (
     text: string,
@@ -693,31 +661,6 @@ export function App(): ReactElement {
     }
   }, [actions, gitWorkspace, state.busy, state.runCheckpoint])
 
-  const confirmPlanModeExit = useCallback(async (): Promise<void> => {
-    if (state.mode !== 'plan') {
-      setPlanModeExitConfirmOpen(false)
-      return
-    }
-    if (state.busy) {
-      setPlanModeExitError('当前会话仍在运行，请等待完成或中止后再切换工作模式。')
-      return
-    }
-    setPlanModeExitBusy(true)
-    setPlanModeExitError('')
-    try {
-      await actions.setMode('build')
-      setPlanModeExitConfirmOpen(false)
-    } catch (error) {
-      setPlanModeExitError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setPlanModeExitBusy(false)
-    }
-  }, [actions, state.busy, state.mode])
-
-  useEffect(() => {
-    if (state.mode !== 'plan') setPlanModeExitConfirmOpen(false)
-  }, [state.mode])
-
   const activeCwd = selectedSession?.cwd ?? state.status.cwd
   const activePath = selectedSession?.path ?? state.session?.sessionFile
   const historyNavigatorVisible = (state.historyIndex?.landmarks.length ?? 0) >= 2
@@ -870,7 +813,8 @@ export function App(): ReactElement {
                 cwd={state.status.cwd}
                 hasSessions={state.sessions.length > 1}
                 canFork={state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
-                onFork={(id) => void handleFork(id)}
+                onFork={handleFork}
+
                 agentActivity={agentActivity}
                 workingStatus={workingStatus}
                 latestRunChanges={latestRunChanges}
@@ -1069,30 +1013,26 @@ export function App(): ReactElement {
         }}
       />
       <ConfirmDialog
-        open={planModeExitConfirmOpen}
+        open={planModeExitDialog.open}
         title="确认进入构建模式"
         message="计划模式只允许资料收集，不会修改文件或创建 Pion 任务。"
-        detail={planModeExitError || '确认后将恢复编辑、写入和终端工具；此操作不会自动开始执行，仍需发送下一条执行请求。'}
+        detail={planModeExitDialog.error || '确认后将恢复编辑、写入和终端工具；此操作不会自动开始执行，仍需发送下一条执行请求。'}
         confirmLabel="切换到构建模式"
         tone="accent"
-        busy={planModeExitBusy || state.busy}
-        onConfirm={() => void confirmPlanModeExit()}
-        onCancel={() => {
-          if (!planModeExitBusy && !state.busy) setPlanModeExitConfirmOpen(false)
-        }}
+        busy={planModeExitDialog.busy}
+        onConfirm={planModeExitDialog.onConfirm}
+        onCancel={planModeExitDialog.onCancel}
       />
       <ConfirmDialog
-        open={yoloConfirmOpen}
+        open={yoloDialog.open}
         title="确认开启 YOLO 模式"
         message="YOLO 模式会自动批准本会话的所有工具权限请求，包括写入文件和执行终端命令。"
-        detail={yoloError || '开启后不再弹出权限确认，也不会写入项目权限规则；发送 /yolo off 或点击 YOLO 标识可随时关闭。'}
+        detail={yoloDialog.error || '开启后不再弹出权限确认，也不会写入项目权限规则；发送 /yolo off 或点击 YOLO 标识可随时关闭。'}
         confirmLabel="开启 YOLO"
         tone="danger"
-        busy={yoloBusy}
-        onConfirm={() => void applyYoloMode(true)}
-        onCancel={() => {
-          if (!yoloBusy) setYoloConfirmOpen(false)
-        }}
+        busy={yoloDialog.busy}
+        onConfirm={yoloDialog.onConfirm}
+        onCancel={yoloDialog.onCancel}
       />
       {taskHistoryMounted && (
         <Suspense fallback={null}>
