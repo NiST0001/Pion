@@ -3,8 +3,8 @@
 import '@testing-library/jest-dom/vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { ConfirmDialog } from '../../src/renderer/src/components/ConfirmDialog'
-import { OperationsModal } from '../../src/renderer/src/components/OperationsModal'
+import { ConfirmDialog } from '../../src/renderer/src/features/common/ConfirmDialog'
+import { OperationsModal } from '../../src/renderer/src/features/operations/OperationsModal'
 
 describe('OperationsModal', () => {
   it('opens a command-labelled portal and closes with Escape', () => {

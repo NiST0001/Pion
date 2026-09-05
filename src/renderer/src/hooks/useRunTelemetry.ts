@@ -22,10 +22,12 @@ function mergeRuns(current: RunOperation[], update: RunTelemetryUpdate, sessionP
 
 export function useRunTelemetry({
   hasBridge,
+  enabled = true,
   sessionPath,
   cwd
 }: {
   hasBridge: boolean
+  enabled?: boolean
   sessionPath?: string
   cwd?: string
 }): {
@@ -38,7 +40,7 @@ export function useRunTelemetry({
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    if (!hasBridge || (!sessionPath && !cwd)) {
+    if (!enabled || !hasBridge || (!sessionPath && !cwd)) {
       setRuns([])
       setLoading(false)
       return
@@ -64,7 +66,7 @@ export function useRunTelemetry({
       active = false
       off()
     }
-  }, [cwd, hasBridge, sessionPath])
+  }, [cwd, enabled, hasBridge, sessionPath])
 
   const latestRun = runs[0] ?? null
   const activeRun = useMemo(

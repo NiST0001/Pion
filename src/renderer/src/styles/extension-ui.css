@@ -1,18 +1,27 @@
 .extension-ui-backdrop {
-  position: fixed;
+  position: absolute;
   inset: 0;
-  z-index: 330;
+  z-index: 31;
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: center;
+  padding: 16px 16px 14px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.extension-ui-backdrop.is-global {
+  position: fixed;
+  z-index: 141;
+  align-items: center;
   padding: 24px;
   background: rgba(0, 0, 0, 0.34);
-  animation: pion-fade-in var(--motion-normal) ease both;
+  pointer-events: auto;
 }
 
 .extension-ui-dialog {
-  width: min(620px, calc(100vw - 32px));
-  max-height: min(760px, calc(100vh - 40px));
+  width: min(620px, 100%);
+  max-height: min(520px, calc(100% - 16px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -21,6 +30,7 @@
   background: var(--bg-elev);
   color: var(--fg);
   box-shadow: var(--shadow-pop);
+  pointer-events: auto;
   animation: pion-pop-in var(--motion-normal) var(--motion-ease-out) both;
 }
 
@@ -30,7 +40,7 @@
   gap: 10px;
   padding: 14px 14px 12px;
   border-bottom: 1px solid var(--border-soft);
-  background: var(--surface-tint);
+  background: linear-gradient(110deg, var(--accent-soft), var(--surface-tint));
 }
 
 .extension-ui-icon {
@@ -178,11 +188,24 @@
   color: var(--on-accent);
 }
 
+.extension-ui-backdrop.is-global .extension-ui-dialog {
+  max-height: min(520px, calc(100vh - 48px));
+}
+
 .extension-ui-dialog button:disabled,
 .extension-ui-dialog input:disabled,
 .extension-ui-dialog textarea:disabled {
   opacity: 0.55;
   cursor: wait;
+}
+
+.extension-ui-dialog:focus,
+.extension-ui-dialog:focus-visible {
+  outline: none !important;
+}
+
+html:not(.pion-keyboard-focus) .extension-ui-dialog :focus-visible {
+  outline: none !important;
 }
 
 html.pion-keyboard-focus .extension-ui-dialog button:focus-visible {
@@ -196,9 +219,14 @@ html.pion-keyboard-focus .extension-ui-dialog button:focus-visible {
     padding: 10px;
   }
 
+  .extension-ui-backdrop.is-global {
+    align-items: center;
+    padding: 12px;
+  }
+
   .extension-ui-dialog {
     width: 100%;
-    max-height: calc(100vh - 20px);
+    max-height: calc(100% - 10px);
   }
 }
 

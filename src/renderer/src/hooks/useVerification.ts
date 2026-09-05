@@ -17,10 +17,12 @@ function mergeRuns(current: VerificationRun[], update: VerificationSnapshotUpdat
 
 export function useVerification({
   hasBridge,
+  enabled = true,
   cwd,
   sessionPath
 }: {
   hasBridge: boolean
+  enabled?: boolean
   cwd?: string
   sessionPath?: string
 }): {
@@ -74,7 +76,14 @@ export function useVerification({
 
   useEffect(() => {
     setLogs({})
-    void load()
+    if (!enabled) {
+      setPlan(null)
+      setPolicy(null)
+      setRuns([])
+      setLoading(false)
+      return
+    }
+    void load(true)
     if (!hasBridge) return
     const offRuns = window.pion.onVerificationRuns((update) => {
       setRuns((current) => mergeRuns(current, update, cwd))
@@ -89,7 +98,7 @@ export function useVerification({
       offRuns()
       offLog()
     }
-  }, [cwd, hasBridge, load])
+  }, [cwd, enabled, hasBridge, load])
 
   const perform = useCallback(async (operation: () => Promise<VerificationRun>): Promise<void> => {
     setBusy(true)

@@ -63,6 +63,81 @@
   margin-top: 13px;
 }
 
+.review-file-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.review-tree-branch,
+.review-tree-group {
+  min-width: 0;
+}
+
+.review-tree-directory {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  gap: 5px;
+  padding: 5px 7px 5px calc(7px + var(--review-tree-indent, 0px));
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-muted);
+  text-align: left;
+}
+
+.review-tree-directory:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.review-tree-directory > svg:first-child {
+  flex: none;
+  color: var(--fg-faint);
+}
+
+.review-tree-directory > svg:nth-child(2) {
+  flex: none;
+  color: color-mix(in srgb, var(--accent-strong) 72%, var(--fg-faint));
+}
+
+.review-tree-directory > span:not(.review-tree-count) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-tree-count {
+  flex: none;
+  min-width: 15px;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  text-align: center;
+}
+
+.review-file-item.review-tree-file {
+  min-height: 28px;
+  gap: 5px;
+  padding: 5px 7px 5px calc(7px + var(--review-tree-indent, 0px));
+}
+
+.review-tree-file-spacer {
+  width: 12px;
+  flex: 0 0 12px;
+}
+
+.review-tree-file > svg {
+  flex: none;
+}
+
 .review-file-item.conflicted,
 .review-file-item.conflicted svg {
   color: var(--danger);
@@ -174,6 +249,34 @@
   display: flex;
   gap: 5px;
   margin-left: auto;
+}
+
+.review-captured-badge {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.review-captured-note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-diff-reveal {
+  min-width: max-content;
+}
+
+.review-captured-detail .diff-view {
+  min-width: max-content;
+  padding-bottom: 20px;
 }
 
 .git-diff-view {
@@ -328,6 +431,12 @@
 
 .git-conflict-save {
   align-self: flex-end;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .review-diff-reveal {
+    animation: none;
+  }
 }
 
 @media (max-width: 1120px) {

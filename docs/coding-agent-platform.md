@@ -59,6 +59,23 @@ queue. `dispatching` or `running` prompts are never replayed because external to
 side effects may already have occurred. A resumed run includes the prior run ID and a
 concise interruption prompt.
 
+Enter is the immediate steering path. Tab-owned follow-ups are kept in Pion's local
+queue so each item can be promoted to a prompt or steer without duplicating Pi's
+raw queue; local follow-ups dispatch only after Pi emits `agent_settled` for a
+successful run. That event is the true idle boundary, including automatic
+compaction/retry, so a failed compaction retry is neither replayed nor projected
+as a successful run. After a failed or aborted turn, the local queue stays blocked
+until the user explicitly promotes an item, preventing accidental replay.
+
+The renderer loads only a viewport-sized newest history page first. Older/newer
+JSONL windows are fetched at scroll edges, prepending preserves the scroll anchor,
+and visible history, final output, and review diff text use independent
+opacity reveals rather than remounting or animating an entire message block.
+Markdown and history text use a waterfall line reveal: each line transitions
+from `opacity: 0` to `opacity: 1` in top-to-bottom order. Streamed Markdown stays
+stable while tokens arrive, so formatting punctuation and parent refreshes cannot
+replay already-visible content.
+
 Usage events are treated as cumulative snapshots until the pinned Pi contract proves
 otherwise. Final assistant-message usage is authoritative. Costs preserve provider
 reported totals; no guessed price is presented as exact. Context pressure uses the

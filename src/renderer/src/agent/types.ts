@@ -41,6 +41,8 @@ export interface ToolItem {
   writeContent?: string
   /** Generic textual output */
   outputText?: string
+  /** Set by live tool events; absent on history replay and paged entries. */
+  live?: boolean
   /** Pion 原生任务或旧 todo 工具结果中的完整任务快照 */
   todos?: AgentTodo[]
 }
@@ -58,6 +60,8 @@ export type TimelineItem =
       images?: ImageContent[]
       timestamp?: string
       historical?: boolean
+      /** Paged history navigation mounts this item statically (no waterfall). */
+      noReveal?: boolean
     }
   | {
       kind: 'assistant'
@@ -66,11 +70,15 @@ export type TimelineItem =
       text: string
       thinking: string
       streaming: boolean
+      /** Set by message_start; absent on history replay and paged entries. */
+      live?: boolean
       error?: string
       historical?: boolean
+      /** Paged history navigation mounts this item statically (no waterfall). */
+      noReveal?: boolean
     }
-  | { kind: 'tool'; id: number; tool: ToolItem; historical?: boolean }
-  | { kind: 'compaction'; id: number; summary: string; historical?: boolean }
+  | { kind: 'tool'; id: number; tool: ToolItem; historical?: boolean; noReveal?: boolean }
+  | { kind: 'compaction'; id: number; entryId?: string; summary: string; historical?: boolean; noReveal?: boolean }
 
 // ---------------------------------------------------------------------------
 // Changes (review panel)
@@ -104,13 +112,19 @@ export interface AgentState {
   thinkingLevels: string[]
   commands: SlashCommandInfo[]
   mode: AgentMode
+  /** Session-scoped: auto-approve every tool-permission prompt. */
+  yolo: boolean
   runningSessionPaths: string[]
   timeline: TimelineItem[]
   timelineMutation: 'replace' | 'prepend' | 'append' | null
   timelineLoading: boolean
   timelineError?: string
   busy: boolean
+  compacting: boolean
+  /** Counts retained for status/telemetry compatibility. */
   queued: { steering: number; followUp: number }
+  /** Text snapshots used by the composer-side queue card. */
+  queuedMessages: { steering: string[]; followUp: string[] }
 }
 
 export const initialState: AgentState = {
@@ -128,12 +142,15 @@ export const initialState: AgentState = {
   thinkingLevels: [],
   commands: [],
   mode: 'build',
+  yolo: false,
   runningSessionPaths: [],
   timeline: [],
   timelineMutation: null,
   timelineLoading: false,
   busy: false,
-  queued: { steering: 0, followUp: 0 }
+  compacting: false,
+  queued: { steering: 0, followUp: 0 },
+  queuedMessages: { steering: [], followUp: [] }
 }
 
 export type Action =

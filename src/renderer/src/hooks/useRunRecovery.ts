@@ -16,10 +16,12 @@ function isRelevantUpdate(
 
 export function useRunRecovery({
   hasBridge,
+  enabled = true,
   sessionPath,
   cwd
 }: {
   hasBridge: boolean
+  enabled?: boolean
   sessionPath?: string
   cwd?: string
 }): {
@@ -38,7 +40,7 @@ export function useRunRecovery({
   candidatesRef.current = candidates
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (!hasBridge || (!sessionPath && !cwd)) {
+    if (!enabled || !hasBridge || (!sessionPath && !cwd)) {
       setCandidates([])
       return
     }
@@ -51,19 +53,19 @@ export function useRunRecovery({
       if (generation.current !== request) return
       setError(cause instanceof Error ? cause.message : String(cause))
     }
-  }, [cwd, hasBridge, sessionPath])
+  }, [cwd, enabled, hasBridge, sessionPath])
 
   useEffect(() => {
     setCandidates([])
     setError('')
     void refresh()
-    if (!hasBridge) return
+    if (!enabled || !hasBridge) return
     const off = window.pion.onRunTelemetry((update) => {
       const ids = new Set(candidatesRef.current.map((candidate) => candidate.run.id))
       if (isRelevantUpdate(update, ids, sessionPath, cwd)) void refresh()
     })
     return off
-  }, [cwd, hasBridge, refresh, sessionPath])
+  }, [cwd, enabled, hasBridge, refresh, sessionPath])
 
   const perform = useCallback(async (
     runId: string,

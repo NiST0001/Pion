@@ -177,8 +177,11 @@ html:not(.pion-keyboard-focus) :where(
   button,
   a[href],
   summary,
+  input,
+  textarea,
+  select,
   [role='button'],
-  [tabindex]:not([tabindex='-1'])
+  [tabindex]
 ):focus-visible {
   outline: none !important;
 }

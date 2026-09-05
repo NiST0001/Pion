@@ -1,7 +1,40 @@
 /* ==========================================================================
    任务面板：停靠在输入框上方的本轮工作计划。
-   高度按未完成任务数自适应；点击顶栏直接展开或折叠。
+   高度按本轮任务数自适应；完成项保留到下一轮计划开始。
    ========================================================================== */
+
+/* The composer can expose both pieces of run context without making either
+   card compete with the input itself: tasks stay on the left, queued user
+   messages stay on the right. */
+.composer-support-row {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  width: min(calc(100% - 48px), 1600px);
+  margin: 0 auto;
+  gap: 12px;
+}
+
+.composer-support-row.has-task-panel:not(.has-queue-panel) {
+  width: min(calc(100% - 48px), 800px);
+}
+
+.composer-support-row .task-panel {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  flex: 1 1 0;
+}
+
+.composer-support-row.has-queue-panel:not(.has-task-panel) {
+  justify-content: flex-end;
+}
+
+.composer-support-row.has-queue-panel:not(.has-task-panel) .queue-panel {
+  max-width: 800px;
+  flex: 0 1 800px;
+}
 
 .task-panel {
   position: relative;
@@ -219,6 +252,111 @@ html.pion-keyboard-focus .task-panel-head:focus-visible {
   text-decoration-color: rgba(var(--accent-rgb), 0.45);
 }
 
+/* 排队消息条目 */
+
+.queue-panel .task-panel-summary > svg {
+  color: var(--warn);
+}
+
+.queue-panel .task-panel-count {
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--warn);
+}
+
+.queue-item {
+  min-height: 30px;
+  height: auto;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+.queue-item-status {
+  border-radius: 8px;
+}
+
+.queue-item-steering .queue-item-status {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.queue-item-follow-up .queue-item-status {
+  border-color: color-mix(in srgb, var(--warn) 58%, var(--border));
+  color: var(--warn);
+}
+
+.queue-item-copy {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+  gap: 7px;
+}
+
+.queue-item-kind {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  color: var(--fg-faint);
+  font-size: 9px;
+  line-height: 1.1;
+}
+
+.queue-item-steering .queue-item-kind {
+  border-color: rgba(var(--accent-rgb), 0.3);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.queue-item-follow-up .queue-item-kind {
+  color: var(--warn);
+}
+
+.queue-item-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+
+.queue-item-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 23px;
+  flex: 0 0 24px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--motion-ease-out),
+    border-color var(--motion-fast) var(--motion-ease-out),
+    color var(--motion-fast) var(--motion-ease-out);
+}
+
+.queue-item-send:hover:not(:disabled),
+.queue-item-send:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.queue-item-send:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.queue-item-send-pending {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1;
+}
+
 /* AI 任务条目 */
 
 @keyframes task-status-spin {
@@ -259,8 +397,25 @@ html.pion-keyboard-focus .task-panel-head:focus-visible {
 }
 
 @media (max-width: 700px) {
+  .composer-support-row,
+  .composer-support-row.has-task-panel:not(.has-queue-panel) {
+    width: calc(100% - 24px);
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  .composer-support-row.has-queue-panel:not(.has-task-panel) .queue-panel {
+    max-width: none;
+    flex-basis: auto;
+  }
+
   .task-panel {
     width: calc(100% - 24px);
+  }
+
+  .composer-support-row .task-panel {
+    width: 100%;
   }
 
   .task-panel.expanded {

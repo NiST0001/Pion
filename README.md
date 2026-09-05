@@ -32,18 +32,18 @@
 
 ### 对话
 - 流式输出 + 思考过程折叠 + 打字指示
-- 统一的克制动效系统：面板、弹窗、菜单、页面切换、树展开、工具详情和附件均有短过渡，并完整支持 `prefers-reduced-motion`
+- 统一的克制动效系统：面板、弹窗、菜单、页面切换、树展开、工具详情、实时 AI 文本和附件均有短过渡，并完整支持 `prefers-reduced-motion`
 - Markdown 渲染（GFM、代码高亮、一键复制）
-- 支持将剪贴板图像直接粘贴到输入框，发送前显示缩略图，也会在会话消息中保留预览
+- 输入框支持将剪贴板图像直接粘贴到输入框，也可使用“@ 参考”按钮、输入 @ 或拖拽选择图像/文本/常见代码文件（图像 ≤ 8 MB、文本 ≤ 1 MB）；图像按原生图像消息发送，文本文件内容作为本次消息的参考上下文
 - 工具调用卡片：edit 显示彩色 Diff（+/- 行统计），write/bash/read 折叠详情
-- 运行中可继续输入（自动作为转向消息 steer 注入）或中止
-- 输入 `/` 打开动态斜杠命令菜单，支持 Pi 内置 `/compact`、`/new`、`/name`、`/clone`，Pion 内置 `/verify`、`/agents`，以及扩展、提示词模板和技能命令
-- 输入框内置「构建 / 计划」模式切换，支持 `Ctrl+Tab` 快速切换；计划模式由 `@narumitw/pi-plan-mode` 提供只读探索和方案整理能力
+- 运行中按 Enter 仍是直接发送（steer 注入当前运行）；Tab 才进入本地可管理的稍后队列，队列卡片的每条消息都可单独“直接发送”
+- 输入 `/` 打开动态斜杠命令菜单，支持 Pi 内置 `/compact`、`/new`、`/name`、`/clone`，Pion 内置 `/plan`、`/verify`、`/agents`、`/yolo`（自动批准本会话工具权限，开启需确认、不写入权限规则），以及扩展、提示词模板和技能命令
+- 输入框内置「构建 / 计划」模式切换，支持 `Ctrl+Tab` 快速切换；计划模式是 Pion 自有的只读资料收集与方案规划模式，不调用任务工具、不修改文件，确认后切回构建模式才开始执行
 - Pi 官方插件商店：原生目录可直接安装和卸载，支持全部/已安装/未安装筛选及目录外已安装包管理（`https://pi.dev/packages`）
 - 技能与工具中心：展示当前配置和已安装插件提供的技能、扩展工具及来源
 - 四套本地主题：陶土深色/浅色保留克制橙色重点，Codex 深色/浅色使用近黑白表面与单色主操作
 - 会话列表预览：支持紧凑、舒适、详细三种显示密度，并持久化保存在本机
-- 对话区左侧提供完整会话历史导航轨：按用户消息显示位置标记，悬停预览问题与回复，点击可加载并居中定位尚未载入的历史窗口
+- 对话区左侧提供完整会话历史导航轨：按用户消息显示位置标记，悬停预览问题与回复，点击可加载并居中定位；可在设置中限制可见条数，超出后用滚轮浏览窗口
 - 会话支持收藏；收藏区固定显示在搜索框下方，点击收藏项会同步选中项目会话
 
 ### 项目
@@ -54,16 +54,18 @@
 - 项目级工具策略覆盖文件读取、文件修改、Shell、网络和插件工具，可分别设为允许、询问或拒绝
 - 默认允许项目内普通读取，其余能力执行前询问；文件工具识别到的目录外/敏感路径及高风险命令始终需要单独确认
 - 权限确认支持仅本次、当前会话和项目永久允许，并覆盖跨项目后台会话的并发请求队列
+- 工具权限请求到达时发送系统通知，点击通知可唤回 Pion 完成批准或拒绝
 - 项目信任和工具确认都是策略保护层，不是操作系统沙箱；Agent 仍以当前系统用户权限运行
 
 ### 会话与分支
-- 会话列表：按项目目录扫描 `~/.pi/agent/sessions/`，点击后以完整最新分页作为静态快照，滚到顶部再按需加载更早内容
-- 首次加载/跳转的历史窗口按屏幕空间自上而下级联淡入（每行延迟由挂载时的视口位置决定，0–380ms）；向上/向下翻页追加的历史保持静态，实时流式输出同样使用渐显动画
+- Git 分支以 worktree 树显示；可在分支行直接创建独立 worktree，或使用铅笔按钮重命名当前本地分支，名称校验和 Git 操作由主进程完成
+- 会话列表：按项目目录扫描 `~/.pi/agent/sessions/`，点击后只加载接近当前屏幕的一小段最新窗口；滚到顶部/底部才按需加载相邻历史，避免一次挂载整段会话
+- 会话历史、正式 AI 输出和审查差异统一使用瀑布式逐行渐入：每行从 `opacity: 0` 过渡到 `opacity: 1`，流式内容不会因格式化或父级刷新反复闪烁，并完整支持 `prefers-reduced-motion`
 - 已加载会话的时间线按路径缓存并即时恢复，随后用 JSONL 叶节点校验后台新增内容；会话后端不重启；全局（跨项目/工作树）最多保留 10 个，超过后按最早加载顺序淘汰
 - 历史分页请求显式绑定目标会话文件，冷会话直接读取 JSONL，不等待 RPC 后台加载扩展和模型；快速连续选择时仅最后一次请求可以激活
 - 会话支持复制与从任意用户消息处分叉（fork）；fork 后时间线回到分叉点，输入框自动预填原消息
 - 新建会话；RPC 子进程每次启动为新会话，落盘懒持久化（空会话不产生文件）
-- 原生任务系统：Pion 自带 `pion_task` 工具，不依赖外部 todo 插件；当前轮任务停靠在输入框上方，完成项按用户消息归档到历史任务面板
+- 构建模式的原生任务系统：Pion 自带 `pion_task` 工具，不依赖外部 todo 插件；计划模式不会调用它，当前轮任务停靠在输入框上方，完成项按用户消息归档到历史任务面板
 
 ### 审查与运行闭环
 - 对话末尾以 Codex 风格卡片汇总本轮 edit/write；审查栏以实时 Git porcelain-v2 状态为准，不依赖聊天历史重建工作区
@@ -82,6 +84,8 @@
 
 ### 模型
 - 模型选择器：按 provider 分组，显示上下文窗口与推理能力标记
+- 设置中心直接读取 Pi `ModelRuntime` 完整提供商目录，支持 API 密钥、订阅 OAuth、设备代码、浏览器回调、退出与取消；凭据仍由 Pi `auth.json` 管理且不会回传 renderer
+- 保留自定义兼容端点入口，将模型元数据写入 `models.json`、凭据分离写入 `auth.json`，并仅在所有保留后台空闲时重载
 - 思考级别切换（off/minimal/low/medium/high…按模型支持）
 - 构建 / 计划模式和斜杠命令均通过 RPC 接入 pi，计划状态随会话恢复
 
@@ -130,21 +134,42 @@ npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 
 src/
 ├── main/                 # Electron 主进程
 │   ├── index.ts          # 窗口创建 + IPC 注册
-│   ├── agent-bridge.ts   # RpcClient 生命周期、后台池、会话与模型桥接
+│   ├── agent/            # Agent RPC 桥接、Pion 扩展与 wire 映射
+│   │   ├── agent-bridge.ts       # IPC facade
+│   │   ├── backend-pool.ts       # 后台实例池与 FIFO 淘汰
+│   │   ├── backend-events.ts     # RPC 状态迁移
+│   │   ├── pending-requests.ts   # 权限、扩展 UI 与认证请求队列
+│   │   ├── queue-projection.ts   # Pi 原始队列与 Pion 本地队列投影
+│   │   ├── provider-auth-ui.ts   # 提供商认证交互适配
+│   │   ├── plan-mode.ts
+│   │   ├── task-planning.ts
+│   │   ├── wire.ts
+│   │   ├── constants.ts
+│   │   ├── types.ts
+│   │   └── utils.ts
 │   ├── git.ts            # Git 分支与 worktree 操作
 │   ├── checkpoints.ts    # 每轮工作区快照、差异检测与安全恢复
 │   ├── run-store.ts      # 运行遥测、队列和重启恢复持久化
 │   ├── verification.ts   # 命令发现、取消、日志与有界修复
-│   ├── git-service.ts    # 实时 Git diff/stage/commit/conflict 工作流
+│   ├── git-service.ts    # 实时 Git 工作流 facade
+│   ├── git/              # Git 进程、解析器与限制常量
+│   │   ├── process.ts
+│   │   ├── parsers.ts
+│   │   └── constants.ts
 │   ├── workflow-manager.ts # 隔离多 Agent 状态机、合并与清理
+│   ├── workflow/         # worker runner、验证 runner 与工作流契约
+│   │   ├── runners.ts
+│   │   ├── types.ts
+│   │   ├── constants.ts
+│   │   └── utils.ts
 │   ├── tool-permissions.ts # 项目策略存储与 Pi 全局权限门扩展
-│   ├── wire.ts           # pi SDK -> renderer wire 映射
 │   ├── plugin-manager.ts # 官方插件目录与 pi install
 │   └── projects.ts       # 项目列表持久化
 ├── preload/
 │   └── index.ts          # contextBridge -> window.pion
 ├── shared/
-│   ├── types.ts          # IPC 契约（主/预加载/渲染共享，SDK 无关）
+│   ├── types.ts          # IPC 数据契约（主/预加载/渲染共享，SDK 无关）
+│   ├── pion-api.ts       # preload -> renderer 的类型化 API facade
 │   ├── operations.ts     # 运行、验证与 Git 领域类型
 │   ├── workflows.ts      # 多 Agent 状态机投影
 │   └── ipc.ts            # IPC 频道一事实来源
@@ -157,30 +182,46 @@ src/
         │   ├── reducer.ts
         │   ├── timeline.ts
         │   └── sessionOrder.ts
-        ├── hooks/useAgent.ts     # IPC 订阅与 actions 组装
-        └── components/
-            ├── Sidebar.tsx       # 项目/分支工作树
-            ├── SessionList.tsx   # 会话条目、预览密度、拖拽与右键操作
-            ├── ChatMessage.tsx   # 消息气泡（Markdown、fork 按钮）
-            ├── Markdown.tsx      # react-markdown + 高亮 + 复制
-            ├── DiffView.tsx      # pi diff 格式 -> 彩色行渲染
-            ├── ToolCallItem.tsx  # 工具调用卡片
-            ├── Composer.tsx      # 输入区（文本/剪贴板图像/发送/停止）
-            ├── ProjectTrustBanner.tsx # 项目资源信任提示与快速决策
-            ├── HistoryNavigator.tsx # 会话历史标记、预览与跨分页跳转
-            ├── ToolPermissionModal.tsx # 工具调用授权队列
-            ├── ToolPermissionSettings.tsx # 项目工具策略设置
-            ├── ModelPicker.tsx   # 模型 + 思考级别选择器
-            ├── GitDiffView.tsx   # Git hunk/行级审查操作
-            ├── VerificationPanel.tsx # 自动验证状态与日志
-            ├── WorkflowPanel.tsx # 有边界多 Agent 工作流
-            ├── PluginStoreModal.tsx # pi 插件目录 / 安装 / 状态筛选
-            └── SkillsToolsModal.tsx # 内置与插件技能/工具
+        ├── hooks/                # renderer 状态与副作用 hooks
+        │   ├── agent/            # Agent 历史、运行、会话、提供商和订阅 hooks
+        │   │   ├── useAgentHistory.ts
+        │   │   ├── useAgentRunActions.ts
+        │   │   ├── useAgentSessionActions.ts
+        │   │   └── useAgentSubscriptions.ts
+        │   ├── useAgent.ts          # 对外 facade
+        │   ├── usePanelLayout.ts
+        │   ├── useGitWorkspace.ts
+        │   ├── useRunRecovery.ts
+        │   ├── useRunTelemetry.ts
+        │   ├── useVerification.ts
+        │   └── useWorkflows.ts
+        ├── utils/                # renderer 纯工具与持久化辅助
+        ├── styles/               # 按领域组织的基础、面板和动效样式
+        │   ├── settings/          # 设置基础、模型与主题样式
+        │   ├── refinements/       # 侧栏、项目树、能力中心与布局微调
+        │   ├── plugin-store.css   # 插件商店目录与浏览器面板
+        │   └── review-layout.css  # 审查分栏布局覆盖
+        └── features/             # 按用户功能域组织的 UI
+            ├── chat/             # Composer、参考文件、菜单、Markdown、消息和时间线
+            ├── session/          # 会话列表、历史导航与任务面板
+            ├── project/          # 项目、分支和信任状态
+            ├── review/           # Diff、文件变更和审查
+            ├── operations/       # 验证、工作流、权限和运行状态
+            ├── settings/         # 设置外壳、模型页面、标题和工具权限配置
+            ├── capabilities/   # 插件、技能与工具中心
+            ├── chrome/          # 标题栏与窗口级 UI
+            └── common/           # 空状态、确认、输入和扩展交互等通用组件
 ```
+
+旧 `renderer/src/components/*` 路径以及 `src/main/agent-bridge.ts`、
+`src/main/wire.ts`、`src/main/task-planning.ts` 保留轻量 re-export facade，
+便于外部扩展和旧测试平滑迁移。
 
 ## 说明
 
+- 本项目采用 MIT License，完整条款见根目录 `LICENSE`。
 - 本项目**仅本地开发**，未配置打包分发（electron-builder 等）；`npm run dev` 为主工作流。
 - 模型/思考等级切换、会话树、fork、斜杠命令、计划模式、手动压缩与 HTML 导出均已接入。
 - 工具策略保存在 Electron userData 下的 `pion-tool-permissions.json`；运行时生成的全局 Pi 权限门扩展位于 `runtime/` 子目录。
 - 会话文件由 pi 自身管理（JSONL，按目录分桶），Pion 只读扫描列表；跨项目点击会话时交给对应的 pi 后台加载。
+- `useAgent.ts`、`AgentBridge`、`GitService` 和 `WorkflowManager` 保留为对外 facade；具体缓存、进程、解析、交互和 runner 逻辑放在同领域子模块中。

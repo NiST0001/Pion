@@ -209,20 +209,23 @@
   white-space: pre-wrap;
 }
 
-.caret {
-  display: inline-block;
-  width: 7px;
-  height: 15px;
-  margin-left: 2px;
-  vertical-align: text-bottom;
-  background: var(--accent);
-  animation: blink 0.9s steps(1) infinite;
-}
-
 .thinking {
   margin-bottom: 10px;
   font-size: 12px;
   color: var(--fg-faint);
+}
+
+/* Keep a thinking-only turn visually grouped with the tool it introduces. */
+.row-assistant-thinking-only {
+  margin-bottom: -10px;
+}
+
+.row-assistant-thinking-only .bubble-assistant {
+  padding-bottom: 2px;
+}
+
+.row-assistant-thinking-only .thinking {
+  margin-bottom: 0;
 }
 
 .thinking summary {
@@ -241,7 +244,7 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
 }
 
 .thinking pre {
-  margin-top: 4px;
+  margin: 4px 0 0;
   padding: 2px 0 2px 12px;
   background: transparent;
   border: 0;

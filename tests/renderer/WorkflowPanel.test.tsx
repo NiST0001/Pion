@@ -3,7 +3,7 @@
 import '@testing-library/jest-dom/vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { WorkflowPanel } from '../../src/renderer/src/components/WorkflowPanel'
+import { WorkflowPanel } from '../../src/renderer/src/features/operations/WorkflowPanel'
 import type { WorkflowSnapshot } from '../../src/shared/workflows'
 
 function workflow(state: WorkflowSnapshot['state']): WorkflowSnapshot {

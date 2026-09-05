@@ -7,7 +7,11 @@
 @import './styles/composer.css';
 @import './styles/chat.css';
 @import './styles/history-navigator.css';
+@import './styles/settings/models.css';
 @import './styles/settings.css';
+@import './styles/settings/themes.css';
+@import './styles/plugin-store.css';
+@import './styles/review-layout.css';
 @import './styles/permissions.css';
 @import './styles/changes.css';
 @import './styles/git-review.css';
@@ -22,5 +26,11 @@
 @import './styles/operations-modal.css';
 @import './styles/chrome.css';
 @import './styles/refinements.css';
+@import './styles/refinements/sidebar.css';
+@import './styles/refinements/capabilities.css';
+@import './styles/refinements/project.css';
+@import './styles/refinements/tree.css';
+@import './styles/refinements/layout.css';
+@import './styles/refinements/final.css';
 @import './styles/typography.css';
 @import './styles/motion.css';

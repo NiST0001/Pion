@@ -12,6 +12,7 @@ export const IPC = {
   AgentStop: 'pion:agent-stop',
   AgentSend: 'pion:agent-send',
   AgentQueue: 'pion:agent-queue',
+  AgentSendQueued: 'pion:agent-send-queued',
   AgentAbort: 'pion:agent-abort',
   AgentRunCheckpoint: 'pion:agent-run-checkpoint',
   AgentRollbackCheckpoint: 'pion:agent-rollback-checkpoint',
@@ -63,7 +64,15 @@ export const IPC = {
   // commands, modes, model & thinking
   AgentCommands: 'pion:agent-commands',
   AgentSetMode: 'pion:agent-set-mode',
+  AgentSetYolo: 'pion:agent-set-yolo',
   AgentModels: 'pion:agent-models',
+  AgentModelProviders: 'pion:agent-model-providers',
+  AgentLoginModelProvider: 'pion:agent-login-model-provider',
+  AgentLogoutModelProvider: 'pion:agent-logout-model-provider',
+  AgentModelProviderAuthState: 'pion:agent-model-provider-auth-state',
+  AgentCancelModelProviderAuth: 'pion:agent-cancel-model-provider-auth',
+  AgentOpenModelProviderAuthUrl: 'pion:agent-open-model-provider-auth-url',
+  AgentAddModelProvider: 'pion:agent-add-model-provider',
   AgentSkills: 'pion:agent-skills',
   AgentCapabilities: 'pion:agent-capabilities',
   AgentSetModel: 'pion:agent-set-model',
@@ -108,6 +117,7 @@ export const IPC = {
   ProjectsPush: 'pion:projects',
   BranchesList: 'pion:branches-list',
   BranchCreate: 'pion:branch-create',
+  BranchRename: 'pion:branch-rename',
   GitStatus: 'pion:git-status',
   GitDiff: 'pion:git-diff',
   GitStagePaths: 'pion:git-stage-paths',
@@ -143,5 +153,6 @@ export const IPC_EVENTS = {
   Projects: 'pion:projects',
   ToolPermissionRequests: 'pion:tool-permission-requests',
   ExtensionUiRequests: 'pion:extension-ui-requests',
+  ModelProviderAuthState: 'pion:model-provider-auth-state',
   WindowState: 'pion:window-state'
 } as const

@@ -9,8 +9,9 @@
 #   ~/.local/share/applications/pion.desktop  桌面快捷方式
 #
 # 用法:
-#   ./scripts/install-local.sh            # 编译 + 安装
+#   ./scripts/install-local.sh            # 递增补丁版本号 + 编译 + 安装
 #   ./scripts/install-local.sh --no-build # 跳过编译，直接安装现有 out/
+#   ./scripts/install-local.sh --no-bump  # 跳过版本号递增
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -21,7 +22,27 @@ BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 FONT_BOLD="/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"
 
-if [ "${1:-}" != "--no-build" ]; then
+BUILD=1
+BUMP=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-build) BUILD=0 ;;
+    --no-bump) BUMP=0 ;;
+    *) echo "[install] 未知参数: $arg（可用: --no-build --no-bump）" >&2; exit 1 ;;
+  esac
+done
+
+if [ "$BUMP" -eq 1 ]; then
+  OLD_VERSION="$(node -p "require('./package.json').version")"
+  if command -v npm >/dev/null 2>&1; then
+    NEW_VERSION="$(npm version patch --no-git-tag-version)"
+  else
+    NEW_VERSION="$(node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));const v=p.version.split('.');v[2]=String(Number(v[2]||0)+1);p.version=v.join('.');fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n');console.log('v'+p.version)")"
+  fi
+  echo "[install] 版本号: $OLD_VERSION -> $NEW_VERSION"
+fi
+
+if [ "$BUILD" -eq 1 ]; then
   echo "[install] 编译（electron-vite build）..."
   if command -v npm >/dev/null 2>&1; then
     npm run build
@@ -56,6 +77,9 @@ rm -f "$LIST"
 # Electron 在 package.json 里属 devDependency，但它是桌面应用运行时本体
 rm -rf "$APP_DIR/node_modules/electron"
 cp -a node_modules/electron "$APP_DIR/node_modules/electron"
+# npm ls may still report packages left in the developer checkout after a dependency
+# removal. Never ship the removed third-party plan extension (or its namespace).
+rm -rf "$APP_DIR/node_modules/@narumitw"
 mkdir -p "$APP_DIR/node_modules/.bin"
 ln -sfn ../electron/cli.js "$APP_DIR/node_modules/.bin/electron"
 

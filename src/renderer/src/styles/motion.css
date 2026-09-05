@@ -1,7 +1,7 @@
 /* ==========================================================================
    Pion motion system
    Short, restrained transitions for interactive UI. Restored conversation
-   history intentionally remains static; only live streaming output animates.
+   history keeps its layout static; visible text elements may reveal independently.
    ========================================================================== */
 
 :root {
@@ -164,7 +164,8 @@ body,
 
 .composer-inline-controls .picker-menu,
 .composer-project-menu,
-.slash-command-menu {
+.slash-command-menu,
+.reference-menu {
   transform-origin: bottom center;
   animation: pion-menu-in-up var(--motion-normal) var(--motion-ease-out) both;
 }
@@ -264,7 +265,7 @@ button:not(:disabled):active,
   transition: transform var(--motion-normal) var(--motion-ease-out);
 }
 
-/* Paged/prepended history stays static; freshly loaded windows use .history-reveal. */
+/* History rows keep their layout static; visible characters reveal independently. */
 .timeline > .row:not(.streaming-reveal):not(.history-reveal),
 .timeline > .tool-call:not(.history-reveal),
 .timeline > .compaction-marker:not(.history-reveal) {

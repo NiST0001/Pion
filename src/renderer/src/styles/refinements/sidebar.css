@@ -1,0 +1,109 @@
+/* sidebar quick actions ----------------------------------------------------- */
+
+.sidebar-toolbar {
+  position: relative;
+  padding: 0 0 14px;
+  margin: 0 0 7px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.sidebar-quick-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.sidebar-new-session,
+.sidebar-tools-button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 9px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  font-size: 12px;
+  text-align: left;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, transform 0.12s ease;
+}
+
+.sidebar-new-session {
+  background: transparent;
+  color: var(--fg-dim);
+  font-weight: 500;
+}
+
+.sidebar-new-session:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.sidebar-tools-button {
+  background: transparent;
+  color: var(--fg-dim);
+}
+
+.sidebar-tools-button:hover {
+  border-color: rgba(var(--accent-rgb), 0.35);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.sidebar-tools-arrow {
+  margin-left: auto;
+  color: var(--fg-faint);
+  transition: color 0.15s ease, transform 0.15s ease;
+}
+
+.sidebar-tools-button:hover .sidebar-tools-arrow {
+  color: var(--accent-strong);
+  transform: translateX(2px);
+}
+
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  background: var(--selected-bg);
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--fg-faint);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, color 0.12s ease;
+}
+
+.sidebar-search:focus-within {
+  border-color: rgba(var(--accent-rgb), 0.65);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.sidebar-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+}
+
+.sidebar-search input::placeholder {
+  color: var(--fg-faint);
+}
+
+.sidebar-search input::-webkit-search-cancel-button {
+  opacity: 0.55;
+  filter: grayscale(1);
+}
+
+
+@media (max-width: 700px) {
+  .sidebar-toolbar {
+    padding-bottom: 11px;
+  }
+}
+

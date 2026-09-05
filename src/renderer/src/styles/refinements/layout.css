@@ -1,0 +1,58 @@
+/* resizable side panels ----------------------------------------------------- */
+
+.sidebar,
+.review-panel {
+  position: relative;
+}
+
+.sidebar-resizer,
+.review-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 40;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.sidebar-resizer {
+  right: -5px;
+}
+
+.review-resizer {
+  left: -5px;
+}
+
+.sidebar-resizer::after,
+.review-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s ease, box-shadow 0.12s ease;
+}
+
+.sidebar-resizer::after {
+  right: 4px;
+}
+
+.review-resizer::after {
+  left: 4px;
+}
+
+.sidebar-resizer:hover::after,
+.review-resizer:hover::after {
+  opacity: 0.85;
+  box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.45);
+}
+
+body.pion-resizing-panels,
+body.pion-resizing-panels * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+

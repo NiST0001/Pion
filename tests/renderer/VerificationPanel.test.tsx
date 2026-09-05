@@ -3,7 +3,7 @@
 import '@testing-library/jest-dom/vitest'
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { VerificationPanel } from '../../src/renderer/src/components/VerificationPanel'
+import { VerificationPanel } from '../../src/renderer/src/features/operations/VerificationPanel'
 
 const handlers = {
   onStart: vi.fn(),

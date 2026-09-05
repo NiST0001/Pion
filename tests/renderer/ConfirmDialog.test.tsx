@@ -3,7 +3,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import { ConfirmDialog } from '../../src/renderer/src/components/ConfirmDialog'
+import { ConfirmDialog } from '../../src/renderer/src/features/common/ConfirmDialog'
 
 describe('ConfirmDialog', () => {
   it('renders in a portal and confirms explicitly', async () => {

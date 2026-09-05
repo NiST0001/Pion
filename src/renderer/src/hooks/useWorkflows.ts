@@ -3,6 +3,7 @@ import type { WorkflowSnapshot } from '../../../shared/workflows'
 
 interface UseWorkflowsOptions {
   hasBridge: boolean
+  enabled?: boolean
   cwd?: string
 }
 
@@ -10,7 +11,7 @@ function order(values: WorkflowSnapshot[]): WorkflowSnapshot[] {
   return [...values].sort((left, right) => right.updatedAt - left.updatedAt)
 }
 
-export function useWorkflows({ hasBridge, cwd }: UseWorkflowsOptions) {
+export function useWorkflows({ hasBridge, enabled = true, cwd }: UseWorkflowsOptions) {
   const [workflows, setWorkflows] = useState<WorkflowSnapshot[]>([])
   const [selectedId, setSelectedId] = useState<string>()
   const [loading, setLoading] = useState(false)
@@ -38,6 +39,12 @@ export function useWorkflows({ hasBridge, cwd }: UseWorkflowsOptions) {
   }, [cwd, hasBridge])
 
   useEffect(() => {
+    if (!enabled) {
+      setWorkflows([])
+      setSelectedId(undefined)
+      setLoading(false)
+      return
+    }
     void refresh()
     if (!hasBridge || !cwd) return
     return window.pion.onWorkflowUpdate(({ workflow }) => {
@@ -50,7 +57,7 @@ export function useWorkflows({ hasBridge, cwd }: UseWorkflowsOptions) {
       ]))
       setSelectedId((current) => current ?? workflow.id)
     })
-  }, [cwd, hasBridge, refresh])
+  }, [cwd, enabled, hasBridge, refresh])
 
   const invoke = useCallback(async (
     operation: () => Promise<WorkflowSnapshot>

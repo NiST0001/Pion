@@ -2,7 +2,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification } from 'el
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { AgentBridge } from './agent-bridge'
+import { AgentBridge } from './agent/agent-bridge'
 import { AppSettings } from './app-settings'
 import { RunStore } from './run-store'
 import { VerificationService } from './verification'
@@ -13,13 +13,16 @@ import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
 import type {
+  AddModelProviderInput,
   ExtensionUiResponse,
   GitDiffScope,
   GitSelectionRequest,
   ImageContent,
+  ModelProviderAuthType,
   ProjectMeta,
   RunTelemetryQuery,
   StartVerificationOptions,
+  ToolPermissionRequest,
   ToolPermissionResolution,
   VerificationPolicy,
   ToolPermissionRules
@@ -30,7 +33,8 @@ const userDataOverride = process.env.PION_USER_DATA_DIR?.trim()
 if (userDataOverride) app.setPath('userData', resolve(userDataOverride))
 
 const runStore = new RunStore(join(app.getPath('userData'), 'pion-runs.json'))
-const bridge = new AgentBridge(runStore)
+const appSettings = new AppSettings()
+const bridge = new AgentBridge(runStore, appSettings)
 const verification = new VerificationService(join(app.getPath('userData'), 'pion-verification.json'))
 const workflowPermissionStore = new ToolPermissionStore()
 const workflows = new WorkflowManager({
@@ -43,8 +47,15 @@ const workflows = new WorkflowManager({
 const git = new GitService()
 const plugins = new PluginManager()
 const projects = new ProjectStore()
-const appSettings = new AppSettings()
 let completionNotificationsEnabled = true
+
+function focusMainWindow(): void {
+  const win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed())
+  if (!win) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
 
 function showSessionCompletionNotification({ cwd }: { cwd: string; sessionPath?: string }): void {
   if (!completionNotificationsEnabled || !Notification.isSupported()) return
@@ -54,20 +65,31 @@ function showSessionCompletionNotification({ cwd }: { cwd: string; sessionPath?:
       title: 'Pion · 输出完成',
       body: `${projectName} 会话输出已完成`
     })
-    notification.on('click', () => {
-      const win = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed())
-      if (!win) return
-      if (win.isMinimized()) win.restore()
-      win.show()
-      win.focus()
-    })
+    notification.on('click', focusMainWindow)
     notification.show()
   } catch (error) {
     console.error('[pion] failed to show session completion notification:', error)
   }
 }
 
+function showToolPermissionNotification(request: ToolPermissionRequest): void {
+  if (!Notification.isSupported()) return
+  const projectName = basename(request.cwd) || '当前项目'
+  const summary = request.summary.trim() || `${request.toolName} 请求执行操作`
+  try {
+    const notification = new Notification({
+      title: 'Pion · 需要批准',
+      body: `${projectName}：${summary.slice(0, 180)}`
+    })
+    notification.on('click', focusMainWindow)
+    notification.show()
+  } catch (error) {
+    console.error('[pion] failed to show tool permission notification:', error)
+  }
+}
+
 bridge.onSessionCompleted(showSessionCompletionNotification)
+bridge.onToolPermissionRequested(showToolPermissionNotification)
 bridge.onRunCompleted((run) => verification.handleAgentRunCompleted(run))
 verification.setAutoRepairHandler((run, prompt) =>
   bridge.startVerificationRepair(run.sessionPath, run.cwd, prompt)
@@ -158,6 +180,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC.AgentStop, () => bridge.stop())
   ipcMain.handle(IPC.AgentSend, (_event, message: string, images?: ImageContent[]) => bridge.send(message, images))
   ipcMain.handle(IPC.AgentQueue, (_event, message: string, images?: ImageContent[]) => bridge.queue(message, images))
+  ipcMain.handle(
+    IPC.AgentSendQueued,
+    (_event, kind: 'steering' | 'followUp', index: number) => bridge.sendQueuedMessage(kind, index)
+  )
   ipcMain.handle(IPC.AgentAbort, () => bridge.abort())
   ipcMain.handle(IPC.AgentRunCheckpoint, () => bridge.getRunCheckpoint())
   ipcMain.handle(IPC.AgentRollbackCheckpoint, () => bridge.rollbackRunCheckpoint())
@@ -246,7 +272,25 @@ function registerIpc(): void {
   // commands, modes, model & thinking -------------------------------------------
   ipcMain.handle(IPC.AgentCommands, () => bridge.getCommands())
   ipcMain.handle(IPC.AgentSetMode, (_event, mode: 'build' | 'plan') => bridge.setMode(mode))
+  ipcMain.handle(IPC.AgentSetYolo, (_event, enabled: boolean) => bridge.setYoloMode(enabled === true))
   ipcMain.handle(IPC.AgentModels, () => bridge.getModels())
+  ipcMain.handle(IPC.AgentModelProviders, () => bridge.getModelProviders())
+  ipcMain.handle(
+    IPC.AgentLoginModelProvider,
+    (_event, providerId: string, authType: ModelProviderAuthType) =>
+      bridge.loginModelProvider(providerId, authType)
+  )
+  ipcMain.handle(IPC.AgentLogoutModelProvider, (_event, providerId: string) =>
+    bridge.logoutModelProvider(providerId)
+  )
+  ipcMain.handle(IPC.AgentModelProviderAuthState, () => bridge.getModelProviderAuthState())
+  ipcMain.handle(IPC.AgentCancelModelProviderAuth, () => bridge.cancelModelProviderAuth())
+  ipcMain.handle(IPC.AgentOpenModelProviderAuthUrl, (_event, url: string) =>
+    bridge.openModelProviderAuthUrl(url)
+  )
+  ipcMain.handle(IPC.AgentAddModelProvider, (_event, input: AddModelProviderInput) =>
+    bridge.addModelProvider(input)
+  )
   ipcMain.handle(IPC.AgentSkills, () => bridge.getSkills())
   ipcMain.handle(IPC.AgentCapabilities, () => bridge.getCapabilities())
   ipcMain.handle(IPC.AgentSetModel, (_event, provider: string, modelId: string) =>
@@ -305,7 +349,9 @@ function registerIpc(): void {
     bridge.compactNow(customInstructions)
   )
   ipcMain.handle(IPC.AgentExportHtml, () => bridge.exportSessionHtml())
-  ipcMain.handle(IPC.AgentRenameSession, (_event, name: string) => bridge.renameSession(name))
+  ipcMain.handle(IPC.AgentRenameSession, (_event, name: string, sessionPath?: string) =>
+    bridge.renameSession(name, sessionPath)
+  )
   ipcMain.handle(IPC.AgentSetSteeringMode, (_event, mode: 'all' | 'one-at-a-time') =>
     bridge.setSteeringMode(mode)
   )
@@ -336,6 +382,8 @@ function registerIpc(): void {
   )
   ipcMain.handle(IPC.BranchesList, (_event, cwd: string) => bridge.listBranches(cwd))
   ipcMain.handle(IPC.BranchCreate, (_event, cwd: string, name: string) => bridge.createBranch(cwd, name))
+  ipcMain.handle(IPC.BranchRename, (_event, cwd: string, oldName: string, newName: string) =>
+    bridge.renameBranch(cwd, oldName, newName))
   ipcMain.handle(IPC.GitStatus, (_event, cwd: string) => git.getStatus(cwd))
   ipcMain.handle(IPC.GitDiff, (_event, cwd: string, path: string, scope: GitDiffScope) =>
     git.getDiff(cwd, path, scope)

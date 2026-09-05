@@ -1,3 +1,15 @@
+/* Stable containing block for both the scroll viewport and composer dock.
+   The task panel may redistribute space inside this shell, but cannot resize
+   the navigator's coordinate system. */
+.conversation-shell {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .chat-stage {
   position: relative;
   flex: 1;
@@ -10,7 +22,7 @@
   height: 100%;
 }
 
-.chat-stage.has-history-navigator .chat-scroll {
+.conversation-shell.has-history-navigator .chat-scroll {
   padding-left: 54px;
 }
 
@@ -22,33 +34,103 @@
   left: 9px;
   width: 36px;
   pointer-events: none;
-  transform: translateY(var(--history-navigator-task-offset, 0px));
-  transition: transform var(--motion-slow) var(--motion-ease-out);
 }
 
 .history-navigator-track {
   position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 5px;
-  padding: 6px 0;
+  top: 50%;
+  left: 0;
+  box-sizing: border-box;
+  display: block;
+  width: 40px;
+  max-height: 100%;
+  overflow: hidden;
+  padding: 0;
   border-radius: 8px;
   pointer-events: auto;
-  cursor: pointer;
+  cursor: ns-resize;
   touch-action: none;
+  transform: translateY(-50%);
   transition: background 0.14s ease;
+}
+
+.history-navigator-track.has-before.has-after {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 12px, #000 calc(100% - 12px), transparent);
+}
+
+.history-navigator-track.has-before:not(.has-after) {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px);
+  mask-image: linear-gradient(to bottom, transparent, #000 12px);
+}
+
+.history-navigator-track.has-after:not(.has-before) {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 12px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 12px), transparent);
 }
 
 .history-navigator-track:hover {
   background: transparent;
 }
 
+/* The track keeps its 36px hit area, but the hover-scaled bars may paint to
+   the right so their endpoint lengths can form the requested decay curve. */
+.history-navigator.wave-active .history-navigator-track {
+  overflow: visible;
+  clip-path: polygon(0 0, 84px 0, 84px 100%, 0 100%);
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+.history-navigator-strip {
+  box-sizing: border-box;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 6px 0;
+}
+
+.history-navigator-strip.wheel-scrolling {
+  animation: history-navigator-smooth-scroll 260ms cubic-bezier(0.18, 0.74, 0.22, 1) both;
+}
+
+@keyframes history-navigator-smooth-scroll {
+  from {
+    transform: translateY(var(--history-wheel-offset));
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.history-navigator-marker-slot {
+  position: relative;
+  flex: 0 0 3px;
+  width: 100%;
+  height: 3px;
+}
+
+.history-navigator-marker-slot.has-group-divider::after {
+  position: absolute;
+  top: calc(100% + var(--history-divider-offset));
+  left: 8px;
+  width: 32px;
+  height: 1px;
+  border-radius: 999px;
+  background: var(--fg-dim);
+  content: '';
+  opacity: 0.72;
+  pointer-events: none;
+  transform: translateY(-50%) scaleY(0.3);
+  transform-origin: center;
+}
+
 .history-navigator-marker {
   position: relative;
-  flex: 0 1 3px;
+  display: block;
   width: 14px;
   height: 3px;
   min-height: 1.5px;
@@ -83,6 +165,16 @@ html.pion-keyboard-focus .history-navigator-marker:focus-visible {
   opacity: 0.28;
 }
 
+.history-navigator-range {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .history-navigator-preview {
   position: absolute;
   left: 54px;
@@ -94,6 +186,11 @@ html.pion-keyboard-focus .history-navigator-marker:focus-visible {
   color: var(--fg);
   transform: translateY(-50%);
   pointer-events: none;
+  transition: left 160ms ease;
+}
+
+.history-navigator.wave-active .history-navigator-preview {
+  left: 78px;
 }
 
 .history-navigator-preview strong {
@@ -150,7 +247,7 @@ html.pion-keyboard-focus .history-navigator-marker:focus-visible {
 }
 
 @media (max-width: 760px) {
-  .chat-stage.has-history-navigator .chat-scroll {
+  .conversation-shell.has-history-navigator .chat-scroll {
     padding-left: 42px;
   }
 
@@ -163,9 +260,21 @@ html.pion-keyboard-focus .history-navigator-marker:focus-visible {
     left: 34px;
     width: min(280px, calc(100vw - 72px));
   }
+
+  .history-navigator.wave-active .history-navigator-preview {
+    left: 72px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .history-navigator-strip.wheel-scrolling {
+    animation: none;
+  }
+
+  .history-navigator-preview {
+    transition: none;
+  }
+
   .history-jump-target .bubble {
     animation: none;
     box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.3);

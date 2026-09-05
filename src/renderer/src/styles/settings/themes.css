@@ -1,0 +1,190 @@
+/* 陶土主题卡片 ------------------------------------------------------------- */
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.theme-choice {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+  padding: 9px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  text-align: left;
+  transition: border-color 0.12s ease, background 0.12s ease, transform 0.12s ease;
+}
+
+.theme-choice:hover {
+  background: var(--bg-hover);
+  border-color: var(--fg-faint);
+  transform: translateY(-1px);
+}
+
+.theme-choice.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.theme-card-preview {
+  display: block;
+  overflow: hidden;
+  height: 78px;
+  border: 1px solid;
+  border-radius: 7px;
+}
+
+.theme-card-preview.terracotta-dark {
+  background: #211f1d;
+  border-color: #3b3733;
+}
+
+.theme-card-preview.terracotta-light {
+  background: #f7f5f2;
+  border-color: #ded8d1;
+}
+
+.theme-card-preview.codex-dark {
+  background: #171717;
+  border-color: #383838;
+}
+
+.theme-card-preview.codex-light {
+  background: #f7f7f7;
+  border-color: #d8d8d8;
+}
+
+.theme-card-top {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 17px;
+  padding: 0 7px;
+  border-bottom: 1px solid;
+}
+
+.terracotta-dark .theme-card-top {
+  background: #292623;
+  border-color: #3b3733;
+}
+
+.terracotta-light .theme-card-top {
+  background: #fffdfa;
+  border-color: #e5dfd9;
+}
+
+.codex-dark .theme-card-top {
+  background: #1f1f1f;
+  border-color: #383838;
+}
+
+.codex-light .theme-card-top {
+  background: #ffffff;
+  border-color: #dddddd;
+}
+
+.theme-card-top i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #d97757;
+}
+
+.codex-dark .theme-card-top i {
+  background: #f1f1ef;
+}
+
+.codex-light .theme-card-top i {
+  background: #202020;
+}
+
+.theme-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+}
+
+.theme-card-line,
+.theme-card-pill {
+  display: block;
+  height: 4px;
+  border-radius: 999px;
+}
+
+.theme-card-line {
+  width: 62%;
+}
+
+.theme-card-line.short {
+  width: 38%;
+}
+
+.terracotta-dark .theme-card-line {
+  background: #49443f;
+}
+
+.terracotta-light .theme-card-line {
+  background: #d9d2ca;
+}
+
+.codex-dark .theme-card-line {
+  background: #4a4a4a;
+}
+
+.codex-light .theme-card-line {
+  background: #d4d4d4;
+}
+
+.theme-card-pill {
+  width: 28%;
+  margin-top: 2px;
+  background: #d97757;
+}
+
+.codex-dark .theme-card-pill {
+  background: #f1f1ef;
+}
+
+.codex-light .theme-card-pill {
+  background: #202020;
+}
+
+.theme-choice-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 2px 1px;
+}
+
+.theme-choice-copy strong {
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.theme-choice-copy small {
+  overflow: hidden;
+  color: var(--fg-faint);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.theme-choice-check {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  padding: 2px;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+

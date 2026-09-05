@@ -3,6 +3,7 @@ import { lstat, mkdtemp, readFile, readlink, rm, symlink, unlink, writeFile } fr
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { renameGitBranch, listBranchInfos } from '../../src/main/git'
 import { GitService, parsePorcelainV2, parseUnifiedDiff } from '../../src/main/git-service'
 
 const roots: string[] = []
@@ -52,6 +53,31 @@ describe('GitService parsing', () => {
     expect(diff.hunks).toHaveLength(1)
     expect(diff.hunks[0].lines.map((line) => line.kind)).toEqual(['delete', 'add', 'context'])
     expect(diff).toMatchObject({ additions: 1, deletions: 1, selectable: true })
+  })
+})
+
+describe('Git branch workflow', () => {
+  it('renames a linked worktree branch and refreshes its branch identity', async () => {
+    const root = await repository()
+    const worktree = join(root, 'linked-worktree')
+    git(root, 'branch', 'feature/old-name')
+    git(root, 'worktree', 'add', '-q', worktree, 'feature/old-name')
+
+    const renamed = await renameGitBranch(worktree, 'feature/old-name', 'feature/new-name')
+
+    expect(renamed).toMatchObject({
+      cwd: worktree,
+      name: 'feature/new-name',
+      gitBranch: 'feature/new-name',
+      isMain: false
+    })
+    await expect(renameGitBranch(worktree, 'feature/new-name', 'feature/new-name'))
+      .rejects.toThrow('新旧分支名称不能相同')
+    expect((await listBranchInfos(root)).find((branch) => branch.cwd === worktree)).toMatchObject({
+      name: 'feature/new-name',
+      gitBranch: 'feature/new-name',
+      isMain: false
+    })
   })
 })
 

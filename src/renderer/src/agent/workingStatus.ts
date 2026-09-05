@@ -35,8 +35,6 @@ function runningTool(timeline: TimelineItem[]): ToolItem | undefined {
 
 function toolStatus(tool: ToolItem): WorkingStatus {
   const name = tool.name.toLocaleLowerCase()
-  if (name === 'plan_mode_question') return { label: '等待计划选择中...', face: '(・_・?)' }
-  if (name.startsWith('plan_mode_')) return { label: '整理计划中...', face: '( •̀ ω •́ )✧' }
   if (/pion_task|todo|task/.test(name)) return { label: '整理任务中...', face: '(｡•̀ᴗ-)✧' }
   if (/read|grep|find|glob|list|tree|search_files/.test(name)) return { label: '读取项目中...', face: '( •̀ᴗ•́ )و' }
   if (/edit|write|patch|replace|create_file/.test(name)) return { label: '编辑代码中...', face: '✍(•̀ᴗ•́)' }
@@ -50,13 +48,17 @@ export function deriveWorkingStatus({
   timeline,
   mode,
   thinkingLevel,
+  compacting = false,
   cycle = 0
 }: {
   timeline: TimelineItem[]
   mode: AgentMode
   thinkingLevel?: string
+  compacting?: boolean
   cycle?: number
 }): WorkingStatus {
+  if (compacting) return { label: '压缩中...', face: '(｡•̀ᴗ-)✧' }
+
   const tool = runningTool(timeline)
   if (tool) return toolStatus(tool)
 

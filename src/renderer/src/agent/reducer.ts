@@ -35,6 +35,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
         ...state,
         status: action.status,
         busy: dead || ready ? false : state.busy,
+        compacting: dead || ready ? false : state.compacting,
         timelineLoading: dead ? false : state.timelineLoading,
         timelineError: dead ? undefined : state.timelineError,
         session: dead || ready ? null : state.session,
@@ -45,14 +46,21 @@ export function reducer(state: AgentState, action: Action): AgentState {
         models: ready ? [] : state.models,
         thinkingLevels: ready ? [] : state.thinkingLevels,
         commands: dead || ready ? [] : state.commands,
-        mode: dead || ready ? 'build' : state.mode
+        mode: dead || ready ? 'build' : state.mode,
+        yolo: dead || ready ? false : state.yolo,
+        queued: dead || ready ? { steering: 0, followUp: 0 } : state.queued,
+        queuedMessages: dead || ready
+          ? { steering: [], followUp: [] }
+          : state.queuedMessages
       }
     }
     case 'session':
       return {
         ...state,
         session: action.session,
-        busy: action.session?.isStreaming ?? false
+        busy: Boolean(action.session?.isStreaming || action.session?.isCompacting),
+        compacting: action.session?.isCompacting ?? false,
+        yolo: action.session?.yolo ?? false
       }
     case 'runCheckpoint':
       return { ...state, runCheckpoint: action.checkpoint }
@@ -157,7 +165,10 @@ export function reducer(state: AgentState, action: Action): AgentState {
         timelineMutation: 'replace',
         timelineLoading: false,
         timelineError: undefined,
-        busy: false
+        // History replacement must not erase a running/compacting backend
+        // selected while the page was being loaded.
+        busy: state.busy,
+        compacting: state.compacting
       }
     case 'prependEntries':
       if (action.items.length === 0) return state
@@ -186,11 +197,14 @@ export function reducer(state: AgentState, action: Action): AgentState {
         ...state,
         timeline: [],
         mode: 'build',
+        yolo: false,
         timelineMutation: 'replace',
         timelineLoading: false,
         timelineError: undefined,
         busy: false,
-        queued: { steering: 0, followUp: 0 }
+        compacting: false,
+        queued: { steering: 0, followUp: 0 },
+        queuedMessages: { steering: [], followUp: [] }
       }
     case 'event': {
       const next = reduceEvent(state, action.event)
@@ -204,13 +218,24 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
   const event = input as WireEvent
   switch (event.type) {
     case 'agent_start':
-      return { ...state, busy: true }
+      return { ...state, busy: true, compacting: false }
 
     case 'agent_settled':
-      return finalizeStreaming({ ...state, busy: false, queued: { steering: 0, followUp: 0 } })
+      // Keep any queue snapshot until Pi emits its final queue_update. This is
+      // important when an abort or failed compaction leaves a user message
+      // waiting for an explicit retry.
+      return finalizeStreaming({
+        ...state,
+        busy: false,
+        compacting: false
+      })
 
     case 'agent_end':
-      return event.willRetry ? state : { ...state, busy: false }
+      // Pi may compact or retry after agent_end; agent_settled is the true idle boundary.
+      return state
+
+    case 'compaction_start':
+      return { ...state, busy: true, compacting: true }
 
     case 'message_start': {
       const { message } = event
@@ -233,7 +258,7 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
           ...state,
           timeline: [
             ...state.timeline,
-            { kind: 'assistant', id: nextTimelineId(), text: '', thinking: '', streaming: true }
+            { kind: 'assistant', id: nextTimelineId(), text: '', thinking: '', streaming: true, live: true }
           ]
         }
       }
@@ -290,6 +315,17 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
           ? { ...state, mode: enabled ? 'plan' : 'build' }
           : state
       }
+      if (entry.type === 'compaction') {
+        const timeline = [...state.timeline]
+        for (let i = timeline.length - 1; i >= 0; i--) {
+          const item = timeline[i]
+          if (item.kind === 'compaction' && !item.entryId) {
+            timeline[i] = { ...item, entryId: entry.id }
+            return { ...state, timeline }
+          }
+        }
+        return state
+      }
       if (entry.type !== 'message') return state
       const role = (entry.message as WireMessage | undefined)?.role
       const timeline = [...state.timeline]
@@ -313,6 +349,7 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
         name: event.toolName,
         status: 'running',
         isError: false,
+        live: true,
         ...parseToolArgs(event.toolName, event.args)
       }
       return { ...state, timeline: [...state.timeline, { kind: 'tool', id: nextTimelineId(), tool }] }
@@ -334,16 +371,29 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
       return { ...state, timeline }
     }
 
-    case 'queue_update':
+    case 'queue_update': {
+      const steering = Array.isArray(event.steering)
+        ? event.steering.filter((message): message is string => typeof message === 'string')
+        : []
+      const followUp = Array.isArray(event.followUp)
+        ? event.followUp.filter((message): message is string => typeof message === 'string')
+        : []
       return {
         ...state,
-        queued: { steering: event.steering?.length ?? 0, followUp: event.followUp?.length ?? 0 }
+        queued: { steering: steering.length, followUp: followUp.length },
+        queuedMessages: { steering, followUp }
       }
+    }
 
     case 'compaction_end': {
-      if (event.aborted || event.errorMessage) return state
-      return {
+      const nextState = {
         ...state,
+        busy: event.reason === 'manual' ? false : state.busy,
+        compacting: false
+      }
+      if (event.aborted || event.errorMessage) return nextState
+      return {
+        ...nextState,
         timeline: [
           ...state.timeline,
           { kind: 'compaction', id: nextTimelineId(), summary: '上下文已压缩' }

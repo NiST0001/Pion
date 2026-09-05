@@ -3,7 +3,7 @@
 import '@testing-library/jest-dom/vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import { RunMetricsStrip } from '../../src/renderer/src/components/RunMetricsStrip'
+import { RunMetricsStrip } from '../../src/renderer/src/features/operations/RunMetricsStrip'
 import type { RunOperation } from '../../src/shared/operations'
 
 const run: RunOperation = {

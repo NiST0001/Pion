@@ -3,7 +3,7 @@
 import '@testing-library/jest-dom/vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { ExtensionUiModal } from '../../src/renderer/src/components/ExtensionUiModal'
+import { ExtensionUiModal } from '../../src/renderer/src/features/common/ExtensionUiModal'
 import type { ExtensionUiRequest } from '../../src/shared/types'
 
 const baseRequest: ExtensionUiRequest = {
@@ -53,6 +53,31 @@ describe('ExtensionUiModal', () => {
     fireEvent.change(editor, { target: { value: '自定义答案' } })
     fireEvent.click(screen.getByRole('button', { name: /提交回答/ }))
     expect(onResolve).toHaveBeenCalledWith({ value: '自定义答案' })
+  })
+
+  it('renders Pi provider secrets in a global password prompt', () => {
+    const onResolve = vi.fn()
+    const { container } = render(
+      <ExtensionUiModal
+        request={{
+          ...baseRequest,
+          method: 'input',
+          options: undefined,
+          source: 'provider-auth',
+          scope: 'global',
+          secret: true,
+          title: 'OpenAI · 输入 API 密钥'
+        }}
+        queueLength={1}
+        busy={false}
+        error=""
+        onResolve={onResolve}
+      />
+    )
+
+    expect(container.querySelector('.extension-ui-backdrop')).toHaveClass('is-global')
+    expect(screen.getByText('Pi 提供商认证')).toBeInTheDocument()
+    expect(container.querySelector('input')).toHaveAttribute('type', 'password')
   })
 
   it('cancels the pending request with Escape', () => {

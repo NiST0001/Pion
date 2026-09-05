@@ -16,6 +16,17 @@ describe('deriveWorkingStatus', () => {
     expect(status.face).toBeTruthy()
   })
 
+  it('shows compaction in the same working-status row', () => {
+    const status = deriveWorkingStatus({
+      timeline: [],
+      mode: 'build',
+      compacting: true,
+      cycle: 2
+    })
+    expect(status.label).toBe('压缩中...')
+    expect(status.face).toBeTruthy()
+  })
+
   it('cycles through planning and deep-thinking variants', () => {
     expect(deriveWorkingStatus({ timeline: [], mode: 'plan', cycle: 0 }).label).toBe('规划中...')
     expect(deriveWorkingStatus({ timeline: [], mode: 'plan', cycle: 1 }).label).toBe('计划中...')
@@ -29,8 +40,7 @@ describe('deriveWorkingStatus', () => {
     ['bash', '操作终端中...'],
     ['web_search', '检索资料中...'],
     ['mcp', '调用 MCP 中...'],
-    ['unknown_tool', '操作工具中...'],
-    ['plan_mode_question', '等待计划选择中...']
+    ['unknown_tool', '操作工具中...']
   ])('maps %s to a specific tool status', (tool, label) => {
     expect(deriveWorkingStatus({ timeline: runningTool(tool), mode: 'build' }).label).toBe(label)
   })

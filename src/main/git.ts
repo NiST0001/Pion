@@ -61,11 +61,15 @@ export async function listBranchInfos(cwd: string): Promise<BranchInfo[]> {
   try {
     const root = resolve(await runGit(requestedCwd, ['rev-parse', '--show-toplevel']))
     const records = parseGitWorktrees(await runGit(root, ['worktree', 'list', '--porcelain']))
-    const mainRecord = records.find((record) => resolve(record.path) === root)
-    const currentBranch = mainRecord?.branch ?? await runGit(root, ['branch', '--show-current']).catch(() => '')
+    // `rev-parse --show-toplevel` points at the requested linked worktree.
+    // `git worktree list` is ordered with the primary worktree first, so use
+    // that record to keep isMain stable when callers start from a branch cwd.
+    const mainRecord = records[0]
+    const mainCwd = mainRecord ? resolve(mainRecord.path) : root
+    const currentBranch = mainRecord?.branch ?? await runGit(mainCwd, ['branch', '--show-current']).catch(() => '')
     const branches = records.map((record) => {
       const worktreeCwd = resolve(record.path)
-      const isMain = worktreeCwd === root
+      const isMain = worktreeCwd === mainCwd
       const gitBranch = record.branch ?? (isMain ? currentBranch : undefined)
       return {
         name: isMain ? (gitBranch || 'main') : (gitBranch || basename(worktreeCwd)),
@@ -79,6 +83,34 @@ export async function listBranchInfos(cwd: string): Promise<BranchInfo[]> {
   } catch {
     return [{ name: 'main', cwd: requestedCwd, isMain: true }]
   }
+}
+
+/** Rename the branch checked out by the requested worktree. */
+export async function renameGitBranch(cwd: string, oldBranchName: string, newBranchName: string): Promise<BranchInfo> {
+  const requestedCwd = resolve(cwd)
+  const oldName = oldBranchName.trim()
+  const newName = newBranchName.trim()
+  if (!oldName) throw new Error('原分支名称不能为空')
+  if (!newName) throw new Error('新分支名称不能为空')
+  if (oldName === newName) throw new Error('新旧分支名称不能相同')
+
+  await runGit(requestedCwd, ['check-ref-format', '--branch', newName])
+  const currentBranch = await runGit(requestedCwd, ['branch', '--show-current'])
+  if (currentBranch !== oldName) {
+    throw new Error(`只能重命名当前工作树对应的分支：${currentBranch || 'detached HEAD'}`)
+  }
+
+  try {
+    await runGit(requestedCwd, ['show-ref', '--verify', '--quiet', `refs/heads/${oldName}`])
+  } catch {
+    throw new Error(`Git 分支不存在：${oldName}`)
+  }
+
+  await runGit(requestedCwd, ['branch', '-m', oldName, newName])
+  const branches = await listBranchInfos(requestedCwd)
+  return branches.find((branch) => branch.cwd === requestedCwd && branch.gitBranch === newName)
+    ?? branches.find((branch) => branch.gitBranch === newName)
+    ?? { name: newName, cwd: requestedCwd, gitBranch: newName, isMain: false }
 }
 
 /** Create a new branch and its worktree under <project>/../.pion-worktrees/. */

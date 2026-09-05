@@ -29,6 +29,23 @@ export function nextTimelineId(): number {
   return nextId++
 }
 
+/**
+ * Stable id for items derived from persisted session entries. Rebuilding a
+ * history window (cache restore, revalidation, paging) must produce the same
+ * ids so React keeps the mounted components instead of remounting them — a
+ * remount would replay reveal animations and requeue waterfall slots.
+ */
+export function stableTimelineId(seed: string): number {
+  let h1 = 5381
+  let h2 = 52711
+  for (let i = 0; i < seed.length; i++) {
+    const c = seed.charCodeAt(i)
+    h1 = ((h1 << 5) + h1) ^ c
+    h2 = ((h2 << 5) + h2) ^ c
+  }
+  return (h1 >>> 0) * 2 ** 21 + (h2 >>> 0) % 2 ** 21
+}
+
 // ---------------------------------------------------------------------------
 // Tool arg / result parsing (shared by live events and session replay)
 // ---------------------------------------------------------------------------
@@ -97,21 +114,40 @@ export function deriveAgentTaskRuns(timeline: TimelineItem[]): AgentTaskRun[] {
   return deriveSessionTaskRuns(events)
 }
 
-/** Incomplete tasks created or changed by the most recent user-message run. */
+/**
+ * Tasks for the live panel. Keep every state from the current planned turn so
+ * completed rows remain visible. A later user message does not erase that
+ * finished plan by itself; the prior plan disappears only when the next turn
+ * actually invokes the task tool (normally its required empty `clear` snapshot).
+ */
 export function deriveAgentTodos(timeline: TimelineItem[]): AgentTodo[] | null {
   let latestUserKey: string | null = null
+  let latestUserIndex = -1
   for (let index = timeline.length - 1; index >= 0; index--) {
     const item = timeline[index]
     if (item.kind !== 'user') continue
     latestUserKey = item.entryId ?? `timeline-${item.id}`
+    latestUserIndex = index
     break
   }
   if (!latestUserKey) return null
 
-  const run = deriveAgentTaskRuns(timeline).find((candidate) => candidate.key === latestUserKey)
-  if (!run) return null
-  const active = run.tasks.filter((todo) => todo.status === 'pending' || todo.status === 'in_progress')
-  return active.length > 0 ? active : null
+  const runs = deriveAgentTaskRuns(timeline)
+  const currentRun = runs.find((candidate) => candidate.key === latestUserKey)
+  if (currentRun) {
+    const visible = currentRun.tasks.filter((todo) => todo.status !== 'deleted')
+    return visible.length > 0 ? visible : null
+  }
+
+  const nextPlanStarted = timeline.slice(latestUserIndex + 1).some((item) => (
+    item.kind === 'tool' && item.tool.todos !== undefined
+  ))
+  if (nextPlanStarted) return null
+
+  const previousRun = runs.at(-1)
+  if (!previousRun) return null
+  const visible = previousRun.tasks.filter((todo) => todo.status !== 'deleted')
+  return visible.length > 0 ? visible : null
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +187,9 @@ export function deriveChanges(timeline: TimelineItem[]): FileChange[] {
       byPath.set(tool.path, {
         path: tool.path,
         kind: 'edit',
-        diff: tool.diff,
+        diff: existing?.kind === 'edit' && existing.diff
+          ? `${existing.diff}\n  ...\n${tool.diff}`
+          : tool.diff,
         additions: (existing?.additions ?? 0) + stats.additions,
         deletions: (existing?.deletions ?? 0) + stats.deletions
       })
@@ -213,7 +251,7 @@ export function entriesToTimeline(
   for (const entry of entries) {
     if (entry.type === 'compaction') {
       if (typeof entry.summary === 'string') {
-        items.push({ kind: 'compaction', id: nextTimelineId(), summary: '上下文已压缩' })
+        items.push({ kind: 'compaction', id: stableTimelineId(`compaction:${entry.id}`), entryId: entry.id, summary: '上下文已压缩' })
       }
       continue
     }
@@ -224,7 +262,7 @@ export function entriesToTimeline(
     if (message.role === 'user') {
       items.push({
         kind: 'user',
-        id: nextTimelineId(),
+        id: stableTimelineId(`entry:${entry.id}`),
         entryId: entry.id,
         text: messageText(message),
         images: messageImages(message),
@@ -240,7 +278,7 @@ export function entriesToTimeline(
       if (text !== '' || thinking !== '') {
         items.push({
           kind: 'assistant',
-          id: nextTimelineId(),
+          id: stableTimelineId(`entry:${entry.id}`),
           entryId: entry.id,
           text,
           thinking,
@@ -258,26 +296,66 @@ export function entriesToTimeline(
         const result = toolResults.get(call.id)
         items.push({
           kind: 'tool',
-          id: nextTimelineId(),
+          id: stableTimelineId(`tool:${call.id}`),
           tool: result ? applyToolResult(tool, result.result, result.isError) : tool
         })
       }
       continue
     }
   }
-  // Only freshly loaded windows replay the staggered fade; paged history stays static.
+  // Every history window is marked for character-level screen reveal. The
+  // reveal utility arms only characters currently inside the viewport.
   if (options.reveal !== false) {
     for (const item of items) item.historical = true
   }
   return items
 }
 
+/** Stable identities let a live append be reconciled with a paged JSONL window. */
+function timelineItemIdentity(item: TimelineItem): string | undefined {
+  if (item.kind === 'tool') return `tool:${item.tool.id}`
+  if (item.entryId) return `entry:${item.entryId}`
+  return undefined
+}
+
+/** Filter incoming items that are already represented in a loaded timeline. */
+export function uniqueTimelineItems(
+  existing: TimelineItem[],
+  incoming: TimelineItem[]
+): TimelineItem[] {
+  const known = new Set<string>()
+  for (const item of existing) {
+    const identity = timelineItemIdentity(item)
+    if (identity) known.add(identity)
+  }
+  return incoming.filter((item) => {
+    const identity = timelineItemIdentity(item)
+    if (!identity) return true
+    if (known.has(identity)) return false
+    known.add(identity)
+    return true
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Paged-history timeline cache
 // ---------------------------------------------------------------------------
 
-export const HISTORY_ENTRY_CHUNK_SIZE = 80
-export const INITIAL_HISTORY_PAGE_SIZE = 160
+/** Fallback page size used when the renderer has no viewport (SSR/tests). */
+export const HISTORY_ENTRY_CHUNK_SIZE = 12
+/** Fallback newest page size used for the first paint of a selected session. */
+export const INITIAL_HISTORY_PAGE_SIZE = 12
+
+/**
+ * Keep the first history request close to one screen of transcript rows. A
+ * small two-row cushion prevents an immediate blank edge while avoiding the
+ * old fixed 56-entry transfer for long sessions.
+ */
+export function getViewportHistoryPageSize(): number {
+  if (typeof window === 'undefined') return INITIAL_HISTORY_PAGE_SIZE
+  const viewportHeight = window.visualViewport?.height || window.innerHeight || 768
+  return Math.min(24, Math.max(8, Math.ceil(viewportHeight / 96) + 2))
+}
 const MAX_TIMELINE_CACHE = 10
 
 export interface TimelineCacheEntry {

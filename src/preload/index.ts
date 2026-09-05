@@ -15,6 +15,9 @@ import type {
   GitWorkspaceSnapshot,
   ImageContent,
   BranchInfo,
+  ModelProviderAuthState,
+  ModelProviderAuthType,
+  ModelProviderInfo,
   PionApi,
   PluginCatalogItem,
   PluginInstallResult,
@@ -60,6 +63,7 @@ const api: PionApi = {
   stopAgent: () => ipcRenderer.invoke(IPC.AgentStop),
   send: (message, images) => ipcRenderer.invoke(IPC.AgentSend, message, images),
   queue: (message, images) => ipcRenderer.invoke(IPC.AgentQueue, message, images),
+  sendQueuedMessage: (kind, index) => ipcRenderer.invoke(IPC.AgentSendQueued, kind, index),
   abort: () => ipcRenderer.invoke(IPC.AgentAbort),
   getRunCheckpoint: () =>
     ipcRenderer.invoke(IPC.AgentRunCheckpoint) as Promise<RunCheckpointStatus | null>,
@@ -137,7 +141,19 @@ const api: PionApi = {
   uninstallPlugin: (source) =>
     ipcRenderer.invoke(IPC.PluginsUninstall, source) as Promise<PluginUninstallResult>,
   setMode: (mode: AgentMode) => ipcRenderer.invoke(IPC.AgentSetMode, mode),
+  setYoloMode: (enabled: boolean) => ipcRenderer.invoke(IPC.AgentSetYolo, enabled),
   getAvailableModels: () => ipcRenderer.invoke(IPC.AgentModels),
+  listModelProviders: () =>
+    ipcRenderer.invoke(IPC.AgentModelProviders) as Promise<ModelProviderInfo[]>,
+  loginModelProvider: (providerId, authType: ModelProviderAuthType) =>
+    ipcRenderer.invoke(IPC.AgentLoginModelProvider, providerId, authType) as Promise<ModelProviderInfo[]>,
+  logoutModelProvider: (providerId) =>
+    ipcRenderer.invoke(IPC.AgentLogoutModelProvider, providerId) as Promise<ModelProviderInfo[]>,
+  getModelProviderAuthState: () =>
+    ipcRenderer.invoke(IPC.AgentModelProviderAuthState) as Promise<ModelProviderAuthState | null>,
+  cancelModelProviderAuth: () => ipcRenderer.invoke(IPC.AgentCancelModelProviderAuth),
+  openModelProviderAuthUrl: (url) => ipcRenderer.invoke(IPC.AgentOpenModelProviderAuthUrl, url),
+  addModelProvider: (input) => ipcRenderer.invoke(IPC.AgentAddModelProvider, input),
   getSkills: () => ipcRenderer.invoke(IPC.AgentSkills) as Promise<SkillInfo[]>,
   getCapabilities: () => ipcRenderer.invoke(IPC.AgentCapabilities) as Promise<AgentCapabilities>,
   setModel: (provider, modelId) => ipcRenderer.invoke(IPC.AgentSetModel, provider, modelId),
@@ -149,7 +165,7 @@ const api: PionApi = {
   setAutoRetry: (enabled) => ipcRenderer.invoke(IPC.AgentSetAutoRetry, enabled),
   compactNow: (customInstructions) => ipcRenderer.invoke(IPC.AgentCompact, customInstructions),
   exportSessionHtml: () => ipcRenderer.invoke(IPC.AgentExportHtml),
-  renameSession: (name) => ipcRenderer.invoke(IPC.AgentRenameSession, name),
+  renameSession: (name, sessionPath) => ipcRenderer.invoke(IPC.AgentRenameSession, name, sessionPath),
   setSteeringMode: (mode) => ipcRenderer.invoke(IPC.AgentSetSteeringMode, mode),
   setFollowUpMode: (mode) => ipcRenderer.invoke(IPC.AgentSetFollowUpMode, mode),
 
@@ -183,6 +199,8 @@ const api: PionApi = {
     ipcRenderer.invoke(IPC.ProjectTrustSet, cwd, decision) as Promise<ProjectTrustInfo>,
   listBranches: (cwd) => ipcRenderer.invoke(IPC.BranchesList, cwd) as Promise<BranchInfo[]>,
   createBranch: (cwd, name) => ipcRenderer.invoke(IPC.BranchCreate, cwd, name) as Promise<BranchInfo>,
+  renameBranch: (cwd, oldName, newName) =>
+    ipcRenderer.invoke(IPC.BranchRename, cwd, oldName, newName) as Promise<BranchInfo>,
   getGitStatus: (cwd) => ipcRenderer.invoke(IPC.GitStatus, cwd) as Promise<GitWorkspaceSnapshot>,
   getGitDiff: (cwd, path, scope: GitDiffScope) =>
     ipcRenderer.invoke(IPC.GitDiff, cwd, path, scope) as Promise<GitFileDiff>,
@@ -240,6 +258,8 @@ const api: PionApi = {
     subscribe<ToolPermissionRequest[]>(IPC_EVENTS.ToolPermissionRequests, listener),
   onExtensionUiRequests: (listener) =>
     subscribe<ExtensionUiRequest[]>(IPC_EVENTS.ExtensionUiRequests, listener),
+  onModelProviderAuthState: (listener) =>
+    subscribe<ModelProviderAuthState | null>(IPC_EVENTS.ModelProviderAuthState, listener),
   onWindowState: (listener) => subscribe<boolean>(IPC_EVENTS.WindowState, listener)
 }
 

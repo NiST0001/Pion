@@ -3,7 +3,7 @@
 import '@testing-library/jest-dom/vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { SessionItems } from '../../src/renderer/src/components/SessionList'
+import { SessionItems } from '../../src/renderer/src/features/session/SessionList'
 import type { SessionMeta } from '../../src/shared/types'
 
 const optimistic: SessionMeta = {
@@ -31,6 +31,7 @@ describe('SessionItems optimistic projection', () => {
         onReorder={vi.fn()}
         onDelete={vi.fn()}
         onCopy={vi.fn()}
+        onRename={vi.fn()}
         onOpenTaskHistory={vi.fn()}
         getForkMessages={vi.fn().mockResolvedValue([])}
         onFork={vi.fn().mockResolvedValue('')}

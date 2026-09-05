@@ -1,9 +1,10 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
-import { AgentBridge } from '../../src/main/agent-bridge'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import { RunStore } from '../../src/main/run-store'
+import { TOOL_PERMISSION_MARKER } from '../../src/main/tool-permissions'
 import type { ExtensionUiRequest } from '../../src/shared/types'
 
 const roots: string[] = []
@@ -40,10 +41,10 @@ async function fixture(): Promise<{
     startPromise: Promise.resolve()
   }
   const internals = bridge as unknown as {
-    backends: Map<string, unknown>
+    backendPool: { add(backendValue: unknown): void }
     handleExtensionUiRequest(backendValue: unknown, event: unknown): boolean
   }
-  internals.backends.set('backend-1', backend)
+  internals.backendPool.add(backend)
   return {
     bridge,
     backend,
@@ -77,6 +78,68 @@ describe('AgentBridge extension UI requests', () => {
       type: 'extension_ui_response',
       id: 'pi-request-1',
       value: option
+    })
+  })
+
+  it('notifies listeners when a tool permission request is queued', async () => {
+    const value = await fixture()
+    const listener = vi.fn()
+    const off = value.bridge.onToolPermissionRequested(listener)
+    const metadata = {
+      cwd: value.backend.cwd,
+      toolName: 'write',
+      category: 'write',
+      policyCategories: ['write'],
+      summary: '需要修改项目文件',
+      detail: '写入文件',
+      risks: [],
+      canRemember: true
+    }
+
+    expect(value.handle({
+      type: 'extension_ui_request',
+      id: 'pi-permission-1',
+      method: 'select',
+      title: `${TOOL_PERMISSION_MARKER}${JSON.stringify(metadata)}`
+    })).toBe(true)
+
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(listener).toHaveBeenCalledWith(expect.objectContaining({
+      toolName: 'write',
+      summary: '需要修改项目文件'
+    }))
+    off()
+  })
+
+  it('auto-approves tool permission requests while yolo mode is enabled', async () => {
+    const value = await fixture()
+    const listener = vi.fn()
+    value.bridge.onToolPermissionRequested(listener)
+    ;(value.bridge as unknown as { yoloSessions: Set<string> }).yoloSessions.add('backend-1')
+    const metadata = {
+      cwd: value.backend.cwd,
+      toolName: 'bash',
+      category: 'shell',
+      policyCategories: ['shell'],
+      summary: '执行终端命令',
+      detail: 'npm test',
+      risks: [],
+      canRemember: true
+    }
+
+    expect(value.handle({
+      type: 'extension_ui_request',
+      id: 'pi-permission-yolo',
+      method: 'select',
+      title: `${TOOL_PERMISSION_MARKER}${JSON.stringify(metadata)}`
+    })).toBe(true)
+
+    expect(listener).not.toHaveBeenCalled()
+    expect(value.bridge.getPendingToolPermissionRequests()).toEqual([])
+    expect(JSON.parse(value.writes[0])).toEqual({
+      type: 'extension_ui_response',
+      id: 'pi-permission-yolo',
+      value: 'allow-once'
     })
   })
 

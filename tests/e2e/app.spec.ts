@@ -152,10 +152,11 @@ test('reviews, stages, and commits a live Git worktree', async ({}, testInfo) =>
   git(repo, 'init', '-q')
   git(repo, 'config', 'user.name', 'Pion E2E')
   git(repo, 'config', 'user.email', 'pion-e2e@example.invalid')
-  await writeFile(join(repo, 'file.txt'), 'before\n')
-  git(repo, 'add', 'file.txt')
+  await mkdir(join(repo, 'src', 'components'), { recursive: true })
+  await writeFile(join(repo, 'src', 'components', 'file.txt'), 'before\n')
+  git(repo, 'add', 'src/components/file.txt')
   git(repo, 'commit', '-qm', 'base')
-  await writeFile(join(repo, 'file.txt'), 'after\n')
+  await writeFile(join(repo, 'src', 'components', 'file.txt'), 'after\n')
   await writeFile(join(userData, 'projects.json'), JSON.stringify({
     projects: [{ cwd: repo, name: 'repo', addedAt: Date.now(), lastUsedAt: Date.now() }]
   }))
@@ -173,7 +174,10 @@ test('reviews, stages, and commits a live Git worktree', async ({}, testInfo) =>
 
   try {
     const page = await app.firstWindow()
-    const file = page.getByTitle('file.txt').last()
+    await expect(page.getByRole('tree', { name: '修改文件树' })).toBeVisible()
+    await expect(page.getByRole('treeitem', { name: '收起目录 src' })).toBeVisible()
+    await expect(page.getByRole('treeitem', { name: '收起目录 src/components' })).toBeVisible()
+    const file = page.getByTitle('src/components/file.txt').last()
     await expect(file).toBeVisible()
     await file.click()
     await expect(page.locator('.git-diff-hunk')).toBeVisible()

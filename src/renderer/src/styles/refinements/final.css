@@ -1,0 +1,190 @@
+/* reduced-accent pass -------------------------------------------------------
+   Terracotta is reserved for primary actions, focus, and thin state markers.
+   Selection surfaces, secondary icons, and decorative labels stay neutral. */
+
+.side-item.active,
+.settings-nav-item.active,
+.capabilities-nav-item.active,
+.review-file-item.active,
+.picker-option.selected,
+.thinking-option.selected,
+.composer-project-option.selected,
+.slash-command-option.active,
+.plugin-store-filters button.active,
+.model-choice.selected,
+.theme-choice.active {
+  border-color: var(--selected-border);
+  background: var(--selected-bg);
+  color: var(--fg);
+  box-shadow: none;
+}
+
+/* Sidebar tree selection stays borderless: background + thin accent bar only. */
+.project-folder.active > .project-folder-head,
+.project-branch-head.active {
+  background: var(--selected-bg);
+  color: var(--fg);
+}
+
+.project-branch-sessions .side-session.active {
+  border-color: transparent;
+  background: var(--selected-bg);
+  color: var(--fg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.segmented button.active,
+.settings-page .segmented button.active {
+  border-color: var(--selected-border);
+  background: var(--selected-bg-strong);
+  color: var(--fg);
+  box-shadow: none;
+}
+
+.composer-mode-plan .composer-mode-option.active:last-child {
+  border-color: color-mix(in srgb, var(--purple) 48%, var(--border));
+  background: var(--selected-bg);
+  color: var(--purple);
+}
+
+.side-item.active .side-item-icon,
+.project-folder-icon,
+.project-folder-new-branch-plus,
+.project-branch-icon,
+.composer-project-icon,
+.composer-project-option-icon,
+.composer-project-option-check,
+.settings-nav-item.active .settings-nav-icon,
+.capabilities-nav-item.active .capabilities-nav-icon,
+.capabilities-nav-item:hover .capabilities-nav-arrow,
+.capabilities-nav-item.active .capabilities-nav-arrow,
+.active-model-icon,
+.provider-mark,
+.plugin-store-heading h2 svg {
+  color: var(--fg-dim);
+}
+
+.project-folder.active > .project-folder-head .project-folder-name,
+.project-branch-head.active .project-branch-name,
+.project-branch-head.active .project-branch-icon {
+  color: var(--fg);
+}
+
+.active-model-icon {
+  background: var(--selected-bg-strong);
+  color: var(--fg);
+}
+
+.capability-card-icon,
+.tool-permission-setting-icon,
+.feature-icon {
+  border-color: var(--border-soft);
+  background: var(--selected-bg);
+  color: var(--fg-dim);
+}
+
+.settings-section-title,
+.modal-kicker,
+.settings-page-kicker,
+.capabilities-page-kicker,
+.review-panel-kicker,
+.capabilities-count,
+.active-model-copy > span {
+  color: var(--fg-faint);
+}
+
+.settings-page > .settings-section,
+.appearance-preview-card,
+.active-model-card,
+.action-card,
+.about-hero {
+  border-color: var(--border);
+  background: var(--surface-tint);
+  box-shadow: none;
+}
+
+.action-card:hover:not(:disabled),
+.capability-card:hover,
+.plugin-card:hover {
+  border-color: var(--selected-border);
+  background: var(--selected-bg);
+  box-shadow: none;
+}
+
+.plugin-type-badge {
+  border-color: var(--border);
+  background: var(--selected-bg);
+  color: var(--fg-dim);
+}
+
+.project-folder-head:hover,
+.project-branch-toggle:hover,
+.project-branch-rename:hover,
+.project-branch-new:hover,
+.side-session-favorite:hover,
+.sidebar-tools-button:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.slash-command-option:hover,
+.thinking-option:hover,
+.picker-option:hover,
+.plugin-store-filters button:hover {
+  border-color: var(--selected-border);
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.picker-trigger:hover,
+.picker-compact .picker-trigger:hover,
+.picker-compact .picker-trigger[aria-expanded='true'],
+.thinking-trigger:hover,
+.thinking-trigger[aria-expanded='true'],
+.composer-project-trigger:hover,
+.composer-project-trigger[aria-expanded='true'] {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.composer-project-trigger[aria-expanded='true'] .composer-project-chevron {
+  color: var(--fg-dim);
+}
+
+.sidebar-tools-button:hover .sidebar-tools-arrow,
+.side-session:hover .side-session-drag,
+.side-session.drag-over .side-session-drag,
+.plugin-detail-button:hover,
+.plugin-external-link:hover,
+.fork-button:hover,
+.code-copy:hover {
+  color: var(--fg);
+}
+
+.composer-attachment,
+.message-image {
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.empty-mark {
+  border-color: var(--border);
+  background: var(--selected-bg);
+  color: var(--fg-dim);
+  box-shadow: none;
+}
+
+.markdown blockquote {
+  border-left-color: var(--selected-border);
+}
+
+.titlebar-review-btn.active {
+  background: var(--selected-bg-strong);
+  color: var(--fg);
+}
+
+.project-trust-card-icon {
+  border-color: var(--border);
+  background: var(--selected-bg);
+  color: var(--ok);
+}

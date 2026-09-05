@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Composer } from '../../src/renderer/src/components/Composer'
+import { Composer } from '../../src/renderer/src/features/chat/Composer'
 
-describe('Composer local slash commands', () => {
+describe('Composer input references and local slash commands', () => {
   afterEach(() => {
     delete (window as unknown as { pion?: unknown }).pion
   })
@@ -16,7 +16,6 @@ describe('Composer local slash commands', () => {
     render(
       <Composer
         busy={false}
-        queued={{ steering: 0, followUp: 0 }}
         disabled={false}
         sendDisabled
         prefill=""
@@ -46,6 +45,69 @@ describe('Composer local slash commands', () => {
     expect(input).toHaveValue('')
   })
 
+  it('keeps Enter as direct send while a run is busy', () => {
+    const onSend = vi.fn()
+    const onQueue = vi.fn()
+    render(
+      <Composer
+        busy
+        disabled={false}
+        sendDisabled={false}
+        prefill=""
+        history={[]}
+        commands={[]}
+        mode="build"
+        onModeChange={vi.fn()}
+        onSend={onSend}
+        onQueue={onQueue}
+        onAbort={vi.fn()}
+      />
+    )
+
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: '立即插入当前运行' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(onSend).toHaveBeenCalledWith('立即插入当前运行', [])
+    expect(onQueue).not.toHaveBeenCalled()
+  })
+
+  it('adds a text reference from the file input after typing @', async () => {
+    const onSend = vi.fn()
+    render(
+      <Composer
+        busy={false}
+        disabled={false}
+        sendDisabled={false}
+        prefill=""
+        history={[]}
+        commands={[]}
+        mode="build"
+        onModeChange={vi.fn()}
+        onSend={onSend}
+        onQueue={vi.fn()}
+        onAbort={vi.fn()}
+      />
+    )
+
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '请查看 @' } })
+    expect(screen.getByRole('listbox', { name: '参考文件' })).toBeInTheDocument()
+
+    const fileInput = screen.getByLabelText('选择图像或参考文件')
+    const reference = new File(['line one\nline two'], 'notes.md', { type: 'text/markdown' })
+    fireEvent.change(fileInput, { target: { files: [reference] } })
+
+    expect(await screen.findByText('@notes.md')).toBeInTheDocument()
+    expect(textarea).toHaveValue('请查看 @notes.md ')
+    fireEvent.click(screen.getByRole('button', { name: /发送消息/ }))
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith(
+      expect.stringContaining('<reference-content>\nline one\nline two\n</reference-content>'),
+      []
+    ))
+  })
+
   it.each([
     { key: 'Enter', value: '/verify' },
     { key: 'Tab', value: '/verify ' }
@@ -65,7 +127,6 @@ describe('Composer local slash commands', () => {
     render(
       <Composer
         busy={key === 'Tab'}
-        queued={{ steering: 0, followUp: 0 }}
         disabled={false}
         sendDisabled
         prefill=""

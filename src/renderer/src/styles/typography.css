@@ -1,4 +1,4 @@
-/* ========================================================================== 
+/* ==========================================================================
    Readable typography pass
 
    Loaded after refinements.css so the application keeps its spatial density
@@ -199,8 +199,6 @@ select {
 .diff-view,
 .empty-state p code,
 .picker-trigger,
-.status-run,
-.queued,
 .modified-files-title strong,
 .tool-permission-summary,
 .branch-create-field,

@@ -136,14 +136,16 @@
 }
 
 .run-recovery-banner {
-  margin: 0 18px 7px;
-  padding: 9px 10px;
+  flex: none;
+  margin: 6px 12px 0;
+  padding: 7px 9px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: start;
+  align-items: center;
   gap: 9px;
+  border: 1px solid color-mix(in srgb, var(--danger, #c85d52) 18%, var(--border-soft));
   border-radius: 10px;
-  background: color-mix(in srgb, var(--danger, #c85d52) 8%, var(--bg-elev));
+  background: color-mix(in srgb, var(--danger, #c85d52) 7%, var(--bg-elev));
   color: var(--fg-muted);
   animation: pion-reveal-in var(--motion-normal, 180ms) var(--motion-ease-out, ease-out) both;
 }
@@ -176,8 +178,12 @@
 }
 
 .run-recovery-copy p {
+  display: -webkit-box;
   margin: 2px 0 0;
+  overflow: hidden;
   line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
 }
 
 .run-recovery-copy blockquote {

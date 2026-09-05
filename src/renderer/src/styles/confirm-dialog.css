@@ -126,3 +126,62 @@ html.pion-keyboard-focus .confirm-dialog-actions button:focus-visible {
   opacity: 0.55;
   cursor: wait;
 }
+
+/* Theme-native text prompt used by non-destructive named operations. */
+.text-input-dialog {
+  width: min(460px, calc(100vw - 32px));
+}
+
+.text-input-dialog-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.text-input-dialog-field input {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--fg);
+  font: 500 12px/1.4 var(--mono);
+  text-align: left;
+  transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
+}
+
+.text-input-dialog-field input::placeholder {
+  color: var(--fg-faint);
+}
+
+html.pion-keyboard-focus .text-input-dialog-field input:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.text-input-dialog-meta {
+  display: flex;
+  justify-content: space-between;
+  min-height: 16px;
+  gap: 12px;
+  margin-top: 5px;
+  color: var(--fg-faint);
+  font-size: 9.5px;
+}
+
+.text-input-dialog-meta > span:first-child {
+  flex: 1;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.text-input-dialog-meta > span:last-child {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+}
