@@ -69,15 +69,26 @@ export function useConversationNavigation({
   }, [lastGrow, lastItemId, busy, timelineLength, timelineMutation, scrollRef])
 
   // Async siblings above the scroller (run metrics strip, trust banner, error
-  // banner) mount after a session switch and shrink the viewport; Chromium
-  // then clamps scrollTop and the view jumps up. Re-pin to the bottom whenever
-  // the scroller resizes while the user was already at the bottom.
+  // banner) and the composer dock (task/queue panels) mount after a session
+  // switch or mid-run and shrink the viewport. Track the pre-resize geometry:
+  // if the view was at the bottom before the shrink, re-pin so the last line
+  // is never sliced by the newly grown dock.
   useEffect(() => {
     const element = scrollRef.current
     if (!element || typeof ResizeObserver !== 'function') return
+    let previousClientHeight = element.clientHeight
     const observer = new ResizeObserver(() => {
-      if (!nearBottomRef.current) return
-      element.scrollTop = element.scrollHeight
+      const nextClientHeight = element.clientHeight
+      if (nextClientHeight === previousClientHeight) return
+      // nearBottomRef is refreshed by layout effects that already see the new
+      // (shrunken) height, so it can falsely report "not at bottom". Compute
+      // the pre-resize state from the previous viewport height instead.
+      const wasNearBottom = element.scrollTop + previousClientHeight >= element.scrollHeight - 96
+      previousClientHeight = nextClientHeight
+      if (wasNearBottom || nearBottomRef.current) {
+        element.scrollTop = element.scrollHeight
+        nearBottomRef.current = true
+      }
     })
     observer.observe(element)
     return () => observer.disconnect()
