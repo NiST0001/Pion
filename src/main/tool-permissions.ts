@@ -11,6 +11,9 @@ import type {
 } from '../shared/types'
 
 export const TOOL_PERMISSION_MARKER = '__PION_TOOL_PERMISSION__:'
+/** Marker for the silent checkpoint gate: the extension asks the main process
+    to create the run checkpoint before the first write-capable tool runs. */
+export const RUN_CHECKPOINT_MARKER = '__PION_RUN_CHECKPOINT__'
 export const TOOL_PERMISSION_TIMEOUT_MS = 120_000
 
 export const DEFAULT_TOOL_PERMISSION_RULES: ToolPermissionRules = {
@@ -176,6 +179,9 @@ function toolPermissionExtensionSource(): string {
 import { basename, dirname, resolve, sep } from "node:path";
 
 const MARKER = "__PION_TOOL_PERMISSION__:";
+const CHECKPOINT_MARKER = "__PION_RUN_CHECKPOINT__";
+const CHECKPOINT_TIMEOUT = 30000;
+const CHECKPOINT_READ_ONLY = new Set(["read", "grep", "find", "ls", "pion_task"]);
 const TIMEOUT = 120000;
 const DEFAULTS = { read: "allow", write: "ask", shell: "ask", network: "ask", external: "ask" };
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -283,7 +289,18 @@ function classify(event, ctx) {
   return { toolName, category, policyCategories: categories, summary, detail, risks };
 }
 
+async function checkpointGate(event, ctx) {
+  if (CHECKPOINT_READ_ONLY.has(event.toolName)) return;
+  if (!ctx.hasUI) return;
+  try {
+    await ctx.ui.select(CHECKPOINT_MARKER, ["ready"], { timeout: CHECKPOINT_TIMEOUT });
+  } catch {
+    // A checkpoint failure must never block the tool call itself.
+  }
+}
+
 async function gate(event, ctx) {
+  await checkpointGate(event, ctx);
   if (PION_INTERNAL_TOOLS.has(event.toolName)) return undefined;
   const request = classify(event, ctx);
   const policy = readPolicy(ctx.cwd);

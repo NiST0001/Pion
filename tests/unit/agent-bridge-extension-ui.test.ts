@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import { RunStore } from '../../src/main/run-store'
-import { TOOL_PERMISSION_MARKER } from '../../src/main/tool-permissions'
+import { RUN_CHECKPOINT_MARKER, TOOL_PERMISSION_MARKER } from '../../src/main/tool-permissions'
 import type { ExtensionUiRequest } from '../../src/shared/types'
 
 const roots: string[] = []
@@ -141,6 +141,44 @@ describe('AgentBridge extension UI requests', () => {
       id: 'pi-permission-yolo',
       value: 'allow-once'
     })
+  })
+
+  it('creates the run checkpoint lazily through the gate marker', async () => {
+    const value = await fixture()
+    const { execFileSync } = await import('node:child_process')
+    execFileSync('git', ['init', '-q'], { cwd: value.backend.cwd as string })
+    ;(value.backend as { activeRunId?: string }).activeRunId = 'run-1'
+
+    expect(value.handle({
+      type: 'extension_ui_request',
+      id: 'gate-1',
+      method: 'select',
+      title: RUN_CHECKPOINT_MARKER
+    })).toBe(true)
+
+    await vi.waitFor(() => {
+      expect(value.writes.some((line) => line.includes('gate-1'))).toBe(true)
+    })
+    const response = JSON.parse(value.writes.find((line) => line.includes('gate-1')) ?? '{}')
+    expect(response).toMatchObject({
+      type: 'extension_ui_response',
+      id: 'gate-1',
+      value: 'ready'
+    })
+    const firstCheckpoint = (value.backend as { checkpoint?: unknown }).checkpoint
+    expect(firstCheckpoint).toBeTruthy()
+
+    // A second gate in the same run reuses the checkpoint instead of recreating it.
+    expect(value.handle({
+      type: 'extension_ui_request',
+      id: 'gate-2',
+      method: 'select',
+      title: RUN_CHECKPOINT_MARKER
+    })).toBe(true)
+    await vi.waitFor(() => {
+      expect(value.writes.some((line) => line.includes('gate-2'))).toBe(true)
+    })
+    expect((value.backend as { checkpoint?: unknown }).checkpoint).toBe(firstCheckpoint)
   })
 
   it('cancels malformed interactive requests instead of leaving the Agent waiting', async () => {

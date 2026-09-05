@@ -31,3 +31,6 @@ Thumbs.db
 
 # electron
 .dev-port
+
+# pion runtime
+.pion-worktrees/

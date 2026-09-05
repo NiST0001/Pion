@@ -65,6 +65,7 @@ import type {
 } from '../../shared/operations'
 import { EMPTY_TOKEN_USAGE, RunStore } from '../run-store'
 import {
+  RUN_CHECKPOINT_MARKER,
   TOOL_PERMISSION_MARKER,
   TOOL_PERMISSION_TIMEOUT_MS,
   ToolPermissionStore
@@ -444,8 +445,22 @@ export class AgentBridge {
       || request.method !== 'select'
       || typeof request.id !== 'string'
       || typeof request.title !== 'string'
-      || !request.title.startsWith(TOOL_PERMISSION_MARKER)
     ) return false
+
+    // Silent checkpoint gate: create the run checkpoint before the first
+    // write-capable tool executes, then release the tool immediately.
+    if (request.title === RUN_CHECKPOINT_MARKER) {
+      void this.ensureRunCheckpoint(backend)
+        .catch((error: unknown) => {
+          console.error('[pion] lazy checkpoint failed:', error)
+        })
+        .finally(() => {
+          this.respondToExtensionUi(backend.client, request.id as string, { value: 'ready' })
+        })
+      return true
+    }
+
+    if (!request.title.startsWith(TOOL_PERMISSION_MARKER)) return false
 
     try {
       const parsed = parseToolPermissionMetadata(request.title)
@@ -584,6 +599,37 @@ export class AgentBridge {
 
   cancelModelProviderAuth(): void {
     this.providerAuthUi.cancel(this.providerAuthOperation)
+  }
+
+  /** Reset checkpoint state at dispatch; the real checkpoint is created lazily
+      when the first write-capable tool call fires (gated by the extension). */
+  private resetRunCheckpoint(backend: BackendRecord): void {
+    backend.checkpoint = undefined
+    backend.checkpointStatus = undefined
+    backend.checkpointRunId = undefined
+    if (this.activeKey === backend.key) this.pushRunCheckpoint()
+  }
+
+  /** Create the run checkpoint on first write, at most once per run. */
+  private ensureRunCheckpoint(backend: BackendRecord): Promise<void> {
+    const runId = backend.activeRunId ?? backend.pendingRunIds.at(-1)
+    if (backend.checkpoint && backend.checkpointRunId === runId) return Promise.resolve()
+    if (backend.checkpointCreatePromise) return backend.checkpointCreatePromise
+    const promise = (async (): Promise<void> => {
+      await this.prepareRunCheckpoint(backend)
+      backend.checkpointRunId = runId
+      if (runId && backend.checkpoint) {
+        const checkpoint = { ...backend.checkpoint, state: 'ready' as const }
+        this.runStore.update(runId, (run) => {
+          run.checkpoint = checkpoint
+        })
+      }
+    })()
+    backend.checkpointCreatePromise = promise
+    void promise.finally(() => {
+      if (backend.checkpointCreatePromise === promise) backend.checkpointCreatePromise = undefined
+    })
+    return promise
   }
 
   private async prepareRunCheckpoint(backend: BackendRecord): Promise<void> {
@@ -798,16 +844,15 @@ export class AgentBridge {
       contextWindow: state?.model?.contextWindow,
       prompt: { message, images },
       promptPreview: promptPreview(message),
-      checkpoint: initialState === 'dispatching' && backend.checkpoint
-        ? { ...backend.checkpoint, state: 'ready' }
-        : undefined,
+      // Checkpoints are created lazily at the first write-capable tool call
+      // and bound to the run by ensureRunCheckpoint.
+      checkpoint: undefined,
       usage: { ...EMPTY_TOKEN_USAGE },
       tools: [],
       compactions: [],
       revision: 0
     })
     if (initialState === 'dispatching') {
-      if (backend.checkpoint) backend.checkpointRunId = run.id
       backend.runCompletionPromise = undefined
       // RpcClient.prompt resolves once the request is written, before
       // agent_start arrives. Reserve the backend during that dispatch gap so
@@ -819,10 +864,10 @@ export class AgentBridge {
     return run
   }
 
-  /** Create the checkpoint only when a locally queued run is actually dispatched. */
+  /** Reset stale checkpoint state when a queued run is dispatched; the real
+      checkpoint is created lazily at the first write-capable tool call. */
   private async prepareQueuedRunForDispatch(backend: BackendRecord, runId: string): Promise<void> {
-    await this.prepareRunCheckpoint(backend)
-    backend.checkpointRunId = runId
+    this.resetRunCheckpoint(backend)
     this.runStore.update(runId, (run) => {
       run.state = 'dispatching'
       run.dispatchedAt = undefined
@@ -832,9 +877,7 @@ export class AgentBridge {
       run.interruptedAt = undefined
       run.stopReason = undefined
       run.error = undefined
-      run.checkpoint = backend.checkpoint
-        ? { ...backend.checkpoint, state: 'ready' }
-        : undefined
+      run.checkpoint = undefined
     })
   }
 
@@ -1115,7 +1158,7 @@ export class AgentBridge {
     backend.busy = true
     let run: RunOperation | undefined
     try {
-      await this.prepareRunCheckpoint(backend)
+      this.resetRunCheckpoint(backend)
       await this.applyDesiredMode(backend)
       const interrupted = source.state === 'interrupted'
       const message = interrupted
@@ -1780,7 +1823,7 @@ export class AgentBridge {
       backend.busy = true
       let run: RunOperation | undefined
       try {
-        await this.prepareRunCheckpoint(backend)
+        this.resetRunCheckpoint(backend)
         await this.applyDesiredMode(backend)
         run = this.createRun(backend, state, message, images, 'prompt', 'dispatching')
         await backend.client.prompt(message, images)
@@ -1832,7 +1875,7 @@ export class AgentBridge {
       backend.busy = true
       let run: RunOperation | undefined
       try {
-        await this.prepareRunCheckpoint(backend)
+        this.resetRunCheckpoint(backend)
         await this.applyDesiredMode(backend)
         run = this.createRun(backend, state, message, images, 'follow-up', 'dispatching')
         await backend.client.prompt(message, images)
@@ -1885,7 +1928,7 @@ export class AgentBridge {
     backend.busy = true
     let run: RunOperation | undefined
     try {
-      await this.prepareRunCheckpoint(backend)
+      this.resetRunCheckpoint(backend)
       await this.applyDesiredMode(backend)
       run = this.createRun(backend, state, message, [], 'verification-repair', 'dispatching')
       await backend.client.prompt(message)

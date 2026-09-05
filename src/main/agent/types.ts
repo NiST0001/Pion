@@ -67,6 +67,8 @@ export interface BackendRecord {
   checkpointStatus?: RunCheckpointStatus
   checkpointRunId?: string
   checkpointRefreshPromise?: Promise<RunCheckpointStatus | null>
+  /** Serializes lazy checkpoint creation gated by the first write-capable tool. */
+  checkpointCreatePromise?: Promise<void>
   /** Completion listeners (for example auto-verification) finish before local queue dispatch. */
   runCompletionPromise?: Promise<void>
   activeRunId?: string
