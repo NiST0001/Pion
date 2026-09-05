@@ -348,6 +348,38 @@ html.pion-keyboard-focus .task-panel-head:focus-visible {
     color var(--motion-fast) var(--motion-ease-out);
 }
 
+.queue-item-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 23px;
+  flex: 0 0 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--motion-ease-out),
+    border-color var(--motion-fast) var(--motion-ease-out),
+    color var(--motion-fast) var(--motion-ease-out);
+}
+
+.queue-item-action:hover,
+.queue-item-action:focus-visible {
+  border-color: var(--border);
+  background: var(--bg-hover);
+  color: var(--fg-dim);
+}
+
+.queue-item-remove:hover,
+.queue-item-remove:focus-visible {
+  border-color: rgba(var(--danger-rgb), 0.5);
+  background: rgba(var(--danger-rgb), 0.1);
+  color: var(--danger);
+}
+
 .queue-item-send:hover:not(:disabled),
 .queue-item-send:focus-visible {
   border-color: var(--accent);

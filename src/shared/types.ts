@@ -144,7 +144,7 @@ export type WireEvent =
   | { type: 'tool_execution_start'; toolCallId: string; toolName: string; args: unknown }
   | { type: 'tool_execution_update'; toolCallId: string; toolName: string; partialResult: unknown }
   | { type: 'tool_execution_end'; toolCallId: string; toolName: string; result: unknown; isError: boolean }
-  | { type: 'queue_update'; steering: string[]; followUp: string[] }
+  | { type: 'queue_update'; steering: string[]; followUp: string[]; nativeFollowUpCount?: number }
   | { type: 'compaction_start'; reason: string }
   | { type: 'compaction_end'; reason: string; result: unknown; aborted: boolean; willRetry: boolean; errorMessage?: string }
   | { type: 'session_info_changed'; name?: string }

@@ -1292,7 +1292,7 @@ export class AgentBridge {
     })
   }
 
-  private projectedQueueSnapshot(backend: BackendRecord): { steering: string[]; followUp: string[] } {
+  private projectedQueueSnapshot(backend: BackendRecord): { steering: string[]; followUp: string[]; nativeFollowUpCount: number } {
     const projection = projectQueueSnapshot(
       backend.rawQueue ?? { steering: [], followUp: [] },
       backend.directSteering ?? [],
@@ -1301,7 +1301,10 @@ export class AgentBridge {
       ))
     )
     backend.directSteering = projection.directSteering
-    return projection.queue
+    return {
+      ...projection.queue,
+      nativeFollowUpCount: projection.queue.nativeFollowUpCount ?? 0
+    }
   }
 
   private pushQueueSnapshot(backend: BackendRecord): void {
@@ -1505,6 +1508,29 @@ export class AgentBridge {
       this.pushQueueSnapshot(backend)
       throw error
     }
+  }
+
+  /** Remove a Pion-owned local follow-up from the queue; native Pi queue items
+      cannot be removed over RPC and are rejected with a clear error. */
+  async removeQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void> {
+    if (kind !== 'steering' && kind !== 'followUp') throw new Error('无效的排队消息类型')
+    if (!Number.isInteger(index) || index < 0) throw new Error('无效的排队消息位置')
+    const backend = await this.ensureActiveBackend()
+    if (kind === 'steering') throw new Error('Pi 原生插入消息暂不支持移除')
+
+    const nativeFollowUpCount = backend.rawQueue?.followUp.length ?? 0
+    const localIndex = index - nativeFollowUpCount
+    if (localIndex < 0) throw new Error('这条 Pi 原生排队消息暂不支持移除')
+    const item = backend.localFollowUps?.[localIndex]
+    if (!item) throw new Error('排队消息已被发送或移除')
+    backend.localFollowUps?.splice(localIndex, 1)
+    this.runStore.update(item.runId, (run) => {
+      if (run.state === 'queued') {
+        run.state = 'discarded'
+        run.settledAt = Date.now()
+      }
+    })
+    this.pushQueueSnapshot(backend)
   }
 
   /** Promote one Pion queue-card item without duplicating it in Pi's queue. */

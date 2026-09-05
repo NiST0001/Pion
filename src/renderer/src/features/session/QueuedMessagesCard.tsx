@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
-import { Clock3, MessageSquare, Send, Zap } from 'lucide-react'
+import { Clock3, MessageSquare, Pencil, Send, Trash2, Zap } from 'lucide-react'
 
 const QUEUE_PANEL_STATE_PREFIX = 'pion:session-queue-panel-state:'
 
@@ -47,14 +47,21 @@ export function QueuedMessagesCard({
   sessionKey,
   steering = [],
   followUp = [],
+  nativeFollowUpCount = 0,
   agentBusy = false,
-  onSendItem
+  onSendItem,
+  onEditItem,
+  onRemoveItem
 }: {
   sessionKey: string
   steering?: string[]
   followUp?: string[]
+  /** Leading followUp entries owned by Pi's native queue (not Pion-editable). */
+  nativeFollowUpCount?: number
   agentBusy?: boolean
   onSendItem?: (kind: QueueKind, index: number) => void | Promise<void>
+  onEditItem?: (item: QueueItem) => void | Promise<void>
+  onRemoveItem?: (kind: QueueKind, index: number) => void | Promise<void>
 }): ReactElement | null {
   const items: QueueItem[] = [
     ...steering.map((text, index) => ({ kind: 'steering' as const, text, index })),
@@ -127,6 +134,9 @@ export function QueuedMessagesCard({
             {items.map((item, index) => {
               const text = displayText(item.text)
               const isSteering = item.kind === 'steering'
+              // Only Pion's own local follow-ups can be edited or removed;
+              // native Pi queue entries have no RPC removal path.
+              const editable = !isSteering && item.index >= nativeFollowUpCount
               return (
                 <div
                   key={`${item.kind}-${item.index}-${item.text}`}
@@ -144,6 +154,34 @@ export function QueuedMessagesCard({
                     <span className="queue-item-kind">{isSteering ? '插入' : '稍后'}</span>
                     <span className="queue-item-text">{text}</span>
                   </span>
+                  {editable && onEditItem && (
+                    <button
+                      type="button"
+                      className="queue-item-action"
+                      aria-label={`编辑第 ${index + 1} 条排队消息`}
+                      title="退回到输入框编辑"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void onEditItem(item)
+                      }}
+                    >
+                      <Pencil size={12} aria-hidden="true" />
+                    </button>
+                  )}
+                  {editable && onRemoveItem && (
+                    <button
+                      type="button"
+                      className="queue-item-action queue-item-remove"
+                      aria-label={`删除第 ${index + 1} 条排队消息`}
+                      title="删除这条排队消息"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void onRemoveItem(item.kind, item.index)
+                      }}
+                    >
+                      <Trash2 size={12} aria-hidden="true" />
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="queue-item-send"

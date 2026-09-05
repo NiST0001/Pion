@@ -41,6 +41,31 @@ describe('QueuedMessagesCard', () => {
     expect(onSendItem).toHaveBeenCalledWith('followUp', 0)
   })
 
+  it('exposes edit and remove actions only for local follow-up items', () => {
+    const onEditItem = vi.fn()
+    const onRemoveItem = vi.fn()
+    render(
+      <QueuedMessagesCard
+        sessionKey="session-edit"
+        steering={['原生插入']}
+        followUp={['原生稍后', '本地稍后']}
+        nativeFollowUpCount={1}
+        onEditItem={onEditItem}
+        onRemoveItem={onRemoveItem}
+      />
+    )
+
+    // steering 项和 Pi 原生 followUp 项不可编辑/删除，本地项两个按钮都在
+    expect(screen.getAllByRole('button', { name: /编辑第/ })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /删除第/ })).toHaveLength(1)
+
+    fireEvent.click(screen.getByRole('button', { name: '编辑第 3 条排队消息' }))
+    expect(onEditItem).toHaveBeenCalledWith(expect.objectContaining({ kind: 'followUp', index: 1, text: '本地稍后' }))
+
+    fireEvent.click(screen.getByRole('button', { name: '删除第 3 条排队消息' }))
+    expect(onRemoveItem).toHaveBeenCalledWith('followUp', 1)
+  })
+
   it('can collapse the message list and persists the session preference', () => {
     render(
       <QueuedMessagesCard

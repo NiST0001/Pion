@@ -105,6 +105,14 @@ export function useAgentRunActions({
     [api, refreshModels]
   )
 
+  const removeQueuedMessage = useCallback(
+    async (kind: 'steering' | 'followUp', index: number): Promise<void> => {
+      if (!api || !Number.isInteger(index) || index < 0) return
+      await api.removeQueuedMessage(kind, index)
+    },
+    [api]
+  )
+
   const abort = useCallback(async (): Promise<void> => {
     if (!api) return
     await api.abort()
@@ -138,6 +146,7 @@ export function useAgentRunActions({
     send,
     queue,
     sendQueuedMessage,
+    removeQueuedMessage,
     abort,
     rollbackRunCheckpoint,
     newSession

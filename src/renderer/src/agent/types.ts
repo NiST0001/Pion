@@ -124,7 +124,7 @@ export interface AgentState {
   /** Counts retained for status/telemetry compatibility. */
   queued: { steering: number; followUp: number }
   /** Text snapshots used by the composer-side queue card. */
-  queuedMessages: { steering: string[]; followUp: string[] }
+  queuedMessages: { steering: string[]; followUp: string[]; nativeFollowUpCount: number }
 }
 
 export const initialState: AgentState = {
@@ -150,7 +150,7 @@ export const initialState: AgentState = {
   busy: false,
   compacting: false,
   queued: { steering: 0, followUp: 0 },
-  queuedMessages: { steering: [], followUp: [] }
+  queuedMessages: { steering: [], followUp: [], nativeFollowUpCount: 0 }
 }
 
 export type Action =

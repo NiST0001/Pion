@@ -1,6 +1,8 @@
 export interface QueueSnapshot {
   steering: string[]
   followUp: string[]
+  /** Leading followUp entries owned by Pi's native queue (not Pion-editable). */
+  nativeFollowUpCount?: number
 }
 
 /**
@@ -41,7 +43,8 @@ export function projectQueueSnapshot(
   return {
     queue: {
       steering,
-      followUp: [...raw.followUp, ...localFollowUps]
+      followUp: [...raw.followUp, ...localFollowUps],
+      nativeFollowUpCount: raw.followUp.length
     },
     directSteering: retainedDirectSteering
   }

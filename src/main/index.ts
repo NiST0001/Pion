@@ -184,6 +184,10 @@ function registerIpc(): void {
     IPC.AgentSendQueued,
     (_event, kind: 'steering' | 'followUp', index: number) => bridge.sendQueuedMessage(kind, index)
   )
+  ipcMain.handle(
+    IPC.AgentRemoveQueued,
+    (_event, kind: 'steering' | 'followUp', index: number) => bridge.removeQueuedMessage(kind, index)
+  )
   ipcMain.handle(IPC.AgentAbort, () => bridge.abort())
   ipcMain.handle(IPC.AgentRunCheckpoint, () => bridge.getRunCheckpoint())
   ipcMain.handle(IPC.AgentRollbackCheckpoint, () => bridge.rollbackRunCheckpoint())

@@ -76,6 +76,8 @@ export interface PionApi {
   queue(message: string, images?: ImageContent[]): Promise<void>
   /** Promote one visible queued message to immediate delivery. */
   sendQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void>
+  /** Remove a Pion-owned queued message; native Pi queue entries are rejected. */
+  removeQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void>
   /** Abort the current run. */
   abort(): Promise<void>
   /** Current run checkpoint for the selected session. */

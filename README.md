@@ -1,13 +1,13 @@
 # Pion
 
-基于 [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 二次开发的本地桌面 GUI（Electron + React）.
+基于 [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 二次开发的本地桌面 GUI（Electron + React）
 
 ## 架构
 
 - **主进程** `src/main/`：`AgentBridge` 按会话管理多个 `RpcClient`，以子进程方式驱动 pi agent（`--mode rpc`）
   转发当前会话的 `JsonAgentSessionEvent`、维护会话列表/分支树；`ProjectStore` 持久化项目列表（userData/projects.json）
 - **预加载** `src/preload/`：`contextBridge` 暴露类型化的 `window.pion` API（`src/shared/types.ts` 为三方契约）
-- **渲染进程** `src/renderer/`：React 工作台界面。
+- **渲染进程** `src/renderer/`：React 工作台界面
 
 ## 功能
 
@@ -32,7 +32,7 @@
 - Git 分支以 worktree 树显示；可在分支行直接创建独立 worktree，或使用铅笔按钮重命名当前本地分支，名称校验和 Git 操作由主进程完成
 - 会话列表：按项目目录扫描 `~/.pi/agent/sessions/`，点击后只加载接近当前屏幕的一小段最新窗口；滚到顶部/底部才按需加载相邻历史，不会一次挂载整段会话
 - 会话支持复制与从任意用户消息处分叉（fork）；fork 后时间线回到分叉点，输入框自动预填原消息
-- 构建模式的原生任务系统,自带 `pion_task` 工具.
+- 构建模式的原生任务系统,自带 `pion_task` 工具
 
 ### 审查与运行闭环
 - 支持未暂存/已暂存 diff、整文件及 hunk/行级暂存与撤销、stage/unstage、带 hooks 的 commit，以及 merge/rebase/cherry-pick 冲突读取、显式解决、continue/abort
@@ -76,10 +76,10 @@ npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 
 ```
 
 > 注：pi RPC 子进程启动后会把进程标题改写为 `pi`（`process.title`），
-> `ps`/`pgrep` 按 `cli.js --mode rpc` 检索会扑空，检查存活请用 `pgrep -x pi`。
+> `ps`/`pgrep` 按 `cli.js --mode rpc` 检索会扑空，检查存活请用 `pgrep -x pi`
 
 平台升级的进程边界、安全规则与状态机见
-[`docs/coding-agent-platform.md`](docs/coding-agent-platform.md)。
+[`docs/coding-agent-platform.md`](docs/coding-agent-platform.md)
 
 ## 环境要求
 
@@ -180,11 +180,11 @@ src/
 
 旧 `renderer/src/components/*` 路径以及 `src/main/agent-bridge.ts`、
 `src/main/wire.ts`、`src/main/task-planning.ts` 已在模块化整理中删除，
-请直接使用 `src/main/agent/`、`src/renderer/src/features/` 下的新路径。
+请直接使用 `src/main/agent/`、`src/renderer/src/features/` 下的新路径
 
 ## 说明
 
-- 本项目采用 MIT License，完整条款见根目录 `LICENSE`。
-- 工具策略保存在 Electron userData 下的 `pion-tool-permissions.json`；运行时生成的全局 Pi 权限门扩展位于 `runtime/` 子目录。
-- 会话文件由 pi 自身管理（JSONL，按目录分桶），Pion 只读扫描列表；跨项目点击会话时交给对应的 pi 后台加载。
-- `useAgent.ts`、`AgentBridge`、`GitService` 和 `WorkflowManager` 保留为对外 facade；具体缓存、进程、解析、交互和 runner 逻辑放在同领域子模块中。
+- 本项目采用 MIT License，完整条款见根目录 `LICENSE`
+- 工具策略保存在 Electron userData 下的 `pion-tool-permissions.json`；运行时生成的全局 Pi 权限门扩展位于 `runtime/` 子目录
+- 会话文件由 pi 自身管理（JSONL，按目录分桶），Pion 只读扫描列表；跨项目点击会话时交给对应的 pi 后台加载
+- `useAgent.ts`、`AgentBridge`、`GitService` 和 `WorkflowManager` 保留为对外 facade；具体缓存、进程、解析、交互和 runner 逻辑放在同领域子模块中

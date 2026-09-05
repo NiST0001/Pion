@@ -176,13 +176,15 @@ describe('agent compaction state', () => {
     expect(queued.queued).toEqual({ steering: 1, followUp: 1 })
     expect(queued.queuedMessages).toEqual({
       steering: ['检查入口'],
-      followUp: ['完成后运行测试']
+      followUp: ['完成后运行测试'],
+      nativeFollowUpCount: 0
     })
 
     const settled = reducer(queued, { type: 'event', event: { type: 'agent_settled' } })
     expect(settled.queuedMessages).toEqual({
       steering: ['检查入口'],
-      followUp: ['完成后运行测试']
+      followUp: ['完成后运行测试'],
+      nativeFollowUpCount: 0
     })
   })
 

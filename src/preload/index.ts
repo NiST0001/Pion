@@ -64,6 +64,7 @@ const api: PionApi = {
   send: (message, images) => ipcRenderer.invoke(IPC.AgentSend, message, images),
   queue: (message, images) => ipcRenderer.invoke(IPC.AgentQueue, message, images),
   sendQueuedMessage: (kind, index) => ipcRenderer.invoke(IPC.AgentSendQueued, kind, index),
+  removeQueuedMessage: (kind, index) => ipcRenderer.invoke(IPC.AgentRemoveQueued, kind, index),
   abort: () => ipcRenderer.invoke(IPC.AgentAbort),
   getRunCheckpoint: () =>
     ipcRenderer.invoke(IPC.AgentRunCheckpoint) as Promise<RunCheckpointStatus | null>,

@@ -50,7 +50,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
         yolo: dead || ready ? false : state.yolo,
         queued: dead || ready ? { steering: 0, followUp: 0 } : state.queued,
         queuedMessages: dead || ready
-          ? { steering: [], followUp: [] }
+          ? { steering: [], followUp: [], nativeFollowUpCount: 0 }
           : state.queuedMessages
       }
     }
@@ -204,7 +204,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
         busy: false,
         compacting: false,
         queued: { steering: 0, followUp: 0 },
-        queuedMessages: { steering: [], followUp: [] }
+        queuedMessages: { steering: [], followUp: [], nativeFollowUpCount: 0 }
       }
     case 'event': {
       const next = reduceEvent(state, action.event)
@@ -378,10 +378,13 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
       const followUp = Array.isArray(event.followUp)
         ? event.followUp.filter((message): message is string => typeof message === 'string')
         : []
+      const nativeFollowUpCount = typeof event.nativeFollowUpCount === 'number'
+        ? event.nativeFollowUpCount
+        : 0
       return {
         ...state,
         queued: { steering: steering.length, followUp: followUp.length },
-        queuedMessages: { steering, followUp }
+        queuedMessages: { steering, followUp, nativeFollowUpCount }
       }
     }
 

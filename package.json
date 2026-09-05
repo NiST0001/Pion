@@ -1,6 +1,6 @@
 {
   "name": "pion",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "description": "Desktop app for the pi coding agent",
   "type": "module",
   "main": "out/main/index.js",

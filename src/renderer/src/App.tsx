@@ -860,9 +860,18 @@ export function App(): ReactElement {
                   sessionKey={taskSessionKey}
                   steering={queuedMessages.steering}
                   followUp={queuedMessages.followUp}
+                  nativeFollowUpCount={queuedMessages.nativeFollowUpCount}
                   agentBusy={state.busy}
                   onSendItem={(kind, index) => actions.sendQueuedMessage(kind, index).catch((error: unknown) => {
                     console.error('[pion] 直接发送排队消息失败', error)
+                  })}
+                  onEditItem={(item) => actions.removeQueuedMessage(item.kind, item.index)
+                    .then(() => setPrefill(item.text))
+                    .catch((error: unknown) => {
+                      console.error('[pion] 编辑排队消息失败', error)
+                    })}
+                  onRemoveItem={(kind, index) => actions.removeQueuedMessage(kind, index).catch((error: unknown) => {
+                    console.error('[pion] 删除排队消息失败', error)
                   })}
                 />
               </div>

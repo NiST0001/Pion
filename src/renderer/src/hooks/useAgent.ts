@@ -114,6 +114,7 @@ export function useAgent() {
     send,
     queue,
     sendQueuedMessage,
+    removeQueuedMessage,
     abort,
     rollbackRunCheckpoint,
     newSession
@@ -191,6 +192,7 @@ export function useAgent() {
       send,
       queue,
       sendQueuedMessage,
+      removeQueuedMessage,
       abort,
       rollbackRunCheckpoint,
       newSession,
@@ -234,6 +236,7 @@ export function useAgent() {
       send,
       queue,
       sendQueuedMessage,
+      removeQueuedMessage,
       abort,
       rollbackRunCheckpoint,
       newSession,
