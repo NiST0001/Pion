@@ -236,6 +236,7 @@ export function App(): ReactElement {
   const settingsMounted = useDeferredMount(settingsOpen)
   const newSessionInFlight = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const agentTodos = useMemo(() => deriveAgentTodos(state.timeline) ?? [], [state.timeline])
   const { visibleHistoryEntryId, handleTimelineScroll } = useConversationNavigation({
     scrollRef,
     timeline: state.timeline,
@@ -244,6 +245,9 @@ export function App(): ReactElement {
     sessionPath: state.session?.sessionFile,
     historyIndexSessionPath: state.historyIndex?.sessionPath,
     historyJump: state.historyJump,
+    panelsVisible: state.queuedMessages.steering.length > 0
+      || state.queuedMessages.followUp.length > 0
+      || (state.mode !== 'plan' && agentTodos.length > 0),
     loadOlder: actions.loadOlder,
     loadNewer: actions.loadNewer
   })
@@ -549,7 +553,6 @@ export function App(): ReactElement {
   }, [state.commands])
   const latestRunChanges = useMemo(() => deriveLatestRunChanges(state.timeline), [state.timeline])
   const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
-  const agentTodos = useMemo(() => deriveAgentTodos(state.timeline) ?? [], [state.timeline])
   const hasTaskPanel = state.mode !== 'plan' && agentTodos.length > 0
   const queuedMessages = state.queuedMessages
   const hasQueuedMessages = queuedMessages.steering.length > 0 || queuedMessages.followUp.length > 0
@@ -793,7 +796,7 @@ export function App(): ReactElement {
             onRestoreCheckpoint={(runId) => void runRecovery.restoreCheckpoint(runId)}
           />
 
-          <div className={`conversation-shell${historyNavigatorVisible ? ' has-history-navigator' : ''}`}>
+          <div className={`conversation-shell${historyNavigatorVisible ? ' has-history-navigator' : ''}${(hasTaskPanel || hasQueuedMessages) ? ' has-composer-panels' : ''}`}>
             <HistoryNavigator
               index={state.historyIndex}
               activeEntryId={visibleHistoryEntryId}

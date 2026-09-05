@@ -7,13 +7,22 @@
    card compete with the input itself: tasks stay on the left, queued user
    messages stay on the right. */
 .composer-support-row {
-  position: relative;
-  z-index: 1;
+  /* Floating overlay above the composer: panels never push the timeline. */
+  position: absolute;
+  z-index: 13;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
   align-items: flex-end;
   width: min(calc(100% - 48px), 1600px);
-  margin: 0 auto;
+  margin: 0;
   gap: 12px;
+  pointer-events: none;
+}
+
+.composer-support-row .task-panel {
+  pointer-events: auto;
 }
 
 .composer-support-row.has-task-panel:not(.has-queue-panel) {

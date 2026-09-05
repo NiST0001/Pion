@@ -11,6 +11,8 @@ interface UseConversationNavigationOptions {
   sessionPath?: string
   historyIndexSessionPath?: string
   historyJump: AgentState['historyJump']
+  /** Floating composer panels add bottom clearance; re-pin when they toggle. */
+  panelsVisible?: boolean
   loadOlder: (options?: { viaScroll?: boolean }) => Promise<void>
   loadNewer: (options?: { viaScroll?: boolean }) => Promise<void>
 }
@@ -23,6 +25,7 @@ export function useConversationNavigation({
   sessionPath,
   historyIndexSessionPath,
   historyJump,
+  panelsVisible,
   loadOlder,
   loadNewer
 }: UseConversationNavigationOptions) {
@@ -93,6 +96,14 @@ export function useConversationNavigation({
     observer.observe(element)
     return () => observer.disconnect()
   }, [scrollRef])
+
+  // Floating composer panels add bottom padding without changing the
+  // scroller's clientHeight, so the resize observer never fires for them.
+  useLayoutEffect(() => {
+    const element = scrollRef.current
+    if (!element || !nearBottomRef.current) return
+    element.scrollTop = element.scrollHeight
+  }, [scrollRef, panelsVisible])
 
   const updateVisibleHistoryEntry = useCallback((): void => {
     const container = scrollRef.current

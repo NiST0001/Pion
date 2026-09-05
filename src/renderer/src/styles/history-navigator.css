@@ -26,6 +26,12 @@
   padding-left: 54px;
 }
 
+/* Floating composer panels overlay the timeline; reserve clearance so a
+   bottom-pinned last line always lands above the collapsed panel peek. */
+.conversation-shell.has-composer-panels .chat-scroll {
+  padding-bottom: 46px;
+}
+
 .history-navigator {
   position: absolute;
   z-index: 18;
