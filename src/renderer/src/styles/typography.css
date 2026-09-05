@@ -272,10 +272,10 @@ select {
   --fg-faint: #827b74;
 }
 
-:root[data-theme='codex-dark'] {
+:root[data-theme='plain-dark'] {
   --fg-faint: #929292;
 }
 
-:root[data-theme='codex-light'] {
+:root[data-theme='plain-light'] {
   --fg-faint: #858585;
 }

@@ -74,7 +74,7 @@
   --shadow-pop: 0 18px 46px rgba(76, 57, 43, 0.16);
 }
 
-:root[data-theme='codex-dark'] {
+:root[data-theme='plain-dark'] {
   color-scheme: dark;
   --bg: #171717;
   --bg-elev: #1f1f1f;
@@ -107,7 +107,7 @@
   --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.42);
 }
 
-:root[data-theme='codex-light'] {
+:root[data-theme='plain-light'] {
   color-scheme: light;
   --bg: #ffffff;
   --bg-elev: #ffffff;

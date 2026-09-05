@@ -17,14 +17,14 @@
   --composer-shadow: 0 5px 20px rgba(47, 43, 40, 0.09);
 }
 
-:root[data-theme='codex-dark'] {
+:root[data-theme='plain-dark'] {
   --surface-tint: rgba(255, 255, 255, 0.022);
   --backdrop: rgba(0, 0, 0, 0.62);
   --code-overlay: rgba(0, 0, 0, 0.32);
   --composer-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
 }
 
-:root[data-theme='codex-light'] {
+:root[data-theme='plain-light'] {
   --surface-tint: rgba(0, 0, 0, 0.022);
   --backdrop: rgba(0, 0, 0, 0.28);
   --code-overlay: rgba(255, 255, 255, 0.76);

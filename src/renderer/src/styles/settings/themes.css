@@ -49,12 +49,12 @@
   border-color: #ded8d1;
 }
 
-.theme-card-preview.codex-dark {
+.theme-card-preview.plain-dark {
   background: #171717;
   border-color: #383838;
 }
 
-.theme-card-preview.codex-light {
+.theme-card-preview.plain-light {
   background: #f7f7f7;
   border-color: #d8d8d8;
 }
@@ -78,12 +78,12 @@
   border-color: #e5dfd9;
 }
 
-.codex-dark .theme-card-top {
+.plain-dark .theme-card-top {
   background: #1f1f1f;
   border-color: #383838;
 }
 
-.codex-light .theme-card-top {
+.plain-light .theme-card-top {
   background: #ffffff;
   border-color: #dddddd;
 }
@@ -95,11 +95,11 @@
   background: #d97757;
 }
 
-.codex-dark .theme-card-top i {
+.plain-dark .theme-card-top i {
   background: #f1f1ef;
 }
 
-.codex-light .theme-card-top i {
+.plain-light .theme-card-top i {
   background: #202020;
 }
 
@@ -133,11 +133,11 @@
   background: #d9d2ca;
 }
 
-.codex-dark .theme-card-line {
+.plain-dark .theme-card-line {
   background: #4a4a4a;
 }
 
-.codex-light .theme-card-line {
+.plain-light .theme-card-line {
   background: #d4d4d4;
 }
 
@@ -147,11 +147,11 @@
   background: #d97757;
 }
 
-.codex-dark .theme-card-pill {
+.plain-dark .theme-card-pill {
   background: #f1f1ef;
 }
 
-.codex-light .theme-card-pill {
+.plain-light .theme-card-pill {
   background: #202020;
 }
 

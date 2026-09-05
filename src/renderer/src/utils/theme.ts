@@ -6,8 +6,8 @@
 export type ThemeId =
   | 'terracotta-dark'
   | 'terracotta-light'
-  | 'codex-dark'
-  | 'codex-light'
+  | 'plain-dark'
+  | 'plain-light'
 
 export interface ThemeOption {
   id: ThemeId
@@ -18,8 +18,8 @@ export interface ThemeOption {
 export const THEMES: ThemeOption[] = [
   { id: 'terracotta-dark', name: '陶土深色', description: '暖黑背景，低干扰长时间工作' },
   { id: 'terracotta-light', name: '陶土浅色', description: '暖白纸张感，适合明亮环境' },
-  { id: 'codex-dark', name: 'Codex 深色', description: '近黑表面与白色重点操作' },
-  { id: 'codex-light', name: 'Codex 浅色', description: '纯白表面与黑色重点操作' }
+  { id: 'plain-dark', name: '深色', description: '近黑表面与白色重点操作' },
+  { id: 'plain-light', name: '浅色', description: '纯白表面与黑色重点操作' }
 ]
 
 const THEME_STORAGE_KEY = 'pion:theme'
