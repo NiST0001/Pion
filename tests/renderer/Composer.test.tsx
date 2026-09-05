@@ -72,6 +72,37 @@ describe('Composer input references and local slash commands', () => {
     expect(onQueue).not.toHaveBeenCalled()
   })
 
+  it('triggers the reference menu for CJK-adjacent and full-width @', () => {
+    render(
+      <Composer
+        busy={false}
+        disabled={false}
+        sendDisabled={false}
+        prefill=""
+        history={[]}
+        commands={[]}
+        mode="build"
+        onModeChange={vi.fn()}
+        onSend={vi.fn()}
+        onQueue={vi.fn()}
+        onAbort={vi.fn()}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+
+    // 中文后面不打空格也要触发
+    fireEvent.change(textarea, { target: { value: '看一下这个@' } })
+    expect(screen.getByRole('listbox', { name: '参考文件' })).toBeInTheDocument()
+
+    // 全角 ＠ 也触发
+    fireEvent.change(textarea, { target: { value: '对比一下＠' } })
+    expect(screen.getByRole('listbox', { name: '参考文件' })).toBeInTheDocument()
+
+    // 邮箱地址不触发
+    fireEvent.change(textarea, { target: { value: 'user@example.com' } })
+    expect(screen.queryByRole('listbox', { name: '参考文件' })).not.toBeInTheDocument()
+  })
+
   it('adds a text reference from the file input after typing @', async () => {
     const onSend = vi.fn()
     render(

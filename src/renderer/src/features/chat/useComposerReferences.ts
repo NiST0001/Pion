@@ -13,6 +13,7 @@ import {
   createReferenceId,
   fileToImageContent,
   readReferenceFile,
+  REFERENCE_TRIGGER_RE,
   referenceToken,
   removeReferenceToken
 } from './composerReferences'
@@ -158,7 +159,7 @@ export function useComposerReferences({
 
   const insertReferenceToken = useCallback((name: string): void => {
     const current = valueRef.current
-    const match = current.match(/(^|\s)@([^\s]*)$/)
+    const match = current.match(REFERENCE_TRIGGER_RE)
     if (!match || match.index === undefined) return
     const start = match.index + match[1].length
     const nextValue = `${current.slice(0, start)}${referenceToken(name)} `

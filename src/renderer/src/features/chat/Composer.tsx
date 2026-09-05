@@ -3,7 +3,7 @@ import type { KeyboardEvent, ReactElement, ReactNode } from 'react'
 import { ArrowUp, AtSign, Hammer, ListTodo, ShieldAlert, Square } from 'lucide-react'
 import type { AgentMode, ImageContent, SlashCommandInfo } from '../../../../shared/types'
 
-import { buildReferenceMessage } from './composerReferences'
+import { buildReferenceMessage, REFERENCE_TRIGGER_RE } from './composerReferences'
 import { ComposerAttachments } from './ComposerAttachments'
 import { ReferenceMenu, SlashCommandMenu } from './ComposerMenus'
 import { useComposerReferences } from './useComposerReferences'
@@ -164,7 +164,7 @@ export function Composer({
     element.style.height = `${Math.min(element.scrollHeight, 200)}px`
   }
 
-  const referenceMatch = value.match(/(^|\s)@([^\s]*)$/)
+  const referenceMatch = value.match(REFERENCE_TRIGGER_RE)
   const referenceQuery = referenceMatch?.[2].toLocaleLowerCase() ?? null
   const referenceOptions = referenceQuery === null
     ? []

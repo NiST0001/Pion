@@ -74,10 +74,18 @@ export function referenceToken(name: string): string {
   return `@${name.replace(/\s+/g, '_')}`
 }
 
+/**
+ * The @ reference trigger: at the start of the input, after whitespace, or
+ * directly after CJK/punctuation characters (Chinese typing rarely separates
+ * words with spaces). Both half-width @ and full-width ＠ count. Latin letters
+ * and digits before @ do not trigger, so email addresses stay inert.
+ */
+export const REFERENCE_TRIGGER_RE = /(^|[\s\p{P}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])[@＠]([^\s]*)$/u
+
 export function removeReferenceToken(message: string, name: string): string {
   const token = referenceToken(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return message
-    .replace(new RegExp(`(^|\\s)${token}(?=\\s|$)`, 'g'), '$1')
+    .replace(new RegExp(`(^|[\\s\\p{P}\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}])${token}(?=\\s|$)`, 'gu'), '$1')
     .replace(/[ \t]{2,}/g, ' ')
 }
 
