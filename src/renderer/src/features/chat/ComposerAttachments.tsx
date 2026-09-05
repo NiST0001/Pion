@@ -30,10 +30,15 @@ export function ComposerAttachments({
             title={`${reference.name} · ${reference.kind === 'image' ? '图像参考' : '文本参考'}`}
           >
             {reference.kind === 'image' ? (
-              <img
-                src={`data:${reference.image.mimeType};base64,${reference.image.data}`}
-                alt={`待发送图像 ${pendingImages.indexOf(reference.image) + 1}`}
-              />
+              <>
+                <img
+                  src={`data:${reference.image.mimeType};base64,${reference.image.data}`}
+                  alt={`待发送图像 ${pendingImages.indexOf(reference.image) + 1}`}
+                />
+                <span className="composer-attachment-index" aria-hidden="true">
+                  {pendingImages.indexOf(reference.image) + 1}
+                </span>
+              </>
             ) : (
               <>
                 <FileText size={16} aria-hidden="true" />

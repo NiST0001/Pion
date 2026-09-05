@@ -103,6 +103,47 @@ describe('Composer input references and local slash commands', () => {
     expect(screen.queryByRole('listbox', { name: '参考文件' })).not.toBeInTheDocument()
   })
 
+  it('labels images with their order so the model can reference them', async () => {
+    const onSend = vi.fn()
+    render(
+      <Composer
+        busy={false}
+        disabled={false}
+        sendDisabled={false}
+        prefill=""
+        history={[]}
+        commands={[]}
+        mode="build"
+        onModeChange={vi.fn()}
+        onSend={onSend}
+        onQueue={vi.fn()}
+        onAbort={vi.fn()}
+      />
+    )
+    const textarea = screen.getByRole('textbox')
+    fireEvent.change(textarea, { target: { value: '对比这两张图' } })
+
+    const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), (char) => char.charCodeAt(0))
+    const fileInput = screen.getByLabelText('选择图像或参考文件')
+    fireEvent.change(fileInput, {
+      target: { files: [
+        new File([bytes], 'first.png', { type: 'image/png' }),
+        new File([bytes], 'second.png', { type: 'image/png' })
+      ] }
+    })
+
+    expect(await screen.findByText('2 张图像待发送')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /发送消息/ }))
+
+    await waitFor(() => {
+      const [text, images] = onSend.mock.calls[0]
+      expect(images).toHaveLength(2)
+      expect(text).toContain('[图像 1: first.png]')
+      expect(text).toContain('[图像 2: second.png]')
+      expect(text.indexOf('图像 1')).toBeLessThan(text.indexOf('图像 2'))
+    })
+  })
+
   it('adds a text reference from the file input after typing @', async () => {
     const onSend = vi.fn()
     render(

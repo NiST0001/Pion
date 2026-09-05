@@ -90,9 +90,18 @@ export function removeReferenceToken(message: string, name: string): string {
 }
 
 export function buildReferenceMessage(message: string, references: ReferenceAttachment[]): string {
-  const parts = references
-    .filter((reference): reference is Extract<ReferenceAttachment, { kind: 'text' }> => reference.kind === 'text')
-    .map((reference) => `[文件参考 ${referenceToken(reference.name)}]\n<reference-content>\n${reference.content}\n</reference-content>`)
+  // Images travel as bare content blocks; label them in the text so the model
+  // can map “图像 N / 文件名” onto the Nth attached image.
+  const parts: string[] = []
+  let imageIndex = 0
+  for (const reference of references) {
+    if (reference.kind === 'text') {
+      parts.push(`[文件参考 ${referenceToken(reference.name)}]\n<reference-content>\n${reference.content}\n</reference-content>`)
+    } else {
+      imageIndex++
+      parts.push(`[图像 ${imageIndex}: ${reference.name}]`)
+    }
+  }
   return [message.trim(), ...parts].filter(Boolean).join('\n\n')
 }
 
