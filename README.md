@@ -4,6 +4,11 @@
 
 > 本项目大部分代码由 AI 协作生成，经人工审查与测试。
 
+<p align="center">
+  <img src="docs/images/screenshot-dark.png" alt="Pion 深色主题" width="49%">
+  <img src="docs/images/screenshot-light.png" alt="Pion 浅色主题" width="49%">
+</p>
+
 ## 架构
 
 - **主进程** `src/main/`：`AgentBridge` 按会话管理多个 `RpcClient`，以子进程方式驱动 pi agent（`--mode rpc`）
