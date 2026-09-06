@@ -441,6 +441,8 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   padding: 12px 14px;
+  /* Keep code clear of the floating copy button. */
+  padding-right: 42px;
   overflow-x: auto;
   font-family: var(--mono);
   font-size: 12.5px;
@@ -459,12 +461,12 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
   width: 26px;
   height: 26px;
   border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
   display: flex;
   align-items: center;
   justify-content: center;
+  background: var(--bg-elev);
   color: var(--fg-faint);
-  background: rgba(20, 22, 27, 0.85);
-  border: 1px solid var(--border-soft);
   opacity: 0;
   transition: opacity 0.12s ease, color 0.12s ease;
 }
