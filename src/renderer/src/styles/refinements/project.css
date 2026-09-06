@@ -239,7 +239,7 @@
     var(--fg-dim) 62%,
     var(--fg-dim) 100%
   );
-  background-size: 170% 100%;
+  background-size: 200% 100%;
   background-repeat: repeat-x;
   -webkit-background-clip: text;
   background-clip: text;
@@ -249,10 +249,10 @@
 
 @keyframes session-name-sweep {
   from {
-    background-position: 0 0;
+    background-position: 0% 0;
   }
   to {
-    background-position: -170% 0;
+    background-position: 200% 0;
   }
 }
 

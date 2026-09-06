@@ -292,7 +292,7 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
     var(--fg-faint) 62%,
     var(--fg-faint) 100%
   );
-  background-size: 170% 100%;
+  background-size: 200% 100%;
   background-repeat: repeat-x;
   -webkit-background-clip: text;
   background-clip: text;
@@ -308,11 +308,11 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
 
 @keyframes agent-shimmer {
   from {
-    background-position: 0 0;
+    background-position: 0% 0;
   }
   to {
-    /* Exactly one tile width: the loop is seamless. */
-    background-position: -170% 0;
+    /* Exactly one tile (200% of the element) per cycle: linear and seamless. */
+    background-position: 200% 0;
   }
 }
 
