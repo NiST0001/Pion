@@ -1082,7 +1082,6 @@ export class AgentBridge {
     const runs = this.runStore.list({ ...query, limit: Math.max(query.limit ?? 50, 50) })
     const candidates: RunRecoveryCandidate[] = []
     for (let run of runs) {
-      if (run.state === 'queued' && run.interruptedAt === undefined) continue
       if (run.state === 'queued' && this.queuedPromptWasPersisted(run)) {
         run = this.runStore.update(run.id, (current) => {
           current.state = 'interrupted'
@@ -1090,15 +1089,15 @@ export class AgentBridge {
           current.error = '排队消息已出现在会话记录中；为避免重复执行，只能作为安全续接运行继续。'
         }) ?? run
       }
-      if (run.state !== 'queued' && run.state !== 'interrupted') continue
+      // Queued runs restore into the live queue on session activation; they
+      // are not recovery candidates.
+      if (run.state !== 'interrupted') continue
       candidates.push({
         run,
-        reason: run.state === 'queued' ? 'queued-prompt' : 'interrupted-run',
+        reason: 'interrupted-run',
         canResume: true,
         canRestoreCheckpoint: run.checkpoint?.state === 'ready',
-        note: run.state === 'queued'
-          ? '这条排队消息尚未确认执行，可以恢复到当前会话队列。'
-          : '上一轮可能已执行部分工具。续接会先要求 Agent 检查当前工作区，且不会重放旧工具调用。'
+        note: '上一轮可能已执行部分工具。续接会先要求 Agent 检查当前工作区，且不会重放旧工具调用。'
       })
     }
     return candidates
@@ -1787,6 +1786,28 @@ export class AgentBridge {
     this.backendKeysBySessionPath.set(normalizedPath, backend.key)
     if (this.activeKey === backend.key) this.activeSessionPath = normalizedPath
     this.pushRunningSessionPaths()
+    this.restoreQueuedRuns(backend)
+  }
+
+  /** Queued runs are persisted in the run store; put them back into the live
+      queue when their session activates so an app restart never drops them.
+      They wait for the user's next action instead of auto-dispatching. */
+  private restoreQueuedRuns(backend: BackendRecord): void {
+    if (backend.queueRestored) return
+    backend.queueRestored = true
+    const sessionPath = backend.sessionPath ? resolve(backend.sessionPath) : undefined
+    const queued = this.runStore
+      .list({ sessionPath, cwd: sessionPath ? undefined : backend.cwd, limit: 50 })
+      .filter((run) => run.state === 'queued')
+      .sort((left, right) => left.createdAt - right.createdAt)
+    if (queued.length === 0) return
+    backend.localFollowUps ??= []
+    const existing = new Set(backend.localFollowUps.map((item) => item.runId))
+    for (const run of queued) {
+      if (existing.has(run.id)) continue
+      backend.localFollowUps.push({ runId: run.id, text: run.prompt.message, images: run.prompt.images })
+    }
+    this.pushQueueSnapshot(backend)
   }
 
   async stop(): Promise<void> {

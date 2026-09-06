@@ -181,6 +181,37 @@ describe('AgentBridge extension UI requests', () => {
     expect((value.backend as { checkpoint?: unknown }).checkpoint).toBe(firstCheckpoint)
   })
 
+  it('restores persisted queued runs into the live queue on session sync', async () => {
+    const value = await fixture()
+    const sessionPath = join(value.backend.cwd as string, 'session.jsonl')
+    ;(value.bridge as unknown as { runStore: RunStore }).runStore.create({
+      id: 'queued-run-1',
+      cwd: value.backend.cwd as string,
+      sessionPath,
+      kind: 'follow-up',
+      state: 'queued',
+      createdAt: Date.now(),
+      prompt: { message: '重启前排队的消息', images: [] },
+      promptPreview: '重启前排队的消息',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0, costUsd: 0 },
+      tools: [],
+      compactions: [],
+      revision: 0
+    })
+    ;(value.backend.client as { getState?: unknown }).getState = async () => ({ sessionFile: sessionPath })
+
+    await (value.bridge as unknown as { syncBackendSession(b: unknown): Promise<void> })
+      .syncBackendSession(value.backend)
+
+    const followUps = (value.backend as { localFollowUps?: Array<{ text: string }> }).localFollowUps
+    expect(followUps?.map((item) => item.text)).toEqual(['重启前排队的消息'])
+
+    // 幂等：再次同步不重复入队
+    await (value.bridge as unknown as { syncBackendSession(b: unknown): Promise<void> })
+      .syncBackendSession(value.backend)
+    expect((value.backend as { localFollowUps?: unknown[] }).localFollowUps).toHaveLength(1)
+  })
+
   it('cancels malformed interactive requests instead of leaving the Agent waiting', async () => {
     const value = await fixture()
     expect(value.handle({

@@ -112,12 +112,9 @@ export class RunStore {
             : tool)
           run.revision += 1
           recovered = true
-        } else if (run.state === 'queued' && run.interruptedAt === undefined) {
-          run.interruptedAt = Date.now()
-          run.error = run.error ?? 'Pion 重启前这条消息仍在队列中，尚未确认执行。'
-          run.revision += 1
-          recovered = true
         }
+        // Queued prompts never ran a tool: they stay queued and are restored
+        // into the live queue when their session activates again.
         this.runs.set(run.id, run)
       }
       this.trim()

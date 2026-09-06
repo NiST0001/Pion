@@ -69,6 +69,8 @@ export interface BackendRecord {
   checkpointRefreshPromise?: Promise<RunCheckpointStatus | null>
   /** Serializes lazy checkpoint creation gated by the first write-capable tool. */
   checkpointCreatePromise?: Promise<void>
+  /** Persisted queued runs are restored into localFollowUps only once. */
+  queueRestored?: boolean
   /** Completion listeners (for example auto-verification) finish before local queue dispatch. */
   runCompletionPromise?: Promise<void>
   activeRunId?: string
