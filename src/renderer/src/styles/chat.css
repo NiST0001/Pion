@@ -283,12 +283,23 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
   font-weight: 500;
   letter-spacing: 0.4px;
   pointer-events: none;
-  background: linear-gradient(100deg, var(--fg-faint) 25%, var(--fg) 50%, var(--fg-faint) 75%);
-  background-size: 220% 100%;
+  /* Seamless repeating band: the next sweep enters as the previous exits. */
+  background: repeating-linear-gradient(
+    100deg,
+    var(--fg-faint) 0%,
+    var(--fg-faint) 38%,
+    var(--accent-strong) 50%,
+    var(--fg-faint) 62%,
+    var(--fg-faint) 100%
+  );
+  background-size: 170% 100%;
+  background-repeat: repeat-x;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  animation: agent-shimmer 1.5s linear infinite;
+  /* The glow lives on the glyphs, not on any surrounding surface. */
+  text-shadow: 0 0 10px color-mix(in srgb, var(--accent-strong) 42%, transparent);
+  animation: agent-shimmer 1.05s linear infinite;
 }
 
 .agent-working-face {
@@ -299,10 +310,11 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
 
 @keyframes agent-shimmer {
   from {
-    background-position: 115% 0;
+    background-position: 0 0;
   }
   to {
-    background-position: -15% 0;
+    /* Exactly one tile width: the loop is seamless. */
+    background-position: -170% 0;
   }
 }
 
