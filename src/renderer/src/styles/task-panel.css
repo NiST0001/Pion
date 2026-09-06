@@ -434,7 +434,9 @@ html.pion-keyboard-focus .task-panel-head:focus-visible {
 
 .composer {
   position: relative;
-  z-index: 2;
+  /* Above the floating support panels so pickers/menus opened from the
+     composer never paint underneath them. */
+  z-index: 14;
 }
 
 @media (max-width: 700px) {
