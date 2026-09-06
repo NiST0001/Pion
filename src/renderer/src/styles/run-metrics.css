@@ -223,7 +223,7 @@
 
 .run-recovery-primary {
   background: var(--accent);
-  color: var(--accent-contrast, #fff);
+  color: var(--on-accent, #fff);
 }
 
 .run-recovery-actions button:disabled {

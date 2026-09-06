@@ -223,7 +223,7 @@
 .verification-repair button {
   flex: none;
   background: var(--accent);
-  color: var(--accent-contrast, #fff);
+  color: var(--on-accent, #fff);
 }
 
 @media (max-width: 1080px) {

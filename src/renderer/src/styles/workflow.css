@@ -163,7 +163,7 @@
 .workflow-create button,
 .workflow-actions button.primary {
   background: var(--accent);
-  color: var(--accent-contrast, #fff);
+  color: var(--on-accent, #fff);
 }
 
 .workflow-body {
