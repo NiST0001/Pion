@@ -1,7 +1,7 @@
-import { join } from 'node:path'
-import { getPackageDir, RpcClient } from '@earendil-works/pi-coding-agent'
+import { RpcClient } from '@earendil-works/pi-coding-agent'
 import type { VerificationRun } from '../../shared/operations'
 import type { VerificationService } from '../verification'
+import { piCliPath } from '../pi-runtime'
 import { ACTIVE_VERIFICATION, MAX_ACTIVE_WORKERS, WORKER_TIMEOUT_MS } from './constants'
 import { clip } from './utils'
 import type {
@@ -49,7 +49,7 @@ export class PiWorkflowWorkerRunner implements WorkflowWorkerRunner {
     if (this.clients.size >= MAX_ACTIVE_WORKERS) throw new Error('多 Agent 并发上限为 2，请等待当前 worker 完成')
     const extensionPath = await this.permissionExtensionPath()
     const client = new RpcClient({
-      cliPath: join(getPackageDir(), 'dist', 'cli.js'),
+      cliPath: piCliPath(),
       cwd: input.cwd,
       args: [
         '--no-approve',

@@ -1,4 +1,4 @@
-import { dirname, join, resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { stat, unlink } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
@@ -8,7 +8,6 @@ import {
   SessionManager,
   SettingsManager,
   getAgentDir,
-  getPackageDir,
   hasTrustRequiringProjectResources
 } from '@earendil-works/pi-coding-agent'
 import type { SessionEntry } from '@earendil-works/pi-coding-agent'
@@ -56,6 +55,7 @@ import {
   inspectGitRunCheckpoint,
   rollbackGitRunCheckpoint
 } from '../checkpoints'
+import { piCliPath } from '../pi-runtime'
 import type {
   RunOperation,
   RunOperationState,
@@ -1650,7 +1650,7 @@ export class AgentBridge {
     cwd: string,
     sessionPath?: string
   ): Promise<BackendRecord> {
-    const cliPath = join(getPackageDir(), 'dist', 'cli.js')
+    const cliPath = piCliPath()
     const args = await this.backendArgs(cwd, sessionPath)
     const client = new RpcClient({
       cliPath,

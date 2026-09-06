@@ -6,7 +6,6 @@ import { promisify } from 'node:util'
 import {
   DefaultPackageManager,
   getAgentDir,
-  getPackageDir,
   SettingsManager
 } from '@earendil-works/pi-coding-agent'
 import type {
@@ -14,6 +13,7 @@ import type {
   PluginInstallResult,
   PluginUninstallResult
 } from '../shared/types'
+import { piCliPath } from './pi-runtime'
 
 const execFileAsync = promisify(execFile)
 const PI_PLUGIN_STORE_URL = 'https://pi.dev/packages'
@@ -239,7 +239,7 @@ export class PluginManager {
   }
 
   private async runPiCommand(args: string[]): Promise<{ stdout: string; stderr: string }> {
-    const cliPath = join(getPackageDir(), 'dist', 'cli.js')
+    const cliPath = piCliPath()
     try {
       return await execFileAsync('node', [cliPath, ...args], {
         cwd: homedir(),
