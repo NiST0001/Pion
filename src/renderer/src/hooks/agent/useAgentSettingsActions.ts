@@ -49,6 +49,14 @@ export function useAgentSettingsActions({
     [api]
   )
 
+  const migrateSessionToProject = useCallback(
+    async (cwd: string): Promise<string | null> => {
+      if (!api) return null
+      return api.migrateSessionToProject(cwd)
+    },
+    [api]
+  )
+
   const setSteeringMode = useCallback(
     async (mode: 'all' | 'one-at-a-time'): Promise<void> => {
       await api?.setSteeringMode(mode)
@@ -69,6 +77,7 @@ export function useAgentSettingsActions({
     compactNow,
     exportHtml,
     renameSession,
+    migrateSessionToProject,
     setSteeringMode,
     setFollowUpMode
   }

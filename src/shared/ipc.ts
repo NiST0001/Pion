@@ -14,6 +14,7 @@ export const IPC = {
   AgentQueue: 'pion:agent-queue',
   AgentSendQueued: 'pion:agent-send-queued',
   AgentRemoveQueued: 'pion:agent-remove-queued',
+  AgentMigrateProject: 'pion:agent-migrate-project',
   AgentAbort: 'pion:agent-abort',
   AgentRunCheckpoint: 'pion:agent-run-checkpoint',
   AgentRollbackCheckpoint: 'pion:agent-rollback-checkpoint',

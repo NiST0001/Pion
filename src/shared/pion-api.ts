@@ -78,6 +78,8 @@ export interface PionApi {
   sendQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void>
   /** Remove a Pion-owned queued message; native Pi queue entries are rejected. */
   removeQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void>
+  /** Move the active session into another project's bucket; returns the new path. */
+  migrateSessionToProject(cwd: string): Promise<string | null>
   /** Abort the current run. */
   abort(): Promise<void>
   /** Current run checkpoint for the selected session. */

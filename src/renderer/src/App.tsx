@@ -133,6 +133,9 @@ export function App(): ReactElement {
   const [rollbackConfirmOpen, setRollbackConfirmOpen] = useState(false)
   const [rollbackBusy, setRollbackBusy] = useState(false)
   const [rollbackError, setRollbackError] = useState('')
+  const [migrationTarget, setMigrationTarget] = useState<string | null>(null)
+  const [migrationBusy, setMigrationBusy] = useState(false)
+  const [migrationError, setMigrationError] = useState('')
   const {
     maximized,
     sidebarOpen,
@@ -192,7 +195,6 @@ export function App(): ReactElement {
     return Number.isFinite(raw) && raw >= 2 && raw <= 16 ? raw : 10
   })
   const [historyNavMaxVisible, setHistoryNavMaxVisible] = useState<number>(readHistoryNavMaxVisible)
-  const [newSessionCwd, setNewSessionCwd] = useState('')
   const gitWorkspace = useGitWorkspace({
     hasBridge,
     cwd: resourceCwd,
@@ -276,17 +278,6 @@ export function App(): ReactElement {
       : [...current, path])
   }, [])
 
-  // Keep the new-session target valid as projects are added/removed. It follows
-  // the active project initially, but remains independently selectable.
-  useEffect(() => {
-    setNewSessionCwd((current) => {
-      if (current && state.projects.some((project) => project.cwd === current)) return current
-      return state.projects.find((project) => project.cwd === state.status.cwd)?.cwd
-        ?? state.projects[0]?.cwd
-        ?? ''
-    })
-  }, [state.projects, state.status.cwd])
-
   // Keep the user's selected row authoritative while the slower backend
   // switch and its state refreshes complete. Older state responses must not
   // make the sidebar highlight jump back to the previous session.
@@ -310,7 +301,6 @@ export function App(): ReactElement {
 
   const handleSelectProject = useCallback(
     async (cwd: string) => {
-      setNewSessionCwd(cwd)
       sessionSelectionId.current += 1
       setSelectedSession(null)
       if (cwd === state.status.cwd) return
@@ -326,16 +316,36 @@ export function App(): ReactElement {
     [actions, state.status.cwd]
   )
 
+  const requestProjectMigration = useCallback((cwd: string): void => {
+    if (!cwd || cwd === state.status.cwd) return
+    setMigrationError('')
+    setMigrationTarget(cwd)
+  }, [state.status.cwd])
+
+  const confirmProjectMigration = useCallback(async (): Promise<void> => {
+    if (!migrationTarget) return
+    setMigrationBusy(true)
+    setMigrationError('')
+    try {
+      const movedPath = await actions.migrateSessionToProject(migrationTarget)
+      setMigrationTarget(null)
+      if (movedPath) await actions.switchSession(movedPath)
+    } catch (error) {
+      setMigrationError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setMigrationBusy(false)
+    }
+  }, [actions, migrationTarget])
+
   const handleNewSession = useCallback(
     async (cwd?: string) => {
       if (newSessionInFlight.current) return
       newSessionInFlight.current = true
       try {
-        const targetCwd = cwd ?? (newSessionCwd || state.status.cwd)
+        const targetCwd = cwd ?? state.status.cwd
         sessionSelectionId.current += 1
         setSelectedSession(null)
         if (targetCwd) {
-          setNewSessionCwd(targetCwd)
           const trust = await window.pion.getProjectTrust(targetCwd)
           await activateProject(targetCwd)
           if (trust.decision === 'ask') {
@@ -350,7 +360,7 @@ export function App(): ReactElement {
         newSessionInFlight.current = false
       }
     },
-    [actions, activateProject, newSessionCwd, state.status.cwd]
+    [actions, activateProject, state.status.cwd]
   )
 
   const handleNewBranch = useCallback((cwd: string) => {
@@ -400,7 +410,6 @@ export function App(): ReactElement {
       const previousSelection = selectedSession
       const previousReviewPath = reviewPath
       const previousCapturedReviewChange = capturedReviewChange
-      setNewSessionCwd(cwd)
       setReviewPath(null)
       setCapturedReviewChange(null)
       setPendingReviewSelection(null)
@@ -696,7 +705,7 @@ export function App(): ReactElement {
             <SidebarToolbar
               searchQuery={sessionQuery}
               onSearch={setSessionQuery}
-              onNewSession={() => void handleNewSession(newSessionCwd || undefined)}
+              onNewSession={() => void handleNewSession()}
               onOpenCapabilities={() => setCapabilitiesOpen(true)}
             />
             <FavoriteSessions
@@ -894,9 +903,9 @@ export function App(): ReactElement {
               projectSelector={
                 <ProjectPicker
                   projects={state.projects}
-                  value={newSessionCwd}
+                  value={state.status.cwd ?? ''}
                   disabled={state.projects.length === 0}
-                  onChange={setNewSessionCwd}
+                  onChange={requestProjectMigration}
                 />
               }
               controls={
@@ -1045,6 +1054,19 @@ export function App(): ReactElement {
         busy={yoloDialog.busy}
         onConfirm={yoloDialog.onConfirm}
         onCancel={yoloDialog.onCancel}
+      />
+      <ConfirmDialog
+        open={migrationTarget !== null}
+        title="迁移会话到项目"
+        message={`将会话迁移到 ${state.projects.find((project) => project.cwd === migrationTarget)?.name ?? migrationTarget}？`}
+        detail={migrationError || '会话文件会移动到目标项目的会话目录，并在那里继续。运行中的会话需要先等待完成。'}
+        confirmLabel="迁移"
+        tone="accent"
+        busy={migrationBusy}
+        onConfirm={() => void confirmProjectMigration()}
+        onCancel={() => {
+          if (!migrationBusy) setMigrationTarget(null)
+        }}
       />
       {taskHistoryMounted && (
         <Suspense fallback={null}>

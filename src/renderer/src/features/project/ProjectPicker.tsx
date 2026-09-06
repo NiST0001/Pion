@@ -59,7 +59,7 @@ export function ProjectPicker({
         ref={triggerRef}
         type="button"
         className="composer-project-trigger"
-        aria-label="新会话项目"
+        aria-label="当前项目"
         aria-haspopup="listbox"
         aria-expanded={open}
         disabled={disabled}
@@ -74,8 +74,8 @@ export function ProjectPicker({
       </button>
 
       {open && projects.length > 0 && (
-        <div className="composer-project-menu picker-menu" role="listbox" aria-label="新会话项目">
-          <div className="composer-project-menu-head">选择新会话项目</div>
+        <div className="composer-project-menu picker-menu" role="listbox" aria-label="迁移会话到项目">
+          <div className="composer-project-menu-head">迁移会话到项目</div>
           {projects.map((project, index) => (
             <button
               ref={(element) => {

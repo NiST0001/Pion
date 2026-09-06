@@ -173,6 +173,7 @@ export function useAgent() {
     compactNow,
     exportHtml,
     renameSession,
+    migrateSessionToProject,
     setSteeringMode,
     setFollowUpMode
   } = useAgentSettingsActions({
@@ -224,6 +225,7 @@ export function useAgent() {
       compactNow,
       exportHtml,
       renameSession,
+      migrateSessionToProject,
       setSteeringMode,
       setFollowUpMode
     }),
@@ -268,6 +270,7 @@ export function useAgent() {
       compactNow,
       exportHtml,
       renameSession,
+      migrateSessionToProject,
       setSteeringMode,
       setFollowUpMode
     ]

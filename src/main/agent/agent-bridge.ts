@@ -1,6 +1,6 @@
-import { dirname, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { stat, unlink } from 'node:fs/promises'
+import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
 import {
   ProjectTrustStore,
@@ -1253,6 +1253,71 @@ export class AgentBridge {
     this.setStatus({ phase: 'ready', error: undefined, cwd: normalizedCwd })
     this.pushRunCheckpoint()
     void this.pushSessionInfo()
+  }
+
+  /** pi derives the session bucket from the cwd the same way; keep in sync. */
+  private sessionDirFor(cwd: string): string {
+    const safePath = `--${resolve(cwd).replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
+    return join(getAgentDir(), 'sessions', safePath)
+  }
+
+  /**
+   * Migrate the active session to another project: move the session file into
+   * the target project's bucket, rewrite its header cwd, then activate it.
+   * Unsaved sessions have no file to move and just switch the project.
+   */
+  async migrateSessionToProject(targetCwd: string): Promise<string | null> {
+    const target = resolve(targetCwd)
+    const fromCwd = this.activeCwd
+    if (!fromCwd || resolve(fromCwd) === target) return this.activeSessionPath ?? null
+    const backend = this.getActiveBackend()
+    if (backend) {
+      await backend.startPromise
+      const state = await backend.client.getState().catch(() => null)
+      if (
+        state?.isStreaming
+        || state?.isCompacting
+        || backend.busy
+        || backend.compacting
+        || backend.localQueueDispatching
+        || (backend.localFollowUps?.length ?? 0) > 0
+        || backend.runCompletionPromise
+      ) {
+        throw new Error('当前会话正在运行，请等待完成或中止后再迁移项目')
+      }
+    }
+
+    const sessionPath = this.activeSessionPath ?? backend?.sessionPath
+    if (!sessionPath) {
+      await this.start(target)
+      return null
+    }
+
+    const source = resolve(sessionPath)
+    const targetDir = this.sessionDirFor(target)
+    await mkdir(targetDir, { recursive: true })
+    const targetPath = join(targetDir, basename(source))
+    const content = await readFile(source, 'utf8')
+    const lines = content.split('\n')
+    try {
+      const header = JSON.parse(lines[0]) as { type?: string; cwd?: unknown }
+      if (header && header.type === 'session') {
+        header.cwd = target
+        lines[0] = JSON.stringify(header)
+      }
+    } catch {
+      // Keep the original first line if it is not a JSON header.
+    }
+    await writeFile(targetPath, lines.join('\n'), 'utf8')
+    if (targetPath !== source) await unlink(source).catch(() => undefined)
+    this.sessionManagers.delete(source)
+    this.sessionManagers.delete(targetPath)
+    this.sessionManagerSignatures.delete(source)
+    this.sessionManagerSignatures.delete(targetPath)
+
+    await this.switchSession(targetPath)
+    await this.refreshSidebarSessions()
+    return targetPath
   }
 
   private newSessionKey(cwd: string): string {
