@@ -10,7 +10,12 @@ import type { ExtensionUiRequest } from '../../src/shared/types'
 const roots: string[] = []
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  await Promise.all(roots.splice(0).map((root) => rm(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 100
+  })))
 })
 
 async function fixture(): Promise<{
@@ -156,9 +161,10 @@ describe('AgentBridge extension UI requests', () => {
       title: RUN_CHECKPOINT_MARKER
     })).toBe(true)
 
+    // 检查点创建要走一串 git 子进程，Windows 高负载下可能超过 waitFor 默认 1s
     await vi.waitFor(() => {
       expect(value.writes.some((line) => line.includes('gate-1'))).toBe(true)
-    })
+    }, { timeout: 15_000, interval: 100 })
     const response = JSON.parse(value.writes.find((line) => line.includes('gate-1')) ?? '{}')
     expect(response).toMatchObject({
       type: 'extension_ui_response',
@@ -177,7 +183,7 @@ describe('AgentBridge extension UI requests', () => {
     })).toBe(true)
     await vi.waitFor(() => {
       expect(value.writes.some((line) => line.includes('gate-2'))).toBe(true)
-    })
+    }, { timeout: 15_000, interval: 100 })
     expect((value.backend as { checkpoint?: unknown }).checkpoint).toBe(firstCheckpoint)
   })
 

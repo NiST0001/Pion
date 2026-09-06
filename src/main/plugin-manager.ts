@@ -6,7 +6,6 @@ import { promisify } from 'node:util'
 import {
   DefaultPackageManager,
   getAgentDir,
-  getPackageDir,
   SettingsManager
 } from '@earendil-works/pi-coding-agent'
 import type {
@@ -14,6 +13,7 @@ import type {
   PluginInstallResult,
   PluginUninstallResult
 } from '../shared/types'
+import { piCliPath } from './pi-runtime'
 
 const execFileAsync = promisify(execFile)
 const PI_PLUGIN_STORE_URL = 'https://pi.dev/packages'
@@ -222,7 +222,8 @@ export class PluginManager {
       )).join('\n')
       throw new Error(`无法保存 Pi 插件设置：${details}`)
     }
-    const label = basename(fallbackCommand)
+    // Windows 上解析到的是 bun.cmd / pnpm.exe，展示时去掉可执行扩展名
+    const label = basename(fallbackCommand).replace(/\.(exe|cmd|bat|com)$/i, '')
     return `系统未提供 npm，已使用 ${label} ${action === 'install' ? '安装' : '卸载'} ${source}`
   }
 
@@ -238,7 +239,7 @@ export class PluginManager {
   }
 
   private async runPiCommand(args: string[]): Promise<{ stdout: string; stderr: string }> {
-    const cliPath = join(getPackageDir(), 'dist', 'cli.js')
+    const cliPath = piCliPath()
     try {
       return await execFileAsync('node', [cliPath, ...args], {
         cwd: homedir(),

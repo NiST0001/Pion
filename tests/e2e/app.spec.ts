@@ -1,7 +1,7 @@
 import { _electron as electron, expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { delimiter, join, resolve } from 'node:path'
 
 const projectRoot = resolve(import.meta.dirname, '../..')
 
@@ -110,16 +110,32 @@ test('uninstalls an npm plugin when npm is unavailable', async ({}, testInfo) =>
     private: true,
     dependencies: { 'pi-subagents': '1.0.0' }
   }))
-  const bunPath = join(binDir, 'bun')
-  await writeFile(bunPath, '#!/bin/sh\nprintf "%s\\n" "$@" > "$PION_FAKE_PM_LOG"\n')
-  await chmod(bunPath, 0o755)
+  // POSIX 用可执行的 sh 脚本；Windows 用 .cmd 垫片转发到 node 脚本，
+  // PATH 中不需要有 node（垫片写死了绝对路径），维持“npm 不可用”的测试前提。
+  let pathValue = binDir
+  if (process.platform === 'win32') {
+    const script = join(binDir, 'fake-bun.mjs')
+    await writeFile(script, [
+      "import { writeFileSync } from 'node:fs'",
+      "const file = process.env.PION_FAKE_PM_LOG",
+      "if (file) writeFileSync(file, process.argv.slice(2).join('\\n') + '\\n')",
+      ''
+    ].join('\n'))
+    await writeFile(join(binDir, 'bun.cmd'), `@${JSON.stringify(process.execPath)} "${script}" %*\r\n`)
+    const system32 = process.env.SystemRoot ? join(process.env.SystemRoot, 'System32') : ''
+    pathValue = [binDir, system32].filter(Boolean).join(delimiter)
+  } else {
+    const bunPath = join(binDir, 'bun')
+    await writeFile(bunPath, '#!/bin/sh\nprintf "%s\\n" "$@" > "$PION_FAKE_PM_LOG"\n')
+    await chmod(bunPath, 0o755)
+  }
 
   const app = await electron.launch({
     args: [projectRoot],
     cwd: projectRoot,
     env: {
       ...process.env,
-      PATH: binDir,
+      PATH: pathValue,
       PION_USER_DATA_DIR: userData,
       PI_CODING_AGENT_DIR: piAgentDir,
       PION_FAKE_PM_LOG: logPath,

@@ -17,7 +17,12 @@ afterEach(async () => {
   else process.env.PATH = originalPath
   if (originalLog === undefined) delete process.env.PION_FAKE_PM_LOG
   else process.env.PION_FAKE_PM_LOG = originalLog
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  await Promise.all(roots.splice(0).map((root) => rm(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 100
+  })))
 })
 
 async function createPackageFixture(): Promise<{
@@ -43,13 +48,32 @@ async function createPackageFixture(): Promise<{
   return { root, agentDir, binDir, logPath }
 }
 
-async function installFakeBun(fixture: Awaited<ReturnType<typeof createPackageFixture>>): Promise<void> {
+async function installFakeBun(fixture: Awaited<ReturnType<typeof createPackageFixture>>): Promise<string> {
+  // POSIX 用可执行的 sh 脚本；Windows 用 .cmd 垫片转发到 node 脚本
+  // （PATH 里没有 node 也能跑，垫片中写死了绝对路径）
+  if (process.platform === 'win32') {
+    const script = join(fixture.binDir, 'fake-bun.mjs')
+    await writeFile(script, [
+      "import { writeFileSync } from 'node:fs'",
+      "const file = process.env.PION_FAKE_PM_LOG",
+      "if (file) writeFileSync(file, process.argv.slice(2).join('\\n') + '\\n')",
+      ''
+    ].join('\n'))
+    const bunPath = join(fixture.binDir, 'bun.cmd')
+    await writeFile(bunPath, `@${JSON.stringify(process.execPath)} "${script}" %*\r\n`)
+    const command = bunPath
+    process.env.PI_CODING_AGENT_DIR = fixture.agentDir
+    process.env.PATH = fixture.binDir
+    process.env.PION_FAKE_PM_LOG = fixture.logPath
+    return command
+  }
   const bunPath = join(fixture.binDir, 'bun')
   await writeFile(bunPath, '#!/bin/sh\nprintf "%s\\n" "$@" > "$PION_FAKE_PM_LOG"\n')
   await chmod(bunPath, 0o755)
   process.env.PI_CODING_AGENT_DIR = fixture.agentDir
   process.env.PATH = fixture.binDir
   process.env.PION_FAKE_PM_LOG = fixture.logPath
+  return bunPath
 }
 
 describe('PluginManager package-manager fallback', () => {
@@ -81,7 +105,7 @@ describe('PluginManager package-manager fallback', () => {
 
   it('surfaces settings persistence failures', async () => {
     const fixture = await createPackageFixture()
-    await installFakeBun(fixture)
+    const bunCommand = await installFakeBun(fixture)
     const settings = SettingsManager.inMemory({ packages: ['npm:pi-subagents'] })
     vi.spyOn(settings, 'drainErrors').mockReturnValue([{
       scope: 'global',
@@ -89,7 +113,7 @@ describe('PluginManager package-manager fallback', () => {
     }])
     const manager = new PluginManager({
       createSettingsManager: () => settings,
-      findExecutable: (command) => command === 'bun' ? join(fixture.binDir, 'bun') : null
+      findExecutable: (command) => command === 'bun' ? bunCommand : null
     })
 
     await expect(manager.uninstall('npm:pi-subagents')).rejects.toThrow(

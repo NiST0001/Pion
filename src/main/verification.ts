@@ -211,7 +211,9 @@ export class VerificationService {
                 : ['npm', 'pnpm', 'yarn', 'bun']
         const executable = await findExecutable(preferred)
         if (executable) {
-          packageManager = preferred.find((name) => executable.endsWith(name) || executable.endsWith(`${name}.cmd`))
+          // Windows 上解析到的是 npm.CMD / bun.exe，先去掉扩展名再做大小写不敏感匹配
+          const resolvedName = executable.toLowerCase().replace(/\.(exe|cmd|bat|com)$/, '')
+          packageManager = preferred.find((name) => resolvedName.endsWith(name))
             ?? requested
             ?? 'package-manager'
           for (const kind of KINDS) {

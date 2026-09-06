@@ -53,8 +53,11 @@ describe('ProviderConfigStore', () => {
     })
     expect(modelsText).not.toContain('secret-provider-key')
     expect(auth['local-openai']).toEqual({ type: 'api_key', key: 'secret-provider-key' })
-    expect((await stat(join(root, 'models.json'))).mode & 0o777).toBe(0o600)
-    expect((await stat(join(root, 'auth.json'))).mode & 0o777).toBe(0o600)
+    // POSIX 权限位断言仅在不做权限模拟的系统上成立；Windows 的 chmod 是空操作
+    if (process.platform !== 'win32') {
+      expect((await stat(join(root, 'models.json'))).mode & 0o777).toBe(0o600)
+      expect((await stat(join(root, 'auth.json'))).mode & 0o777).toBe(0o600)
+    }
   })
 
   it('uses a local placeholder credential when no key is supplied', async () => {

@@ -1,8 +1,8 @@
 // UI 变更验证：无边框标题栏 / 模型选择器位置 / 设置面板
 import { spawn, execSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { SessionManager } from '@earendil-works/pi-coding-agent'
 
@@ -16,7 +16,7 @@ mkdirSync(process.env.PION_USER_DATA_DIR, { recursive: true })
 mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true })
 // 测试工作区用独立临时 git 仓库，避免与本机正在使用的项目会话互相干扰
 const TEST_WORKSPACE = mkdtempSync(join(tmpdir(), 'pion-ui-test-'))
-execSync('git init -q -b main && git config user.email nist@localhost && git config user.name nist && git commit -q --allow-empty -m init', { cwd: TEST_WORKSPACE })
+execSync('git init -q -b main && git config user.email nist@localhost && git config user.name nist && git config core.autocrlf false && git commit -q --allow-empty -m init', { cwd: TEST_WORKSPACE })
 const ORDER_SESSION_PATHS = ['A', 'B'].map((label) => {
   const manager = SessionManager.create(TEST_WORKSPACE)
   manager.appendSessionInfo(`Pion reorder probe ${label}`)
@@ -121,20 +121,28 @@ const CHECKPOINT_TEST_FILE = join(TEST_WORKSPACE, '.pion-checkpoint-ui-test.tmp'
 rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
 rmSync(CHECKPOINT_TEST_FILE, { force: true })
 writeFileSync(CHECKPOINT_BASELINE_FILE, 'preserve this pre-run content\n')
-const child = spawn('node_modules/electron/dist/electron', ['.', `--remote-debugging-port=${PORT}`], {
-  env: { ...process.env, PION_TOOL_PERMISSION_TEST: '1' },
-  stdio: ['ignore', 'ignore', 'ignore']
-})
+const child = spawn(
+  process.platform === 'win32'
+    ? 'node_modules\\electron\\dist\\electron.exe'
+    : 'node_modules/electron/dist/electron',
+  ['.', `--remote-debugging-port=${PORT}`],
+  {
+    env: { ...process.env, PION_TOOL_PERMISSION_TEST: '1' },
+    stdio: ['ignore', 'ignore', 'ignore']
+  }
+)
+// 进程退出时的兜底清理；Windows 上句柄可能尚未释放，尽力而为即可
 process.on('exit', () => {
   try { child.kill('SIGKILL') } catch {}
-  rmSync(CHECKPOINT_BASELINE_FILE, { force: true })
-  rmSync(CHECKPOINT_TEST_FILE, { force: true })
-  rmSync(TRUST_TEST_WORKSPACE, { recursive: true, force: true })
-  for (const path of ORDER_SESSION_PATHS) rmSync(path, { force: true })
-  rmSync(NATIVE_TASK_SESSION_PATH, { force: true })
-  rmSync(NATIVE_TASK_WORKSPACE, { recursive: true, force: true })
-  rmSync(TEST_WORKSPACE, { recursive: true, force: true })
-  rmSync(TEST_RUNTIME_ROOT, { recursive: true, force: true })
+  const bestEffort = (path, opts) => { try { rmSync(path, opts) } catch { /* 句柄未释放时留给手动清理 */ } }
+  bestEffort(CHECKPOINT_BASELINE_FILE, { force: true })
+  bestEffort(CHECKPOINT_TEST_FILE, { force: true })
+  bestEffort(TRUST_TEST_WORKSPACE, { recursive: true, force: true })
+  for (const path of ORDER_SESSION_PATHS) bestEffort(path, { force: true })
+  bestEffort(NATIVE_TASK_SESSION_PATH, { force: true })
+  bestEffort(NATIVE_TASK_WORKSPACE, { recursive: true, force: true })
+  bestEffort(TEST_WORKSPACE, { recursive: true, force: true })
+  bestEffort(TEST_RUNTIME_ROOT, { recursive: true, force: true })
 })
 
 async function getPage() {
@@ -188,6 +196,15 @@ const checkHost = (name, value) => {
   else failed++
 }
 
+// Windows 上后端 RPC 与进程启动更慢，轮询等待表达式为真
+const waitForExpr = async (expr, iterations = 60, interval = 250) => {
+  for (let i = 0; i < iterations; i++) {
+    if (await evaluate(expr)) return true
+    await sleep(interval)
+  }
+  return await evaluate(expr)
+}
+
 // 等待 agent 运行
 for (let i = 0; i < 40; i++) {
   await sleep(500)
@@ -195,7 +212,10 @@ for (let i = 0; i < 40; i++) {
 }
 // Previous interrupted runs may have left deleted temp workspaces in the
 // persistent project list. Remove only this test suite's own path prefix.
-await evaluate(`(async () => { const projects = await window.pion.listProjects(); for (const project of projects) { if (/^\\/tmp\\/pion-(?:ui-test|trust-ui)-/.test(project.cwd)) await window.pion.removeProject(project.cwd); } return true; })()`)
+// （按平台临时目录前缀匹配，Windows 上 cwd 是反斜杠路径，统一归一为 '/' 再比较）
+const staleProjectPrefixes = [join(tmpdir(), 'pion-ui-test-'), join(tmpdir(), 'pion-trust-ui-')]
+  .map((prefix) => prefix.split(sep).join('/'))
+await evaluate(`(async () => { const projects = await window.pion.listProjects(); for (const project of projects) { const cwd = project.cwd.split(${JSON.stringify(sep)}).join('/'); if (${JSON.stringify(staleProjectPrefixes)}.some((prefix) => cwd.startsWith(prefix))) await window.pion.removeProject(project.cwd); } return true; })()`)
 
 await evaluate(`(async () => { await window.pion.addProject(${JSON.stringify(TRUST_TEST_WORKSPACE)}); await window.pion.setProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)}, false); await window.pion.startAgent(${JSON.stringify(TRUST_TEST_WORKSPACE)}); return true })()`)
 for (let i = 0; i < 20; i++) {
@@ -218,10 +238,7 @@ for (let i = 0; i < 90; i++) {
 }
 await evaluate(`(async () => { await window.pion.setProjectTrust(${JSON.stringify(TRUST_TEST_WORKSPACE)}, null); await window.pion.removeProject(${JSON.stringify(TRUST_TEST_WORKSPACE)}); await window.pion.addProject(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.startAgent(${JSON.stringify(TEST_WORKSPACE)}); await window.pion.newSession(); return true })()`)
 // 等待新会话的空状态真正落到界面上（启动时可能短暂展示恢复的实时会话）
-for (let i = 0; i < 60; i++) {
-  await sleep(250)
-  if (await evaluate(`document.querySelectorAll('.timeline > *').length === 0 && !!document.querySelector('.empty-state')`)) break
-}
+await waitForExpr(`document.querySelectorAll('.timeline > *').length === 0 && !!document.querySelector('.empty-state')`, 120, 500)
 // 后端在本机高负载时启动较慢，等待其真正激活再继续
 for (let i = 0; i < 60; i++) {
   await sleep(500)
@@ -267,11 +284,12 @@ for (let i = 0; i < 30; i++) {
   if (await evaluate(`!document.querySelector('.tool-permission-modal')`)) break
 }
 await check('项目级允许即时持久化', `(async () => { const policy = await window.pion.getToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}); return policy.source === 'saved' && policy.rules.write === 'allow' && (await window.pion.getPendingToolPermissionRequests()).length === 0 && !window.__pionPermissionError; })()`)
+// 隔离测试环境没有可用模型，第一个权限命令的 RPC turn 收不到 settle 事件，
+// send 会一直挂起并把后续命令挡在队列里。先强制中止本轮运行使后端重新空闲。
+await evaluate(`window.pion.abort().catch(() => true)`)
+await waitForExpr(`(async () => { const s = await window.pion.getState(); return !!s && !s.isStreaming && !!document.querySelector('.send-button') && document.querySelector('.send-button')?.disabled === false })()`, 120, 300)
 await evaluate(`(async () => { await window.pion.setToolPermissionPolicy(${JSON.stringify(TEST_WORKSPACE)}, { write: 'allow', shell: 'ask' }); window.pion.send('/pion-permission-risk-test').catch((error) => { window.__pionPermissionError = String(error); }); return true; })()`)
-for (let i = 0; i < 80; i++) {
-  await sleep(120)
-  if (await evaluate(`!!document.querySelector('.tool-permission-modal')`)) break
-}
+await waitForExpr(`!!document.querySelector('.tool-permission-modal')`, 200, 150)
 await check('高风险命令强制逐次确认', `document.querySelector('.tool-permission-risks')?.textContent?.includes('高风险命令') && document.querySelectorAll('.tool-permission-allow-actions button').length === 1 && !document.querySelector('.tool-permission-allow-project')`)
 await evaluate(`document.querySelector('.tool-permission-allow-actions button')?.click()`)
 for (let i = 0; i < 30; i++) {
@@ -290,7 +308,7 @@ await check('主输入区使用大号正文', `parseFloat(getComputedStyle(docum
 await check('侧栏项目标签不再使用小字号', `parseFloat(getComputedStyle(document.querySelector('.project-folder-name')).fontSize) >= 14`)
 checkHost('后台准备期间输入框保持可编辑', (() => { const app = readFileSync('src/renderer/src/App.tsx', 'utf8'); const composer = readFileSync('src/renderer/src/features/chat/Composer.tsx', 'utf8'); return app.includes('disabled={!state.status.cwd}') && app.includes('sendDisabled={state.status.phase') && composer.includes('Agent 正在准备，可先输入任务') && composer.includes('disabled || sendDisabled'); })())
 checkHost('非首屏面板与消息 Markdown 按需加载', (() => { const app = readFileSync('src/renderer/src/App.tsx', 'utf8'); const timeline = readFileSync('src/renderer/src/features/chat/ChatTimeline.tsx', 'utf8'); return timeline.includes("lazy(() => import('./ChatMessage')") && app.includes("lazy(() => import('./features/settings/SettingsModal')") && !timeline.includes("import { ChatMessage } from './ChatMessage'"); })())
-checkHost('首屏主脚本压缩到 1MB 以内', (() => { const sizes = execSync("find out/renderer/assets -maxdepth 1 -type f -name 'index-*.js' -printf '%s\\n'").toString().trim().split(/\s+/).map(Number).filter(Number.isFinite); return sizes.length === 1 && sizes[0] < 1_000_000; })())
+checkHost('首屏主脚本压缩到 1MB 以内', (() => { const dir = 'out/renderer/assets'; const sizes = readdirSync(dir).filter((name) => /^index-.*\.js$/.test(name)).map((name) => statSync(join(dir, name)).size); return sizes.length === 1 && sizes[0] < 1_000_000; })())
 await check('旧 header 已移除',  `!document.querySelector('.app-header')`)
 await check('窗口控制三键（最小/最大/关闭）', `document.querySelectorAll('.titlebar-btn').length >= 3`)
 await check('关闭按钮样式', `!!document.querySelector('.titlebar-close')`)
@@ -314,10 +332,8 @@ await evaluate(`document.querySelector('.review-rollback-button')?.click()`)
 await sleep(120)
 await check('本轮回滚使用主题确认框', `(() => { const dialog = document.querySelector('.confirm-dialog'); const probe = document.createElement('i'); probe.style.background = 'var(--bg-elev)'; document.body.appendChild(probe); const expected = getComputedStyle(probe).backgroundColor; probe.remove(); return !!dialog && dialog.getAttribute('role') === 'alertdialog' && dialog.textContent?.includes('撤销本轮修改') && getComputedStyle(dialog).backgroundColor === expected; })()`)
 await evaluate(`document.querySelector('.confirm-dialog-confirm')?.click()`)
-for (let i = 0; i < 30; i++) {
-  await sleep(120)
-  if (await evaluate(`(async () => (await window.pion.getRunCheckpoint())?.state === 'rolled-back')()`)) break
-}
+// 回滚要走一串 git 子进程，Windows 上较慢
+await waitForExpr(`(async () => (await window.pion.getRunCheckpoint())?.state === 'rolled-back')()`, 120, 250)
 await check('一键恢复本轮检查点', `(async () => (await window.pion.getRunCheckpoint())?.state === 'rolled-back' && !document.querySelector('.review-rollback-button') && !document.querySelector('.confirm-dialog'))()`)
 checkHost('检查点移除本轮新增文件', !existsSync(CHECKPOINT_TEST_FILE))
 checkHost(
@@ -584,22 +600,22 @@ await evaluate(`document.querySelector('.composer-mode-option[data-mode="build"]
 await sleep(250)
 await check('构建模式可选', `document.querySelector('.composer-mode-option[data-mode="build"]')?.getAttribute('aria-pressed') === 'true'`)
 await evaluate(`document.querySelector('.composer-mode-option[data-mode="plan"]')?.click()`)
-await sleep(350)
+await waitForExpr(`document.querySelector('.composer-mode-option[data-mode="plan"]')?.getAttribute('aria-pressed') === 'true' && document.querySelector('.composer-row')?.classList.contains('composer-mode-plan')`)
 await check('计划模式可选', `document.querySelector('.composer-mode-option[data-mode="plan"]')?.getAttribute('aria-pressed') === 'true' && document.querySelector('.composer-row')?.classList.contains('composer-mode-plan')`)
 await evaluate(`document.querySelector('.composer-mode-option[data-mode="build"]')?.click()`)
-await sleep(350)
+await waitForExpr(`!!document.querySelector('.confirm-dialog')`)
 await check('计划模式切回构建前需要确认', `!!document.querySelector('.confirm-dialog') && (document.querySelector('#confirm-dialog-title')?.textContent ?? '').includes('构建模式')`)
 await evaluate(`document.querySelector('.confirm-dialog-confirm')?.click()`)
-await sleep(350)
+await waitForExpr(`document.querySelector('.composer-mode-option[data-mode="build"]')?.getAttribute('aria-pressed') === 'true'`)
 await check('计划模式可返回构建', `document.querySelector('.composer-mode-option[data-mode="build"]')?.getAttribute('aria-pressed') === 'true'`)
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); if (!input) return false; const event = new KeyboardEvent('keydown', { key: 'Tab', ctrlKey: true, bubbles: true, cancelable: true }); input.dispatchEvent(event); return event.defaultPrevented; })()`)
-await sleep(350)
+await waitForExpr(`document.querySelector('.composer-mode-option[data-mode="plan"]')?.getAttribute('aria-pressed') === 'true'`)
 await check('Ctrl+Tab 切换计划模式', `document.querySelector('.composer-mode-option[data-mode="plan"]')?.getAttribute('aria-pressed') === 'true'`)
 await evaluate(`(() => { const input = document.querySelector('.composer-row textarea'); if (!input) return false; input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', ctrlKey: true, bubbles: true, cancelable: true })); return true; })()`)
-await sleep(180)
+await waitForExpr(`!!document.querySelector('.confirm-dialog')`)
 await check('Ctrl+Tab 切回构建前需要确认', `!!document.querySelector('.confirm-dialog')`)
 await evaluate(`document.querySelector('.confirm-dialog-confirm')?.click()`)
-await sleep(350)
+await waitForExpr(`document.querySelector('.composer-mode-option[data-mode="build"]')?.getAttribute('aria-pressed') === 'true'`)
 await check('Ctrl+Tab 切换构建模式', `document.querySelector('.composer-mode-option[data-mode="build"]')?.getAttribute('aria-pressed') === 'true'`)
 // 命令列表由后台就绪后异步刷新，未出菜单时重输 '/' 重试
 for (let i = 0; i < 50; i++) {
@@ -631,9 +647,10 @@ await check('快捷键提示为 Tab 排队 Enter 直接发送', `document.queryS
 await check('模型选择器嵌入输入框', `!!document.querySelector('.composer-row .composer-inline-controls .picker')`)
 await check('模型选择器显示当前模型', `(document.querySelector('.composer-inline-controls .picker-value')?.textContent ?? '').length > 0`)
 await check('模型选择器可打开', `(() => { document.querySelector('.composer-inline-controls .picker-trigger')?.click(); return true })()`)
-await sleep(300)
+await waitForExpr(`!!document.querySelector('.composer-inline-controls .picker-menu')`)
 await check('模型菜单已显示', `!!document.querySelector('.composer-inline-controls .picker-menu')`)
 await check('选择菜单使用轻量展开动画', `['pion-menu-in-up', 'pion-menu-in-down'].includes(getComputedStyle(document.querySelector('.composer-inline-controls .picker-menu')).animationName)`)
+await waitForExpr(`document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
 await check('模型选项可见', `document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
 await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
 await check('构建/计划左侧有项目选择', `(() => { const picker = document.querySelector('.composer-inline-controls .composer-project-picker'); const trigger = picker?.querySelector('.composer-project-trigger'); const mode = document.querySelector('.composer-mode-picker'); return !!trigger && trigger.getAttribute('aria-label') === '新会话项目' && (trigger.textContent ?? '').includes('项目') && !!mode && Boolean(picker.compareDocumentPosition(mode) & Node.DOCUMENT_POSITION_FOLLOWING) && !picker?.querySelector('select') && !document.querySelector('.sidebar-new-session-project'); })()`)
@@ -650,7 +667,7 @@ for (let i = 0; i < 30; i++) {
 }
 await check('新建会话后模型选择器可用', `(() => { const button = document.querySelector('.composer-inline-controls .picker-trigger'); return !!button && !button.disabled; })()`)
 await evaluate(`document.querySelector('.composer-inline-controls .picker-trigger')?.click()`)
-await sleep(150)
+await waitForExpr(`document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
 await check('新建会话后模型选项可见', `document.querySelectorAll('.composer-inline-controls .picker-option').length > 0`)
 await evaluate(`(async () => { window.__pionNewSessionId = (await window.pion.getState())?.sessionId ?? null; document.querySelector('.sidebar-new-session')?.click(); return true })()`)
 for (let i = 0; i < 20; i++) {
@@ -705,16 +722,17 @@ await sleep(400)
 await check('点击左下角设置后面板打开', `!!document.querySelector('.settings-modal')`)
 await check('设置面板使用缩放入场动画', `getComputedStyle(document.querySelector('.settings-modal')).animationName === 'pion-pop-in'`)
 await check('设置左侧导航渲染', `document.querySelectorAll('.settings-nav-item').length >= 5`)
+await waitForExpr(`!!document.querySelector('.models-page') && document.querySelectorAll('.provider-card').length > 0`)
 await check('模型提供商页渲染', `!!document.querySelector('.models-page') && document.querySelectorAll('.provider-card').length > 0`)
 await evaluate(`document.querySelector('.provider-add-button')?.click()`)
-await sleep(800)
+await waitForExpr(`document.querySelectorAll('.provider-directory-row').length >= 20`)
 await check('添加提供商使用 Pi 完整目录', `document.querySelectorAll('.provider-directory-row').length >= 20 && document.querySelectorAll('.provider-setup-tabs [role="tab"]').length === 2`)
 checkHost('提供商认证复用 Pi ModelRuntime', (() => { const auth = readFileSync('src/main/provider-auth.ts', 'utf8'); const bridge = readFileSync('src/main/agent/agent-bridge.ts', 'utf8'); return auth.includes('ModelRuntime.create') && auth.includes('runtime.login') && auth.includes('runtime.logout') && bridge.includes("source: 'provider-auth'") && bridge.includes("scope: 'global'"); })())
 await evaluate(`document.querySelector('.provider-add-button')?.click()`)
 await sleep(100)
 await check('提供商模型默认折叠', `document.querySelectorAll('.provider-card .model-choice').length === 0`)
 await evaluate(`document.querySelector('.provider-card-head')?.click()`)
-await sleep(150)
+await waitForExpr(`document.querySelectorAll('.provider-card .model-choice').length > 0`)
 await check('点击提供商可展开模型', `document.querySelectorAll('.provider-card .model-choice').length > 0 && document.querySelector('.provider-card-head')?.getAttribute('aria-expanded') === 'true'`)
 await evaluate(`document.querySelector('.provider-card-head')?.click()`)
 await sleep(100)
@@ -853,9 +871,11 @@ await sleep(180)
 await check('拖拽后会话顺序可改变', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => [...candidate.querySelectorAll('.side-session')].some((item) => item.dataset.sessionPath === window.__pionSessionListAnchor)); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && before.length >= 2 && after[0] === before[1] && after[1] === before[0] ? true : { before, after, anchor: window.__pionSessionListAnchor }; })()`)
 await evaluate(`window.__pionProjectOrderBefore = [...document.querySelectorAll('.project-folder .project-folder-name')].map((item) => item.textContent)`)
 await evaluate(`(() => { const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => [...candidate.querySelectorAll('.side-session')].some((item) => item.dataset.sessionPath === window.__pionSessionListAnchor)); const target = [...(list?.querySelectorAll('.side-session') ?? [])].find((item) => item.dataset.sessionPath !== window.__pionActiveSessionBefore); window.__pionTargetSessionPath = target?.dataset.sessionPath ?? null; target?.click(); return Boolean(target); })()`)
-await check('选中会话立即高亮', `(() => { const target = document.querySelector('.side-session[data-session-path="' + window.__pionTargetSessionPath + '"]'); return !!target && target.classList.contains('active') ? true : { targetPath: window.__pionTargetSessionPath, found: !!target, activePaths: [...document.querySelectorAll('.side-session.active')].map((item) => item.dataset.sessionPath) }; })()`)
+// Windows 会话路径包含反斜杠，CSS 属性选择器中反斜杠是转义符，必须先翻倍
+await evaluate(`window.__pionCssEscapePath = (path) => String(path).split(String.fromCharCode(92)).join(String.fromCharCode(92, 92))`)
+await check('选中会话立即高亮', `(() => { const target = document.querySelector('.side-session[data-session-path="' + window.__pionCssEscapePath(window.__pionTargetSessionPath) + '"]'); return !!target && target.classList.contains('active') ? true : { targetPath: window.__pionTargetSessionPath, found: !!target, activePaths: [...document.querySelectorAll('.side-session.active')].map((item) => item.dataset.sessionPath) }; })()`)
 await sleep(1200)
-await check('异步刷新保持选中会话', `(() => { const target = document.querySelector('.side-session[data-session-path="' + window.__pionTargetSessionPath + '"]'); return !!target && target.classList.contains('active'); })()`)
+await check('异步刷新保持选中会话', `(() => { const target = document.querySelector('.side-session[data-session-path="' + window.__pionCssEscapePath(window.__pionTargetSessionPath) + '"]'); return !!target && target.classList.contains('active'); })()`)
 await check('激活会话不会自动置顶项目', `JSON.stringify(window.__pionProjectOrderBefore) === JSON.stringify([...document.querySelectorAll('.project-folder .project-folder-name')].map((item) => item.textContent))`)
 await check('激活会话不会自动置顶', `(() => { const before = window.__pionSessionOrderBefore; const list = [...document.querySelectorAll('.project-branch-sessions')].find((candidate) => [...candidate.querySelectorAll('.side-session')].some((item) => item.dataset.sessionPath === window.__pionSessionListAnchor)); const after = list ? [...list.querySelectorAll('.side-session')].map(e => e.dataset.sessionPath) : []; return Array.isArray(before) && after[0] === before[1] && after[1] === before[0]; })()`)
 await evaluate(`(() => {
@@ -915,6 +935,26 @@ checkHost('缓存会话后台校验不显示加载状态', agentHookSource.inclu
 await evaluate(`window.pion.removeProject(${JSON.stringify(TEST_WORKSPACE)}).then(() => true).catch(() => false)`)
 
 ws.close()
-child.kill('SIGTERM')
+// Windows：Electron 的 pi 后端子进程会占用临时目录，必须杀整棵进程树后再清理
+if (process.platform === 'win32') {
+  if (child.pid) {
+    try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }) } catch { /* already exited */ }
+  }
+} else {
+  child.kill('SIGTERM')
+}
 console.log(`\n${ok} 项通过${failed > 0 ? `，${failed} 项失败` : ''}`)
+// 给操作系统一点时间释放文件句柄，再做带重试的清理，避免 EPERM/EBUSY
+await sleep(500)
+const cleanupRoots = [TRUST_TEST_WORKSPACE, NATIVE_TASK_WORKSPACE, TEST_WORKSPACE, TEST_RUNTIME_ROOT]
+for (const path of cleanupRoots) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      rmSync(path, { recursive: true, force: true })
+      break
+    } catch {
+      await sleep(200)
+    }
+  }
+}
 process.exit(failed > 0 ? 1 : 0)

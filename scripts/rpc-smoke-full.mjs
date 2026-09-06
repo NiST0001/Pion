@@ -4,11 +4,14 @@
 // - newSession / fork / switchSession（会话管理与分叉）
 // - SessionManager.list（项目会话列表）
 import { RpcClient, getPackageDir, SessionManager } from '@earendil-works/pi-coding-agent'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
 
 const cliPath = join(getPackageDir(), 'dist', 'cli.js')
-const cwd = process.argv[2] ?? '/tmp'
+// 未指定 cwd 时使用平台临时目录（Windows 上没有 /tmp）
+const cwd = process.argv[2] ?? mkdtempSync(join(tmpdir(), 'pion-rpc-smoke-full-'))
+const cleanupCwd = !process.argv[2]
 console.log(`[smoke] cwd: ${cwd}`)
 
 // --- 1. SessionManager.list（不经子进程） ---
@@ -69,3 +72,4 @@ console.log(`[smoke] newSession 后 entries: ${fresh.entries.length} 条`)
 
 await client.stop()
 console.log('[smoke] done ✓')
+if (cleanupCwd) rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })

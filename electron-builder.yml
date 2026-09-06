@@ -3,12 +3,16 @@ productName: Pion
 copyright: Copyright © 2026 Pion contributors
 
 publish:
-  provider: github
-  draft: false
-  releaseType: release
+  - provider: github
+    releaseType: release
 
 directories:
   output: dist
+
+# pi 包会被 RpcClient 以系统 node 子进程执行；asar 是 Electron 虚拟文件系统，
+# 系统 node 读不到，必须把 node_modules 解出 asar 供子进程直接访问。
+asarUnpack:
+  - node_modules/**/*
 
 files:
   - out/**
@@ -24,7 +28,7 @@ linux:
     - deb
 
 win:
-  icon: build/icon.png
+  icon: build/icon.ico
   target:
     - nsis
 

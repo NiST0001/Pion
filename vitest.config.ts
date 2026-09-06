@@ -8,6 +8,9 @@ export default defineConfig({
     setupFiles: ['tests/setup.ts'],
     restoreMocks: true,
     clearMocks: true,
+    // Windows 上进程启动与文件系统明显更慢，5s 默认值会误杀正常用例
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],

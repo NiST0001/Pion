@@ -1,3 +1,5 @@
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parseToolPermissionMetadata } from '../../src/main/agent/tool-permission-request'
 import { TOOL_PERMISSION_MARKER } from '../../src/main/tool-permissions'
@@ -6,11 +8,15 @@ function titleFor(metadata: unknown): string {
   return `${TOOL_PERMISSION_MARKER}${JSON.stringify(metadata)}`
 }
 
+// 用平台无关的绝对路径，避免 '/tmp/project' 这类 POSIX 路径在 Windows 上被解析到当前盘符
+const projectCwd = resolve(join(tmpdir(), 'pion-permission-project'))
+const sessionPath = resolve(join(tmpdir(), 'pion-permission-session.jsonl'))
+
 describe('parseToolPermissionMetadata', () => {
   it('parses a valid permission request and clamps field sizes', () => {
     const parsed = parseToolPermissionMetadata(titleFor({
-      cwd: '/tmp/project',
-      sessionPath: '/tmp/session.jsonl',
+      cwd: projectCwd,
+      sessionPath,
       toolName: 'write',
       category: 'write',
       policyCategories: ['write', 'write'],
@@ -21,8 +27,8 @@ describe('parseToolPermissionMetadata', () => {
     }))
 
     expect(parsed).toMatchObject({
-      cwd: '/tmp/project',
-      sessionPath: '/tmp/session.jsonl',
+      cwd: projectCwd,
+      sessionPath,
       toolName: 'write',
       category: 'write',
       policyCategories: ['write'],
@@ -38,7 +44,7 @@ describe('parseToolPermissionMetadata', () => {
     expect(parseToolPermissionMetadata(`${TOOL_PERMISSION_MARKER}not-json`)).toBeNull()
     expect(parseToolPermissionMetadata(titleFor({ toolName: 'write' }))).toBeNull()
     expect(parseToolPermissionMetadata(titleFor({
-      cwd: '/tmp/project',
+      cwd: projectCwd,
       toolName: 'bash',
       category: 'shell',
       policyCategories: [],
@@ -46,7 +52,7 @@ describe('parseToolPermissionMetadata', () => {
       detail: 'd'
     }))).toBeNull()
     expect(parseToolPermissionMetadata(titleFor({
-      cwd: '/tmp/project',
+      cwd: projectCwd,
       toolName: 'bash',
       category: 'bogus',
       policyCategories: ['shell'],
