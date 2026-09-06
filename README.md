@@ -7,6 +7,8 @@
 <p align="center">
   <img src="docs/images/screenshot-dark.png" alt="Pion 深色主题" width="49%">
   <img src="docs/images/screenshot-light.png" alt="Pion 浅色主题" width="49%">
+  <img src="docs/images/screenshot-dark-orange.png" alt="Pion 浅色主题" width="49%">
+  <img src="docs/images/screenshot-light-orange.png" alt="Pion 浅色主题" width="49%">
 </p>
 
 ## 架构
