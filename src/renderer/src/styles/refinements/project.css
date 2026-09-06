@@ -229,6 +229,47 @@
   isolation: isolate;
 }
 
+/* A bright spot orbits the row border while the session runs. */
+@property --side-session-border-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.side-session.running::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  pointer-events: none;
+  background: conic-gradient(
+    from var(--side-session-border-angle),
+    transparent 0%,
+    transparent 62%,
+    rgba(var(--accent-rgb), 0.85) 78%,
+    transparent 94%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: side-session-border-spin 2.8s linear infinite;
+}
+
+@keyframes side-session-border-spin {
+  to {
+    --side-session-border-angle: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .side-session.running::before {
+    animation: none;
+    background: rgba(var(--accent-rgb), 0.45);
+  }
+}
+
 /* The running sweep lives on the session name glyphs, not the row background. */
 .side-session.running .side-item-label {
   background: repeating-linear-gradient(
