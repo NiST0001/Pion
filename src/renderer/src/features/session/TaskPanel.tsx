@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
-import { Check, Circle, ListTodo, Loader2 } from 'lucide-react'
+import { Check, CircleDashed, ListTodo, Loader2 } from 'lucide-react'
 import type { AgentTodo } from '../../agent/types'
 
 const TASK_PANEL_STATE_PREFIX = 'pion:session-task-panel-state:'
@@ -98,7 +98,7 @@ export function TaskPanel({
                     ? <Check size={12} />
                     : task.status === 'in_progress'
                       ? <Loader2 size={11} className="task-status-spinner" />
-                      : <Circle size={11} />}
+                      : <CircleDashed size={11} />}
                 </span>
                 <span className="task-index">{String(index + 1).padStart(2, '0')}</span>
                 <span className="task-title" title={task.description ?? task.title}>
