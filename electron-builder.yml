@@ -1,0 +1,29 @@
+appId: io.github.nist0001.pion
+productName: Pion
+copyright: Copyright © 2026 Pion contributors
+
+directories:
+  output: dist
+
+files:
+  - out/**
+  - package.json
+  - LICENSE
+
+linux:
+  category: Development
+  icon: build/icon.png
+  maintainer: Pion contributors <noreply@github.com>
+  target:
+    - AppImage
+    - deb
+
+win:
+  icon: build/icon.png
+  target:
+    - nsis
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Pion
