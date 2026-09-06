@@ -4,6 +4,7 @@ copyright: Copyright © 2026 Pion contributors
 
 publish:
   - provider: github
+    draft: false
     releaseType: release
 
 directories:
