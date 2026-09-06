@@ -229,48 +229,38 @@
   isolation: isolate;
 }
 
-.side-session.running::after {
-  content: '';
-  position: absolute;
-  z-index: 0;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 42%;
-  border-radius: inherit;
-  pointer-events: none;
-  background: linear-gradient(
-    104deg,
-    transparent 0%,
-    rgba(var(--accent-rgb), 0.035) 25%,
-    rgba(var(--accent-rgb), 0.16) 50%,
-    rgba(var(--accent-rgb), 0.035) 75%,
-    transparent 100%
+/* The running sweep lives on the session name glyphs, not the row background. */
+.side-session.running .side-item-label {
+  background: repeating-linear-gradient(
+    100deg,
+    var(--fg-dim) 0%,
+    var(--fg-dim) 38%,
+    var(--accent-strong) 50%,
+    var(--fg-dim) 62%,
+    var(--fg-dim) 100%
   );
-  transform: translateX(-135%);
-  will-change: transform;
-  animation: session-running-sweep 3.6s linear infinite;
+  background-size: 170% 100%;
+  background-repeat: repeat-x;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: session-name-sweep 1.8s linear infinite;
 }
 
-.side-session.running > * {
-  position: relative;
-  z-index: 1;
-}
-
-@keyframes session-running-sweep {
-  0%,
-  16% {
-    transform: translateX(-135%);
+@keyframes session-name-sweep {
+  from {
+    background-position: 0 0;
   }
-  76%,
-  100% {
-    transform: translateX(345%);
+  to {
+    background-position: -170% 0;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .side-session.running::after {
-    display: none;
+  .side-session.running .side-item-label {
+    background: none;
+    color: var(--fg-dim);
+    animation: none;
   }
 }
 

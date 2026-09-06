@@ -297,8 +297,6 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  /* The glow lives on the glyphs, not on any surrounding surface. */
-  text-shadow: 0 0 10px color-mix(in srgb, var(--accent-strong) 42%, transparent);
   animation: agent-shimmer 1.05s linear infinite;
 }
 
