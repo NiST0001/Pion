@@ -24,6 +24,8 @@ async function repository(): Promise<string> {
   git(root, 'init', '-q')
   git(root, 'config', 'user.name', 'Pion Test')
   git(root, 'config', 'user.email', 'pion@example.invalid')
+  // 固定行尾行为，避免 Windows 全局 core.autocrlf 把 LF 检出成 CRLF
+  git(root, 'config', 'core.autocrlf', 'false')
   await writeFile(join(root, 'README.md'), '# base\n')
   git(root, 'add', 'README.md')
   git(root, 'commit', '-qm', 'base')
@@ -68,6 +70,20 @@ async function waitForState(manager: WorkflowManager, id: string, state: Workflo
   throw new Error(`workflow did not reach ${state}; current=${manager.get(id)?.state}`)
 }
 
+// 状态先在内存中可见，后台操作的收尾（状态持久化）可能尚未完成；
+// Windows 文件写入较慢时该窗口更明显，遇到“操作正在进行”时短暂重试。
+async function settle<T>(action: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + 10_000
+  while (true) {
+    try {
+      return await action()
+    } catch (error) {
+      if (Date.now() > deadline || !String(error).includes('正在进行')) throw error
+      await new Promise((done) => setTimeout(done, 25))
+    }
+  }
+}
+
 async function manager(_root: string, verification: WorkflowVerificationRunner): Promise<WorkflowManager> {
   const state = await mkdtemp(join(tmpdir(), 'pion-workflow-state-'))
   roots.push(state)
@@ -83,7 +99,13 @@ async function manager(_root: string, verification: WorkflowVerificationRunner):
 }
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  // Windows 上 git 子进程可能短暂占用 worktree 目录，需要重试清理
+  await Promise.all(roots.splice(0).map((root) => rm(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 100
+  })))
 })
 
 describe('WorkflowManager', () => {
@@ -97,7 +119,7 @@ describe('WorkflowManager', () => {
     expect(workflows.get(created.id)?.plan).toContain('implement feature')
     expect(git(root, 'status', '--porcelain')).toBe('')
 
-    await workflows.approvePlan(created.id)
+    await settle(() => workflows.approvePlan(created.id))
     await waitForState(workflows, created.id, 'awaiting_merge')
     const candidate = workflows.get(created.id)
     expect(candidate?.review?.verdict).toBe('pass')
@@ -105,11 +127,11 @@ describe('WorkflowManager', () => {
     expect(git(root, 'show', `${candidate?.candidateOid}:feature.txt`)).toBe('implemented')
     await expect(readFile(join(root, 'feature.txt'), 'utf8')).rejects.toThrow()
 
-    const merged = await workflows.merge(created.id)
+    const merged = await settle(() => workflows.merge(created.id))
     expect(merged.state).toBe('completed')
     expect(await readFile(join(root, 'feature.txt'), 'utf8')).toBe('implemented\n')
 
-    const cleaned = await workflows.cleanup(created.id)
+    const cleaned = await settle(() => workflows.cleanup(created.id))
     expect(cleaned.cleanupCompletedAt).toBeTypeOf('number')
     expect(cleaned.worktrees).toEqual({})
   })
@@ -120,13 +142,13 @@ describe('WorkflowManager', () => {
     const created = await workflows.create({ cwd: root, goal: 'add feature.txt' })
     await workflows.start(created.id)
     await waitForState(workflows, created.id, 'awaiting_plan')
-    await workflows.approvePlan(created.id)
+    await settle(() => workflows.approvePlan(created.id))
     await waitForState(workflows, created.id, 'awaiting_merge')
 
     await writeFile(join(root, 'target-change.txt'), 'advanced\n')
     git(root, 'add', 'target-change.txt')
     git(root, 'commit', '-qm', 'advance target')
-    const result = await workflows.merge(created.id)
+    const result = await settle(() => workflows.merge(created.id))
     expect(result.state).toBe('stale')
     await expect(readFile(join(root, 'feature.txt'), 'utf8')).rejects.toThrow()
   })
@@ -180,11 +202,11 @@ describe('WorkflowManager', () => {
     const created = await workflows.create({ cwd: root, goal: 'add feature.txt' })
     await workflows.start(created.id)
     await waitForState(workflows, created.id, 'awaiting_plan')
-    await workflows.approvePlan(created.id)
+    await settle(() => workflows.approvePlan(created.id))
     await waitForState(workflows, created.id, 'blocked')
 
     expect(workflows.get(created.id)?.blockedReason).toBe('no-verification')
-    const waived = await workflows.waiveTests(created.id)
+    const waived = await settle(() => workflows.waiveTests(created.id))
     expect(waived.state).toBe('awaiting_merge')
     expect(waived.verification?.state).toBe('waived')
   })

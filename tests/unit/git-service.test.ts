@@ -9,7 +9,13 @@ import { GitService, parsePorcelainV2, parseUnifiedDiff } from '../../src/main/g
 const roots: string[] = []
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+  // Windows 上杀掉的 git 子进程可能短暂占用临时目录，需要重试清理
+  await Promise.all(roots.splice(0).map((root) => rm(root, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 100
+  })))
 })
 
 function git(cwd: string, ...args: string[]): string {
@@ -22,11 +28,27 @@ async function repository(): Promise<string> {
   git(root, 'init', '-q')
   git(root, 'config', 'user.name', 'Pion Tests')
   git(root, 'config', 'user.email', 'pion@example.invalid')
+  // 固定行尾行为，避免 Windows 全局 core.autocrlf 把 LF 检出成 CRLF
+  git(root, 'config', 'core.autocrlf', 'false')
   await writeFile(join(root, 'file.txt'), 'a\nb\nc\n')
   git(root, 'add', 'file.txt')
   git(root, 'commit', '-qm', 'base')
   return root
 }
+
+// Windows 创建符号链接需要开发者模式或管理员权限，先探测能力再决定是否跳过
+async function canCreateSymlinks(): Promise<boolean> {
+  const probe = await mkdtemp(join(tmpdir(), 'pion-symlink-probe-'))
+  roots.push(probe)
+  try {
+    await symlink('target', join(probe, 'link'))
+    return true
+  } catch {
+    return false
+  }
+}
+
+const symlinkCapable = await canCreateSymlinks()
 
 describe('GitService parsing', () => {
   it('parses NUL-delimited porcelain paths with spaces', () => {
@@ -166,7 +188,7 @@ describe('GitService workflow', () => {
     expect(await readFile(join(root, 'file.txt'), 'utf8')).toBe('current\n')
   })
 
-  it('preserves symlink mode when choosing a conflict stage', async () => {
+  it.skipIf(!symlinkCapable)('preserves symlink mode when choosing a conflict stage', async () => {
     const root = await repository()
     const service = new GitService()
     await symlink('base-target', join(root, 'link'))

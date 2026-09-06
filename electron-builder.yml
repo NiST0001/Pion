@@ -3,9 +3,8 @@ productName: Pion
 copyright: Copyright © 2026 Pion contributors
 
 publish:
-  provider: github
-  draft: false
-  releaseType: release
+  - provider: github
+    releaseType: release
 
 directories:
   output: dist
@@ -24,7 +23,7 @@ linux:
     - deb
 
 win:
-  icon: build/icon.png
+  icon: build/icon.ico
   target:
     - nsis
 
