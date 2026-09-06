@@ -2,6 +2,8 @@
 
 基于 [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 二次开发的本地桌面 GUI（Electron + React）
 
+> 本项目大部分代码由 AI 协作生成，经人工审查与测试。
+
 ## 架构
 
 - **主进程** `src/main/`：`AgentBridge` 按会话管理多个 `RpcClient`，以子进程方式驱动 pi agent（`--mode rpc`）
@@ -183,6 +185,7 @@ src/
 请直接使用 `src/main/agent/`、`src/renderer/src/features/` 下的新路径
 
 ## 说明
+
 
 - 本项目采用 MIT License，完整条款见根目录 `LICENSE`
 - 工具策略保存在 Electron userData 下的 `pion-tool-permissions.json`；运行时生成的全局 Pi 权限门扩展位于 `runtime/` 子目录
