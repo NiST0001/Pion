@@ -250,16 +250,8 @@ export function Composer({
       return
     }
 
-    if (
-      showReferenceMenu &&
-      event.key === 'Enter' &&
-      !event.shiftKey &&
-      !event.nativeEvent.isComposing
-    ) {
-      event.preventDefault()
-      openReferencePicker()
-      return
-    }
+    // An @ reference menu is only a suggestion. Enter keeps its normal send
+    // behavior; the picker opens only through an explicit click.
 
     if (
       event.key === 'Tab' &&

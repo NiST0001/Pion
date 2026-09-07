@@ -110,23 +110,9 @@ export function useAgent() {
     void refreshModels().catch(() => undefined)
   }, [refreshModels, state.session?.sessionId, state.status.phase, state.timelineLoading])
 
-  // Hidden/frozen renderers can miss live agent events; catch the timeline up
-  // when the window becomes visible again during a run.
-  useEffect(() => {
-    const onVisible = (): void => {
-      if (document.visibilityState !== 'visible') return
-      // The compositor can also stall paints while hidden; nudge a repaint
-      // regardless of run state, then catch the timeline up during runs.
-      document.documentElement.dataset.visibilityNudge = String(Date.now())
-      if (state.busy) void reloadTimeline().catch(() => undefined)
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    window.addEventListener('focus', onVisible)
-    return () => {
-      document.removeEventListener('visibilitychange', onVisible)
-      window.removeEventListener('focus', onVisible)
-    }
-  }, [reloadTimeline, state.busy])
+  // Window focus/visibility changes must not reload the history window: doing
+  // so replaces the user's reading position with the newest page. Agent IPC
+  // subscriptions remain attached while the window is in the background.
 
   const {
     send,

@@ -27,6 +27,7 @@ export interface ChatTimelineProps {
   agentActivity: boolean
   workingStatus: WorkingStatus
   latestRunChanges: FileChange[]
+  workspaceChanges?: boolean
   runCheckpoint: RunCheckpointStatus | null
   rollbackBusy: boolean
   rollbackError: string
@@ -49,6 +50,7 @@ export function ChatTimeline({
   agentActivity,
   workingStatus,
   latestRunChanges,
+  workspaceChanges,
   runCheckpoint,
   rollbackBusy,
   rollbackError,
@@ -107,11 +109,12 @@ export function ChatTimeline({
             </div>
           )}
           {!busy
-            && runCheckpoint?.state !== 'rolled-back'
+            && (workspaceChanges || runCheckpoint?.state !== 'rolled-back')
             && latestRunChanges.length > 0
             && (
               <ModifiedFilesCard
                 changes={latestRunChanges}
+                workspace={workspaceChanges}
                 cwd={cwd}
                 canUndo={Boolean(
                   runCheckpoint?.state === 'ready'

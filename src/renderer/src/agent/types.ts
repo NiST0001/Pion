@@ -123,6 +123,8 @@ export interface AgentState {
   timelineError?: string
   busy: boolean
   compacting: boolean
+  /** Ordered lifecycle events override asynchronous snapshots until session reset. */
+  compactionEventState?: boolean
   /** Counts retained for status/telemetry compatibility. */
   queued: { steering: number; followUp: number }
   /** Text snapshots used by the composer-side queue card. */

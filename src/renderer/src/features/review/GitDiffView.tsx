@@ -1,13 +1,13 @@
-import { useLayoutEffect, useRef } from 'react'
+import { memo } from 'react'
 import type { ReactElement } from 'react'
 import type { GitFileDiff } from '../../../../shared/types'
-import { RevealText, watchScreenTextReveal } from '../../utils/screenTextReveal'
+import { ReviewRevealText } from './ReviewRevealText'
 
 function actionLabel(action: 'stage' | 'unstage' | 'discard'): string {
   return action === 'stage' ? '暂存 hunk' : action === 'unstage' ? '取消暂存 hunk' : '撤销 hunk'
 }
 
-export function GitDiffView({
+export const GitDiffView = memo(function GitDiffView({
   diff,
   action,
   selectedLineIds,
@@ -22,15 +22,6 @@ export function GitDiffView({
   onToggleLine: (lineId: string) => void
   onApplyHunk: (hunkId: string) => void
 }): ReactElement {
-  const revealRef = useRef<HTMLDivElement>(null)
-
-  useLayoutEffect(() => {
-    const root = revealRef.current
-    if (!root) return
-    const container = root.closest<HTMLElement>('.review-detail-body') ?? root
-    return watchScreenTextReveal(container, root)
-  }, [diff])
-
   if (diff.binary) {
     return <div className="git-diff-binary">二进制文件不支持行级预览，请使用整文件操作。</div>
   }
@@ -39,11 +30,11 @@ export function GitDiffView({
   }
 
   return (
-    <div ref={revealRef} className="git-diff-view">
+    <div className="git-diff-view">
       {diff.hunks.map((hunk) => (
         <section className="git-diff-hunk" key={hunk.id}>
           <header>
-            <code><RevealText text={hunk.header} mode="history" /></code>
+            <code><ReviewRevealText key={hunk.header} text={hunk.header} /></code>
             {diff.selectable && (
               <button type="button" disabled={disabled} onClick={() => onApplyHunk(hunk.id)}>
                 {actionLabel(action)}
@@ -70,7 +61,7 @@ export function GitDiffView({
                     <td className="git-diff-old">{line.oldLine ?? ''}</td>
                     <td className="git-diff-new">{line.newLine ?? ''}</td>
                     <td className="git-diff-marker">{line.kind === 'add' ? '+' : line.kind === 'delete' ? '−' : ''}</td>
-                    <td className="git-diff-code"><RevealText text={line.text || '\u00a0'} mode="history" /></td>
+                    <td className="git-diff-code"><ReviewRevealText key={line.text} text={line.text || '\u00a0'} /></td>
                   </tr>
                 )
               })}
@@ -80,4 +71,4 @@ export function GitDiffView({
       ))}
     </div>
   )
-}
+})

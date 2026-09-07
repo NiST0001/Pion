@@ -36,6 +36,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
         status: action.status,
         busy: dead || ready ? false : state.busy,
         compacting: dead || ready ? false : state.compacting,
+        compactionEventState: dead || ready ? undefined : state.compactionEventState,
         timelineLoading: dead ? false : state.timelineLoading,
         timelineError: dead ? undefined : state.timelineError,
         session: dead || ready ? null : state.session,
@@ -54,14 +55,22 @@ export function reducer(state: AgentState, action: Action): AgentState {
           : state.queuedMessages
       }
     }
-    case 'session':
+    case 'session': {
+      const incoming = action.session
+      const sameSession = Boolean(incoming && (!state.session
+        || (incoming.sessionFile && incoming.sessionFile === state.session.sessionFile)
+        || (incoming.sessionId && incoming.sessionId === state.session.sessionId)))
+      const compactionEventState = sameSession ? state.compactionEventState : undefined
+      const compacting = compactionEventState ?? incoming?.isCompacting ?? false
       return {
         ...state,
-        session: action.session,
-        busy: Boolean(action.session?.isStreaming || action.session?.isCompacting),
-        compacting: action.session?.isCompacting ?? false,
-        yolo: action.session?.yolo ?? false
+        session: incoming,
+        busy: Boolean(incoming?.isStreaming || compacting),
+        compacting,
+        compactionEventState,
+        yolo: incoming?.yolo ?? false
       }
+    }
     case 'runCheckpoint':
       return { ...state, runCheckpoint: action.checkpoint }
     case 'sessions': {
@@ -205,6 +214,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
         timelineError: undefined,
         busy: false,
         compacting: false,
+        compactionEventState: undefined,
         queued: { steering: 0, followUp: 0 },
         queuedMessages: { steering: [], followUp: [], nativeFollowUpCount: 0 }
       }
@@ -220,7 +230,7 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
   const event = input as WireEvent
   switch (event.type) {
     case 'agent_start':
-      return { ...state, busy: true, compacting: false }
+      return { ...state, busy: true, compacting: false, compactionEventState: false }
 
     case 'agent_settled':
       // Keep any queue snapshot until Pi emits its final queue_update. This is
@@ -229,7 +239,8 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
       return finalizeStreaming({
         ...state,
         busy: false,
-        compacting: false
+        compacting: false,
+        compactionEventState: false
       })
 
     case 'agent_end':
@@ -237,7 +248,7 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
       return state
 
     case 'compaction_start':
-      return { ...state, busy: true, compacting: true }
+      return { ...state, busy: true, compacting: true, compactionEventState: true }
 
     case 'message_start': {
       const { message } = event
@@ -394,7 +405,8 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
       const nextState = {
         ...state,
         busy: event.reason === 'manual' ? false : state.busy,
-        compacting: false
+        compacting: false,
+        compactionEventState: false
       }
       if (event.aborted || event.errorMessage) return nextState
       return {

@@ -16,6 +16,7 @@ import type {
   GitWorkspaceSnapshot
 } from '../shared/operations'
 import { MAX_CONFLICT_TEXT } from './git/constants'
+import { parseNumstat } from './git/numstat'
 import { runGitBuffer, runGitText } from './git/process'
 import {
   canonicalChangeKey,
@@ -33,6 +34,7 @@ const SNAPSHOT_CHANNEL = IPC_EVENTS.GitSnapshot
 
 export class GitService {
   private win: BrowserWindow | null = null
+  private readonly statusCache = new Map<string, GitWorkspaceSnapshot>()
   private readonly fingerprintCache = new Map<string, { signature: string; digest: string }>()
 
   bind(win: BrowserWindow): void {
@@ -62,6 +64,24 @@ export class GitService {
       .update('\0').update(indexState)
       .update('\0').update(worktreeFingerprint)
       .digest('hex')
+    const cached = this.statusCache.get(root)
+    if (cached?.snapshotId === snapshotId && cached.operation === operation) return cached
+    const stats = await Promise.all([
+      runGitBuffer(root, ['diff', '--numstat', '-z', '--no-ext-diff', '--no-textconv']),
+      runGitBuffer(root, ['diff', '--cached', '--numstat', '-z', '--no-ext-diff', '--no-textconv'])
+    ])
+    const [unstagedStats, stagedStats] = stats.map((buffer) => parseNumstat(buffer.toString('utf8')))
+    for (const file of parsed.files) {
+      const unstaged = unstagedStats.get(file.path)
+      const staged = stagedStats.get(file.path)
+      file.additions = (unstaged?.additions ?? 0) + (staged?.additions ?? 0)
+      file.deletions = (unstaged?.deletions ?? 0) + (staged?.deletions ?? 0)
+      if (file.kind === 'untracked') {
+        // Match getDiff's size/binary policy and count final unterminated lines.
+        const patch = await this.untrackedPatch(root, file.path)
+        file.additions = patch.split('\n').slice(5).filter((line) => line.startsWith('+')).length
+      }
+    }
     const snapshot: GitWorkspaceSnapshot = {
       snapshotId,
       root,
@@ -76,6 +96,8 @@ export class GitService {
       conflictCount: parsed.files.filter((file) => file.conflicted).length,
       capturedAt: Date.now()
     }
+    if (this.statusCache.size >= 16) this.statusCache.clear()
+    this.statusCache.set(root, snapshot)
     return snapshot
   }
 
@@ -332,6 +354,7 @@ export class GitService {
     const bytes = await readFile(target)
     if (bytes.includes(0)) return `diff --git a/${path} b/${path}\nBinary files /dev/null and b/${path} differ\n`
     const text = bytes.toString('utf8')
+    if (!text) return `diff --git a/${path} b/${path}\nnew file mode 100644\n`
     const lines = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n')
     return [
       `diff --git a/${path} b/${path}`,

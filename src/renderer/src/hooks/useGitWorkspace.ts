@@ -59,7 +59,7 @@ export function useGitWorkspace({
       const next = await window.pion.getGitStatus(cwd)
       if (refreshGeneration.current !== generation) return
       rootRef.current = next.root
-      setSnapshot(next)
+      setSnapshot((current) => current?.snapshotId === next.snapshotId && current.root === next.root && current.operation === next.operation ? current : next)
       setError('')
     } catch (cause) {
       if (refreshGeneration.current !== generation) return
@@ -83,7 +83,7 @@ export function useGitWorkspace({
     const off = window.pion.onGitSnapshot((update) => {
       if (update.snapshot.root === cwd || update.snapshot.root === rootRef.current) {
         rootRef.current = update.snapshot.root
-        setSnapshot(update.snapshot)
+        setSnapshot((current) => current?.snapshotId === update.snapshot.snapshotId && current.root === update.snapshot.root && current.operation === update.snapshot.operation ? current : update.snapshot)
       }
     })
     const timer = window.setInterval(() => {

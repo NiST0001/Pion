@@ -201,6 +201,9 @@ export type GitDiffScope = 'unstaged' | 'staged'
 export type GitOperation = 'none' | 'merge' | 'rebase' | 'cherry-pick' | 'revert'
 
 export interface GitFileStatus {
+  /** Sum of staged and unstaged Git diff counts; binary changes count as zero. */
+  additions?: number
+  deletions?: number
   path: string
   oldPath?: string
   kind: GitFileKind

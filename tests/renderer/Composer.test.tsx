@@ -72,6 +72,32 @@ describe('Composer input references and local slash commands', () => {
     expect(onQueue).not.toHaveBeenCalled()
   })
 
+  it.each(['@', '请查看@文件', '请查看＠文件', 'name@example.com'])('sends %s with Enter instead of opening the reference picker', (text) => {
+    const onSend = vi.fn()
+    const { container } = render(
+      <Composer
+        busy={false} disabled={false} sendDisabled={false}
+        prefill="" history={[]} commands={[]} mode="build"
+        onModeChange={vi.fn()} onSend={onSend} onQueue={vi.fn()} onAbort={vi.fn()}
+      />
+    )
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!
+    const click = vi.spyOn(picker, 'click').mockImplementation(() => undefined)
+    try {
+      const input = screen.getByRole('textbox')
+      fireEvent.change(input, { target: { value: text } })
+      fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+      expect(onSend).not.toHaveBeenCalled()
+      fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+      expect(onSend).not.toHaveBeenCalled()
+      fireEvent.keyDown(input, { key: 'Enter' })
+      expect(onSend).toHaveBeenCalledWith(text, [])
+      expect(click).not.toHaveBeenCalled()
+    } finally {
+      click.mockRestore()
+    }
+  })
+
   it('triggers the reference menu for CJK-adjacent and full-width @', () => {
     render(
       <Composer

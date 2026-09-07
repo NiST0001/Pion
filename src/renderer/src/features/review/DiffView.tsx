@@ -1,6 +1,6 @@
-import { useLayoutEffect, useMemo, useRef } from 'react'
+import { memo, useMemo } from 'react'
 import type { ReactElement } from 'react'
-import { RevealText, watchScreenTextReveal } from '../../utils/screenTextReveal'
+import { ReviewRevealText } from './ReviewRevealText'
 
 interface DiffLine {
   kind: 'add' | 'del' | 'ctx' | 'gap'
@@ -37,7 +37,7 @@ function parseDiff(diff: string): DiffLine[] {
   return lines
 }
 
-export function DiffView({
+export const DiffView = memo(function DiffView({
   diff,
   dense = false,
   reveal = false
@@ -47,18 +47,9 @@ export function DiffView({
   reveal?: boolean
 }): ReactElement {
   const lines = useMemo(() => parseDiff(diff), [diff])
-  const revealRef = useRef<HTMLDivElement>(null)
-
-  useLayoutEffect(() => {
-    if (!reveal) return
-    const root = revealRef.current
-    if (!root) return
-    const container = root.closest<HTMLElement>('.review-detail-body, .chat-scroll') ?? root
-    return watchScreenTextReveal(container, root)
-  }, [diff, reveal])
 
   return (
-    <div ref={revealRef} className={`diff-view${dense ? ' diff-dense' : ''}`}>
+    <div className={`diff-view${dense ? ' diff-dense' : ''}`}>
       <table>
         <tbody>
           {lines.map((line, i) => (
@@ -69,9 +60,9 @@ export function DiffView({
               </td>
               <td className="diff-text">
                 {line.kind === 'gap' ? (
-                  reveal ? <RevealText text="⋯" mode="history" /> : <span className="diff-gap">⋯</span>
+                  reveal ? <ReviewRevealText text="⋯" /> : <span className="diff-gap">⋯</span>
                 ) : line.text ? (
-                  reveal ? <RevealText text={line.text} mode="history" /> : line.text
+                  reveal ? <ReviewRevealText key={line.text} text={line.text} /> : line.text
                 ) : '\u00a0'}
               </td>
             </tr>
@@ -80,4 +71,4 @@ export function DiffView({
       </table>
     </div>
   )
-}
+})

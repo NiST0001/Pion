@@ -227,7 +227,7 @@ export function App(): ReactElement {
   const gitWorkspace = useGitWorkspace({
     hasBridge,
     cwd: resourceCwd,
-    enabled: reviewOpen && gitResourcesEnabled
+    enabled: gitResourcesEnabled
   })
   const reviewCodeKey = gitWorkspace.snapshot
     ? `${gitWorkspace.snapshot.root}\u0000${gitWorkspace.snapshot.snapshotId}`
@@ -590,7 +590,16 @@ export function App(): ReactElement {
     for (const command of PION_LOCAL_SLASH_COMMANDS) merged.set(command.name, command)
     return [...merged.values()]
   }, [state.commands])
-  const latestRunChanges = useMemo(() => deriveLatestRunChanges(state.timeline), [state.timeline])
+  const latestRunChanges = useMemo<FileChange[]>(() => {
+    // Use the same workspace snapshot as Review, not a partial tool transcript.
+    if (gitWorkspace.snapshot) return gitWorkspace.snapshot.files.map((file) => ({
+      path: file.path,
+      kind: 'edit',
+      additions: file.additions ?? 0,
+      deletions: file.deletions ?? 0
+    }))
+    return deriveLatestRunChanges(state.timeline)
+  }, [gitWorkspace.snapshot, state.timeline])
   const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
   const hasTaskPanel = state.mode !== 'plan' && agentTodos.length > 0
   const queuedMessages = state.queuedMessages
@@ -867,6 +876,7 @@ export function App(): ReactElement {
                 agentActivity={agentActivity}
                 workingStatus={workingStatus}
                 latestRunChanges={latestRunChanges}
+                workspaceChanges={Boolean(gitWorkspace.snapshot)}
                 runCheckpoint={state.runCheckpoint}
                 rollbackBusy={rollbackBusy}
                 rollbackError={rollbackError}

@@ -7,6 +7,7 @@ const DEFAULT_VISIBLE_FILES = 3
 
 interface ModifiedFilesCardProps {
   changes: FileChange[]
+  workspace?: boolean
   cwd?: string
   canUndo: boolean
   undoBusy: boolean
@@ -18,6 +19,7 @@ interface ModifiedFilesCardProps {
 
 export function ModifiedFilesCard({
   changes,
+  workspace = false,
   cwd,
   canUndo,
   undoBusy,
@@ -46,12 +48,12 @@ export function ModifiedFilesCard({
   const hiddenCount = Math.max(0, changes.length - visibleChanges.length)
 
   return (
-    <section className="modified-files-card" aria-label="本轮已修改文件">
+    <section className="modified-files-card" aria-label={workspace ? '工作区已修改文件' : '本轮工具记录'}>
       <header className="modified-files-head">
         <span className="modified-files-icon"><FileDiff size={15} /></span>
         <span className="modified-files-title">
-          <strong>已编辑 {changes.length} 个文件</strong>
-          <span className="modified-files-total">
+          <strong>{workspace ? '工作区已编辑' : '本轮记录'} {changes.length} 个文件</strong>
+          <span className="modified-files-total" title={workspace ? '与审查栏相同：已暂存 + 未暂存，包含未跟踪文件；非本轮独有修改' : '仅当前已加载的 edit/write 工具记录，非工作区总量'}>
             <b className="stat-add">+{totals.additions}</b>
             <b className="stat-del">−{totals.deletions}</b>
           </span>
@@ -65,7 +67,7 @@ export function ModifiedFilesCard({
             onClick={onUndo}
           >
             <RotateCcw size={12} className={undoBusy ? 'spin' : undefined} />
-            {undoBusy ? '撤销中' : '撤销'}
+            {undoBusy ? '撤销中' : workspace ? '撤销本轮' : '撤销'}
           </button>
           <button
             type="button"
