@@ -79,7 +79,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
       const sessions = reconcileSessionProjection(action.sessions, previous)
       return {
         ...state,
-        sessions,
+        sessions: !projectCwd || projectCwd === state.status.cwd ? sessions : state.sessions,
         sessionsByProject: projectCwd
           ? { ...state.sessionsByProject, [projectCwd]: sessions }
           : state.sessionsByProject

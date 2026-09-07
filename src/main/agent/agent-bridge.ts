@@ -1718,7 +1718,8 @@ export class AgentBridge {
         }
       }
       if (runningStateChanged) this.pushRunningSessionPaths()
-      if (type === 'agent_start' || type === 'message_start' || type === 'agent_settled') {
+      if (type === 'agent_start' || type === 'message_start' || type === 'agent_settled'
+        || (type === 'message_end' && (!backend.sidebarPublishedSessionPath || backend.sidebarPublishedSessionPath !== backend.sessionPath))) {
         // Keep persisted history fresh even when this backend finishes while a
         // different project or session is selected. A first prompt can also
         // create the session file needed by the sidebar running indicator.
@@ -1876,6 +1877,15 @@ export class AgentBridge {
     if (this.activeKey === backend.key) this.activeSessionPath = normalizedPath
     this.pushRunningSessionPaths()
     this.restoreQueuedRuns(backend)
+    if (backend.sidebarPublishedSessionPath !== normalizedPath) {
+      const sessions = await this.listSessions(backend.cwd)
+      // Pi can allocate a path before it writes the JSONL. Retry on subsequent
+      // message events until listSessions actually sees the persisted session.
+      if (backend.sessionPath === normalizedPath && sessions.some((session) => resolve(session.path) === normalizedPath)) {
+        backend.sidebarPublishedSessionPath = normalizedPath
+        this.win?.webContents.send(SESSIONS_CHANNEL, sessions)
+      }
+    }
   }
 
   /** Queued runs are persisted in the run store; put them back into the live

@@ -35,6 +35,13 @@ function state(): AgentState {
 }
 
 describe('optimistic new session projection', () => {
+  it('publishes a background project session without replacing the active project list', () => {
+    const background = { ...existing, projectCwd: '/tmp/other-project', id: 'background', path: '/tmp/background.jsonl' }
+    const updated = reducer(state(), { type: 'sessions', sessions: [background] })
+    expect(updated.sessions).toEqual([existing])
+    expect(updated.sessionsByProject[background.projectCwd]).toEqual([background])
+  })
+
   it('appears immediately and survives a stale session-list response', () => {
     const projected = reducer(state(), { type: 'optimisticSession', session: optimistic })
     expect(projected.sessions.map((session) => session.id)).toEqual(['existing', 'new-session'])

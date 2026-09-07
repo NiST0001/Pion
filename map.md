@@ -87,6 +87,7 @@
   - `SessionList.test.tsx`：会话行状态与未读标记。
   - `ReviewRevealText.test.tsx`：审查字符动画结束后释放节点。
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
+- `tests/unit/session-sidebar-sync.test.ts`：新会话首次落盘后的项目列表推送；`optimistic-session.test.ts` 覆盖占位替换和跨项目列表隔离。
   - `historyReveal.test.tsx`、`screenTextReveal.test.tsx`：渐入行为。
 - `tests/e2e/app.spec.ts`：Electron 端到端场景。
 - `vitest.config.ts`、`playwright.config.ts`：测试配置。

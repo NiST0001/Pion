@@ -55,6 +55,8 @@ export interface BackendRecord {
   key: string
   cwd: string
   sessionPath?: string
+  /** Set only after the persisted session appears in its project's sidebar list. */
+  sidebarPublishedSessionPath?: string
   client: RpcClient
   phase: BackendPhase
   busy: boolean
