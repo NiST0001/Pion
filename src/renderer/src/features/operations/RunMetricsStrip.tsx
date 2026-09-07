@@ -46,7 +46,22 @@ function stateLabel(state: RunOperation['state']): string {
   }
 }
 
-export function RunMetricsStrip({ run }: { run: RunOperation | null }): ReactElement | null {
+export interface SessionTotals {
+  duration: number
+  usage: TokenUsage
+}
+
+export function RunMetricsStrip({
+  run,
+  sessionTotals,
+  showDuration = true,
+  showCost = false
+}: {
+  run: RunOperation | null
+  sessionTotals?: SessionTotals | null
+  showDuration?: boolean
+  showCost?: boolean
+}): ReactElement | null {
   const [expanded, setExpanded] = useState(false)
   const [now, setNow] = useState(Date.now())
   const active = Boolean(run && ACTIVE_STATES.has(run.state))
@@ -86,11 +101,11 @@ export function RunMetricsStrip({ run }: { run: RunOperation | null }): ReactEle
           <Activity size={13} />
           <span>{stateLabel(run.state)}</span>
         </span>
-        <span className="run-metric"><Clock3 size={12} />{formatDuration(metrics.duration)}</span>
+        {showDuration && <span className="run-metric"><Clock3 size={12} />{formatDuration(metrics.duration)}</span>}
         <span className="run-metric" title={`输入 ${metrics.usage.input} / 输出 ${metrics.usage.output}`}>
           <Zap size={12} />{formatTokens(metrics.usage.total)} tokens
         </span>
-        {cost > 0 && <span className="run-metric">${cost.toFixed(cost < 0.01 ? 4 : 3)}</span>}
+        {showCost && cost > 0 && <span className="run-metric">${cost.toFixed(cost < 0.01 ? 4 : 3)}</span>}
         {pressure !== null && (
           <span
             className={`run-metric${pressure >= 0.8 ? ' pressure-high' : ''}`}
@@ -99,6 +114,18 @@ export function RunMetricsStrip({ run }: { run: RunOperation | null }): ReactEle
               : '最近一次模型请求的上下文占用'}
           >
             <Gauge size={12} />{Math.round(pressure * 100)}%
+          </span>
+        )}
+        {sessionTotals && (
+          <span
+            className="run-metric run-metric-session"
+            title={`整个会话累计：输入 ${sessionTotals.usage.input} / 输出 ${sessionTotals.usage.output} / 缓存 ${sessionTotals.usage.cacheRead}`}
+          >
+            <span className="run-metric-session-label">会话</span>
+            {showDuration && formatDuration(sessionTotals.duration)}
+            {showDuration && ' · '}
+            {formatTokens(sessionTotals.usage.total)}
+            {showCost && sessionTotals.usage.costUsd > 0 && ` · $${sessionTotals.usage.costUsd.toFixed(sessionTotals.usage.costUsd < 0.01 ? 4 : 3)}`}
           </span>
         )}
         <ChevronDown size={13} className="run-metrics-chevron" />

@@ -22,8 +22,15 @@ import type {
   GitDiffScope,
   ImageContent,
   SessionMeta,
-  SlashCommandInfo
+  SlashCommandInfo,
+  TokenUsage
 } from '../../shared/types'
+import {
+  readShowMetricCost,
+  readShowMetricDuration,
+  saveShowMetricCost,
+  saveShowMetricDuration
+} from './utils/metricsSettings'
 import { TaskPanel } from './features/session/TaskPanel'
 import { QueuedMessagesCard } from './features/session/QueuedMessagesCard'
 import { ChatTimeline } from './features/chat/ChatTimeline'
@@ -103,6 +110,28 @@ export function App(): ReactElement {
     cwd: resourceCwd
   })
   const displayedRun = runTelemetry.activeRun ?? runTelemetry.latestRun
+  const [showMetricDuration, setShowMetricDuration] = useState(() => readShowMetricDuration())
+  const [showMetricCost, setShowMetricCost] = useState(() => readShowMetricCost())
+  const sessionTotals = useMemo(() => {
+    const runs = runTelemetry.runs
+    if (runs.length === 0) return null
+    const usage = runs.reduce<TokenUsage>((acc, run) => ({
+      input: acc.input + run.usage.input + (run.liveUsage?.input ?? 0),
+      output: acc.output + run.usage.output + (run.liveUsage?.output ?? 0),
+      cacheRead: acc.cacheRead + run.usage.cacheRead + (run.liveUsage?.cacheRead ?? 0),
+      cacheWrite: acc.cacheWrite + run.usage.cacheWrite + (run.liveUsage?.cacheWrite ?? 0),
+      reasoning: acc.reasoning + run.usage.reasoning + (run.liveUsage?.reasoning ?? 0),
+      total: acc.total + run.usage.total + (run.liveUsage?.total ?? 0),
+      costUsd: acc.costUsd + run.usage.costUsd + (run.liveUsage?.costUsd ?? 0)
+    }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, total: 0, costUsd: 0 })
+    const now = Date.now()
+    const duration = runs.reduce((total, run) => {
+      const started = run.agentStartedAt ?? run.dispatchedAt ?? run.createdAt
+      const ended = run.settledAt ?? run.interruptedAt ?? now
+      return total + Math.max(0, ended - started)
+    }, 0)
+    return { duration, usage }
+  }, [runTelemetry.runs])
   const runRecovery = useRunRecovery({
     hasBridge,
     enabled: policyResourcesEnabled,
@@ -786,7 +815,12 @@ export function App(): ReactElement {
             </div>
           )}
 
-          <RunMetricsStrip run={displayedRun} />
+          <RunMetricsStrip
+            run={displayedRun}
+            sessionTotals={sessionTotals}
+            showDuration={showMetricDuration}
+            showCost={showMetricCost}
+          />
 
           <ProjectTrustBanner
             trust={projectTrust}
@@ -1117,6 +1151,16 @@ export function App(): ReactElement {
             onHistoryNavGapChange={handleHistoryNavGapChange}
             historyNavMaxVisible={historyNavMaxVisible}
             onHistoryNavMaxVisibleChange={handleHistoryNavMaxVisibleChange}
+            showMetricDuration={showMetricDuration}
+            showMetricCost={showMetricCost}
+            onMetricDurationChange={(value) => {
+              setShowMetricDuration(value)
+              saveShowMetricDuration(value)
+            }}
+            onMetricCostChange={(value) => {
+              setShowMetricCost(value)
+              saveShowMetricCost(value)
+            }}
             projectTrust={projectTrust}
             projectTrustBusy={projectTrustBusy || state.busy || state.status.phase === 'starting'}
             projectTrustError={projectTrustError}

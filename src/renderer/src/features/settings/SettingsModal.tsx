@@ -70,6 +70,10 @@ interface SettingsModalProps {
   onHistoryNavGapChange: (gap: number) => void
   historyNavMaxVisible: number
   onHistoryNavMaxVisibleChange: (count: number) => void
+  showMetricDuration: boolean
+  showMetricCost: boolean
+  onMetricDurationChange: (value: boolean) => void
+  onMetricCostChange: (value: boolean) => void
   projectTrust: ProjectTrustInfo | null
   projectTrustBusy: boolean
   projectTrustError: string
@@ -102,6 +106,10 @@ export function SettingsModal({
   onHistoryNavGapChange,
   historyNavMaxVisible,
   onHistoryNavMaxVisibleChange,
+  showMetricDuration,
+  showMetricCost,
+  onMetricDurationChange,
+  onMetricCostChange,
   projectTrust,
   projectTrustBusy,
   projectTrustError,
@@ -353,6 +361,30 @@ export function SettingsModal({
                         setAutoRetry(value)
                         void actions.setAutoRetry(value)
                       }}
+                    />
+                  </div>
+                </div>
+
+                <div className="settings-section">
+                  <div className="settings-section-title">统计显示</div>
+                  <div className="setting-row">
+                    <div>
+                      <div className="setting-label">显示用时</div>
+                      <div className="setting-desc">统计面板显示每轮与整个会话的耗时</div>
+                    </div>
+                    <Toggle
+                      on={showMetricDuration}
+                      onChange={onMetricDurationChange}
+                    />
+                  </div>
+                  <div className="setting-row">
+                    <div>
+                      <div className="setting-label">显示计费</div>
+                      <div className="setting-desc">统计面板显示每轮与整个会话的费用</div>
+                    </div>
+                    <Toggle
+                      on={showMetricCost}
+                      onChange={onMetricCostChange}
                     />
                   </div>
                 </div>

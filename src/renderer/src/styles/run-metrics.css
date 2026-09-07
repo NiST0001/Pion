@@ -36,6 +36,19 @@
   white-space: nowrap;
 }
 
+.run-metric-session {
+  margin-left: auto;
+  gap: 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border-soft);
+  color: var(--fg-faint);
+}
+
+.run-metric-session-label {
+  color: var(--fg-dim);
+  font-weight: 600;
+}
+
 .run-metrics-state {
   color: var(--fg);
   font-weight: 650;

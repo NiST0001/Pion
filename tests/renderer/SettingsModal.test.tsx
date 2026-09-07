@@ -49,6 +49,10 @@ function renderSettings(
       onHistoryNavGapChange={vi.fn()}
       historyNavMaxVisible={40}
       onHistoryNavMaxVisibleChange={vi.fn()}
+      showMetricDuration
+      showMetricCost={false}
+      onMetricDurationChange={vi.fn()}
+      onMetricCostChange={vi.fn()}
       projectTrust={null}
       projectTrustBusy={false}
       projectTrustError=""

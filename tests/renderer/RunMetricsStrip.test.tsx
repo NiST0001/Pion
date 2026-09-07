@@ -37,7 +37,7 @@ const run: RunOperation = {
 
 describe('RunMetricsStrip', () => {
   it('summarizes time, tokens, cost, and context at the workspace top', () => {
-    render(<RunMetricsStrip run={run} />)
+    render(<RunMetricsStrip run={run} showCost />)
     const summary = screen.getByRole('button')
     expect(summary).toHaveTextContent('已完成')
     expect(summary).toHaveTextContent('31s')
@@ -45,6 +45,24 @@ describe('RunMetricsStrip', () => {
     expect(summary).toHaveTextContent('$0.060')
     expect(summary).toHaveTextContent('24%')
     expect(screen.getByTitle('上下文 12k / 50k')).toBeInTheDocument()
+  })
+
+  it('shows whole-session totals beside the current run when provided', () => {
+    render(
+      <RunMetricsStrip
+        run={run}
+        sessionTotals={{
+          duration: 187_000,
+          usage: { input: 40_000, output: 8_000, cacheRead: 1_000, cacheWrite: 0, reasoning: 1_000, total: 50_000, costUsd: 0.24 }
+        }}
+        showCost
+      />
+    )
+    const summary = screen.getByRole('button')
+    expect(summary).toHaveTextContent('会话')
+    expect(summary).toHaveTextContent('3m 07s')
+    expect(summary).toHaveTextContent('50k')
+    expect(summary).toHaveTextContent('$0.240')
   })
 
   it('reveals authoritative context and cost details on demand', () => {
