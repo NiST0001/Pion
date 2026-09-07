@@ -458,6 +458,14 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       page.entries,
       collectToolResults([...page.entries, ...page.toolResults])
     )
+    // Keep the in-flight assistant message pinned to the end of the jumped
+    // window so the live stream keeps rendering instead of being dropped.
+    const liveItems = state.timeline.filter((item) => (
+      item.kind === 'assistant'
+      && item.streaming
+      && !items.some((pageItem) => pageItem.id === item.id)
+    ))
+    const windowedItems = [...items, ...liveItems]
     const cursor: HistoryCursor = {
       path: index.sessionPath,
       items,
@@ -475,7 +483,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     timelineOwnerPath.current = index.sessionPath
     historyCursor.current = cursor.complete && cursor.newerComplete ? null : cursor
     storeTimelineCache(timelineCache.current, index.sessionPath, {
-      items: cursor.items,
+      items: windowedItems,
       mode: cursor.mode,
       apiBefore: cursor.apiBefore,
       apiAfter: cursor.apiAfter,
@@ -485,7 +493,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       leafId: cursor.leafId,
       total: cursor.total
     })
-    showTimeline(index.sessionPath, items, page.mode)
+    showTimeline(index.sessionPath, windowedItems, page.mode)
     dispatch({
       type: 'historyJump',
       entryId: landmark.entryId,

@@ -843,7 +843,7 @@ export function App(): ReactElement {
             <HistoryNavigator
               index={state.historyIndex}
               activeEntryId={visibleHistoryEntryId}
-              busy={state.timelineLoading || state.busy}
+              busy={state.timelineLoading}
               gap={historyNavGap}
               maxVisible={historyNavMaxVisible}
               onJump={(landmark) => void actions.jumpToHistoryLandmark(landmark)}
