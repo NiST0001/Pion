@@ -11,6 +11,7 @@
 | src/shared/ipc.ts | 请求与事件频道 |
 | src/shared/pion-api.ts | PionApi 接口 |
 | src/shared/types.ts | 共享类型入口 |
+| src/shared/release-notes.ts | 关于页内置发布日志，按版本倒序维护 |
 | src/renderer/src/main.tsx | React 启动入口 |
 | src/renderer/src/App.tsx | 工作台装配、布局与交互编排 |
 
@@ -62,7 +63,7 @@
 - `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
 - `operations/`：RunMetricsStrip、权限确认、验证、运行恢复和工作流面板。
 - `review/`：Git 改动列表、差异与审查界面。ModifiedFilesCard 使用工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 共享可见性观察器，保留字符渐入并在结束后回收字符节点。
-- `settings/`：设置、模型选择器与模型配置页。
+- `settings/`：设置、模型选择器与模型配置页；`ReleaseNotes.tsx` 在关于 Pion 页展示可展开的更新日志。
 - `capabilities/`：技能工具列表与插件商店。
 - `chrome/`：窗口标题栏等外壳组件。
 - `common/`：通用对话框、空状态和扩展 UI。
@@ -87,11 +88,12 @@
   - `SortableSidebarGroup.test.tsx`：项目/分支排序持久化及隐藏项、新增项的顺序处理。
   - `SessionList.test.tsx`：会话行状态与未读标记。
   - `ReviewRevealText.test.tsx`：审查字符动画结束后释放节点。
+  - `ReleaseNotes.test.tsx`：更新日志版本展示与默认展开状态。
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
 - `tests/unit/session-sidebar-sync.test.ts`：新会话首次落盘后的项目列表推送；`optimistic-session.test.ts` 覆盖占位替换和跨项目列表隔离。
   - `historyReveal.test.tsx`、`screenTextReveal.test.tsx`：渐入行为。
-- `tests/e2e/app.spec.ts`：Electron 端到端场景。
-- `vitest.config.ts`、`playwright.config.ts`：测试配置。
+- `tests/e2e/app.spec.ts`：Electron 启动、统计计费开关、插件卸载及 Git 审查提交场景。
+- `vitest.config.ts`、`playwright.config.ts`：测试配置；E2E 在 CI 中同时输出 GitHub 断言注释，便于定位失败。
 
 ## 开发、安装与发布
 

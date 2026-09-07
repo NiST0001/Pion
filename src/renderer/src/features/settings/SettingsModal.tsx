@@ -33,6 +33,7 @@ import type {
 import { ToolPermissionSettings } from './ToolPermissionSettings'
 import { ModelsPage } from './ModelsPage'
 import { PageHeading } from './SettingsPageHeading'
+import { ReleaseNotes } from './ReleaseNotes'
 import { SESSION_PREVIEW_OPTIONS } from '../../utils/sessionPreview'
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { currentTheme, saveTheme, THEMES } from '../../utils/theme'
@@ -674,6 +675,7 @@ export function SettingsModal({
                   <InfoRow label="运行时" value="Electron · React · Vite" />
                   <InfoRow label="配置目录" value="~/.pi/agent" mono />
                 </div>
+                <ReleaseNotes />
                 <div className="settings-section about-features">
                   <div className="settings-section-title">工作台能力</div>
                   <div className="feature-list">

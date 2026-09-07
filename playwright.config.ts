@@ -6,6 +6,7 @@ export default defineConfig({
   workers: 1,
   timeout: 45_000,
   expect: { timeout: 10_000 },
-  reporter: [['list']],
+  // Publish failed assertions as GitHub annotations, not just a generic exit code.
+  reporter: process.env.CI ? [['list'], ['github']] : [['list']],
   outputDir: 'test-results'
 })

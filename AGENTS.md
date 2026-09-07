@@ -44,4 +44,6 @@ Pion 是基于 Electron、React、TypeScript、Vite 的 pi coding agent 桌面�
 
 - scripts/install-local.sh 默认递增 patch 版本并构建，安装到 ~/.local/share/pion/app/，启动器为 ~/.local/bin/pion。
 - 推送 v* 标签会触发 .github/workflows/release.yml，构建 Windows NSIS、Linux AppImage/deb 并发布。
+- 每次发布后，总结本版本实际交付的新增、修复及重要行为变化，核对并填写 src/shared/release-notes.ts 的更新日志（供设置 → 关于 Pion 展示），按版本倒序排列，不写未经验证的性能或测试结论，不将仅本机安装的版本当作正式发布。
+- 更新日志随安装包内置，因此打标签、打包前先准备本版本日志；发布完成后再核对最终发布内容并补充遗漏，同时同步 GitHub Release 说明。若打包后修改日志，不宣称已经生成的安装包包含该修改。
 - 构建通过不等同于类型检查、测试或真机验证通过。

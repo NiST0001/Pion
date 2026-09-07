@@ -766,6 +766,37 @@
 
 /* about and diagnostics pages */
 
+.release-note {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 0;
+}
+
+.release-note summary {
+  cursor: pointer;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.release-note-label {
+  margin-left: 12px;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.release-note ul {
+  margin: 12px 0 4px;
+  padding-left: 22px;
+  list-style: disc;
+  color: var(--fg-dim);
+  line-height: 1.7;
+}
+
+.release-note li + li {
+  margin-top: 6px;
+}
+
+
 .about-hero {
   display: flex;
   align-items: center;
