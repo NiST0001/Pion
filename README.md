@@ -2,7 +2,7 @@
 
 基于 [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) 二次开发的本地桌面 GUI（Electron + React）
 
-> 本项目大部分代码由 AI 协作生成，经人工审查与测试。
+> 本项目代码由 AI 协作生成，经人工审查与测试。
 
 <p align="center">
   <img src="docs/images/screenshot-dark.png" alt="Pion 深色主题" width="49%">
