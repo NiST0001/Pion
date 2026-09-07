@@ -892,6 +892,12 @@ button.tool-head.screen-text-reveal-line {
   opacity: 0;
 }
 
+/* Lines older than the reveal window skip the cascade entirely. */
+.screen-text-reveal-line-history.screen-text-reveal-static {
+  opacity: 1;
+  animation: none;
+}
+
 /* The animation only starts once the line's fixed delay has been assigned
    (ref callback while streaming, settle scan while reading history). */
 .screen-text-reveal-line[data-line-reveal-ready="true"] {

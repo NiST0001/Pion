@@ -8,6 +8,7 @@ export const SCREEN_TEXT_REVEAL_ARMED_CLASS = 'screen-text-reveal-armed'
 export const SCREEN_TEXT_REVEAL_LINE_CLASS = 'screen-text-reveal-line'
 export const SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS = 'screen-text-reveal-line-live'
 export const SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS = 'screen-text-reveal-line-history'
+export const SCREEN_TEXT_REVEAL_STATIC_CLASS = 'screen-text-reveal-static'
 // Five times faster than the original 6ms / 260ms reveal while retaining a
 // small left-to-right cue on long messages.
 export const SCREEN_TEXT_REVEAL_STAGGER_MS = 1.2
@@ -41,20 +42,27 @@ export function resetLineRevealClock(): void {
 }
 
 /**
- * Assign waterfall delays to every pending history line in DOM order,
- * continuing the shared clock. Runs once after a history load settles, so the
- * initial view is always one clean top-to-bottom cascade no matter how many
- * paging batches were needed to assemble it.
+ * Assign waterfall delays to pending history lines, continuing the shared
+ * clock. Only the bottom two viewport heights animate: everything older
+ * appears instantly, so opening a long session never makes the user wait
+ * through a full-history cascade.
  */
 export function assignPendingLineDelays(container: HTMLElement): void {
   const pending = [...container.querySelectorAll<HTMLElement>(
     `.${SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS}:not([data-line-reveal-ready="true"])`
   )]
   if (pending.length === 0) return
+
+  const containerRect = container.getBoundingClientRect()
+  const windowTop = containerRect.bottom - containerRect.height * 2
   const currentTime = now()
   if (nextLineRevealAt <= currentTime) nextLineRevealAt = currentTime
   for (const element of pending) {
     element.dataset.lineRevealReady = 'true'
+    if (element.getBoundingClientRect().bottom < windowTop) {
+      element.classList.add(SCREEN_TEXT_REVEAL_STATIC_CLASS)
+      continue
+    }
     const delay = Math.max(0, Math.round(nextLineRevealAt - currentTime))
     element.style.setProperty('--screen-text-reveal-delay', `${delay}ms`)
     nextLineRevealAt += SCREEN_TEXT_REVEAL_LINE_STAGGER_MS

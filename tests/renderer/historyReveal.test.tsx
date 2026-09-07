@@ -1,11 +1,15 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   armHistoryRevealRow,
   armPendingHistoryRevealRows
 } from '../../src/renderer/src/utils/historyReveal'
-import { armScreenTextReveal } from '../../src/renderer/src/utils/screenTextReveal'
+import {
+  armScreenTextReveal,
+  assignPendingLineDelays,
+  resetLineRevealClock
+} from '../../src/renderer/src/utils/screenTextReveal'
 
 function rect(top: number, left: number, height = 20, width = 200): DOMRect {
   return {
@@ -104,6 +108,33 @@ describe('history text reveal', () => {
     armHistoryRevealRow(row, container)
 
     expect(character).toHaveClass('screen-text-reveal-armed')
+  })
+
+  it('animates only the bottom two viewport heights and shows older lines instantly', () => {
+    const container = document.createElement('div')
+    document.body.append(container)
+    container.getBoundingClientRect = () => rect(100, 0, 500, 400)
+    const makeLine = (top: number): HTMLElement => {
+      const line = document.createElement('span')
+      line.className = 'screen-text-reveal-line screen-text-reveal-line-history'
+      line.getBoundingClientRect = () => rect(top, 0, 20, 200)
+      container.append(line)
+      return line
+    }
+
+    // 窗口：容器底部 600 - 2*500 = -400；top=0 的行在窗口之上，top=500/580 的在窗口内
+    const oldLine = makeLine(-600)
+    const inWindow1 = makeLine(500)
+    const inWindow2 = makeLine(580)
+    const nowSpy = vi.spyOn(performance, 'now').mockReturnValue(1000)
+    resetLineRevealClock()
+    assignPendingLineDelays(container)
+    nowSpy.mockRestore()
+
+    expect(oldLine).toHaveClass('screen-text-reveal-static')
+    expect(oldLine.style.getPropertyValue('--screen-text-reveal-delay')).toBe('')
+    expect(inWindow1.style.getPropertyValue('--screen-text-reveal-delay')).toBe('0ms')
+    expect(inWindow2.style.getPropertyValue('--screen-text-reveal-delay')).toBe('20ms')
   })
 
   it('does not arm characters outside the scroll viewport', () => {
