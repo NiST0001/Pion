@@ -157,6 +157,8 @@ export function reducer(state: AgentState, action: Action): AgentState {
       return { ...state, mode: action.mode }
     case 'runningSessionPaths':
       return { ...state, runningSessionPaths: action.paths }
+    case 'unreadSessions':
+      return { ...state, unreadSessionPaths: action.paths }
     case 'loadEntries':
       return {
         ...state,

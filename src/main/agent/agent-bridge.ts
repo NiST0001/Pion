@@ -105,7 +105,8 @@ import {
   STATE_REFRESH_EVENTS,
   STATUS_CHANNEL,
   TOOL_PERMISSION_CHANNEL,
-  TREE_CHANNEL
+  TREE_CHANNEL,
+  UNREAD_SESSIONS_CHANNEL
 } from './constants'
 import type {
   BackendPhase,
@@ -141,6 +142,8 @@ export class AgentBridge {
   private stopping = false
   private readonly backendKeysBySessionPath = new Map<string, string>()
   private readonly desiredModes = new Map<string, AgentMode>()
+  /** Sessions whose latest completed run the user has not opened yet. */
+  private readonly unreadSessionPaths = new Set<string>()
   /** Sessions whose tool-permission prompts are auto-approved (yolo mode). */
   private readonly yoloSessions = new Set<string>()
   private readonly sessionManagers = new Map<string, SessionManager>()
@@ -202,6 +205,7 @@ export class AgentBridge {
     this.pushExtensionUiRequests()
     this.pushModelProviderAuthState()
     this.pushRunningSessionPaths()
+    this.pushUnreadSessions()
     const activeBackend = this.getActiveBackend()
     if (activeBackend) this.pushQueueSnapshot(activeBackend)
   }
@@ -220,6 +224,10 @@ export class AgentBridge {
         .filter((backend) => (backend.busy || backend.runCompletionPromise) && backend.sessionPath)
         .map((backend) => resolve(backend.sessionPath as string))
     )]
+  }
+
+  getUnreadSessionPaths(): string[] {
+    return [...this.unreadSessionPaths]
   }
 
   getRunTelemetry(query: RunTelemetryQuery = {}): RunOperation[] {
@@ -274,6 +282,10 @@ export class AgentBridge {
   private pushRunCheckpoint(): void {
     const checkpoint = this.getActiveBackend()?.checkpointStatus ?? null
     this.win?.webContents.send(CHECKPOINT_CHANNEL, checkpoint)
+  }
+
+  private pushUnreadSessions(): void {
+    this.win?.webContents.send(UNREAD_SESSIONS_CHANNEL, [...this.unreadSessionPaths])
   }
 
   private pushToolPermissionRequests(): void {
@@ -1665,6 +1677,18 @@ export class AgentBridge {
       this.trackBackendEvent(backend, event, type)
       if (type === 'agent_settled') {
         const terminal = backend.completionState ?? 'completed'
+        const settledSessionPath = backend.sessionPath ? resolve(backend.sessionPath) : undefined
+        // Mark sessions finished elsewhere as unread until the user opens them.
+        if (
+          (terminal === 'completed' || terminal === 'failed')
+          && settledSessionPath
+          && settledSessionPath !== this.activeSessionPath
+        ) {
+          if (!this.unreadSessionPaths.has(settledSessionPath)) {
+            this.unreadSessionPaths.add(settledSessionPath)
+            this.pushUnreadSessions()
+          }
+        }
         this.completeCompanionRuns(backend, terminal, Date.now())
         backend.completionState = undefined
         backend.localQueueDispatching = false
@@ -2229,6 +2253,7 @@ export class AgentBridge {
     const target = await this.resolveListedSession(sessionPath)
     if (generation !== this.sessionSelectionGeneration) return { cancelled: true }
     const manager = this.openSessionManager(target)
+    if (this.unreadSessionPaths.delete(target)) this.pushUnreadSessions()
     this.activateLogicalSession(target, manager.getCwd() || this.activeCwd)
     // Activate the logical session synchronously, then warm its backend in the
     // background. The renderer can read the cached SessionManager immediately
@@ -2314,6 +2339,8 @@ export class AgentBridge {
     const active = this.activeSessionPath === target
 
     await unlink(target)
+    const wasUnread = this.unreadSessionPaths.delete(target)
+    if (wasUnread) this.pushUnreadSessions()
     await this.sessionModelPreferences?.deleteSessionModel(target)
     this.sessionManagers.delete(target)
     this.sessionManagerSignatures.delete(target)

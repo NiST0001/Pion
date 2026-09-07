@@ -10,6 +10,7 @@ export const MODEL_PROVIDER_AUTH_CHANNEL = IPC_EVENTS.ModelProviderAuthState
 export const STATE_CHANNEL = IPC_EVENTS.AgentState
 export const SESSIONS_CHANNEL = IPC_EVENTS.AgentSessions
 export const RUNNING_SESSIONS_CHANNEL = IPC_EVENTS.AgentRunningSessions
+export const UNREAD_SESSIONS_CHANNEL = IPC_EVENTS.AgentUnreadSessions
 export const RUN_TELEMETRY_CHANNEL = IPC_EVENTS.AgentRunTelemetry
 export const TREE_CHANNEL = IPC_EVENTS.AgentTree
 

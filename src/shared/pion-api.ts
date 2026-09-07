@@ -165,6 +165,8 @@ export interface PionApi {
   getSessionTaskHistory(sessionPath: string): Promise<SessionTaskRun[]>
   /** Persisted session paths whose retained backends are actively processing a run. */
   getRunningSessionPaths(): Promise<string[]>
+  /** Session paths with a completed/failed run not yet opened in this window. */
+  getUnreadSessionPaths(): Promise<string[]>
   /** Load a bounded history window; omit before for the newest window. */
   getEntriesPage(
     before?: number,
@@ -277,6 +279,8 @@ export interface PionApi {
   onSessions(listener: (sessions: SessionMeta[]) => void): () => void
   /** Subscribe whenever any retained session starts or finishes a run. */
   onRunningSessionPaths(listener: (sessionPaths: string[]) => void): () => void
+  /** Sessions whose latest completed run the user has not opened yet. */
+  onUnreadSessions(listener: (sessionPaths: string[]) => void): () => void
   /** Subscribe to branch-tree pushes. */
   onTree(listener: (tree: { tree: TreeNodeLite[]; leafId: string | null } | null) => void): () => void
   /** Subscribe to project-list pushes. */

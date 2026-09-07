@@ -266,6 +266,7 @@ function registerIpc(): void {
     bridge.getSessionTaskHistory(sessionPath)
   )
   ipcMain.handle(IPC.AgentRunningSessions, () => bridge.getRunningSessionPaths())
+  ipcMain.handle(IPC.AgentUnreadSessions, () => bridge.getUnreadSessionPaths())
   ipcMain.handle(
     IPC.AgentEntriesPage,
     (_event, before?: number, limit?: number, sessionPath?: string) =>

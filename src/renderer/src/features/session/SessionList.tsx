@@ -38,6 +38,7 @@ function formatTime(mtime: number): string {
 interface SessionItemActions {
   activePath?: string
   runningSessionPaths: ReadonlySet<string>
+  unreadSessionPaths?: ReadonlySet<string>
   onSelect: (path: string) => void
   onReorder?: (sessions: SessionMeta[]) => void
   onDelete: (path: string) => Promise<void>
@@ -54,6 +55,7 @@ export function SessionItems({
   sessions,
   activePath,
   runningSessionPaths,
+  unreadSessionPaths,
   previewDensity,
   onSelect,
   onReorder,
@@ -125,7 +127,7 @@ export function SessionItems({
         <div
           key={session.path}
           data-session-path={session.path}
-          className={`side-item side-session side-session-${previewDensity}${onReorder && !session.optimistic ? ' reorderable' : ''}${session.path === activePath ? ' active' : ''}${runningSessionPaths.has(session.path) || session.optimistic ? ' running' : ''}${session.optimistic ? ' optimistic' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
+          className={`side-item side-session side-session-${previewDensity}${onReorder && !session.optimistic ? ' reorderable' : ''}${session.path === activePath ? ' active' : ''}${runningSessionPaths.has(session.path) || session.optimistic ? ' running' : ''}${unreadSessionPaths?.has(session.path) ? ' unread' : ''}${session.optimistic ? ' optimistic' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
           aria-busy={runningSessionPaths.has(session.path) || session.optimistic}
           draggable={Boolean(onReorder && !session.optimistic)}
           onDragStart={(event) => {
@@ -153,14 +155,19 @@ export function SessionItems({
           }}
           title={session.optimistic
             ? '正在保存新会话…'
-            : `${session.path}\n${onReorder ? '拖拽调整顺序 · ' : ''}点击星标收藏 · 右键查看更多操作`}
+            : `${unreadSessionPaths?.has(session.path) ? '未读：有新的运行结果\n' : ''}${session.path}\n${onReorder ? '拖拽调整顺序 · ' : ''}点击星标收藏 · 右键查看更多操作`}
         >
           <div className="side-session-content">
             {onReorder && !session.optimistic && <GripVertical size={13} className="side-session-drag" aria-hidden="true" />}
             <div className="side-session-main">
-              <span className="side-item-label">
-                {session.name || session.preview || '未命名会话'}
-              </span>
+              <div className="side-session-title-row">
+                {unreadSessionPaths?.has(session.path) && (
+                  <span className="side-session-unread-indicator" aria-label="未读会话" title="有新的运行结果" />
+                )}
+                <span className="side-item-label">
+                  {session.name || session.preview || '未命名会话'}
+                </span>
+              </div>
               {previewDensity === 'detailed' && session.name && session.preview && (
                 <span className="side-session-preview">{session.preview}</span>
               )}

@@ -114,6 +114,8 @@ export interface AgentState {
   mode: AgentMode
   /** Session-scoped: auto-approve every tool-permission prompt. */
   yolo: boolean
+  /** Sessions whose latest completed run has not been opened yet. */
+  unreadSessionPaths: string[]
   runningSessionPaths: string[]
   timeline: TimelineItem[]
   timelineMutation: 'replace' | 'prepend' | 'append' | null
@@ -143,6 +145,7 @@ export const initialState: AgentState = {
   commands: [],
   mode: 'build',
   yolo: false,
+  unreadSessionPaths: [],
   runningSessionPaths: [],
   timeline: [],
   timelineMutation: null,
@@ -158,6 +161,7 @@ export type Action =
   | { type: 'session'; session: SessionInfo | null }
   | { type: 'runCheckpoint'; checkpoint: RunCheckpointStatus | null }
   | { type: 'sessions'; sessions: SessionMeta[] }
+  | { type: 'unreadSessions'; paths: string[] }
   | { type: 'projectSessions'; sessionsByProject: Record<string, SessionMeta[]> }
   | { type: 'projectSessionsUpdate'; cwd: string; sessions: SessionMeta[] }
   | { type: 'optimisticSession'; session: SessionMeta }

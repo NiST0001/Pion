@@ -52,4 +52,36 @@ describe('SessionItems optimistic projection', () => {
     expect(onToggleFavorite).not.toHaveBeenCalled()
     expect(container.querySelector('.context-menu')).not.toBeInTheDocument()
   })
+
+  it('highlights a session with unread output', () => {
+    const session: SessionMeta = {
+      projectCwd: '/tmp/project',
+      path: '/tmp/project/session.jsonl',
+      id: 'session-1',
+      timestamp: '2026-01-01T00:00:00Z',
+      mtime: 1,
+      preview: 'completed task',
+      messageCount: 2
+    }
+    const { container } = render(
+      <SessionItems
+        sessions={[session]}
+        runningSessionPaths={new Set()}
+        unreadSessionPaths={new Set([session.path])}
+        previewDensity="compact"
+        favoritePaths={new Set()}
+        onSelect={vi.fn()}
+        onDelete={vi.fn(async () => undefined)}
+        onCopy={vi.fn(async () => undefined)}
+        onRename={vi.fn(async () => undefined)}
+        onOpenTaskHistory={vi.fn()}
+        getForkMessages={vi.fn().mockResolvedValue([])}
+        onFork={vi.fn().mockResolvedValue('')}
+        onToggleFavorite={vi.fn()}
+      />
+    )
+
+    expect(container.querySelector('.side-session')).toHaveClass('unread')
+    expect(screen.getByLabelText('未读会话')).toBeInTheDocument()
+  })
 })

@@ -296,6 +296,7 @@ export function App(): ReactElement {
 
   const favoritePathSet = useMemo(() => new Set(favoriteSessionPaths), [favoriteSessionPaths])
   const runningSessionPathSet = useMemo(() => new Set(state.runningSessionPaths), [state.runningSessionPaths])
+  const unreadSessionPathSet = useMemo(() => new Set(state.unreadSessionPaths), [state.unreadSessionPaths])
   const favoriteSessions = useMemo(() => {
     const sessions = Object.values(state.sessionsByProject).flat()
     return orderFavoriteSessions(sessions, favoriteSessionPaths)
@@ -743,6 +744,7 @@ export function App(): ReactElement {
               previewDensity={sessionPreviewDensity}
               activePath={activePath}
               runningSessionPaths={runningSessionPathSet}
+              unreadSessionPaths={unreadSessionPathSet}
               favoritePaths={favoritePathSet}
               onToggleFavorite={handleToggleFavorite}
               onSelectSession={(session) => void handleSelectSession(session.projectCwd ?? state.status.cwd ?? '', session.path)}
@@ -762,6 +764,7 @@ export function App(): ReactElement {
               activeCwd={activeCwd}
               activePath={activePath}
               runningSessionPaths={runningSessionPathSet}
+              unreadSessionPaths={unreadSessionPathSet}
               onSelect={(cwd) => void handleSelectProject(cwd)}
               onAdd={() => void handleAddProject()}
               onRemove={(cwd) => void actions.removeProject(cwd)}

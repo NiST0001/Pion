@@ -46,6 +46,7 @@ export function useAgentSubscriptions({
       api.onRunCheckpoint((checkpoint) => dispatch({ type: 'runCheckpoint', checkpoint })),
       api.onState((session) => dispatch({ type: 'session', session })),
       api.onSessions((sessions) => dispatch({ type: 'sessions', sessions })),
+      api.onUnreadSessions((paths) => dispatch({ type: 'unreadSessions', paths })),
       api.onRunningSessionPaths((paths) => dispatch({ type: 'runningSessionPaths', paths })),
       api.onTree((tree) => dispatch({ type: 'tree', tree })),
       api.onProjects((nextProjects) => dispatch({ type: 'projects', projects: nextProjects })),
@@ -53,6 +54,9 @@ export function useAgentSubscriptions({
     ]
     void api.getRunningSessionPaths()
       .then((paths) => dispatch({ type: 'runningSessionPaths', paths }))
+      .catch(() => undefined)
+    void api.getUnreadSessionPaths()
+      .then((paths) => dispatch({ type: 'unreadSessions', paths }))
       .catch(() => undefined)
     return () => offs.forEach((off) => off())
   }, [api, dispatch])

@@ -117,6 +117,7 @@ export function FavoriteSessions({
   searchQuery,
   activePath,
   runningSessionPaths,
+  unreadSessionPaths,
   previewDensity,
   favoritePaths,
   onToggleFavorite,
@@ -132,6 +133,7 @@ export function FavoriteSessions({
   searchQuery: string
   activePath?: string
   runningSessionPaths: ReadonlySet<string>
+  unreadSessionPaths?: ReadonlySet<string>
   previewDensity: SessionPreviewDensity
   favoritePaths: ReadonlySet<string>
   onToggleFavorite: (path: string) => void
@@ -158,6 +160,7 @@ export function FavoriteSessions({
           sessions={visibleSessions}
           activePath={activePath}
           runningSessionPaths={runningSessionPaths}
+          unreadSessionPaths={unreadSessionPaths}
           previewDensity={previewDensity}
           favoritePaths={favoritePaths}
           onToggleFavorite={onToggleFavorite}
@@ -210,6 +213,7 @@ export function ProjectList({
   activeCwd,
   activePath,
   runningSessionPaths,
+  unreadSessionPaths,
   previewDensity,
   onSelect,
   onAdd,
@@ -235,6 +239,7 @@ export function ProjectList({
   activeCwd?: string
   activePath?: string
   runningSessionPaths: ReadonlySet<string>
+  unreadSessionPaths?: ReadonlySet<string>
   previewDensity: SessionPreviewDensity
   onSelect: (cwd: string) => void
   onAdd: () => void
@@ -293,6 +298,7 @@ export function ProjectList({
           activeCwd={activeCwd}
           activePath={activePath}
           runningSessionPaths={runningSessionPaths}
+          unreadSessionPaths={unreadSessionPaths}
           previewDensity={previewDensity}
           searchActive={Boolean(normalizedQuery)}
           canRemove={projects.length > 1}
@@ -323,6 +329,7 @@ function ProjectBranch({
   allSessions,
   activePath,
   runningSessionPaths,
+  unreadSessionPaths,
   previewDensity,
   onNewSession,
   onRenameBranch,
@@ -342,6 +349,7 @@ function ProjectBranch({
   allSessions: SessionMeta[]
   activePath?: string
   runningSessionPaths: ReadonlySet<string>
+  unreadSessionPaths?: ReadonlySet<string>
   previewDensity: SessionPreviewDensity
   onNewSession: (cwd: string) => void
   onRenameBranch: (branch: BranchInfo, name: string) => Promise<void>
@@ -458,6 +466,7 @@ function ProjectBranch({
               sessions={sessions}
               activePath={activePath}
               runningSessionPaths={runningSessionPaths}
+              unreadSessionPaths={unreadSessionPaths}
               previewDensity={previewDensity}
               favoritePaths={favoritePaths}
               onToggleFavorite={onToggleFavorite}
@@ -483,6 +492,7 @@ function ProjectFolder({
   activeCwd,
   activePath,
   runningSessionPaths,
+  unreadSessionPaths,
   searchActive,
   canRemove,
   previewDensity,
@@ -507,6 +517,7 @@ function ProjectFolder({
   activeCwd?: string
   activePath?: string
   runningSessionPaths: ReadonlySet<string>
+  unreadSessionPaths?: ReadonlySet<string>
   searchActive: boolean
   canRemove: boolean
   previewDensity: SessionPreviewDensity
@@ -588,6 +599,7 @@ function ProjectFolder({
               allSessions={allSessions}
               activePath={activePath}
               runningSessionPaths={runningSessionPaths}
+              unreadSessionPaths={unreadSessionPaths}
               previewDensity={previewDensity}
               onNewSession={onNewSession}
               onRenameBranch={(branch, name) => onRenameBranch(project.cwd, branch, name)}

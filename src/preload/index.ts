@@ -131,6 +131,8 @@ const api: PionApi = {
     ipcRenderer.invoke(IPC.AgentTaskHistory, sessionPath) as Promise<SessionTaskRun[]>,
   getRunningSessionPaths: () =>
     ipcRenderer.invoke(IPC.AgentRunningSessions) as Promise<string[]>,
+  getUnreadSessionPaths: () =>
+    ipcRenderer.invoke(IPC.AgentUnreadSessions) as Promise<string[]>,
   getEntriesPage: (before, limit, sessionPath) =>
     ipcRenderer.invoke(IPC.AgentEntriesPage, before, limit, sessionPath) as Promise<SessionEntriesPage | null>,
   getTree: () => ipcRenderer.invoke(IPC.AgentTree),
@@ -253,6 +255,8 @@ const api: PionApi = {
   onSessions: (listener) => subscribe<SessionMeta[]>(IPC_EVENTS.AgentSessions, listener),
   onRunningSessionPaths: (listener) =>
     subscribe<string[]>(IPC_EVENTS.AgentRunningSessions, listener),
+  onUnreadSessions: (listener) =>
+    subscribe<string[]>(IPC_EVENTS.AgentUnreadSessions, listener),
   onTree: (listener) =>
     subscribe<{ tree: TreeNodeLite[]; leafId: string | null } | null>(IPC_EVENTS.AgentTree, listener),
   onProjects: (listener) => subscribe<ProjectMeta[]>(IPC_EVENTS.Projects, listener),
