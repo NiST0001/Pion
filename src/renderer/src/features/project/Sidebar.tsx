@@ -21,6 +21,7 @@ import type {
 import { SessionItems, sessionMatchesQuery } from '../session/SessionList'
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { TextInputDialog } from '../common/TextInputDialog'
+import { SortableSidebarGroup } from './SortableSidebarGroup'
 
 // ---------------------------------------------------------------------------
 // Section shell
@@ -290,7 +291,9 @@ export function ProjectList({
       {visibleProjects.length === 0 && (
         <div className="side-empty">{normalizedQuery ? '没有匹配的会话' : '暂无项目'}</div>
       )}
-      {visibleProjects.map(({ project, branches }) => (
+      <SortableSidebarGroup scope="projects" kind="project" items={visibleProjects}
+        allKeys={projects.map((project) => project.cwd)} getKey={({ project }) => project.cwd}>
+      {({ project, branches }) => (
         <ProjectFolder
           key={project.cwd}
           project={project}
@@ -318,7 +321,8 @@ export function ProjectList({
           favoritePaths={favoritePaths}
           onToggleFavorite={onToggleFavorite}
         />
-      ))}
+      )}
+      </SortableSidebarGroup>
     </Section>
   )
 }
@@ -399,7 +403,9 @@ function ProjectBranch({
     <div className="project-branch">
       <div
         className={`project-branch-head${sessions.some((session) => session.path === activePath) ? ' active' : ''}`}
-        title={`${branch.name} · Git worktree：${branch.cwd}`}
+        draggable
+        data-sidebar-drag-kind="branch"
+        title={`${branch.name} · Git worktree：${branch.cwd} · 拖动排序`}
       >
         <button
           type="button"
@@ -545,8 +551,10 @@ function ProjectFolder({
     <div className={`project-folder project-folder-${previewDensity}${active ? ' active' : ''}`}>
       <div
         className="project-folder-head"
+        draggable
+        data-sidebar-drag-kind="project"
         onClick={() => onSelect(project.cwd)}
-        title={project.cwd}
+        title={`${project.cwd} · 拖动排序`}
       >
         <button
           type="button"
@@ -591,7 +599,9 @@ function ProjectFolder({
       </div>
       {expanded && (
         <div className="project-folder-branches">
-          {branches.map(({ branch, sessions, allSessions }) => (
+          <SortableSidebarGroup scope={`branches:${project.cwd}`} kind="branch" items={branches}
+            allKeys={branches.map(({ branch }) => branch.cwd)} getKey={({ branch }) => branch.cwd}>
+          {({ branch, sessions, allSessions }) => (
             <ProjectBranch
               key={branch.cwd}
               branch={branch}
@@ -614,7 +624,8 @@ function ProjectFolder({
               favoritePaths={favoritePaths}
               onToggleFavorite={onToggleFavorite}
             />
-          ))}
+          )}
+          </SortableSidebarGroup>
         </div>
       )}
     </div>

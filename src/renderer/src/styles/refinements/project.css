@@ -309,6 +309,25 @@
   cursor: grabbing;
 }
 
+[data-sidebar-drag-kind] {
+  cursor: grab;
+}
+
+[data-sidebar-drag-kind]:active {
+  cursor: grabbing;
+}
+
+.sidebar-sort-item.is-dragging {
+  opacity: 0.45;
+}
+
+.sidebar-sort-item.is-drop-target {
+  outline: 1px dashed var(--accent-strong);
+  outline-offset: -1px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+}
+
 .side-session-content {
   display: flex;
   align-items: flex-start;

@@ -59,7 +59,7 @@
 
 - `chat/`：ChatTimeline、ChatMessage、Markdown、ToolCallItem、Composer；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
 - `session/`：HistoryNavigator 跳转条、SessionList 会话行、QueuedMessagesCard、TaskPanel、TaskHistoryPanel。
-- `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示。
+- `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
 - `operations/`：RunMetricsStrip、权限确认、验证、运行恢复和工作流面板。
 - `review/`：Git 改动列表、差异与审查界面。ModifiedFilesCard 使用工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 共享可见性观察器，保留字符渐入并在结束后回收字符节点。
 - `settings/`：设置、模型选择器与模型配置页。
@@ -84,6 +84,7 @@
   - `conversationNavigation.test.tsx`：跳转后不被实时更新或运行状态变化拉回底部。
   - `HistoryNavigator.test.tsx`：跳转条交互。
   - `Composer.test.tsx`：输入框、@ 参考、回车发送与斜杠命令。
+  - `SortableSidebarGroup.test.tsx`：项目/分支排序持久化及隐藏项、新增项的顺序处理。
   - `SessionList.test.tsx`：会话行状态与未读标记。
   - `ReviewRevealText.test.tsx`：审查字符动画结束后释放节点。
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
