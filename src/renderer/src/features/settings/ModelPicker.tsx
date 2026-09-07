@@ -52,6 +52,9 @@ export function ModelPicker({
       </button>
       {open && (
         <div className="picker-menu">
+          {models.length === 0 && (
+            <div className="picker-empty">模型加载中…</div>
+          )}
           {Object.entries(groupByProvider(models)).map(([provider, group]) => (
             <div key={provider} className="picker-group">
               <div className="picker-group-title">{provider}</div>

@@ -106,6 +106,12 @@
   padding: 8px 8px 4px;
 }
 
+.picker-empty {
+  padding: 10px 12px;
+  color: var(--fg-faint);
+  font-size: 12px;
+}
+
 .picker-option {
   display: flex;
   align-items: center;

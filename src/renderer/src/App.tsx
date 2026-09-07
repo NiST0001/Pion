@@ -915,13 +915,11 @@ export function App(): ReactElement {
                     models={state.models}
                     currentProvider={state.session?.provider}
                     currentModelId={state.session?.modelId}
-                    disabled={state.status.phase !== 'running'}
                     onSelect={(provider, modelId) => void actions.setModel(provider, modelId)}
                   />
                   <ThinkingPicker
                     levels={state.thinkingLevels}
                     current={state.session?.thinkingLevel}
-                    disabled={state.status.phase !== 'running'}
                     onSelect={(level) => void actions.setThinkingLevel(level)}
                   />
                 </>
