@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { realpathSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type {
   ProjectToolPermissionPolicy,
@@ -18,8 +18,8 @@ export const TOOL_PERMISSION_TIMEOUT_MS = 120_000
 
 export const DEFAULT_TOOL_PERMISSION_RULES: ToolPermissionRules = {
   read: 'allow',
-  write: 'ask',
-  shell: 'ask',
+  write: 'allow',
+  shell: 'allow',
   network: 'ask',
   external: 'ask'
 }
@@ -38,6 +38,17 @@ function canonicalCwd(cwd: string): string {
   } catch {
     return absolute
   }
+}
+
+/** Worktree sessions inherit the base project's policy (mirrors the gate). */
+function projectRootOf(cwd: string): string {
+  const canonicalPath = canonicalCwd(cwd)
+  const marker = `${sep}.pion-worktrees${sep}`
+  const index = canonicalPath.indexOf(marker)
+  if (index < 0) return canonicalPath
+  const projectName = canonicalPath.slice(index + marker.length).split(sep)[0]
+  if (!projectName) return canonicalPath
+  return join(canonicalPath.slice(0, index), projectName)
 }
 
 function isDecision(value: unknown): value is ToolPermissionDecision {
@@ -111,7 +122,11 @@ export class ToolPermissionStore {
   async getPolicy(cwd: string): Promise<ProjectToolPermissionPolicy> {
     await this.load()
     const normalizedCwd = canonicalCwd(cwd)
-    const saved = this.data.projects[normalizedCwd]
+    const policyRoot = projectRootOf(cwd)
+    const saved = this.data.projects[policyRoot]
+      ?? Object.entries(this.data.projects)
+        .filter(([key]) => policyRoot === key || policyRoot.startsWith(`${key}${sep}`))
+        .sort((left, right) => right[0].length - left[0].length)[0]?.[1]
     return {
       cwd: normalizedCwd,
       source: saved ? 'saved' : 'default',
@@ -183,7 +198,7 @@ const CHECKPOINT_MARKER = "__PION_RUN_CHECKPOINT__";
 const CHECKPOINT_TIMEOUT = 30000;
 const CHECKPOINT_READ_ONLY = new Set(["read", "grep", "find", "ls", "pion_task"]);
 const TIMEOUT = 120000;
-const DEFAULTS = { read: "allow", write: "ask", shell: "ask", network: "ask", external: "ask" };
+const DEFAULTS = { read: "allow", write: "allow", shell: "allow", network: "ask", external: "ask" };
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const SHELL_TOOLS = new Set(["bash", "powershell"]);
@@ -207,12 +222,37 @@ function canonical(path) {
   }
 }
 
+/**
+ * Worktree sessions live under <projectParent>/.pion-worktrees/<name>/<branch>,
+ * outside the project folder. Map them back to the base project so its
+ * permission policy and workspace boundary apply instead of the bare defaults.
+ */
+function projectRootOf(cwd) {
+  const canonicalCwd = canonical(cwd);
+  const marker = sep + ".pion-worktrees" + sep;
+  const index = canonicalCwd.indexOf(marker);
+  if (index < 0) return canonicalCwd;
+  const projectName = canonicalCwd.slice(index + marker.length).split(sep)[0];
+  if (!projectName) return canonicalCwd;
+  return resolve(canonicalCwd.slice(0, index), projectName);
+}
+
 function readPolicy(cwd) {
   const file = process.env.PION_TOOL_PERMISSION_CONFIG;
   if (!file) return { ...DEFAULTS };
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8"));
-    const saved = parsed && parsed.projects && parsed.projects[canonical(cwd)];
+    const projects = parsed && parsed.projects ? parsed.projects : {};
+    const root = projectRootOf(cwd);
+    let saved = projects[root];
+    if (!saved) {
+      // Longest configured prefix wins (e.g. a home-level allow rule).
+      let best = "";
+      for (const key of Object.keys(projects)) {
+        if ((root === key || root.startsWith(key + sep)) && key.length > best.length) best = key;
+      }
+      if (best) saved = projects[best];
+    }
     if (!saved) return { ...DEFAULTS };
     const rules = { ...DEFAULTS };
     for (const category of Object.keys(DEFAULTS)) {
@@ -267,9 +307,13 @@ function classify(event, ctx) {
   if (command && NETWORK_COMMAND.test(command) && !categories.includes("network")) categories.push("network");
 
   const root = canonical(ctx.cwd);
+  const projectRoot = projectRootOf(ctx.cwd);
   const path = toolPath(input, root);
   const risks = [];
-  if (path && !isWithin(root, canonical(path))) risks.push("outside-workspace");
+  if (path) {
+    const canonicalPath = canonical(path);
+    if (!isWithin(root, canonicalPath) && !isWithin(projectRoot, canonicalPath)) risks.push("outside-workspace");
+  }
   if (path && isSensitivePath(canonical(path))) risks.push("sensitive-path");
   if (command && DESTRUCTIVE_COMMAND.test(command)) risks.push("destructive-command");
 
