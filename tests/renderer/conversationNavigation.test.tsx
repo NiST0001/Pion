@@ -19,7 +19,7 @@ describe('conversation navigation', () => {
     Object.defineProperties(element, { scrollHeight: { value: 2000 }, clientHeight: { value: 400, configurable: true } })
     const options: Parameters<typeof useConversationNavigation>[0] = {
       scrollRef: { current: element }, timeline: [], timelineMutation: 'replace', busy: false,
-      sessionPath: '/a', historyJump: undefined,
+      sessionPath: '/a', historyJump: null,
       loadOlder: vi.fn(async () => undefined), loadNewer: vi.fn(async () => undefined)
     }
     const { result, rerender } = renderHook((props) => useConversationNavigation(props), { initialProps: options })

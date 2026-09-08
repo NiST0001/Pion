@@ -46,7 +46,7 @@ describe('Composer input references and local slash commands', () => {
   })
 
   it('does not show a stale or invented percentage while post-compaction usage is pending', () => {
-    render(<Composer busy={false} disabled={false} prefill="" history={[]} commands={[]}
+    render(<Composer busy={false} disabled={false} sendDisabled={false} prefill="" history={[]} commands={[]}
       contextPressure={0.9} contextUsagePending mode="build" onModeChange={vi.fn()}
       onSend={vi.fn()} onQueue={vi.fn()} onAbort={vi.fn()} />)
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()

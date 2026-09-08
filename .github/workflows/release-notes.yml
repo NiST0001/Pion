@@ -1,0 +1,62 @@
+name: release-notes
+
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release-notes.yml']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag, e.g. v0.1.33'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Read bundled release notes
+        run: |
+          node --experimental-strip-types --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import { RELEASE_NOTES } from './src/shared/release-notes.ts';
+          const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
+          const note = RELEASE_NOTES.find(item => item.version === version);
+          if (!note) throw new Error(`Missing bundled notes for ${version}`);
+          fs.writeFileSync('release-note.json', JSON.stringify({
+            tag: `v${version}`,
+            body: `## 更新内容\n\n${note.changes.map(change => `- ${change}`).join('\n')}`
+          }));
+          JS
+      - name: Synchronize GitHub Release description
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs');
+            const note = JSON.parse(fs.readFileSync('release-note.json', 'utf8'));
+            // A packaging matrix may still be uploading its first artifact.
+            let release;
+            for (let attempt = 0; attempt < 30; attempt++) {
+              try {
+                release = (await github.rest.repos.getReleaseByTag({ ...context.repo, tag: note.tag })).data;
+                break;
+              } catch (error) {
+                if (error.status !== 404 || attempt === 29) throw error;
+                await new Promise(resolve => setTimeout(resolve, 10000));
+              }
+            }
+            await github.rest.repos.updateRelease({ ...context.repo, release_id: release.id, body: note.body });
+            core.info(`Synchronized ${release.html_url}`);

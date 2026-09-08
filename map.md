@@ -112,6 +112,6 @@
 - `dev.sh`：本地开发启动；`scripts/`：安装与诊断脚本。
 - `scripts/install-local.sh`：本机安装、默认递增版本。
 - `electron-builder.yml`、`build/`：分发包配置与图标。
-- `.github/workflows/quality.yml`：质量检查；`release.yml`：标签触发发布。
+- `.github/workflows/quality.yml`：质量检查；`release.yml`：标签触发发布；`release-notes.yml`：发布成功后读取该版本内置日志并同步 GitHub Release 说明，也支持指定已有标签手动同步。
 - `docs/development.md`：开发说明；`docs/coding-agent-platform.md`：设计资料。
 - `out/`、`dist/`、`coverage/`、`test-results/`：生成产物，不作源码修改。
