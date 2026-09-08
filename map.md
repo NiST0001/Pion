@@ -107,7 +107,7 @@
   - `AnimatedDisclosure.test.tsx`、`ToolCallItem.test.tsx`：详情按需挂载、收起后清理、快速反向操作、减少动态效果与工具文字渐入。
   - `ComposerSupportPanels.test.tsx`：任务/排队槽位切换时保留 DOM、草稿和挂载状态。
   - `HistoryNavigator.test.tsx`：跳转条交互，实时索引增加时保留手动浏览的范围。
-  - `loadingScroll.test.tsx`：初次加载可滚入空白、部分渲染不缩短滚动范围、首个 scroll 前手势生效、分页保留消息屏幕位置及加载中的向上滚动、占位不遮蔽分页位移、补偿不连锁分页、跳转短页前释放旧空白范围且滚至末尾不回拉，以及用户取消待执行跳转。
+  - `loadingScroll.test.tsx`：初次加载可滚入空白、部分渲染不缩短滚动范围、首个 scroll 前手势生效、会话切换/空加载的程序化 scroll 不锁住占位、分页保留消息屏幕位置及加载中的向上滚动、占位不遮蔽分页位移、补偿不连锁分页、跳转短页前释放旧空白范围且滚至末尾不回拉，以及用户取消待执行跳转。
   - `liveHistoryIndex.test.tsx`：忙碌时按落盘/完成事件更新索引、在途事件补刷新、过滤 token 增量、读取失败保留与会话隔离。
   - `Composer.test.tsx`：输入框、@ 参考、回车发送与斜杠命令。
   - `SortableSidebarGroup.test.tsx`：项目/分支排序持久化及隐藏项、新增项的顺序处理。
@@ -123,6 +123,7 @@
 - `tests/unit/session-sidebar-sync.test.ts`：新会话首次落盘后的项目列表推送；`optimistic-session.test.ts` 覆盖占位替换和跨项目列表隔离。
   - `historyReveal.test.tsx`、`screenTextReveal.test.tsx`：渐入行为。
 - `tests/e2e/app.spec.ts`：Electron 启动、统计计费开关、统计按压不缩放、详情浮层与顶部统计条同宽且展开不改变消息区尺寸、插件卸载及 Git 审查提交场景。
+- `tests/e2e/session-scroll.spec.ts`：独立临时项目和会话，在真实 Electron DOM 中反复长/短会话切换、注入加载期间的延迟 scroll，检查后端就绪前后不存在残留空白滚动范围；不使用现有用户会话。
 - `vitest.config.ts`、`playwright.config.ts`：测试配置；E2E 在 CI 中同时输出 GitHub 断言注释，便于定位失败。
 
 ## 开发、安装与发布

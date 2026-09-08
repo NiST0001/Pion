@@ -59,6 +59,37 @@ describe('agent compaction state', () => {
     expect(settled).toMatchObject({ busy: false, compacting: false })
   })
 
+  it('keeps mid-run threshold compaction active until the resumed run settles', () => {
+    const backend = {
+      key: 'mid-run', cwd: '/tmp', client: {}, phase: 'running',
+      busy: false, compacting: false, pendingRunIds: [], startPromise: Promise.resolve()
+    } as unknown as BackendRecord
+    const modes = new Map()
+    let state = initialState
+    const events = [
+      { type: 'agent_start' },
+      { type: 'compaction_start', reason: 'threshold' },
+      { type: 'compaction_end', reason: 'threshold', result: {}, aborted: false, willRetry: false }
+    ]
+    for (const event of events) {
+      expect(applyBackendEvent(backend, event, modes).sessionCompleted).toBe(false)
+      state = reducer(state, { type: 'event', event })
+      expect(backend.busy).toBe(true)
+      expect(state.busy).toBe(true)
+    }
+    expect(backend.compacting).toBe(false)
+    expect(backend.completionState).toBeUndefined()
+    expect(state.compacting).toBe(false)
+    const end = { type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop' }], willRetry: false }
+    applyBackendEvent(backend, end, modes)
+    state = reducer(state, { type: 'event', event: end })
+    expect(backend.busy).toBe(true)
+    expect(state.busy).toBe(true)
+    expect(applyBackendEvent(backend, { type: 'agent_settled' }, modes).sessionCompleted).toBe(true)
+    expect(reducer(state, { type: 'event', event: { type: 'agent_settled' } }).busy).toBe(false)
+    expect(backend.busy).toBe(false)
+  })
+
   it('marks a failed automatic compaction retry as failed instead of completed', () => {
     const backend = {
       key: 'test',

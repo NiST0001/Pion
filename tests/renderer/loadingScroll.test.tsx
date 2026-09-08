@@ -28,7 +28,10 @@ function setup(loading: boolean, content = 0) {
   const totalHeight = () => Math.max(400, height, parseFloat(surface.style.minHeight) || 0)
   Object.defineProperties(element, {
     clientHeight: { value: 400 }, scrollHeight: { get: totalHeight },
-    scrollTop: { get: () => top, set: (value: number) => { top = Math.max(0, Math.min(value, totalHeight() - 400)) } }
+    scrollTop: {
+      get: () => { top = Math.max(0, Math.min(top, totalHeight() - 400)); return top },
+      set: (value: number) => { top = Math.max(0, Math.min(value, totalHeight() - 400)) }
+    }
   })
   surface.getBoundingClientRect = () => ({ height: totalHeight() } as DOMRect)
   const options: Parameters<typeof useConversationNavigation>[0] = {
@@ -68,6 +71,50 @@ it('lets users scroll into blank loading space and keeps it when partial content
   h.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }))
   expect(h.surface.style.minHeight).toBe('')
   expect(h.element.scrollTop).toBe(0)
+})
+
+it('does not retain the loading placeholder after a programmatic scroll with no user gesture', () => {
+  const h = setup(true)
+  expect(h.element.scrollHeight).toBe(1200)
+  // Browser scroll delivery after reserving/clearing content is not a wheel,
+  // touch or scrollbar gesture. It must not turn this temporary height sticky.
+  act(() => h.result.current.handleTimelineScroll())
+  h.content(180)
+  h.rerender({ ...h.options, timeline: [item], timelineLoading: false })
+  expect(h.surface.style.minHeight).toBe('')
+  expect(h.element.scrollHeight).toBe(400)
+  expect(h.element.scrollTop).toBe(0)
+})
+
+it.each([180, 900])('clears old-session space and follows the actual %ipx page after delayed browser scroll events', (height) => {
+  const h = setup(false, 4000)
+  const first = { ...h.options, sessionPath: '/a' }
+  h.rerender(first)
+  h.element.dispatchEvent(new WheelEvent('wheel', { deltaY: -500 }))
+  h.element.scrollTop = 1000
+  act(() => h.result.current.handleTimelineScroll())
+  expect(h.surface.style.minHeight).toBe('4000px')
+  h.content(0)
+  const loading = { ...first, sessionPath: '/b', timeline: [], timelineLoading: true }
+  h.rerender(loading)
+  expect(h.element.scrollHeight).toBe(1200)
+  act(() => h.result.current.handleTimelineScroll())
+  // Include a changed-offset event, not just a synthetic no-movement one.
+  h.element.scrollTop = 100
+  act(() => h.result.current.handleTimelineScroll())
+  const ready = { ...loading, timeline: [item], timelineLoading: false }
+  h.content(height)
+  h.rerender(ready)
+  expect(h.surface.style.minHeight).toBe('')
+  expect(h.element.scrollHeight).toBe(Math.max(400, height))
+  expect(h.element.scrollTop).toBe(Math.max(0, height - 400))
+  // A late event from the transition must not recreate space after ready.
+  act(() => h.result.current.handleTimelineScroll())
+  h.rerender({ ...ready, busy: true })
+  expect(h.surface.style.minHeight).toBe('')
+  h.content(height + 500)
+  h.rerender({ ...ready, timeline: [item, { ...item, id: 2 }], timelineMutation: 'append' })
+  expect(h.element.scrollTop).toBe(height + 100)
 })
 
 it('honors keyboard scrolling even before the first message has rendered', () => {

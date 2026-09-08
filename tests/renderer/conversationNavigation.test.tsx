@@ -23,6 +23,7 @@ describe('conversation navigation', () => {
       loadOlder: vi.fn(async () => undefined), loadNewer: vi.fn(async () => undefined)
     }
     const { result, rerender } = renderHook((props) => useConversationNavigation(props), { initialProps: options })
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: -200 }))
     element.scrollTop = 500
     act(() => result.current.handleTimelineScroll())
     rerender({ ...options, timeline: [] })

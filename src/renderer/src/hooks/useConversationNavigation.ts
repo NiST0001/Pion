@@ -419,7 +419,7 @@ export function useConversationNavigation({
     const element = scrollRef.current
     if (!element || pendingJumpNonce.current !== null) return
     const moved = element.scrollTop !== lastScrollTop.current
-    const userMoved = Date.now() <= gestureUntil.current && moved
+    const userMoved = manualScroll.current && Date.now() <= gestureUntil.current && moved
     const movedForward = element.scrollTop > lastScrollTop.current
     if (userMoved) {
       explicitHistoryEntry.current = undefined
@@ -434,19 +434,20 @@ export function useConversationNavigation({
       // because an empty/partially rendered viewport happens to fit on screen.
       followEnd(element)
     }
-    nearBottomRef.current = !readingHistory.current && atSessionBottom
-    if (!nearBottomRef.current) {
+    if (userMoved && !(movedForward && atSessionBottom && !loadingRef.current && hasContentRef.current)) {
+      nearBottomRef.current = false
       readingHistory.current = true
-      if (!explicitHistoryEntry.current || manualScroll.current) {
-        manualScroll.current = true
-        reserveSpace(element)
-      }
+      reserveSpace(element)
     }
+    // Loading placeholders, cache restoration and session switches can emit
+    // scroll without any user input (even with no offset change). Never turn
+    // those events into manual reading or freeze the placeholder's height.
+    // Programmatic writers already synchronize their own offset/follow state.
     lastScrollTop.current = element.scrollTop
     armPendingHistoryRevealRows(element)
     // Layout compensation can emit scroll too. Its offset was already synced
     // above; do not cascade through every page on those no-movement events.
-    pageOnScroll(moved, movedForward)
+    pageOnScroll(userMoved, movedForward)
     scheduleVisibleHistoryUpdate()
   }, [pageOnScroll, scheduleVisibleHistoryUpdate, scrollRef, reserveSpace, hasNewerHistory, followEnd])
 
