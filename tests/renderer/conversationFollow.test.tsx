@@ -19,7 +19,7 @@ function setup() {
     clientHeight: { value: 400 }, scrollHeight: { get: () => height },
     scrollTop: { get: () => top, set: (value: number) => { top = Math.max(0, Math.min(height - 400, value)) } }
   })
-  let timeline: TimelineItem[] = [{ kind: 'assistant', id: 1, text: 'initial', streaming: true }]
+  let timeline: TimelineItem[] = [{ kind: 'assistant', id: 1, text: 'initial', thinking: '', streaming: true }]
   const props: Parameters<typeof useConversationNavigation>[0] = {
     scrollRef: { current: element }, timeline, timelineMutation: 'replace', busy: true,
     sessionPath: '/a', historyJump: null, loadOlder: vi.fn(async () => undefined), loadNewer: vi.fn(async () => undefined)
@@ -32,7 +32,7 @@ function setup() {
   }
   const append = (size = 300) => {
     height += size
-    timeline = [...timeline, { kind: 'assistant', id: timeline.length + 1, text: 'new output', streaming: true }]
+    timeline = [...timeline, { kind: 'assistant', id: timeline.length + 1, text: 'new output', thinking: '', streaming: true }]
     hook.rerender({ ...props, timeline, timelineMutation: 'append' })
   }
   return { ...hook, props, element, scroll, append,
