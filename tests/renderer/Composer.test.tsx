@@ -45,6 +45,15 @@ describe('Composer input references and local slash commands', () => {
     expect(input).toHaveValue('')
   })
 
+  it('does not show a stale or invented percentage while post-compaction usage is pending', () => {
+    render(<Composer busy={false} disabled={false} prefill="" history={[]} commands={[]}
+      contextPressure={0.9} contextUsagePending mode="build" onModeChange={vi.fn()}
+      onSend={vi.fn()} onQueue={vi.fn()} onAbort={vi.fn()} />)
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+    expect(document.querySelector('.send-context-progress')).toBeNull()
+    expect(screen.getByTitle('上下文已压缩，等待下一次模型响应更新用量')).toBeInTheDocument()
+  })
+
   it('keeps Enter as direct send while a run is busy', () => {
     const onSend = vi.fn()
     const onQueue = vi.fn()

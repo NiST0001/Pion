@@ -39,6 +39,7 @@ describe('RunStore', () => {
     store.update('run-1', (run) => {
       run.state = 'completed'
       run.usage.total = 42
+      run.contextUsagePending = true
     })
     await store.flush()
 
@@ -46,6 +47,10 @@ describe('RunStore', () => {
     expect(parsed.runs[0]).toMatchObject({ id: 'run-1', state: 'completed' })
     expect(store.list({ cwd: '/tmp/project' })[0].usage.total).toBe(42)
     expect(store.list({ cwd: '/tmp/other' })).toEqual([])
+    const restored = new RunStore(file)
+    await restored.load()
+    expect(restored.get('run-1')?.contextUsagePending).toBe(true)
+    expect(restored.get('run-1')?.contextPressure).toBeUndefined()
   })
 
   it('marks uncertain active runs interrupted without replaying queued prompts', async () => {

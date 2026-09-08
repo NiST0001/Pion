@@ -24,6 +24,7 @@ interface ComposerProps {
   commands: SlashCommandInfo[]
   /** Latest model request pressure for the selected session's context window. */
   contextPressure?: number
+  contextUsagePending?: boolean
   contextTokens?: number
   contextWindow?: number
   /** Renderer-owned commands that stay available while the Agent backend prepares. */
@@ -48,6 +49,7 @@ export function Composer({
   controls,
   commands,
   contextPressure,
+  contextUsagePending,
   contextTokens,
   contextWindow,
   localCommandNames = [],
@@ -180,11 +182,11 @@ export function Composer({
   const invokedCommandName = value.trim().match(/^\/([^\s]+)(?:\s+[\s\S]*)?$/)?.[1]?.toLocaleLowerCase()
   const localCommandReady = Boolean(invokedCommandName && localCommandNames.includes(invokedCommandName))
   const activeCommandIndex = Math.min(commandIndex, Math.max(0, commandOptions.length - 1))
-  const contextPercent = contextPressure === undefined
+  const contextPercent = contextUsagePending || contextPressure === undefined
     ? null
     : Math.round(Math.max(0, Math.min(contextPressure, 1)) * 100)
   const contextLabel = contextPercent === null
-    ? '上下文占用尚不可用'
+    ? contextUsagePending ? '上下文已压缩，等待下一次模型响应更新用量' : '上下文占用尚不可用'
     : `当前会话上下文已使用 ${contextPercent}%${contextTokens !== undefined && contextWindow
       ? `（${Math.round(contextTokens).toLocaleString()} / ${Math.round(contextWindow).toLocaleString()} tokens）`
       : ''}`

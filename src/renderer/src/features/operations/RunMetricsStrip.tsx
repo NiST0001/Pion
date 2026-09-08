@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Activity, ChevronDown, Clock3, Gauge, Wrench, Zap } from 'lucide-react'
 import type { ReactElement } from 'react'
 import type { RunOperation, TokenUsage } from '../../../../shared/types'
@@ -63,6 +63,8 @@ export function RunMetricsStrip({
   showCost?: boolean
 }): ReactElement | null {
   const [expanded, setExpanded] = useState(false)
+  const panelRef = useRef<HTMLElement>(null)
+  const detailId = useId()
   const [now, setNow] = useState(Date.now())
   const active = Boolean(run && ACTIVE_STATES.has(run.state))
 
@@ -74,6 +76,15 @@ export function RunMetricsStrip({
 
   useEffect(() => setExpanded(false), [run?.id])
 
+  useEffect(() => {
+    if (!expanded) return
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !panelRef.current?.contains(event.target)) setExpanded(false)
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    return () => document.removeEventListener('pointerdown', closeOutside)
+  }, [expanded])
+
   const metrics = useMemo(() => {
     if (!run) return null
     const usage = sumUsage(run.usage, run.liveUsage)
@@ -84,17 +95,19 @@ export function RunMetricsStrip({
   }, [now, run])
 
   if (!run || !metrics) return null
-  const pressure = run.contextPressure === undefined
+  const pressure = run.contextUsagePending || run.contextPressure === undefined
     ? null
     : Math.max(0, Math.min(run.contextPressure, 1.5))
   const cost = metrics.usage.costUsd
 
   return (
-    <section className={`run-metrics-strip state-${run.state}${expanded ? ' expanded' : ''}`} aria-label="运行指标">
+    <section ref={panelRef} className={`run-metrics-strip state-${run.state}${expanded ? ' expanded' : ''}`} aria-label="运行指标"
+      onKeyDown={(event) => { if (event.key === 'Escape') { setExpanded(false); event.stopPropagation() } }}>
       <button
         type="button"
         className="run-metrics-summary"
         aria-expanded={expanded}
+        aria-controls={detailId}
         onClick={() => setExpanded((value) => !value)}
       >
         <span className="run-metrics-state">
@@ -132,7 +145,7 @@ export function RunMetricsStrip({
       </button>
 
       {expanded && (
-        <div className="run-metrics-detail">
+        <div id={detailId} className="run-metrics-detail" role="region" aria-label="统计详情">
           <div className="run-metrics-grid">
             <span><small>输入</small><strong>{formatTokens(metrics.usage.input)}</strong></span>
             <span><small>输出</small><strong>{formatTokens(metrics.usage.output)}</strong></span>
@@ -140,7 +153,7 @@ export function RunMetricsStrip({
             <span><small>推理</small><strong>{formatTokens(metrics.usage.reasoning)}</strong></span>
             <span>
               <small>上下文</small>
-              <strong>{run.contextTokens !== undefined
+              <strong>{run.contextUsagePending ? '压缩后待更新' : run.contextTokens !== undefined
                 ? `${formatTokens(run.contextTokens)}${run.contextWindow !== undefined ? ` / ${formatTokens(run.contextWindow)}` : ''}`
                 : '未知'}</strong>
             </span>

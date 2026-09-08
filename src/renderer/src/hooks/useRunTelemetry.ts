@@ -12,6 +12,8 @@ function belongsToSelection(run: RunOperation, sessionPath?: string, cwd?: strin
 function mergeRuns(current: RunOperation[], update: RunTelemetryUpdate, sessionPath?: string, cwd?: string): RunOperation[] {
   const byId = new Map(current.map((run) => [run.id, run]))
   for (const run of update.runs) {
+    const existing = byId.get(run.id)
+    if (existing && existing.revision > run.revision) continue
     if (belongsToSelection(run, sessionPath, cwd)) byId.set(run.id, run)
     else byId.delete(run.id)
   }
@@ -54,7 +56,7 @@ export function useRunTelemetry({
     void window.pion.getRunTelemetry({ sessionPath, cwd, limit: VISIBLE_RUN_LIMIT })
       .then((result) => {
         if (!active) return
-        setRuns(result.filter((run) => belongsToSelection(run, sessionPath, cwd)))
+        setRuns((current) => mergeRuns(current, { runs: result }, sessionPath, cwd))
       })
       .catch((error: unknown) => {
         console.error('[pion] failed to load run telemetry:', error)

@@ -12,6 +12,7 @@ import { VerificationWorkflowRunner, WorkflowManager } from './workflow-manager'
 import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
+import { TerminalService } from './terminal-service'
 import type {
   AddModelProviderInput,
   ExtensionUiResponse,
@@ -33,6 +34,7 @@ const userDataOverride = process.env.PION_USER_DATA_DIR?.trim()
 if (userDataOverride) app.setPath('userData', resolve(userDataOverride))
 
 const runStore = new RunStore(join(app.getPath('userData'), 'pion-runs.json'))
+const terminals = new TerminalService()
 const appSettings = new AppSettings()
 const bridge = new AgentBridge(runStore, appSettings)
 const verification = new VerificationService(join(app.getPath('userData'), 'pion-verification.json'))
@@ -145,6 +147,7 @@ function createWindow(): void {
     workflows.unbind(win)
     git.unbind(win)
   })
+  terminals.bind(win)
   bridge.bind(win)
   verification.bind(win)
   workflows.bind(win)
@@ -170,6 +173,14 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  const terminalOwner = (event: Electron.IpcMainInvokeEvent): number => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口操作终端')
+    return event.sender.id
+  }
+  ipcMain.handle(IPC.TerminalOpen, (event, cwd: string, cols: number, rows: number) => terminals.open(terminalOwner(event), cwd, cols, rows))
+  ipcMain.handle(IPC.TerminalWrite, (event, id: string, data: string) => terminals.write(terminalOwner(event), id, data))
+  ipcMain.handle(IPC.TerminalResize, (event, id: string, cols: number, rows: number) => terminals.resize(terminalOwner(event), id, cols, rows))
+  ipcMain.handle(IPC.TerminalClose, (event, id: string) => terminals.close(terminalOwner(event), id))
   // agent lifecycle -----------------------------------------------------------
   ipcMain.handle(IPC.AgentStart, async (_event, cwd: string) => {
     const result = await bridge.start(cwd)
@@ -476,5 +487,6 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  terminals.dispose()
   void Promise.all([bridge.stop(), verification.flush(), workflows.shutdown()])
 })

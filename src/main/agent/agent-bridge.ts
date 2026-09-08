@@ -923,7 +923,11 @@ export class AgentBridge {
       return
     }
 
-    const runId = backend.activeRunId
+    // Manual compaction can happen after the run has settled. Invalidate the
+    // displayed session's latest usage, never another project's latest run.
+    const runId = backend.activeRunId ?? (type === 'compaction_end' && backend.sessionPath
+      ? this.runStore.list({ sessionPath: backend.sessionPath, cwd: backend.cwd, limit: 1 })[0]?.id
+      : undefined)
     if (!runId) return
     const now = Date.now()
 
@@ -933,6 +937,8 @@ export class AgentBridge {
       this.runStore.update(runId, (run) => {
         run.liveUsage = usage
         const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite
+        if (contextTokens <= 0) return
+        run.contextUsagePending = false
         run.contextTokens = contextTokens
         run.contextPressure = run.contextWindow && run.contextWindow > 0
           ? contextTokens / run.contextWindow
@@ -950,6 +956,8 @@ export class AgentBridge {
         run.usage = addTokenUsage(run.usage, usage)
         run.liveUsage = undefined
         const contextTokens = usage.input + usage.cacheRead + usage.cacheWrite
+        if (contextTokens <= 0) return
+        run.contextUsagePending = false
         run.contextTokens = contextTokens
         run.contextPressure = run.contextWindow && run.contextWindow > 0
           ? contextTokens / run.contextWindow
@@ -1013,6 +1021,14 @@ export class AgentBridge {
       }
       this.runStore.update(runId, (run) => {
         const error = typeof compaction.errorMessage === 'string' ? compaction.errorMessage : undefined
+        if (!compaction.aborted && !error) {
+          // RPC supplies no post-compaction token count. Do not reuse the
+          // pre-compaction request usage or present an invented 0% value.
+          run.contextTokens = undefined
+          run.contextPressure = undefined
+          run.contextUsagePending = true
+          run.liveUsage = undefined
+        }
         run.compactions.push({
           id: randomUUID(),
           reason: typeof compaction.reason === 'string' ? compaction.reason : 'unknown',

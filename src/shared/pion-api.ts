@@ -65,6 +65,12 @@ import type {
 } from './workflows'
 
 export interface PionApi {
+  openTerminal(cwd: string, cols: number, rows: number): Promise<import('./terminal').TerminalSnapshot>
+  writeTerminal(id: string, data: string): Promise<void>
+  resizeTerminal(id: string, cols: number, rows: number): Promise<void>
+  closeTerminal(id: string): Promise<void>
+  onTerminalData(listener: (update: import('./terminal').TerminalUpdate) => void): () => void
+
   // agent lifecycle ---------------------------------------------------------
   /** Select a working directory; session backends load when selected. */
   startAgent(cwd: string): Promise<void>

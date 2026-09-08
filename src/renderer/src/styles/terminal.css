@@ -1,0 +1,9 @@
+.project-terminal { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; background: var(--bg); }
+.terminal-toolbar { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-bottom: 1px solid var(--border); font-size: 11px; }
+.terminal-toolbar > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; color: var(--fg-dim); }
+.terminal-toolbar button { flex-shrink: 0; padding: 3px 6px; border-radius: var(--radius-sm); color: var(--fg-dim); }
+.terminal-toolbar button:hover { color: var(--accent-strong); background: var(--accent-soft); }
+.terminal-notice { padding: 3px 8px; font-size: 10px; color: var(--fg-faint); }
+.terminal-error { padding: 5px 8px; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.terminal-host { flex: 1; min-width: 0; min-height: 0; overflow: hidden; padding: 4px 8px; }
+.terminal-host .xterm { height: 100%; }

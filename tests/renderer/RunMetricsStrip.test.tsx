@@ -36,7 +36,7 @@ const run: RunOperation = {
 }
 
 describe('RunMetricsStrip', () => {
-  it('summarizes time, tokens, cost, and context at the workspace top', () => {
+  it('summarizes time, tokens, cost, and context in the floating trigger', () => {
     render(<RunMetricsStrip run={run} showCost />)
     const summary = screen.getByRole('button')
     expect(summary).toHaveTextContent('已完成')
@@ -63,6 +63,31 @@ describe('RunMetricsStrip', () => {
     expect(summary).toHaveTextContent('3m 07s')
     expect(summary).toHaveTextContent('50k')
     expect(summary).toHaveTextContent('$0.240')
+  })
+
+  it('dismisses the floating details with Escape or an outside click and resets on run switch', () => {
+    const { rerender } = render(<RunMetricsStrip run={run} />)
+    const trigger = screen.getByRole('button')
+    fireEvent.click(trigger)
+    const detail = screen.getByRole('region', { name: '统计详情' })
+    expect(trigger).toHaveAttribute('aria-controls', detail.id)
+    fireEvent.keyDown(trigger, { key: 'Escape' })
+    expect(screen.queryByRole('region', { name: '统计详情' })).not.toBeInTheDocument()
+    fireEvent.click(trigger)
+    fireEvent.pointerDown(document.body)
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(trigger)
+    rerender(<RunMetricsStrip run={{ ...run, revision: 2 }} />)
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    rerender(<RunMetricsStrip run={{ ...run, id: 'other' }} />)
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('shows pending context after compaction instead of the old percentage', () => {
+    render(<RunMetricsStrip run={{ ...run, contextUsagePending: true }} />)
+    expect(screen.getByRole('button')).not.toHaveTextContent('24%')
+    fireEvent.click(screen.getByRole('button'))
+    expect(screen.getByText('上下文').nextElementSibling).toHaveTextContent('压缩后待更新')
   })
 
   it('reveals authoritative context and cost details on demand', () => {

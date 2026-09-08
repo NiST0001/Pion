@@ -68,6 +68,7 @@ function normalizeRun(value: unknown): RunOperation | null {
     liveUsage: run.liveUsage ? { ...EMPTY_TOKEN_USAGE, ...run.liveUsage } : undefined,
     contextTokens: run.contextTokens,
     contextPressure: run.contextPressure,
+    contextUsagePending: run.contextUsagePending === true,
     tools: Array.isArray(run.tools) ? run.tools : [],
     compactions: Array.isArray(run.compactions) ? run.compactions : [],
     stopReason: run.stopReason,

@@ -58,6 +58,11 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const api: PionApi = {
+  openTerminal: (cwd, cols, rows) => ipcRenderer.invoke(IPC.TerminalOpen, cwd, cols, rows),
+  writeTerminal: (id, data) => ipcRenderer.invoke(IPC.TerminalWrite, id, data),
+  resizeTerminal: (id, cols, rows) => ipcRenderer.invoke(IPC.TerminalResize, id, cols, rows),
+  closeTerminal: (id) => ipcRenderer.invoke(IPC.TerminalClose, id),
+  onTerminalData: (listener) => subscribe<import('../shared/terminal').TerminalUpdate>(IPC_EVENTS.TerminalData, listener),
   // agent lifecycle
   startAgent: (cwd) => ipcRenderer.invoke(IPC.AgentStart, cwd),
   stopAgent: () => ipcRenderer.invoke(IPC.AgentStop),

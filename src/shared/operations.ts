@@ -85,6 +85,8 @@ export interface RunOperation {
   liveUsage?: TokenUsage
   contextTokens?: number
   contextPressure?: number
+  /** Compacted successfully; awaiting usage from a subsequent model response. */
+  contextUsagePending?: boolean
   tools: RunToolTiming[]
   compactions: RunCompactionMetric[]
   stopReason?: string

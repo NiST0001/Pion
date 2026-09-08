@@ -133,6 +133,12 @@ export const IPC = {
   GitOperationContinue: 'pion:git-operation-continue',
   GitOperationAbort: 'pion:git-operation-abort',
 
+  // project terminals
+  TerminalOpen: 'pion:terminal-open',
+  TerminalWrite: 'pion:terminal-write',
+  TerminalResize: 'pion:terminal-resize',
+  TerminalClose: 'pion:terminal-close',
+
   // misc
   ClipboardImage: 'pion:clipboard-image',
   PickWorkspace: 'pion:pick-workspace',
@@ -158,5 +164,6 @@ export const IPC_EVENTS = {
   ToolPermissionRequests: 'pion:tool-permission-requests',
   ExtensionUiRequests: 'pion:extension-ui-requests',
   ModelProviderAuthState: 'pion:model-provider-auth-state',
-  WindowState: 'pion:window-state'
+  WindowState: 'pion:window-state',
+  TerminalData: 'pion:terminal-data'
 } as const

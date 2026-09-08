@@ -39,6 +39,9 @@ import { FavoriteSessions, ProjectList, SidebarToolbar } from './features/projec
 import { ReviewPanel } from './features/review/ReviewPanel'
 import { ModelPicker, ThinkingPicker } from './features/settings/ModelPicker'
 import { TitleBar } from './features/chrome/TitleBar'
+import { DockHeader } from './features/chrome/DockHeader'
+import { useDockLayout } from './hooks/useDockLayout'
+import type { DockPanel } from './utils/dockLayout'
 import { ProjectPicker } from './features/project/ProjectPicker'
 import { ProjectTrustBanner } from './features/project/ProjectTrustBanner'
 import { HistoryNavigator } from './features/session/HistoryNavigator'
@@ -61,6 +64,7 @@ import { resolvePendingReviewFile, scopeForReviewFile } from './utils/reviewPath
 import type { PendingReviewSelection } from './utils/reviewPaths'
 import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
 
+const TerminalPanel = lazy(() => import('./features/terminal/TerminalPanel').then((module) => ({ default: module.TerminalPanel })))
 const LazyBranchCreateModal = lazy(() => import('./features/project/BranchCreateModal')
   .then((module) => ({ default: module.BranchCreateModal })))
 const LazySettingsModal = lazy(() => import('./features/settings/SettingsModal')
@@ -170,11 +174,15 @@ export function App(): ReactElement {
     sidebarOpen,
     setSidebarOpen,
     reviewOpen,
-    setReviewOpen,
-    sidebarWidth,
-    reviewWidth,
-    handleResizeStart
+    setReviewOpen
   } = usePanelLayout(hasBridge)
+  const [terminalOpen, setTerminalOpen] = useState(false)
+  const [terminalCwd, setTerminalCwd] = useState<string>()
+  const dock = useDockLayout({ projects: sidebarOpen, chat: true, review: reviewOpen, terminal: terminalOpen })
+  const dockHeader = (panel: DockPanel, title: string, onClose?: () => void) => (
+    <DockHeader title={title} slot={dock.layout.slots[panel]} onMove={(slot) => dock.movePanel(panel, slot)}
+      onClose={onClose} dragProps={dock.dragProps(panel)} />
+  )
   const {
     completionNotificationsEnabled,
     projectTrust,
@@ -273,7 +281,7 @@ export function App(): ReactElement {
     timeline: state.timeline,
     timelineMutation: state.timelineMutation,
     busy: state.busy,
-    sessionPath: state.session?.sessionFile,
+    sessionPath: resourceSessionPath,
     historyIndexSessionPath: state.historyIndex?.sessionPath,
     historyJump: state.historyJump,
     panelsVisible: state.queuedMessages.steering.length > 0
@@ -732,14 +740,25 @@ export function App(): ReactElement {
         sessionName={state.session?.sessionName}
         maximized={maximized}
         sidebarOpen={sidebarOpen}
-        sidebarWidth={sidebarWidth}
+        sidebarWidth={sidebarOpen ? dock.layout.left : 0}
         reviewOpen={reviewOpen}
         onToggleSidebar={() => setSidebarOpen((open) => !open)}
         onToggleReview={handleToggleReview}
       />
 
-      <div className="app-body">
-        {sidebarOpen && <aside className="sidebar" style={{ width: sidebarWidth }}>
+      <div className="dock-toolbar" aria-label="工作区面板">
+        <button type="button" aria-pressed={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}>项目</button>
+        <button type="button" aria-pressed={reviewOpen} onClick={handleToggleReview}>审查</button>
+        <button type="button" aria-pressed={terminalOpen} disabled={!resourceCwd} onClick={() => {
+          if (terminalOpen && terminalCwd === resourceCwd) setTerminalOpen(false)
+          else { setTerminalCwd(resourceCwd); setTerminalOpen(true) }
+        }}>终端</button>
+        <span>拖动面板标题交换位置</span>
+        <button type="button" onClick={dock.reset}>重置布局</button>
+      </div>
+      <div className="app-body dock-workspace" ref={dock.rootRef} style={dock.rootStyle} data-drop-target={dock.dropTarget ?? ''}>
+        <aside className="sidebar" {...dock.panelProps('projects')}>
+          {dockHeader('projects', '项目', () => setSidebarOpen(false))}
           <div className="sidebar-scroll">
             <SidebarToolbar
               searchQuery={sessionQuery}
@@ -806,16 +825,10 @@ export function App(): ReactElement {
               <span>插件商店</span>
             </button>
           </div>
-          <div
-            className="sidebar-resizer"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="调整会话栏宽度"
-            onPointerDown={(event) => handleResizeStart('sidebar', event)}
-          />
-        </aside>}
+        </aside>
 
-        <div className="main">
+        <div className="main" {...dock.panelProps('chat')}>
+          {dockHeader('chat', '会话')}
           {state.status.phase === 'error' && (
             <div className="banner banner-error">
               <span>agent 启动失败：{state.status.error}</span>
@@ -826,13 +839,6 @@ export function App(): ReactElement {
               <span>{state.timelineError}</span>
             </div>
           )}
-
-          <RunMetricsStrip
-            run={displayedRun}
-            sessionTotals={sessionTotals}
-            showDuration={showMetricDuration}
-            showCost={showMetricCost}
-          />
 
           <ProjectTrustBanner
             trust={projectTrust}
@@ -849,6 +855,13 @@ export function App(): ReactElement {
             onResume={(runId) => void runRecovery.resume(runId)}
             onDiscard={(runId) => void runRecovery.discard(runId)}
             onRestoreCheckpoint={(runId) => void runRecovery.restoreCheckpoint(runId)}
+          />
+
+          <RunMetricsStrip
+            run={displayedRun}
+            sessionTotals={sessionTotals}
+            showDuration={showMetricDuration}
+            showCost={showMetricCost}
           />
 
           <div className={`conversation-shell${historyNavigatorVisible ? ' has-history-navigator' : ''}${(hasTaskPanel || hasQueuedMessages) ? ' has-composer-panels' : ''}`}>
@@ -940,6 +953,7 @@ export function App(): ReactElement {
               history={messageHistory}
               commands={composerCommands}
               contextPressure={displayedRun?.contextPressure}
+              contextUsagePending={displayedRun?.contextUsagePending}
               contextTokens={displayedRun?.contextTokens}
               contextWindow={displayedRun?.contextWindow}
               localCommandNames={LOCAL_SLASH_COMMAND_NAMES}
@@ -981,8 +995,9 @@ export function App(): ReactElement {
           </div>
         </div>
 
-        {reviewOpen && (
-          <ReviewPanel
+        <div className="dock-review" {...dock.panelProps('review')}>
+          {dockHeader('review', '审查', () => setReviewOpen(false))}
+          {reviewOpen && <ReviewPanel
             snapshot={gitResourcesEnabled ? gitWorkspace.snapshot : null}
             diff={reviewCodeEnabled ? gitWorkspace.diff : null}
             conflict={reviewCodeEnabled ? gitWorkspace.conflict : null}
@@ -999,7 +1014,7 @@ export function App(): ReactElement {
             gitResult={gitWorkspace.result}
             rollbackBusy={rollbackBusy}
             rollbackError={rollbackError}
-            width={reviewWidth}
+            width={dock.layout.right}
             onSelect={handleSelectReviewPath}
             onScopeChange={setReviewScope}
             onLoadDiff={(path, scope) => void gitWorkspace.loadDiff(path, scope)}
@@ -1014,9 +1029,16 @@ export function App(): ReactElement {
             onAbortOperation={() => void gitWorkspace.abortOperation()}
             onRollback={() => void handleRollbackRun()}
             onClose={handleToggleReview}
-            onResizeStart={(event) => handleResizeStart('review', event)}
-          />
-        )}
+            onResizeStart={dock.resizeProps('right').onPointerDown}
+          />}
+        </div>
+        <div className="dock-terminal" {...dock.panelProps('terminal')}>
+          {dockHeader('terminal', '终端', () => setTerminalOpen(false))}
+          {terminalCwd && <Suspense fallback={<div className="side-empty">终端加载中…</div>}><TerminalPanel cwd={terminalCwd} visible={terminalOpen} /></Suspense>}
+        </div>
+        {dock.left && <div className="dock-divider dock-divider-left" role="separator" aria-label="调整左侧面板宽度" aria-orientation="vertical" {...dock.resizeProps('left')} />}
+        {dock.right && <div className="dock-divider dock-divider-right" role="separator" aria-label="调整右侧面板宽度" aria-orientation="vertical" {...dock.resizeProps('right')} />}
+        {dock.bottom && <div className="dock-divider dock-divider-bottom" role="separator" aria-label="调整底部面板高度" aria-orientation="horizontal" {...dock.resizeProps('bottom')} />}
       </div>
 
       {operationsPanel && (
