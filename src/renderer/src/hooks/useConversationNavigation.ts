@@ -43,6 +43,8 @@ export function useConversationNavigation({
   const historyHighlightTimer = useRef<number | null>(null)
   const previousTimelineHeight = useRef(0)
   const previousTimelineLength = useRef(0)
+  const previousContentHeight = useRef(0)
+  const prependAnchor = useRef<{ element: HTMLElement; top: number; parent: Element | null } | null>(null)
   /** Follow intent; layout changes alone must never re-enable it. */
   const nearBottomRef = useRef(true)
   const navigationSession = useRef(sessionPath)
@@ -60,7 +62,7 @@ export function useConversationNavigation({
   const hasContentRef = useRef(timeline.length > 0)
   // This is provisional blank space, not an estimate of the entire history.
   // Keep its extent while the user is scrolling; actual content can fill it
-  // naturally, and an explicit return to the end releases unused space.
+  // naturally; an explicit jump or return to the end releases unused space.
   const reserveSpace = useCallback((element: HTMLElement, loading = false) => {
     const surface = scrollSurfaceRef.current
     if (!surface) return
@@ -99,32 +101,57 @@ export function useConversationNavigation({
         explicitHistoryEntry.current = undefined
         previousTimelineHeight.current = 0
         previousTimelineLength.current = 0
+        previousContentHeight.current = 0
+        prependAnchor.current = null
         reservedHeight.current = 0
         gestureUntil.current = 0
         if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
       }
-    }
-    if (manualScroll.current || (timelineLoading && timelineLength === 0)) {
-      reserveSpace(element, timelineLoading && timelineLength === 0)
-    } else {
-      reservedHeight.current = 0
-      if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
     }
     if (historyJump?.nonce !== observedJumpNonce.current) {
       observedJumpNonce.current = historyJump?.nonce
       pendingJumpNonce.current = historyJump?.nonce ?? null
       explicitHistoryEntry.current = historyJump?.entryId
       if (historyJump) {
+        // An explicit jump starts a new reading window, not a continuation of
+        // manual scrolling through the previous window. Drop its provisional
+        // height BEFORE measuring/clamping the target. Otherwise a short page
+        // inherits the old page's blank tail until a bottom scroll releases it.
+        manualScroll.current = false
+        gestureUntil.current = 0
+        reservedHeight.current = 0
+        if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
         nearBottomRef.current = false
         readingHistory.current = true
       }
     }
+    const reservedBeforeLayout = reservedHeight.current
+    if (manualScroll.current || (timelineLoading && timelineLength === 0 && pendingJumpNonce.current === null)) {
+      reserveSpace(element, timelineLoading && timelineLength === 0)
+    } else {
+      reservedHeight.current = 0
+      if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
+    }
     const previousHeight = previousTimelineHeight.current
+    const content = element.querySelector<HTMLElement>('.timeline')
+    const contentHeight = content?.offsetHeight ?? element.scrollHeight
     const addedTimelineItems = timelineLength > previousTimelineLength.current
-    if (timelineMutation === 'prepend' && addedTimelineItems && previousHeight > 0) {
-      // Background filling can preserve an anchor, but a user's scroll must
-      // not be undone when the older page finally arrives.
-      if (!manualScroll.current) element.scrollTop += element.scrollHeight - previousHeight
+    if (timelineMutation === 'prepend' && addedTimelineItems && previousHeight > 0 && pendingJumpNonce.current === null) {
+      // Prepending moves existing rows, even during manual scrolling. Keeping
+      // the same numeric scrollTop would jump to the newly inserted page.
+      // Measure a retained row in layout coordinates (not transformed screen
+      // coordinates), independently of reserved blank space. Add only its
+      // displacement to the CURRENT offset, preserving input during the fetch.
+      const anchor = prependAnchor.current
+      const displacement = element.scrollTop >= previousContentHeight.current ? 0
+        : anchor && element.contains(anchor.element) && anchor.element.offsetParent === anchor.parent
+          ? anchor.element.offsetTop - anchor.top
+          : Math.max(0, contentHeight - previousContentHeight.current)
+      if (displacement > 0 && reservedBeforeLayout > 0 && scrollSurfaceRef.current) {
+        reservedHeight.current = Math.max(reservedHeight.current, reservedBeforeLayout + displacement)
+        scrollSurfaceRef.current.style.minHeight = `${reservedHeight.current}px`
+      }
+      element.scrollTop += displacement
     } else if (timelineMutation === 'replace') {
       // Cache refreshes and new array references are not a request to go live.
       if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)) element.scrollTop = element.scrollHeight
@@ -138,6 +165,11 @@ export function useConversationNavigation({
     }
     previousTimelineHeight.current = element.scrollHeight
     previousTimelineLength.current = timelineLength
+    previousContentHeight.current = contentHeight
+    const firstRow = content?.firstElementChild
+    prependAnchor.current = firstRow instanceof HTMLElement
+      ? { element: firstRow, top: firstRow.offsetTop, parent: firstRow.offsetParent }
+      : null
     lastScrollTop.current = element.scrollTop
   }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, sessionPath, projectCwd, reserveSpace])
 
@@ -375,8 +407,10 @@ export function useConversationNavigation({
     }
     lastScrollTop.current = element.scrollTop
     armPendingHistoryRevealRows(element)
-    if (element.scrollTop <= 96) void loadOlder({ viaScroll: true })
-    if (element.scrollHeight - element.scrollTop - element.clientHeight <= 96) void loadNewer({ viaScroll: true })
+    // Layout compensation can emit scroll too. Its offset was already synced
+    // above; do not cascade through every page on those no-movement events.
+    if (moved && !movedForward && element.scrollTop <= 96) void loadOlder({ viaScroll: true })
+    if (moved && movedForward && element.scrollHeight - element.scrollTop - element.clientHeight <= 96) void loadNewer({ viaScroll: true })
     scheduleVisibleHistoryUpdate()
   }, [loadNewer, loadOlder, scheduleVisibleHistoryUpdate, scrollRef, reserveSpace])
 

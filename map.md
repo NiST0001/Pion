@@ -56,7 +56,7 @@
 | src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换、跳转窗口与事件驱动的实时索引更新 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
-| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、滚动跟随、统一历史定位参考点、显式跳转目标锁定、高亮与尺寸变化处理 |
+| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、滚动跟随、统一历史定位参考点、显式跳转时释放旧占位并锁定目标、高亮与尺寸变化处理 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
 | src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1 缓存迁移；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
 | src/renderer/src/hooks/useRunTelemetry.ts、useRunRecovery.ts | 运行统计与恢复 |
@@ -104,7 +104,7 @@
   - `AnimatedDisclosure.test.tsx`、`ToolCallItem.test.tsx`：详情按需挂载、收起后清理、快速反向操作、减少动态效果与工具文字渐入。
   - `ComposerSupportPanels.test.tsx`：任务/排队槽位切换时保留 DOM、草稿和挂载状态。
   - `HistoryNavigator.test.tsx`：跳转条交互，实时索引增加时保留手动浏览的范围。
-  - `loadingScroll.test.tsx`：初次加载可滚入空白、部分渲染不缩短滚动范围、首个 scroll 前手势生效、分页不撤销向上滚动及用户取消待执行跳转。
+  - `loadingScroll.test.tsx`：初次加载可滚入空白、部分渲染不缩短滚动范围、首个 scroll 前手势生效、分页保留消息屏幕位置及加载中的向上滚动、占位不遮蔽分页位移、补偿不连锁分页、跳转短页前释放旧空白范围且滚至末尾不回拉，以及用户取消待执行跳转。
   - `liveHistoryIndex.test.tsx`：忙碌时按落盘/完成事件更新索引、在途事件补刷新、过滤 token 增量、读取失败保留与会话隔离。
   - `Composer.test.tsx`：输入框、@ 参考、回车发送与斜杠命令。
   - `SortableSidebarGroup.test.tsx`：项目/分支排序持久化及隐藏项、新增项的顺序处理。
