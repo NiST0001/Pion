@@ -28,7 +28,7 @@ export async function ensureNativePlanModeExtension(): Promise<string> {
 export function nativePlanModeExtensionSource(): string {
   return String.raw`const STATE_ENTRY_TYPE = "plan-mode-state";
 const READ_ONLY_TOOL_NAMES = ["read", "grep", "find", "ls"];
-const DEFAULT_NORMAL_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell", "pion_task"];
+const DEFAULT_NORMAL_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell", "pion_task", "pion_ask_user"];
 const PLAN_COMMANDS = [
   { value: "start", label: "start", description: "进入只读计划模式" },
   { value: "exit", label: "exit", description: "退出计划模式并恢复构建工具" },
@@ -41,7 +41,7 @@ const PLAN_PROMPT = [
   "- 严禁修改、创建、删除、移动或覆盖任何文件。",
   "- 严禁执行 bash、PowerShell、终端、安装、提交、迁移或其他可能产生副作用的操作。",
   "- 不要调用 pion_task，也不要把计划转换为 Pion 任务；计划只写在你的回复中。",
-  "- 只能使用当前可见的只读资料工具收集信息。",
+  "- 只能使用当前可见的只读资料工具收集信息；关键歧义可用 pion_ask_user 向用户提问。",
   "- 输出现状、发现、风险和分步骤执行方案，然后停止等待用户确认。",
   "- 只有用户明确切换回构建模式并发送执行请求后，才可以开始实际修改。",
 ].join("\n");
@@ -56,13 +56,13 @@ export default function (pi) {
   }
 
   function isReadOnlyBuiltInTool(name) {
-    if (!READ_ONLY_TOOL_NAMES.includes(name)) return false;
     const tool = pi.getAllTools().find((candidate) => candidate.name === name);
-    return tool?.sourceInfo?.source === "builtin";
+    if (name === "pion_ask_user") return tool?.sourceInfo?.source === "sdk";
+    return READ_ONLY_TOOL_NAMES.includes(name) && tool?.sourceInfo?.source === "builtin";
   }
 
   function readOnlyTools() {
-    return READ_ONLY_TOOL_NAMES.filter((name) => isReadOnlyBuiltInTool(name));
+    return [...READ_ONLY_TOOL_NAMES, "pion_ask_user"].filter((name) => isReadOnlyBuiltInTool(name));
   }
 
   function normalTools() {
@@ -78,7 +78,9 @@ export default function (pi) {
   function restoreTools() {
     const previous = toolsBeforePlanMode;
     toolsBeforePlanMode = undefined;
-    pi.setActiveTools(previous && previous.length > 0 ? previous : normalTools());
+    const restored = previous && previous.length > 0 ? previous : normalTools();
+    const nativeAsk = isReadOnlyBuiltInTool("pion_ask_user") ? ["pion_ask_user"] : [];
+    pi.setActiveTools([...new Set([...restored, ...nativeAsk])]);
   }
 
   function persist() {
@@ -157,7 +159,7 @@ export default function (pi) {
     if (!enabled || isReadOnlyBuiltInTool(event.toolName)) return;
     return {
       block: true,
-      reason: "Pion 计划模式只允许只读资料工具（read/grep/find/ls），已阻止 " + event.toolName + "。请切换到构建模式后再执行。",
+      reason: "Pion 计划模式只允许只读资料工具（read/grep/find/ls）和内置提问，已阻止 " + event.toolName + "。请切换到构建模式后再执行。",
     };
   });
 

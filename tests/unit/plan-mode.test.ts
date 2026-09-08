@@ -19,8 +19,15 @@ describe('Pion native plan mode', () => {
     const source = nativePlanModeExtensionSource()
 
     expect(source).toContain('toolsBeforePlanMode = pi.getActiveTools()')
-    expect(source).toContain('pi.setActiveTools(previous && previous.length > 0 ? previous : normalTools())')
+    expect(source).toContain('const restored = previous && previous.length > 0 ? previous : normalTools()')
+    expect(source).toContain('...restored, ...nativeAsk')
     expect(source).toContain('只有用户明确切换回构建模式并发送执行请求后')
+  })
+
+  it('allows only the SDK-owned question tool alongside read-only built-ins', () => {
+    const source = nativePlanModeExtensionSource()
+    expect(source).toContain('if (name === "pion_ask_user") return tool?.sourceInfo?.source === "sdk"')
+    expect(source).toContain('[...READ_ONLY_TOOL_NAMES, "pion_ask_user"]')
   })
 
   it('does not reactivate the task tool while a plan session is restored', () => {

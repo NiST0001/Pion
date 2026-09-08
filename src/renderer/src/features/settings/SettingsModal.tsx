@@ -34,6 +34,7 @@ import { ToolPermissionSettings } from './ToolPermissionSettings'
 import { ModelsPage } from './ModelsPage'
 import { PageHeading } from './SettingsPageHeading'
 import { ReleaseNotes } from './ReleaseNotes'
+import { WindowEffectsSettings } from './WindowEffectsSettings'
 import { SESSION_PREVIEW_OPTIONS } from '../../utils/sessionPreview'
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { currentTheme, saveTheme, THEMES } from '../../utils/theme'
@@ -629,6 +630,8 @@ export function SettingsModal({
                     ))}
                   </div>
                 </div>
+                <WindowEffectsSettings />
+
                 <div className="appearance-preview-card">
                   <div className="settings-section-title">实时预览</div>
                   <div className="appearance-preview">

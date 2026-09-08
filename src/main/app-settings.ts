@@ -14,6 +14,7 @@ export interface SessionModelPreferenceStore {
 }
 
 interface PionSettingsFile {
+  windowEffectsEnabled?: boolean
   completionNotificationsEnabled?: boolean
   sessionModels?: Record<string, SessionModelPreference>
 }
@@ -35,6 +36,7 @@ export class AppSettings implements SessionModelPreferenceStore {
       const parsed: unknown = JSON.parse(raw)
       if (typeof parsed === 'object' && parsed !== null) {
         const record = parsed as Record<string, unknown>
+        if (typeof record.windowEffectsEnabled === 'boolean') this.settings.windowEffectsEnabled = record.windowEffectsEnabled
         const value = record.completionNotificationsEnabled
         if (typeof value === 'boolean') this.settings.completionNotificationsEnabled = value
         if (typeof record.sessionModels === 'object' && record.sessionModels !== null) {
@@ -59,6 +61,17 @@ export class AppSettings implements SessionModelPreferenceStore {
       }
     } catch {
       // Missing or malformed shell settings fall back to safe defaults.
+    }
+  }
+
+  get windowEffectsEnabled(): boolean { return this.settings.windowEffectsEnabled ?? false }
+
+  async setWindowEffectsEnabled(enabled: boolean): Promise<void> {
+    const previous = this.settings.windowEffectsEnabled
+    this.settings = { ...this.settings, windowEffectsEnabled: enabled }
+    try { await this.persist() } catch (error) {
+      this.settings = { ...this.settings, windowEffectsEnabled: previous }
+      throw error
     }
   }
 

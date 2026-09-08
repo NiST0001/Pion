@@ -3,9 +3,8 @@
    高度按本轮任务数自适应；完成项保留到下一轮计划开始。
    ========================================================================== */
 
-/* The composer can expose both pieces of run context without making either
-   card compete with the input itself: tasks stay on the left, queued user
-   messages stay on the right. */
+/* Keep both grid slots stable. Interpolated tracks let tasks make room for
+   queued messages, and reclaim that room without a sudden width jump. */
 .composer-support-row {
   /* Floating overlay above the composer: panels never push the timeline. */
   position: absolute;
@@ -13,17 +12,35 @@
   bottom: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%);
-  display: flex;
-  align-items: flex-end;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0fr);
+  align-items: end;
   width: min(calc(100% - 48px), 1600px);
   margin: 0;
-  gap: 12px;
+  gap: 0;
   pointer-events: none;
+  transition: grid-template-columns 220ms var(--motion-ease-out), width 220ms var(--motion-ease-out), gap 220ms var(--motion-ease-out);
 }
 
-.composer-support-row .task-panel {
-  pointer-events: auto;
+.composer-support-row.has-task-panel.has-queue-panel {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
 }
+.composer-support-row.has-queue-panel:not(.has-task-panel) {
+  grid-template-columns: minmax(0, 0fr) minmax(0, 1fr);
+}
+.composer-task-slot, .composer-queue-slot {
+  min-width: 0;
+  transition: opacity 160ms ease, transform 220ms var(--motion-ease-out);
+}
+.composer-support-row:not(.has-task-panel) .composer-task-slot,
+.composer-support-row:not(.has-queue-panel) .composer-queue-slot {
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+.composer-support-row:not(.has-queue-panel) .composer-queue-slot { transform: translateX(8px); }
+.composer-support-row .task-panel { pointer-events: auto; }
 
 .composer-support-row.has-task-panel:not(.has-queue-panel) {
   width: min(calc(100% - 48px), 800px);
@@ -37,12 +54,12 @@
 }
 
 .composer-support-row.has-queue-panel:not(.has-task-panel) {
-  justify-content: flex-end;
+  justify-content: normal;
 }
 
 .composer-support-row.has-queue-panel:not(.has-task-panel) .queue-panel {
   max-width: 800px;
-  flex: 0 1 800px;
+  margin-left: auto;
 }
 
 .task-panel {
@@ -443,6 +460,7 @@ html.pion-keyboard-focus .task-panel-head:focus-visible {
   .composer-support-row,
   .composer-support-row.has-task-panel:not(.has-queue-panel) {
     width: calc(100% - 24px);
+    display: flex;
     flex-direction: column;
     align-items: stretch;
     gap: 4px;
@@ -460,6 +478,9 @@ html.pion-keyboard-focus .task-panel-head:focus-visible {
   .composer-support-row .task-panel {
     width: 100%;
   }
+
+  .composer-support-row:not(.has-task-panel) .composer-task-slot,
+  .composer-support-row:not(.has-queue-panel) .composer-queue-slot { display: none; }
 
   .task-panel.expanded {
     max-height: 260px;

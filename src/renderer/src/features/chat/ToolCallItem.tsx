@@ -1,7 +1,6 @@
 import { memo, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
-  ChevronDown,
   ChevronRight,
   FilePenLine,
   FilePlus2,
@@ -25,6 +24,7 @@ import {
   SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS
 } from '../../utils/screenTextReveal'
 import { DiffView } from '../review/DiffView'
+import { AnimatedDisclosure } from '../common/AnimatedDisclosure'
 
 const TOOL_LABELS: Record<string, string> = {
   read: '读取',
@@ -35,7 +35,8 @@ const TOOL_LABELS: Record<string, string> = {
   grep: '搜索内容',
   find: '查找文件',
   ls: '目录',
-  pion_task: '任务'
+  pion_task: '任务',
+  pion_ask_user: '提问'
 }
 
 function truncate(text: string, max: number): string {
@@ -91,7 +92,7 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
         aria-expanded={open}
         aria-label={`${open ? '收起' : '展开'}${label}工具详情`}
       >
-        <span className="tool-chevron">{open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+        <span className="tool-chevron"><ChevronRight size={14} /></span>
         <span className={`tool-icon ${tool.status === 'running' ? 'spin' : ''}`}>
           {tool.status === 'running' ? (
             <Loader2 size={14} />
@@ -129,7 +130,7 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
         )}
       </button>
 
-      {open && (
+      <AnimatedDisclosure open={open}>
         <div className="tool-body" data-live-output="tool-body">
           {tool.diff && <DiffView diff={tool.diff} dense reveal={Boolean(historical)} />}
           {isShell && tool.command && (
@@ -158,7 +159,7 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
             </div>
           )}
         </div>
-      )}
+      </AnimatedDisclosure>
     </div>
   )
 })

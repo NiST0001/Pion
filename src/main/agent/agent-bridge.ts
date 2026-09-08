@@ -55,7 +55,7 @@ import {
   inspectGitRunCheckpoint,
   rollbackGitRunCheckpoint
 } from '../checkpoints'
-import { piCliPath } from '../pi-runtime'
+import { pionRuntimePath } from '../pi-runtime'
 import type {
   RunOperation,
   RunOperationState,
@@ -1756,7 +1756,7 @@ export class AgentBridge {
     cwd: string,
     sessionPath?: string
   ): Promise<BackendRecord> {
-    const cliPath = piCliPath()
+    const cliPath = pionRuntimePath()
     const args = await this.backendArgs(cwd, sessionPath)
     const client = new RpcClient({
       cliPath,

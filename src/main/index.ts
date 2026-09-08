@@ -1,6 +1,6 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, Notification } from 'electron'
 import { basename, dirname, join, resolve } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, release } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { AgentBridge } from './agent/agent-bridge'
 import { AppSettings } from './app-settings'
@@ -13,6 +13,7 @@ import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
 import { TerminalService } from './terminal-service'
+import { WindowEffectsService } from './window-effects'
 import type {
   AddModelProviderInput,
   ExtensionUiResponse,
@@ -36,6 +37,11 @@ if (userDataOverride) app.setPath('userData', resolve(userDataOverride))
 const runStore = new RunStore(join(app.getPath('userData'), 'pion-runs.json'))
 const terminals = new TerminalService()
 const appSettings = new AppSettings()
+const windowEffects = new WindowEffectsService(appSettings, {
+  platform: process.platform, release: release(), ozonePlatform: app.commandLine.getSwitchValue('ozone-platform'),
+  sessionType: process.env.XDG_SESSION_TYPE, desktop: process.env.XDG_CURRENT_DESKTOP,
+  hasDisplay: Boolean(process.env.DISPLAY), hasWaylandDisplay: Boolean(process.env.WAYLAND_DISPLAY)
+}, () => nativeTheme.shouldUseHighContrastColors)
 const bridge = new AgentBridge(runStore, appSettings)
 const verification = new VerificationService(join(app.getPath('userData'), 'pion-verification.json'))
 const workflowPermissionStore = new ToolPermissionStore()
@@ -113,7 +119,7 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 560,
     title: 'Pion',
-    backgroundColor: '#14161b',
+    ...windowEffects.windowOptions(),
     show: false,
     frame: false, // 自绘标题栏
     webPreferences: {
@@ -147,6 +153,7 @@ function createWindow(): void {
     workflows.unbind(win)
     git.unbind(win)
   })
+  windowEffects.bind(win)
   terminals.bind(win)
   bridge.bind(win)
   verification.bind(win)
@@ -173,6 +180,12 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  const appearanceOwner = (event: Electron.IpcMainInvokeEvent): number => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口操作外观')
+    return event.sender.id
+  }
+  ipcMain.handle(IPC.GetWindowEffects, (event) => windowEffects.get(appearanceOwner(event)))
+  ipcMain.handle(IPC.SetWindowEffects, (event, enabled: boolean) => windowEffects.setEnabled(appearanceOwner(event), enabled))
   const terminalOwner = (event: Electron.IpcMainInvokeEvent): number => {
     if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口操作终端')
     return event.sender.id
@@ -474,6 +487,7 @@ app.whenReady().then(async () => {
   await Promise.all([appSettings.load(), bridge.loadToolPermissions(), verification.load(), workflows.load()])
   completionNotificationsEnabled = appSettings.completionNotificationsEnabled
   registerIpc()
+  nativeTheme.on('updated', () => { void windowEffects.refresh() })
   createWindow()
 
   app.on('activate', () => {

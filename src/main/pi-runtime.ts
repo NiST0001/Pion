@@ -1,4 +1,5 @@
-import { join, sep } from 'node:path'
+import { dirname, join, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { getPackageDir } from '@earendil-works/pi-coding-agent'
 
 /**
@@ -17,7 +18,13 @@ export function piPackageDir(): string {
   return dir
 }
 
-/** pi CLI 入口（供子进程执行）。 */
+/** Pion's compiled SDK host, including native customTools (no question plugin). */
+export function pionRuntimePath(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), 'agent-runtime.mjs')
+    .replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`)
+}
+
+/** pi CLI 入口（供独立验证/工作流等子进程执行）。 */
 export function piCliPath(): string {
   return join(piPackageDir(), 'dist', 'cli.js')
 }

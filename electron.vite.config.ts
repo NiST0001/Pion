@@ -14,7 +14,16 @@ import react from '@vitejs/plugin-react'
  */
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()]
+    plugins: [externalizeDepsPlugin()],
+    build: {
+      rollupOptions: {
+        input: { index: 'src/main/index.ts', 'agent-runtime': 'src/main/agent-runtime.ts' },
+        output: {
+          entryFileNames: (chunk) => chunk.name === 'agent-runtime' ? 'agent-runtime.mjs' : '[name].js',
+          chunkFileNames: '[name]-[hash].mjs'
+        }
+      }
+    }
   },
   preload: {
     plugins: [externalizeDepsPlugin()]

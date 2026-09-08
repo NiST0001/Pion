@@ -20,7 +20,13 @@
 .chat-stage .chat-scroll {
   width: 100%;
   height: 100%;
+  /* Navigation owns anchoring; browser anchoring must not undo user input
+     when a paged batch or a delayed render changes the available content. */
+  overflow-anchor: none;
 }
+
+.chat-scroll-surface { min-height: 100%; display: flow-root; overflow-anchor: none; }
+.chat-scroll-surface > .empty-state { height: var(--chat-viewport-height, 100%); }
 
 .conversation-shell.has-history-navigator .chat-scroll {
   padding-left: 54px;

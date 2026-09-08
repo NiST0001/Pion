@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { flushSync } from 'react-dom'
-import { Settings, Store } from 'lucide-react'
+import { Settings, Store, PanelLeft, PanelRight, TerminalSquare, RotateCcw, PanelsTopLeft } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
 import { useRunTelemetry } from './hooks/useRunTelemetry'
 import { useRunRecovery } from './hooks/useRunRecovery'
@@ -11,6 +11,7 @@ import { useConversationNavigation } from './hooks/useConversationNavigation'
 import { useWorkflows } from './hooks/useWorkflows'
 import { useGitWorkspace } from './hooks/useGitWorkspace'
 import { usePanelLayout } from './hooks/usePanelLayout'
+import { useWindowEffects } from './hooks/useWindowEffects'
 import { useDeferredMount } from './hooks/useDeferredMount'
 import { useSessionResourceStage } from './hooks/useSessionResourceStage'
 import { useSessionModes } from './hooks/useSessionModes'
@@ -33,6 +34,7 @@ import {
 } from './utils/metricsSettings'
 import { TaskPanel } from './features/session/TaskPanel'
 import { QueuedMessagesCard } from './features/session/QueuedMessagesCard'
+import { ComposerSupportPanels } from './features/session/ComposerSupportPanels'
 import { ChatTimeline } from './features/chat/ChatTimeline'
 import { Composer } from './features/chat/Composer'
 import { FavoriteSessions, ProjectList, SidebarToolbar } from './features/project/Sidebar'
@@ -41,6 +43,7 @@ import { ModelPicker, ThinkingPicker } from './features/settings/ModelPicker'
 import { TitleBar } from './features/chrome/TitleBar'
 import { DockHeader } from './features/chrome/DockHeader'
 import { useDockLayout } from './hooks/useDockLayout'
+import { DOCK_PANELS, DOCK_LABELS, DOCK_EDGE_LABELS } from './utils/dockLayout'
 import type { DockPanel } from './utils/dockLayout'
 import { ProjectPicker } from './features/project/ProjectPicker'
 import { ProjectTrustBanner } from './features/project/ProjectTrustBanner'
@@ -86,6 +89,7 @@ const LOCAL_SLASH_COMMAND_NAMES = PION_LOCAL_SLASH_COMMANDS.map((command) => com
 
 export function App(): ReactElement {
   const { state, actions, hasBridge } = useAgent()
+  useWindowEffects(true)
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
   const [operationsPanel, setOperationsPanel] = useState<OperationsPanelKind | null>(null)
   const resourceCwd = selectedSession?.cwd ?? state.status.cwd
@@ -178,10 +182,11 @@ export function App(): ReactElement {
   } = usePanelLayout(hasBridge)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [terminalCwd, setTerminalCwd] = useState<string>()
-  const dock = useDockLayout({ projects: sidebarOpen, chat: true, review: reviewOpen, terminal: terminalOpen })
-  const dockHeader = (panel: DockPanel, title: string, onClose?: () => void) => (
-    <DockHeader title={title} slot={dock.layout.slots[panel]} onMove={(slot) => dock.movePanel(panel, slot)}
-      onClose={onClose} dragProps={dock.dragProps(panel)} />
+  const dockVisible = { projects: sidebarOpen, chat: true, review: reviewOpen, terminal: terminalOpen }
+  const dock = useDockLayout(dockVisible)
+  const dockHeader = (panel: DockPanel, onClose?: () => void) => (
+    <DockHeader panel={panel} targets={DOCK_PANELS.filter((target) => dockVisible[target])}
+      onMove={(target, edge) => dock.movePanel(panel, target, edge)} onClose={onClose} dragProps={dock.dragProps(panel)} />
   )
   const {
     completionNotificationsEnabled,
@@ -276,11 +281,13 @@ export function App(): ReactElement {
   const newSessionInFlight = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const agentTodos = useMemo(() => deriveAgentTodos(state.timeline) ?? [], [state.timeline])
-  const { visibleHistoryEntryId, handleTimelineScroll } = useConversationNavigation({
+  const { visibleHistoryEntryId, handleTimelineScroll, scrollSurfaceRef } = useConversationNavigation({
     scrollRef,
     timeline: state.timeline,
     timelineMutation: state.timelineMutation,
     busy: state.busy,
+    timelineLoading: state.timelineLoading,
+    projectCwd: resourceCwd,
     sessionPath: resourceSessionPath,
     historyIndexSessionPath: state.historyIndex?.sessionPath,
     historyJump: state.historyJump,
@@ -740,25 +747,30 @@ export function App(): ReactElement {
         sessionName={state.session?.sessionName}
         maximized={maximized}
         sidebarOpen={sidebarOpen}
-        sidebarWidth={sidebarOpen ? dock.layout.left : 0}
+        sidebarWidth={160}
         reviewOpen={reviewOpen}
         onToggleSidebar={() => setSidebarOpen((open) => !open)}
         onToggleReview={handleToggleReview}
       />
 
       <div className="dock-toolbar" aria-label="工作区面板">
-        <button type="button" aria-pressed={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}>项目</button>
-        <button type="button" aria-pressed={reviewOpen} onClick={handleToggleReview}>审查</button>
+        <span className="dock-toolbar-label"><PanelsTopLeft size={13} />工作区</span>
+        <button type="button" aria-pressed={sidebarOpen} onClick={() => setSidebarOpen((open) => !open)}><PanelLeft size={13} />项目</button>
+        <button type="button" aria-pressed={reviewOpen} onClick={handleToggleReview}><PanelRight size={13} />审查</button>
         <button type="button" aria-pressed={terminalOpen} disabled={!resourceCwd} onClick={() => {
           if (terminalOpen && terminalCwd === resourceCwd) setTerminalOpen(false)
           else { setTerminalCwd(resourceCwd); setTerminalOpen(true) }
-        }}>终端</button>
-        <span>拖动面板标题交换位置</span>
-        <button type="button" onClick={dock.reset}>重置布局</button>
+        }}><TerminalSquare size={13} />终端</button>
+        <span className="dock-toolbar-spacer" />
+        <button type="button" className="dock-reset" aria-label="重置布局" title="恢复默认布局" onClick={dock.reset}><RotateCcw size={13} /></button>
       </div>
-      <div className="app-body dock-workspace" ref={dock.rootRef} style={dock.rootStyle} data-drop-target={dock.dropTarget ?? ''}>
+      <div className="app-body dock-workspace" ref={dock.rootRef} data-dock-active={Boolean(dock.dragged) || undefined}
+        onDragOver={dock.clearDrop} onDragLeave={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect()
+          if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dock.clearDrop()
+        }}>
         <aside className="sidebar" {...dock.panelProps('projects')}>
-          {dockHeader('projects', '项目', () => setSidebarOpen(false))}
+          {dockHeader('projects', () => setSidebarOpen(false))}
           <div className="sidebar-scroll">
             <SidebarToolbar
               searchQuery={sessionQuery}
@@ -828,7 +840,7 @@ export function App(): ReactElement {
         </aside>
 
         <div className="main" {...dock.panelProps('chat')}>
-          {dockHeader('chat', '会话')}
+          {dockHeader('chat')}
           {state.status.phase === 'error' && (
             <div className="banner banner-error">
               <span>agent 启动失败：{state.status.error}</span>
@@ -876,6 +888,7 @@ export function App(): ReactElement {
             <div className="chat-stage">
               <ChatTimeline
                 scrollRef={scrollRef}
+                scrollSurfaceRef={scrollSurfaceRef}
                 onScroll={handleTimelineScroll}
                 timeline={state.timeline}
                 timelineLoading={state.timelineLoading}
@@ -916,15 +929,14 @@ export function App(): ReactElement {
           </div>
 
           <div className="composer-dock">
-            {(hasTaskPanel || hasQueuedMessages) && (
-              <div className={`composer-support-row${hasTaskPanel ? ' has-task-panel' : ''}${hasQueuedMessages ? ' has-queue-panel' : ''}`}>
-                <TaskPanel
+            <ComposerSupportPanels hasTasks={hasTaskPanel} hasQueue={hasQueuedMessages}
+              task={<TaskPanel
                   key={taskSessionKey}
                   sessionKey={taskSessionKey}
                   agentTodos={hasTaskPanel ? agentTodos : null}
                   agentBusy={state.busy}
-                />
-                <QueuedMessagesCard
+                />}
+              queue={<QueuedMessagesCard
                   key={`queue-${taskSessionKey}`}
                   sessionKey={taskSessionKey}
                   steering={queuedMessages.steering}
@@ -942,9 +954,8 @@ export function App(): ReactElement {
                   onRemoveItem={(kind, index) => actions.removeQueuedMessage(kind, index).catch((error: unknown) => {
                     console.error('[pion] 删除排队消息失败', error)
                   })}
-                />
-              </div>
-            )}
+                />}
+            />
             <Composer
               busy={state.busy}
               disabled={!state.status.cwd}
@@ -996,7 +1007,7 @@ export function App(): ReactElement {
         </div>
 
         <div className="dock-review" {...dock.panelProps('review')}>
-          {dockHeader('review', '审查', () => setReviewOpen(false))}
+          {dockHeader('review', () => setReviewOpen(false))}
           {reviewOpen && <ReviewPanel
             snapshot={gitResourcesEnabled ? gitWorkspace.snapshot : null}
             diff={reviewCodeEnabled ? gitWorkspace.diff : null}
@@ -1014,7 +1025,6 @@ export function App(): ReactElement {
             gitResult={gitWorkspace.result}
             rollbackBusy={rollbackBusy}
             rollbackError={rollbackError}
-            width={dock.layout.right}
             onSelect={handleSelectReviewPath}
             onScopeChange={setReviewScope}
             onLoadDiff={(path, scope) => void gitWorkspace.loadDiff(path, scope)}
@@ -1029,16 +1039,17 @@ export function App(): ReactElement {
             onAbortOperation={() => void gitWorkspace.abortOperation()}
             onRollback={() => void handleRollbackRun()}
             onClose={handleToggleReview}
-            onResizeStart={dock.resizeProps('right').onPointerDown}
           />}
         </div>
         <div className="dock-terminal" {...dock.panelProps('terminal')}>
-          {dockHeader('terminal', '终端', () => setTerminalOpen(false))}
+          {dockHeader('terminal', () => setTerminalOpen(false))}
           {terminalCwd && <Suspense fallback={<div className="side-empty">终端加载中…</div>}><TerminalPanel cwd={terminalCwd} visible={terminalOpen} /></Suspense>}
         </div>
-        {dock.left && <div className="dock-divider dock-divider-left" role="separator" aria-label="调整左侧面板宽度" aria-orientation="vertical" {...dock.resizeProps('left')} />}
-        {dock.right && <div className="dock-divider dock-divider-right" role="separator" aria-label="调整右侧面板宽度" aria-orientation="vertical" {...dock.resizeProps('right')} />}
-        {dock.bottom && <div className="dock-divider dock-divider-bottom" role="separator" aria-label="调整底部面板高度" aria-orientation="horizontal" {...dock.resizeProps('bottom')} />}
+        {dock.dividers.map((divider, index) => <div key={divider.path} className={`dock-divider dock-divider-${divider.axis}`}
+          role="separator" aria-label={`调整分栏 ${index + 1}`} {...dock.dividerProps(divider)} />)}
+        {dock.previewStyle && dock.drop && <div className="dock-drop-preview" style={dock.previewStyle} aria-hidden="true">
+          <span>{dock.drop.edge === 'center' ? `与${DOCK_LABELS[dock.drop.panel]}交换位置` : `放到${DOCK_LABELS[dock.drop.panel]}${DOCK_EDGE_LABELS[dock.drop.edge]}`}</span>
+        </div>}
       </div>
 
       {operationsPanel && (

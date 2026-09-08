@@ -55,7 +55,7 @@ interface ReviewPanelProps {
   gitResult: string
   rollbackBusy: boolean
   rollbackError: string
-  width: number
+  width?: number
   onSelect: (path: string | null) => void
   onScopeChange: (scope: GitDiffScope) => void
   onLoadDiff: (path: string, scope: GitDiffScope) => void
@@ -70,7 +70,7 @@ interface ReviewPanelProps {
   onAbortOperation: () => void
   onRollback: () => void
   onClose: () => void
-  onResizeStart: (event: ReactPointerEvent<HTMLDivElement>) => void
+  onResizeStart?: (event: ReactPointerEvent<HTMLDivElement>) => void
 }
 
 function capturedChangeDiff(change: FileChange): string {
@@ -408,7 +408,7 @@ export function ReviewPanel({
 
   return (
     <aside className="review-panel" style={{ width, flexBasis: width }}>
-      <div className="review-resizer" role="separator" aria-orientation="vertical" aria-label="调整审查栏宽度" onPointerDown={onResizeStart} />
+      {onResizeStart && <div className="review-resizer" role="separator" aria-orientation="vertical" aria-label="调整审查栏宽度" onPointerDown={onResizeStart} />}
       <header className="review-panel-head">
         <div className="review-panel-title">
           <div className="review-panel-kicker">GIT WORKSPACE</div>

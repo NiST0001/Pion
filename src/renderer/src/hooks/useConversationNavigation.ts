@@ -8,6 +8,8 @@ interface UseConversationNavigationOptions {
   timeline: TimelineItem[]
   timelineMutation: AgentState['timelineMutation']
   busy: boolean
+  timelineLoading?: boolean
+  projectCwd?: string
   sessionPath?: string
   historyIndexSessionPath?: string
   historyJump: AgentState['historyJump']
@@ -17,11 +19,17 @@ interface UseConversationNavigationOptions {
   loadNewer: (options?: { viaScroll?: boolean }) => Promise<void>
 }
 
+function historyAnchor(container: HTMLElement): number {
+  return container.getBoundingClientRect().top + container.clientTop + Math.min(container.clientHeight * 0.38, 260)
+}
+
 export function useConversationNavigation({
   scrollRef,
   timeline,
   timelineMutation,
   busy,
+  timelineLoading = false,
+  projectCwd,
   sessionPath,
   historyIndexSessionPath,
   historyJump,
@@ -38,9 +46,30 @@ export function useConversationNavigation({
   /** Follow intent; layout changes alone must never re-enable it. */
   const nearBottomRef = useRef(true)
   const navigationSession = useRef(sessionPath)
+  const navigationProject = useRef(projectCwd)
   const readingHistory = useRef(false)
+  const explicitHistoryEntry = useRef<string | undefined>(undefined)
   const pendingJumpNonce = useRef<number | null>(null)
   const observedJumpNonce = useRef<number | undefined>(undefined)
+  const scrollSurfaceRef = useRef<HTMLDivElement>(null)
+  const reservedHeight = useRef(0)
+  const manualScroll = useRef(false)
+  const gestureUntil = useRef(0)
+  const lastScrollTop = useRef(0)
+  const loadingRef = useRef(timelineLoading)
+  const hasContentRef = useRef(timeline.length > 0)
+  // This is provisional blank space, not an estimate of the entire history.
+  // Keep its extent while the user is scrolling; actual content can fill it
+  // naturally, and an explicit return to the end releases unused space.
+  const reserveSpace = useCallback((element: HTMLElement, loading = false) => {
+    const surface = scrollSurfaceRef.current
+    if (!surface) return
+    const height = surface.getBoundingClientRect().height
+    const padding = Math.max(0, element.scrollHeight - height)
+    reservedHeight.current = Math.max(reservedHeight.current, height,
+      element.scrollTop + element.clientHeight - padding, loading ? element.clientHeight * 3 : 0)
+    surface.style.minHeight = `${reservedHeight.current}px`
+  }, [])
 
   const timelineLength = timeline.length
   const lastItem = timeline[timelineLength - 1]
@@ -56,16 +85,35 @@ export function useConversationNavigation({
   useLayoutEffect(() => {
     const element = scrollRef.current
     if (!element) return
-    if (navigationSession.current !== sessionPath) {
+    loadingRef.current = timelineLoading
+    hasContentRef.current = timelineLength > 0
+    scrollSurfaceRef.current?.style.setProperty('--chat-viewport-height', `${element.clientHeight}px`)
+    if (navigationSession.current !== sessionPath || navigationProject.current !== projectCwd) {
+      const assigningFirstPath = navigationProject.current === projectCwd && navigationSession.current === undefined && sessionPath !== undefined && manualScroll.current
       navigationSession.current = sessionPath
-      nearBottomRef.current = true
-      readingHistory.current = false
-      previousTimelineHeight.current = 0
-      previousTimelineLength.current = 0
+      navigationProject.current = projectCwd
+      if (!assigningFirstPath) {
+        nearBottomRef.current = true
+        readingHistory.current = false
+        manualScroll.current = false
+        explicitHistoryEntry.current = undefined
+        previousTimelineHeight.current = 0
+        previousTimelineLength.current = 0
+        reservedHeight.current = 0
+        gestureUntil.current = 0
+        if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
+      }
+    }
+    if (manualScroll.current || (timelineLoading && timelineLength === 0)) {
+      reserveSpace(element, timelineLoading && timelineLength === 0)
+    } else {
+      reservedHeight.current = 0
+      if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
     }
     if (historyJump?.nonce !== observedJumpNonce.current) {
       observedJumpNonce.current = historyJump?.nonce
       pendingJumpNonce.current = historyJump?.nonce ?? null
+      explicitHistoryEntry.current = historyJump?.entryId
       if (historyJump) {
         nearBottomRef.current = false
         readingHistory.current = true
@@ -74,22 +122,24 @@ export function useConversationNavigation({
     const previousHeight = previousTimelineHeight.current
     const addedTimelineItems = timelineLength > previousTimelineLength.current
     if (timelineMutation === 'prepend' && addedTimelineItems && previousHeight > 0) {
-      // Keep the reading position stable while older history is prepended.
-      element.scrollTop += element.scrollHeight - previousHeight
+      // Background filling can preserve an anchor, but a user's scroll must
+      // not be undone when the older page finally arrives.
+      if (!manualScroll.current) element.scrollTop += element.scrollHeight - previousHeight
     } else if (timelineMutation === 'replace') {
       // Cache refreshes and new array references are not a request to go live.
-      if (pendingJumpNonce.current === null && nearBottomRef.current) element.scrollTop = element.scrollHeight
+      if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)) element.scrollTop = element.scrollHeight
     } else if (timelineMutation === 'append') {
       // Follow the newest message only while the user is already near the
       // bottom; never yank someone away who is reading older history.
       const wasNearBottom = previousHeight - element.scrollTop - element.clientHeight <= 80
-      if (pendingJumpNonce.current === null && nearBottomRef.current && (wasNearBottom || previousHeight === 0)) {
+      if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0) && (wasNearBottom || previousHeight === 0)) {
         element.scrollTop = element.scrollHeight
       }
     }
     previousTimelineHeight.current = element.scrollHeight
     previousTimelineLength.current = timelineLength
-  }, [lastGrow, lastItemId, busy, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, sessionPath])
+    lastScrollTop.current = element.scrollTop
+  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, sessionPath, projectCwd, reserveSpace])
 
   // Async siblings above the scroller (run metrics strip, trust banner, error
   // banner) and the composer dock (task/queue panels) mount after a session
@@ -105,8 +155,11 @@ export function useConversationNavigation({
       // Keep the user's follow intent. Inferring it from resized geometry
       // can turn a history reader into a bottom follower.
       previousClientHeight = nextClientHeight
+      scrollSurfaceRef.current?.style.setProperty('--chat-viewport-height', `${nextClientHeight}px`)
+      if (loadingRef.current && !hasContentRef.current) return
       if (pendingJumpNonce.current === null && nearBottomRef.current && !readingHistory.current) {
         element.scrollTop = element.scrollHeight
+        lastScrollTop.current = element.scrollTop
         nearBottomRef.current = true
       }
     })
@@ -118,20 +171,26 @@ export function useConversationNavigation({
   // scroller's clientHeight, so the resize observer never fires for them.
   useLayoutEffect(() => {
     const element = scrollRef.current
-    if (!element || pendingJumpNonce.current !== null || !nearBottomRef.current) return
+    if (!element || pendingJumpNonce.current !== null || !nearBottomRef.current || (loadingRef.current && !hasContentRef.current)) return
     element.scrollTop = element.scrollHeight
+    lastScrollTop.current = element.scrollTop
   }, [scrollRef, panelsVisible])
 
   const updateVisibleHistoryEntry = useCallback((): void => {
     const container = scrollRef.current
     if (!container) return
+    // A clicked landmark stays authoritative through programmatic scrolls,
+    // viewport clamping and live layout changes, even for adjacent short rows.
+    if (explicitHistoryEntry.current) {
+      setVisibleHistoryEntryId(explicitHistoryEntry.current)
+      return
+    }
     const rows = [...container.querySelectorAll<HTMLElement>('.row-user[data-entry-id]')]
     if (rows.length === 0) {
       setVisibleHistoryEntryId(undefined)
       return
     }
-    const rect = container.getBoundingClientRect()
-    const anchor = rect.top + Math.min(container.clientHeight * 0.38, 260)
+    const anchor = historyAnchor(container)
     const nearest = rows.reduce((best, row) => (
       Math.abs(row.getBoundingClientRect().top - anchor)
         < Math.abs(best.getBoundingClientRect().top - anchor)
@@ -179,19 +238,27 @@ export function useConversationNavigation({
     const jump = historyJump
     if (!jump) return
     const frame = window.requestAnimationFrame(() => {
+      if (pendingJumpNonce.current !== jump.nonce) return
       const container = scrollRef.current
       const target = container
         ? [...container.querySelectorAll<HTMLElement>('[data-entry-id]')]
             .find((element) => element.dataset.entryId === jump.entryId)
         : undefined
       pendingJumpNonce.current = null
-      if (!target || !container) return
-      target.scrollIntoView({ behavior: 'auto', block: 'center' })
+      if (!target || !container) {
+        explicitHistoryEntry.current = undefined
+        return
+      }
+      // Use the same row-top anchor as scroll tracking. Centering the whole
+      // bubble used a different reference and selected the preceding short row.
+      const top = container.scrollTop + target.getBoundingClientRect().top - historyAnchor(container)
+      container.scrollTop = Math.max(0, Math.min(Math.max(0, container.scrollHeight - container.clientHeight), top))
       // Do not wait for the asynchronous scroll event: live output or dock
       // resizing may arrive first and otherwise reuse the old bottom flag.
       nearBottomRef.current = false
       readingHistory.current = true
       previousTimelineHeight.current = container.scrollHeight
+      lastScrollTop.current = container.scrollTop
       highlightedHistoryRow.current?.classList.remove('history-jump-target')
       target.classList.add('history-jump-target')
       highlightedHistoryRow.current = target
@@ -237,14 +304,33 @@ export function useConversationNavigation({
   useEffect(() => {
     const element = scrollRef.current
     if (!element) return
-    const resume = () => { readingHistory.current = false }
-    const wheel = (event: WheelEvent) => {
-      resume()
-      nearBottomRef.current = event.deltaY >= 0 && element.scrollHeight - element.scrollTop - element.clientHeight <= 96
+    const resume = () => {
+      if (pendingJumpNonce.current !== null) {
+        pendingJumpNonce.current = null
+        explicitHistoryEntry.current = undefined
+      }
+      gestureUntil.current = Date.now() + 300
+      manualScroll.current = true
+      readingHistory.current = true
+      nearBottomRef.current = false
+      reserveSpace(element, loadingRef.current && !hasContentRef.current)
     }
+    const wheel = (event: WheelEvent) => { if (event.deltaY !== 0) resume() }
     const pointerMove = (event: PointerEvent) => { if (event.buttons) resume() }
     const key = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLElement && (event.target.isContentEditable || ['INPUT', 'TEXTAREA'].includes(event.target.tagName))) return
       if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) resume()
+      if (event.key === 'End' && !loadingRef.current && hasContentRef.current) {
+        event.preventDefault()
+        readingHistory.current = false
+        manualScroll.current = false
+        explicitHistoryEntry.current = undefined
+        reservedHeight.current = 0
+        if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
+        element.scrollTop = element.scrollHeight
+        lastScrollTop.current = element.scrollTop
+        nearBottomRef.current = true
+      }
     }
     element.addEventListener('wheel', wheel, { passive: true })
     element.addEventListener('touchstart', resume, { passive: true })
@@ -260,19 +346,39 @@ export function useConversationNavigation({
       element.removeEventListener('pointerdown', resume)
       element.removeEventListener('keydown', key)
     }
-  }, [scrollRef])
+  }, [scrollRef, reserveSpace])
 
   const handleTimelineScroll = useCallback((): void => {
     const element = scrollRef.current
     if (!element || pendingJumpNonce.current !== null) return
-    nearBottomRef.current = !readingHistory.current &&
-      element.scrollHeight - element.scrollTop - element.clientHeight <= 96
-    if (!nearBottomRef.current) readingHistory.current = true
+    const moved = element.scrollTop !== lastScrollTop.current
+    const userMoved = Date.now() <= gestureUntil.current && moved
+    const movedForward = element.scrollTop > lastScrollTop.current
+    if (userMoved) explicitHistoryEntry.current = undefined
+    const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight <= 96
+    if (userMoved && movedForward && atBottom && !loadingRef.current && hasContentRef.current) {
+      // Resume only after a real, forward user scroll to the bottom, never
+      // because an empty/partially rendered viewport happens to fit on screen.
+      readingHistory.current = false
+      manualScroll.current = false
+      reservedHeight.current = 0
+      if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
+      element.scrollTop = element.scrollHeight
+    }
+    nearBottomRef.current = !readingHistory.current && atBottom
+    if (!nearBottomRef.current) {
+      readingHistory.current = true
+      if (!explicitHistoryEntry.current || manualScroll.current) {
+        manualScroll.current = true
+        reserveSpace(element)
+      }
+    }
+    lastScrollTop.current = element.scrollTop
     armPendingHistoryRevealRows(element)
     if (element.scrollTop <= 96) void loadOlder({ viaScroll: true })
     if (element.scrollHeight - element.scrollTop - element.clientHeight <= 96) void loadNewer({ viaScroll: true })
     scheduleVisibleHistoryUpdate()
-  }, [loadNewer, loadOlder, scheduleVisibleHistoryUpdate, scrollRef])
+  }, [loadNewer, loadOlder, scheduleVisibleHistoryUpdate, scrollRef, reserveSpace])
 
-  return { visibleHistoryEntryId, handleTimelineScroll }
+  return { visibleHistoryEntryId, handleTimelineScroll, scrollSurfaceRef }
 }

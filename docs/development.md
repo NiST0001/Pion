@@ -41,10 +41,35 @@ npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 
   从源码编译需要 Python 和平台 C++ 工具链（Linux build-essential / Windows Visual Studio Build Tools）。
   `electron-builder.yml` 已解包 node_modules，供 node-pty 原生模块及辅助程序在安装包中运行。
 
+## 内置提问工具与会话运行时
+
+`pion_ask_user` 直接作为 SDK `customTools` 编入 Pion，不使用插件商店、用户插件目录、第三方问答插件或运行时生成的提问扩展文件。它每次提出一个明确问题，可给出 2–8 个选项，始终支持自定义回答；无选项时直接输入回答。取消、现有交互通道超时或中止不会选择默认答案，也不代表权限授权。回答保存在会话并发送给模型，不应用来收集密码或密钥。
+
+会话后端运行编译产物 `out/main/agent-runtime.mjs`：通过 SDK runtime factory 在启动、新会话、恢复、fork 时注册内置工具，再使用上游 `runRpcMode`，继续复用现有请求 ID、会话所属关系、交互队列和 React 对话框。协议虽然沿用上游的 `extension_ui_request/response` 名称，但工具本身是 SDK 工具而不是插件。计划模式仅额外放行 SDK 来源的 `pion_ask_user`；问答不创建写入检查点，也不替代后续写入的权限检查。
+
+私有入口只接收 Pion 发送的 RPC、项目批准、扩展路径及会话路径参数，不作为完整 pi CLI 对外使用。跨项目替换必须由主进程重新核对目标项目信任并选择对应后端，不能把原项目批准直接带入另一目录。独立验证/工作流继续使用原有 pi CLI。
+
+Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.mjs`；打包时 `out/main/**/*` 与依赖一起解出 asar，以便系统 Node 在 Windows/Linux 上读取。这里新增运行时接入需要构建、RPC 回归和打包验证；只改源码不会更新正在运行的安装版。
+
+## 原生半透明
+
+设置 → 外观 → 原生半透明，默认关闭。只调整背景透明度，不降低整窗/文字透明度。
+
+- Windows 11 22H2（build 22621）及更新版本：调用 Electron `setBackgroundMaterial('acrylic')`，由 DWM 绘制；旧版 Windows 回退不透明。
+- macOS：调用 `setVibrancy('under-window')`，使用系统 Vibrancy，窗口效果跟随激活状态。此代码路径不意味着已有 macOS 发布包或真机验证。
+- Linux：通过创建时的 `transparent` 窗口交给桌面合成器绘制。默认未创建透明窗口时，启用后需手动重启；关闭视觉效果可立即回退，但恢复普通原生窗口同样需要重启。不会自动重建窗口或重放终端命令。
+- KWin/X11（含明确通过 `--ozone-platform=x11` 启动的 XWayland）：若系统已有 `xprop`，仅对自身窗口设置 `_KDE_NET_WM_BLUR_BEHIND_REGION` 请求原生模糊。缺少工具或模糊未开启时不保证模糊；不会安装工具或修改全局桌面规则。
+- 原生 Wayland、GNOME 等环境使用合成器透明回退，不宣称可用 Electron 通用 API 模糊桌面。`backdrop-filter` 只能处理网页内部内容，不作为原生桌面模糊的替代品。
+- Linux 透明窗口为实验功能：Electron 文档指出透明窗口在部分平台调整尺寸时可能失效，DevTools 也可能影响透明表现。高对比度和原生 API 失败时使用不透明回退；菜单、代码和终端继续保留实底以保证可读性。
+
+平台能力参考：[原生窗口材质](https://www.electronjs.org/docs/latest/api/browser-window#winsetbackgroundmaterialmaterial-windows)、[透明窗口限制](https://www.electronjs.org/docs/latest/tutorial/custom-window-styles#limitations)。
+
 ## 模块化布局与终端
 
-- 项目、会话、审查、终端占用左/中/右/下四个停靠区域；拖动标题到其他面板可交换位置，位置菜单也可用于键盘操作。
-- 分隔条调整宽度和底部高度；`pion:dock-layout-v1` 保存布局与尺寸，工具栏提供重置。
+- 项目、会话、审查和终端使用可嵌套的横向/纵向分栏。将标题拖到任意其他面板的四边可插入分栏，放到中央交换位置；落下前显示最终区域预览。
+- 标题栏的“…”菜单提供目标面板与方向图标，也支持键盘操作，不使用原生位置下拉框。每条分隔线可独立拖动或用方向键调整比例。
+- 布局树只用于计算矩形；四个面板保持固定 React 兄弟节点，移动不会重挂载会话、草稿或终端。隐藏面板暂时折叠对应分栏，重新打开时恢复位置。
+- `pion:dock-layout-v2` 保存布局树及比例，首次读取时迁移旧版 `pion:dock-layout-v1`；非法/重复面板或损坏缓存回退默认布局，工具栏提供重置。
 - 终端按钮按打开时所选项目/worktree 启动 shell；切换项目不会对已有 shell 注入 cd。
   在另一个项目点击终端可打开或复用该项目的终端。
 - 每个窗口最多保留 8 个项目终端，回放输出有界缓存为 256 Ki 字符，xterm 回滚缓冲为 3000 行。
@@ -116,7 +141,7 @@ src/
         │   │   └── useAgentSubscriptions.ts
         │   ├── useAgent.ts          # 对外 facade
         │   ├── usePanelLayout.ts    # 窗口状态与显隐
-        │   ├── useDockLayout.ts     # 停靠位置与尺寸
+        │   ├── useDockLayout.ts     # 嵌套分栏几何、落点预览与尺寸
         │   ├── useGitWorkspace.ts
         │   ├── useRunRecovery.ts
         │   ├── useRunTelemetry.ts

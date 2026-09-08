@@ -13,6 +13,8 @@ directories:
 # 系统 node 读不到，必须把 node_modules 解出 asar 供子进程直接访问。
 asarUnpack:
   - node_modules/**/*
+  # Pion's SDK RPC host and any shared chunks are executed by system Node.
+  - out/main/**/*
 
 files:
   - out/**

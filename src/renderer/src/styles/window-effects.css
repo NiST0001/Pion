@@ -1,0 +1,31 @@
+/* Alpha surfaces expose native DWM/Vibrancy/compositor output. There is no
+   CSS backdrop-filter here: it cannot blur other applications behind a window. */
+html[data-native-surface='true'],
+html[data-native-surface='true'] body,
+html[data-native-surface='true'] #root,
+html[data-native-surface='true'] .app,
+html[data-native-surface='true'] .app-body.dock-workspace { background: transparent; }
+
+html[data-native-surface='true'] .titlebar,
+html[data-native-surface='true'] .dock-toolbar { background: color-mix(in srgb, var(--bg-elev) 78%, transparent); }
+html[data-native-surface='true'] .dock-workspace > [data-dock-panel] {
+  background: color-mix(in srgb, var(--bg) 84%, transparent);
+  border-color: color-mix(in srgb, var(--fg) 13%, transparent);
+}
+html[data-native-surface='true'] .dock-header { background: color-mix(in srgb, var(--bg-elev) 75%, transparent); }
+html[data-native-surface='true'] .dock-review > .review-panel,
+html[data-native-surface='true'] .review-files,
+html[data-native-surface='true'] .review-detail { background: transparent; }
+/* Popovers, code blocks and the terminal retain their solid reading surface. */
+.window-effects-settings h3 { display: flex; align-items: center; gap: 7px; }
+.window-effects-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 12px; color: var(--fg-dim); }
+.window-effects-badge { padding: 2px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--accent-strong); }
+.window-effects-note { margin: 8px 0 0; font-size: 11px; line-height: 1.7; color: var(--fg-faint); }
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  html[data-native-surface='true'], html[data-native-surface='true'] body,
+  html[data-native-surface='true'] #root, html[data-native-surface='true'] .app,
+  html[data-native-surface='true'] .app-body.dock-workspace,
+  html[data-native-surface='true'] .dock-workspace > [data-dock-panel],
+  html[data-native-surface='true'] .titlebar, html[data-native-surface='true'] .dock-toolbar,
+  html[data-native-surface='true'] .dock-header { background: Canvas; }
+}

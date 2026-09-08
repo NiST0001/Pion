@@ -78,6 +78,7 @@ export function HistoryNavigator({
   const trackRef = useRef<HTMLDivElement>(null)
   const previousSessionPathRef = useRef<string | undefined>(undefined)
   const previousLandmarkCountRef = useRef(landmarks.length)
+  const previousActiveEntryRef = useRef(activeEntryId)
   const windowStartRef = useRef(windowStart)
   const wheelSequenceRef = useRef(0)
   const scrubbingRef = useRef(false)
@@ -107,13 +108,14 @@ export function HistoryNavigator({
   useEffect(() => {
     const sessionPath = index?.sessionPath
     const sessionChanged = previousSessionPathRef.current !== sessionPath
+    const activeChanged = previousActiveEntryRef.current !== activeEntryId
     const previousCount = previousLandmarkCountRef.current
     const activeIndex = activeEntryId
       ? landmarks.findIndex((landmark) => landmark.entryId === activeEntryId)
       : -1
 
     // Programmatic positioning should not replay a wheel-only scroll transition.
-    setWheelMotion(null)
+    if (sessionChanged || activeChanged) setWheelMotion(null)
     setWindowStart((current) => {
       const clampedCurrent = clamp(current, 0, maximumWindowStart)
       let next = clampedCurrent
@@ -122,7 +124,7 @@ export function HistoryNavigator({
           ? clamp(activeIndex - Math.floor(visibleLimit / 2), 0, maximumWindowStart)
           : maximumWindowStart
       } else if (
-        activeIndex >= 0
+        activeChanged && activeIndex >= 0
         && (activeIndex < clampedCurrent || activeIndex >= clampedCurrent + visibleLimit)
       ) {
         next = clamp(activeIndex - Math.floor(visibleLimit / 2), 0, maximumWindowStart)
@@ -136,6 +138,7 @@ export function HistoryNavigator({
       return next
     })
 
+    previousActiveEntryRef.current = activeEntryId
     previousSessionPathRef.current = sessionPath
     previousLandmarkCountRef.current = landmarks.length
   }, [activeEntryId, index?.sessionPath, landmarks, maximumWindowStart, visibleLimit])

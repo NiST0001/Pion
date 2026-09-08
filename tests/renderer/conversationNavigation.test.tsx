@@ -44,24 +44,87 @@ describe('conversation navigation', () => {
     Object.defineProperties(element, { scrollHeight: { value: 2000 }, clientHeight: { value: 400 } })
     const target = document.createElement('div')
     target.dataset.entryId = 'near-end'
-    target.scrollIntoView = vi.fn(() => { element.scrollTop = 1550 })
+    target.getBoundingClientRect = () => ({ top: 1702 - element.scrollTop } as DOMRect)
     element.append(target)
     const options: Parameters<typeof useConversationNavigation>[0] = {
-      scrollRef: { current: element }, timeline: [], timelineMutation: 'replace', busy: true,
+      scrollRef: { current: element }, timeline: [{ kind: 'user', id: 1, text: 'near end' }], timelineMutation: 'replace', busy: true,
       historyJump: { entryId: 'near-end', nonce: 1 }, panelsVisible: false,
       loadOlder: vi.fn(async () => undefined), loadNewer: vi.fn(async () => undefined)
     }
     const { result, rerender } = renderHook((props) => useConversationNavigation(props), { initialProps: options })
     act(() => frames.splice(0).forEach((callback) => callback(0)))
     act(() => result.current.handleTimelineScroll())
-    rerender({ ...options, timeline: [], panelsVisible: true })
+    rerender({ ...options, timeline: [...options.timeline], panelsVisible: true })
     expect(element.scrollTop).toBe(1550)
     // Deliberate scrolling back to the bottom restores normal live following.
     element.dispatchEvent(new WheelEvent('wheel', { deltaY: 100 }))
     element.scrollTop = 1600
     act(() => result.current.handleTimelineScroll())
-    rerender({ ...options, timeline: [], panelsVisible: false })
+    rerender({ ...options, timeline: [...options.timeline], panelsVisible: false })
     expect(element.scrollTop).toBe(2000)
+  })
+
+  it('keeps the exact clicked short message selected, including when the viewport clamps its position', () => {
+    const frames: FrameRequestCallback[] = []
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.push(callback); return frames.length })
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+    const element = document.createElement('div')
+    Object.defineProperties(element, { scrollHeight: { value: 1000 }, clientHeight: { value: 400 } })
+    const previous = document.createElement('div')
+    const target = document.createElement('div')
+    previous.className = target.className = 'row-user'
+    previous.dataset.entryId = 'previous'
+    target.dataset.entryId = 'clicked'
+    previous.getBoundingClientRect = () => ({ top: 860 - element.scrollTop } as DOMRect)
+    target.getBoundingClientRect = () => ({ top: 880 - element.scrollTop } as DOMRect)
+    element.append(previous, target)
+    const options: Parameters<typeof useConversationNavigation>[0] = {
+      scrollRef: { current: element }, timeline: [], timelineMutation: 'replace', busy: true,
+      historyJump: { entryId: 'clicked', nonce: 1 },
+      loadOlder: vi.fn(async () => undefined), loadNewer: vi.fn(async () => undefined)
+    }
+    const { result, rerender } = renderHook((props) => useConversationNavigation(props), { initialProps: options })
+    act(() => frames.splice(0).forEach((callback) => callback(0)))
+    expect(element.scrollTop).toBe(600) // target cannot reach the anchor at the document's end
+    expect(target).toHaveProperty('className', 'row-user history-jump-target')
+    act(() => result.current.handleTimelineScroll())
+    act(() => frames.splice(0).forEach((callback) => callback(0)))
+    expect(result.current.visibleHistoryEntryId).toBe('clicked')
+    rerender({ ...options, timeline: [], busy: false })
+    expect(result.current.visibleHistoryEntryId).toBe('clicked')
+    // Genuine scrolling releases the explicit selection and tracks visible rows again.
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: -20 }))
+    element.scrollTop -= 20
+    act(() => result.current.handleTimelineScroll())
+    act(() => frames.splice(0).forEach((callback) => callback(0)))
+    expect(result.current.visibleHistoryEntryId).toBe('previous')
+  })
+
+  it('aligns adjacent messages to the same anchor used for active-row tracking', () => {
+    const frames: FrameRequestCallback[] = []
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.push(callback); return frames.length })
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+    const element = document.createElement('div')
+    Object.defineProperties(element, { scrollHeight: { value: 2000 }, clientHeight: { value: 400 } })
+    const rows = ['previous', 'clicked'].map((id, index) => {
+      const row = document.createElement('div')
+      row.className = 'row-user'
+      row.dataset.entryId = id
+      row.getBoundingClientRect = () => ({ top: 620 + index * 20 - element.scrollTop, height: 18 } as DOMRect)
+      element.append(row)
+      return row
+    })
+    const options: Parameters<typeof useConversationNavigation>[0] = {
+      scrollRef: { current: element }, timeline: [], timelineMutation: 'replace', busy: false,
+      historyJump: { entryId: 'clicked', nonce: 1 },
+      loadOlder: async () => undefined, loadNewer: async () => undefined
+    }
+    const { result } = renderHook(() => useConversationNavigation(options))
+    act(() => frames.splice(0).forEach((callback) => callback(0)))
+    expect(rows[1].getBoundingClientRect().top).toBe(152)
+    act(() => result.current.handleTimelineScroll())
+    act(() => frames.splice(0).forEach((callback) => callback(0)))
+    expect(result.current.visibleHistoryEntryId).toBe('clicked')
   })
 
   it('keeps a history jump in place through live updates, panel changes and settling', () => {
@@ -78,7 +141,7 @@ describe('conversation navigation', () => {
     })
     const target = document.createElement('div')
     target.dataset.entryId = 'old-message'
-    target.scrollIntoView = vi.fn(() => { element.scrollTop = 500 })
+    target.getBoundingClientRect = () => ({ top: 652 - element.scrollTop } as DOMRect)
     element.append(target)
     const timeline: TimelineItem[] = []
     const options: Parameters<typeof useConversationNavigation>[0] = {

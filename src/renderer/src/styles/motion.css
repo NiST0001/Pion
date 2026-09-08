@@ -265,6 +265,23 @@ button:not(:disabled):active,
   transition: transform var(--motion-normal) var(--motion-ease-out);
 }
 
+/* Detail motion changes layout height without scaling text. Heavy content is
+   mounted only while open or during its brief exit transition. */
+.animated-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 180ms var(--motion-ease-out), opacity 140ms ease;
+}
+.animated-disclosure[data-open='true'] { grid-template-rows: 1fr; opacity: 1; }
+.animated-disclosure-inner { min-height: 0; overflow: hidden; }
+.animated-disclosure .tool-body { animation: none; }
+.tool-chevron { display: inline-flex; transition: transform 180ms var(--motion-ease-out); }
+.tool-head[aria-expanded='true'] .tool-chevron { transform: rotate(90deg); }
+@starting-style {
+  .animated-disclosure[data-open='true'] { grid-template-rows: 0fr; opacity: 0; }
+}
+
 /* History rows keep their layout static; visible characters reveal independently. */
 .timeline > .row:not(.streaming-reveal):not(.history-reveal),
 .timeline > .tool-call:not(.history-reveal),

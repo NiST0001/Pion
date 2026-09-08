@@ -15,6 +15,7 @@ import {
 
 export interface ChatTimelineProps {
   scrollRef: RefObject<HTMLDivElement | null>
+  scrollSurfaceRef?: RefObject<HTMLDivElement | null>
   onScroll: () => void
   timeline: TimelineItem[]
   timelineLoading: boolean
@@ -38,6 +39,7 @@ export interface ChatTimelineProps {
 
 export function ChatTimeline({
   scrollRef,
+  scrollSurfaceRef,
   onScroll,
   timeline,
   timelineLoading,
@@ -75,6 +77,7 @@ export function ChatTimeline({
 
   return (
     <main className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
+      <div className="chat-scroll-surface" ref={scrollSurfaceRef}>
       {timeline.length === 0 && !busy ? (
         <EmptyState
           cwd={cwd}
@@ -129,6 +132,7 @@ export function ChatTimeline({
             )}
         </div>
       )}
+      </div>
     </main>
   )
 }

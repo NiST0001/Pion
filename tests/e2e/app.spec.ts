@@ -90,7 +90,13 @@ test('boots the Electron shell with an immediately editable composer', async ({}
     await expect(page.locator('.composer-dock .run-metrics-strip')).toHaveCount(0)
     const scroller = page.locator('.chat-scroll')
     const viewportBefore = await scroller.boundingBox()
-    await metrics.getByRole('button').click()
+    await metrics.getByRole('button').hover()
+    await page.mouse.down()
+    try {
+      await expect(metrics.getByRole('button')).toHaveCSS('scale', '1')
+    } finally {
+      await page.mouse.up()
+    }
     await expect(metrics.getByRole('region', { name: '统计详情' })).toBeVisible()
     await expect(metrics.getByRole('region', { name: '统计详情' })).toHaveCSS('position', 'absolute')
     await expect.poll(() => metrics.evaluate((strip) => {

@@ -263,6 +263,9 @@ export interface PionApi {
   minimizeWindow(): void
   toggleMaximizeWindow(): void
   closeWindow(): void
+  getWindowEffects(): Promise<import('./window-effects').WindowEffectsState>
+  setWindowEffects(enabled: boolean): Promise<import('./window-effects').WindowEffectsState>
+  onWindowEffects(listener: (state: import('./window-effects').WindowEffectsState) => void): () => void
   getWindowState(): Promise<boolean>
   onWindowState(listener: (maximized: boolean) => void): () => void
 

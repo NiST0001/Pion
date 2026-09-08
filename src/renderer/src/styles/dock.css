@@ -1,22 +1,49 @@
-.dock-toolbar { display: flex; align-items: center; gap: 8px; padding: 4px 10px; flex-shrink: 0; border-bottom: 1px solid var(--border); background: var(--bg-elev); font-size: 12px; }
-.dock-toolbar button { padding: 3px 9px; border-radius: var(--radius-sm); color: var(--fg-dim); }
-.dock-toolbar button[aria-pressed='true'], .dock-toolbar button:hover { background: var(--accent-soft); color: var(--accent-strong); }
-.dock-toolbar > span { flex: 1; color: var(--fg-faint); }
-.app-body.dock-workspace { display: grid; position: relative; min-height: 0; min-width: 0; overflow: hidden; grid-template-areas: 'left center right' 'bottom bottom bottom'; }
-.dock-workspace > [data-dock-panel] { min-width: 0; min-height: 0; width: auto; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border); }
+.dock-toolbar {
+  display: flex; align-items: center; gap: 4px; flex-shrink: 0;
+  min-height: 34px; padding: 3px 10px; font-size: 11px; color: var(--fg-dim);
+  background: var(--bg); border-bottom: 1px solid var(--border-soft);
+}
+.dock-toolbar-label { display: inline-flex; align-items: center; gap: 6px; margin-right: 10px; color: var(--fg-faint); }
+.dock-toolbar-spacer { flex: 1; }
+.dock-toolbar button { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: 6px; color: var(--fg-dim); transition: background 120ms ease, color 120ms ease; }
+.dock-toolbar button[aria-pressed='true'] { background: var(--bg-elev); color: var(--fg); box-shadow: inset 0 0 0 1px var(--border-soft); }
+.dock-toolbar button:hover { color: var(--accent-strong); background: var(--accent-soft); }
+.dock-toolbar .dock-reset { padding: 5px; color: var(--fg-faint); }
+.app-body.dock-workspace { display: block; position: relative; min-height: 0; min-width: 0; overflow: hidden; background: var(--bg); }
+/* All panels remain fixed siblings. Only these rectangles change on docking. */
+.dock-workspace > [data-dock-panel] { position: absolute; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--border-soft); border-radius: 9px; background: var(--bg); }
 .dock-workspace > .main { flex: initial; }
+.dock-workspace > [data-dock-dragging='true'] { opacity: 0.55; }
 .dock-workspace .dock-review > .review-panel { width: 100% !important; flex: 1 1 0 !important; min-width: 0; min-height: 0; border: 0; }
-.dock-workspace .review-resizer { display: none; }
-.dock-header { display: flex; flex-shrink: 0; align-items: center; gap: 6px; min-height: 28px; padding: 2px 8px; background: var(--bg-elev); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--fg-dim); }
-.dock-grip { display: flex; align-items: center; gap: 4px; cursor: grab; flex: 1; user-select: none; }
+.dock-header { display: flex; flex-shrink: 0; align-items: center; gap: 6px; min-height: 30px; padding: 2px 7px; background: var(--bg-elev); border-bottom: 1px solid var(--border-soft); font-size: 11px; color: var(--fg-dim); }
+.dock-grip { display: flex; align-items: center; gap: 6px; align-self: stretch; cursor: grab; flex: 1; min-width: 0; user-select: none; font-weight: 550; letter-spacing: 0.02em; }
 .dock-grip:active { cursor: grabbing; }
-.dock-header select { max-width: 72px; font-size: 11px; color: var(--fg-dim); background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius-sm); }
-.dock-workspace[data-drop-target='projects'] > [data-dock-panel='projects'],
-.dock-workspace[data-drop-target='chat'] > [data-dock-panel='chat'],
-.dock-workspace[data-drop-target='review'] > [data-dock-panel='review'],
-.dock-workspace[data-drop-target='terminal'] > [data-dock-panel='terminal'] { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
-.dock-divider { position: absolute; z-index: 25; touch-action: none; }
-.dock-divider-left { left: min(var(--dock-left), 40%); top: 0; bottom: var(--dock-divider-bottom); width: 6px; transform: translateX(-3px); cursor: col-resize; }
-.dock-divider-right { right: min(var(--dock-right), 40%); top: 0; bottom: var(--dock-divider-bottom); width: 6px; transform: translateX(3px); cursor: col-resize; }
-.dock-divider-bottom { bottom: min(var(--dock-bottom), 70%); left: 0; right: 0; height: 6px; transform: translateY(3px); cursor: row-resize; }
-.dock-divider:hover, .dock-divider:focus-visible { background: var(--accent-soft); outline: 1px solid var(--accent-strong); }
+.dock-grip-icon { color: var(--fg-faint); opacity: 0.4; transition: opacity 120ms ease; }
+.dock-header:hover .dock-grip-icon { opacity: 1; }
+.dock-header-actions { display: flex; align-items: center; gap: 2px; }
+.dock-header-button { display: grid; place-items: center; width: 23px; height: 23px; padding: 0; border-radius: 5px; color: var(--fg-faint); }
+.dock-header-button:hover, .dock-header-button[aria-expanded='true'] { color: var(--fg); background: color-mix(in srgb, var(--fg) 7%, transparent); }
+.dock-header-button:focus-visible, .dock-layout-target button:focus-visible, .dock-toolbar button:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 1px; }
+.dock-divider { position: absolute; z-index: 25; touch-action: none; border-radius: 4px; }
+.dock-divider-x { cursor: col-resize; }
+.dock-divider-y { cursor: row-resize; }
+.dock-divider::after { content: ''; position: absolute; border-radius: 2px; background: transparent; transition: background 120ms ease; }
+.dock-divider-x::after { inset: 12px 2px; }
+.dock-divider-y::after { inset: 2px 12px; }
+.dock-divider:hover::after, .dock-divider:focus-visible::after { background: var(--accent-strong); }
+.dock-divider:focus-visible { outline: none; background: var(--accent-soft); }
+.dock-drop-preview { position: absolute; z-index: 30; display: grid; place-items: center; pointer-events: none; border: 2px solid var(--accent-strong); border-radius: 9px; background: color-mix(in srgb, var(--accent-strong) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bg) 65%, transparent); }
+.dock-drop-preview > span { max-width: calc(100% - 20px); padding: 6px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-elev); color: var(--fg); font-size: 12px; text-align: center; box-shadow: 0 4px 18px #0002; }
+.dock-layout-menu { position: fixed; z-index: 400; width: min(272px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto; padding: 7px; border: 1px solid var(--border); border-radius: 11px; background: var(--bg-elev); color: var(--fg); box-shadow: 0 12px 36px #0003, 0 2px 8px #0001; animation: dock-menu-in 110ms ease-out both; }
+.dock-layout-menu-heading { display: flex; align-items: center; justify-content: space-between; padding: 5px 6px 8px; font-size: 12px; font-weight: 600; }
+.dock-layout-menu-heading > span { color: var(--fg-faint); font-size: 10px; font-weight: 400; }
+.dock-layout-target { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 6px; border-radius: 6px; }
+.dock-layout-target:hover { background: color-mix(in srgb, var(--fg) 3%, transparent); }
+.dock-layout-target > span { font-size: 12px; color: var(--fg-dim); }
+.dock-layout-target > div { display: flex; gap: 3px; }
+.dock-layout-target button { width: 27px; height: 27px; display: grid; place-items: center; padding: 0; border: 1px solid var(--border-soft); border-radius: 5px; color: var(--fg-dim); }
+.dock-layout-target button:hover { color: var(--accent-strong); background: var(--accent-soft); border-color: var(--accent-strong); }
+.dock-layout-menu-hint, .dock-layout-menu > p { padding: 8px 6px 3px; margin: 3px 0 0; border-top: 1px solid var(--border-soft); font-size: 10px; color: var(--fg-faint); }
+@keyframes dock-menu-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .dock-layout-menu { animation: none; } .dock-toolbar button, .dock-grip-icon, .dock-divider::after { transition: none; } }
+@media (max-width: 600px) { .dock-toolbar-label { display: none; } }

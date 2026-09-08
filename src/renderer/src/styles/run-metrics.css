@@ -36,6 +36,14 @@
   background: color-mix(in srgb, var(--fg) 4%, transparent);
 }
 
+/* Long strips amplify global press scaling. Keep the geometry still and
+   use a subtle surface change instead of shrinking the whole statistics row. */
+.run-metrics-summary:not(:disabled):active {
+  scale: 1;
+  translate: 0 0;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
 .run-metrics-state,
 .run-metric {
   display: inline-flex;

@@ -16,6 +16,20 @@ const index: SessionHistoryIndex = {
 }
 
 describe('HistoryNavigator', () => {
+  it('adds live landmarks without snapping a manually browsed rail back to the active message', () => {
+    const makeIndex = (count: number): SessionHistoryIndex => ({ ...index, totalEntries: count * 2,
+      landmarks: Array.from({ length: count }, (_, n) => ({ ...index.landmarks[0], entryId: `live-${n + 1}`, entryIndex: n * 2, ordinal: n + 1, snippet: `live ${n + 1}` })) })
+    const props = { busy: false, maxVisible: 4, activeEntryId: 'live-10', onJump: vi.fn() }
+    const { container, rerender } = render(<HistoryNavigator index={makeIndex(10)} {...props} />)
+    const track = container.querySelector('.history-navigator-track')!
+    fireEvent.wheel(track, { deltaY: -72, deltaMode: 0 })
+    expect(screen.getByLabelText(/第 5 条历史消息/)).toBeInTheDocument()
+    rerender(<HistoryNavigator index={makeIndex(11)} {...props} />)
+    expect(screen.getByLabelText(/第 5 条历史消息/)).toBeInTheDocument()
+    expect(screen.queryByLabelText(/第 10 条历史消息/)).not.toBeInTheDocument()
+    expect(props.onJump).not.toHaveBeenCalled()
+  })
+
   it('renders history geometry and applies the hover decay curve without task-panel compensation', () => {
     const { container } = render(
       <HistoryNavigator

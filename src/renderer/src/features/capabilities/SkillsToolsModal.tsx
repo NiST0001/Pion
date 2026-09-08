@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   ChevronRight,
+  CircleHelp,
   FileDiff,
   ListTodo,
   Loader2,
@@ -47,6 +48,11 @@ const BUILTIN_TOOLS: BuiltinToolInfo[] = [
     name: 'pion_task',
     title: '任务计划',
     description: 'Pion 原生的本轮任务规划、状态更新和会话历史归档工具。'
+  },
+  {
+    name: 'pion_ask_user',
+    title: '向用户提问',
+    description: '遇到关键歧义时等待用户回答，支持选项、自定义回答与取消；普通和计划模式均可使用，无需插件。'
   }
 ]
 
@@ -282,10 +288,12 @@ function ToolsPage({
               ? <Terminal size={16} />
               : tool.name === 'pion_task'
                 ? <ListTodo size={16} />
-                : <FileDiff size={16} />}
+                : tool.name === 'pion_ask_user'
+                  ? <CircleHelp size={16} />
+                  : <FileDiff size={16} />}
             name={tool.name}
             title={tool.title}
-            source="Pi 内置"
+            source={tool.name.startsWith('pion_') ? 'Pion 内置' : 'Pi 内置'}
             description={tool.description}
           />
         ))}

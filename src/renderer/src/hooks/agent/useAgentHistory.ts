@@ -49,7 +49,7 @@ interface UseAgentHistoryOptions {
 export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions) {
   const timelineLoadId = useRef(0)
   const historyIndexLoadId = useRef(0)
-  const historyIndexInFlight = useRef<{ path: string; promise: Promise<void> } | null>(null)
+  const historyIndexInFlight = useRef<{ path: string; promise: Promise<void>; dirty: boolean } | null>(null)
   const historyJumpNonce = useRef(0)
   const timelineCache = useRef(new Map<string, TimelineCacheEntry>())
   const historyCursor = useRef<HistoryCursor | null>(null)
@@ -305,31 +305,67 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       return
     }
     const existing = historyIndexInFlight.current
-    if (existing?.path === sessionPath) return existing.promise
+    if (existing?.path === sessionPath) {
+      existing.dirty = true
+      return existing.promise
+    }
 
     const loadId = ++historyIndexLoadId.current
-    const promise = api.getHistoryIndex(sessionPath)
-      .catch(() => null)
-      .then((index) => {
-        if (loadId === historyIndexLoadId.current) dispatch({ type: 'historyIndex', index })
-      })
-      .finally(() => {
-        if (historyIndexInFlight.current?.promise === promise) historyIndexInFlight.current = null
-      })
-    historyIndexInFlight.current = { path: sessionPath, promise }
-    return promise
+    const flight = { path: sessionPath, promise: Promise.resolve(), dirty: false }
+    historyIndexInFlight.current = flight
+    flight.promise = (async () => {
+      do {
+        flight.dirty = false
+        const index = await api.getHistoryIndex(sessionPath).catch(() => null)
+        // Transient reads must not remove the rail. A late snapshot must not
+        // replace the index belonging to a newly selected history window.
+        if (index && loadId === historyIndexLoadId.current && timelineOwnerPath.current === sessionPath) {
+          dispatch({ type: 'historyIndex', index })
+        }
+      } while (flight.dirty && loadId === historyIndexLoadId.current && timelineOwnerPath.current === sessionPath)
+    })().finally(() => {
+      if (historyIndexInFlight.current === flight) historyIndexInFlight.current = null
+    })
+    return flight.promise
   }, [api])
 
   useEffect(() => {
     const sessionPath = state.session?.sessionFile
     if (
       !sessionPath
-      || state.busy
       || state.timelineLoading
       || timelineOwnerPath.current !== sessionPath
     ) return
     void refreshHistoryIndex(sessionPath)
-  }, [refreshHistoryIndex, state.busy, state.session?.sessionFile, state.timelineLoading])
+  }, [refreshHistoryIndex, state.session?.sessionFile, state.timelineLoading])
+
+  useEffect(() => {
+    const path = state.session?.sessionFile
+    if (!api || !path) return
+    let timer: number | undefined
+    const off = api.onEvent((event) => {
+      if (event.type === 'entry_appended') {
+        const entry = event.entry as { type?: string; message?: { role?: string } } | undefined
+        if (entry?.type !== 'compaction' && (entry?.type !== 'message' || !['user', 'assistant'].includes(entry.message?.role ?? ''))) return
+      }
+      if (event.type === 'message_end') {
+        const message = event.message as { role?: string } | undefined
+        if (!['user', 'assistant'].includes(message?.role ?? '')) return
+      }
+      // Persisted entries supply real, jumpable IDs. Do not read the entire
+      // index for each streamed token or for unrelated background sessions.
+      if (!['entry_appended', 'message_end', 'agent_settled', 'compaction_end'].includes(event.type)
+        || timelineOwnerPath.current !== path || timer !== undefined) return
+      timer = window.setTimeout(() => {
+        timer = undefined
+        if (timelineOwnerPath.current === path) void refreshHistoryIndex(path)
+      }, 60)
+    })
+    return () => {
+      off()
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [api, refreshHistoryIndex, state.session?.sessionFile])
 
   /** Fork before a user message; resolves with the message text for prefill. */
   const forkAt = useCallback(

@@ -198,6 +198,9 @@ const api: PionApi = {
   minimizeWindow: () => ipcRenderer.send(IPC.WindowControl, 'minimize'),
   toggleMaximizeWindow: () => ipcRenderer.send(IPC.WindowControl, 'toggle-maximize'),
   closeWindow: () => ipcRenderer.send(IPC.WindowControl, 'close'),
+  getWindowEffects: () => ipcRenderer.invoke(IPC.GetWindowEffects),
+  setWindowEffects: (enabled) => ipcRenderer.invoke(IPC.SetWindowEffects, enabled),
+  onWindowEffects: (listener) => subscribe<import('../shared/window-effects').WindowEffectsState>(IPC_EVENTS.WindowEffects, listener),
   getWindowState: () => ipcRenderer.invoke(IPC.WindowState),
 
   // projects

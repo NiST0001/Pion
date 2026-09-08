@@ -92,6 +92,8 @@ export const IPC = {
   AgentSetFollowUpMode: 'pion:agent-set-follow-up-mode',
 
   // app settings
+  GetWindowEffects: 'pion:get-window-effects',
+  SetWindowEffects: 'pion:set-window-effects',
   GetCompletionNotifications: 'pion:get-completion-notifications',
   SetCompletionNotifications: 'pion:set-completion-notifications',
   ToolPermissionPolicyGet: 'pion:tool-permission-policy-get',
@@ -165,5 +167,6 @@ export const IPC_EVENTS = {
   ExtensionUiRequests: 'pion:extension-ui-requests',
   ModelProviderAuthState: 'pion:model-provider-auth-state',
   WindowState: 'pion:window-state',
-  TerminalData: 'pion:terminal-data'
+  TerminalData: 'pion:terminal-data',
+  WindowEffects: 'pion:window-effects'
 } as const
