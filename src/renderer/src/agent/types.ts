@@ -118,7 +118,7 @@ export interface AgentState {
   unreadSessionPaths: string[]
   runningSessionPaths: string[]
   timeline: TimelineItem[]
-  timelineMutation: 'replace' | 'prepend' | 'append' | null
+  timelineMutation: 'replace' | 'prepend' | 'history-append' | 'append' | null
   timelineLoading: boolean
   timelineError?: string
   busy: boolean

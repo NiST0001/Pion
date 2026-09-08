@@ -53,10 +53,11 @@
 | src/renderer/src/agent/timeline.ts | 会话条目转时间线、缓存和分页类型 |
 | src/renderer/src/agent/sessionFavorites.ts、sessionOrder.ts | 收藏与排序 |
 | src/renderer/src/hooks/useAgent.ts | Agent hooks 汇总、启动及模型刷新 |
-| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换、跳转窗口与事件驱动的实时索引更新 |
+| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换、跳转窗口、事件驱动的实时索引更新；从当前游标查询是否还有后续历史，避免把页末当成会话末尾 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
-| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、滚动跟随、统一历史定位参考点、显式跳转时释放旧占位并锁定目标、高亮与尺寸变化处理 |
+| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随（含延迟内容布局）、统一历史定位参考点、显式跳转时释放旧占位并锁定目标、高亮与尺寸变化处理 |
+| src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
 | src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1 缓存迁移；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
 | src/renderer/src/hooks/useRunTelemetry.ts、useRunRecovery.ts | 运行统计与恢复 |
@@ -97,6 +98,8 @@
 
 - `tests/unit/`：后端策略、队列、运行记录、迁移和 reducer 等逻辑测试；`agent-compaction-state.test.ts` 覆盖压缩生命周期、迟到快照与会话切换重置；`compaction-context-usage.test.ts` 覆盖手动/自动压缩后的用量作废、失败保留和新响应用量更新。
 - `tests/renderer/`：React 组件及 hooks 测试。
+  - `conversationFollow.test.tsx`：用户离开/接近/回到末尾时的新输出行为、无 scroll 事件时恢复跟随、连续手势和延迟布局；程序化定位不代表用户恢复跟随。
+  - `historyPaging.test.tsx`：无 scroll 事件的边界输入、在途去重、嵌套输出区、失败重试、旧填充请求隔离，以及跳转后连续加载多页直到真实会话末尾；区分历史追加与实时追加。
   - `conversationNavigation.test.tsx`：密集短消息定位、底部位置受限时保持明确点击目标；历史跳转、同会话替换、尺寸变化和程序化滚动不恢复跟随；用户返回底部与会话切换恢复跟随。
   - `runTelemetry.test.tsx`：较旧遥测快照或事件不得覆盖压缩后的较新用量状态。
   - `sessionResourceStage.test.tsx`：首次就绪门控、真实会话切换重置，以及历史加载期间统计条/详情保留、订阅不断开并持续更新。

@@ -295,7 +295,8 @@ export function App(): ReactElement {
       || state.queuedMessages.followUp.length > 0
       || (state.mode !== 'plan' && agentTodos.length > 0),
     loadOlder: actions.loadOlder,
-    loadNewer: actions.loadNewer
+    loadNewer: actions.loadNewer,
+    hasNewerHistory: actions.hasNewerHistory
   })
   const sessionSelectionId = useRef(0)
 

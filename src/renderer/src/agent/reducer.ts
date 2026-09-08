@@ -193,7 +193,8 @@ export function reducer(state: AgentState, action: Action): AgentState {
       return {
         ...state,
         timeline: [...state.timeline, ...action.items],
-        timelineMutation: 'append'
+        // Loading the next historical page must never act like live output.
+        timelineMutation: 'history-append'
       }
     case 'timelineLoading':
       return {

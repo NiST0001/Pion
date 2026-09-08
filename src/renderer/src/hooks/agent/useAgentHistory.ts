@@ -56,6 +56,13 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   const timelineOwnerPath = useRef<string | undefined>(undefined)
   const expectedTimeline = useRef<{ path: string; items: TimelineItem[] } | null>(null)
 
+  // Read the authoritative cursor at event time, not a potentially stale
+  // React snapshot. A loaded page's end is not necessarily the session end.
+  const hasNewerHistory = useCallback((): boolean => {
+    const cursor = historyCursor.current
+    return Boolean(cursor && cursor.loadId === timelineLoadId.current && !cursor.newerComplete)
+  }, [])
+
   const showTimeline = useCallback((path: string, items: TimelineItem[], mode: AgentMode): void => {
     timelineOwnerPath.current = path
     expectedTimeline.current = { path, items }
@@ -549,6 +556,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     reloadTimeline,
     loadOlder,
     loadNewer,
+    hasNewerHistory,
     refreshHistoryIndex,
     forkAt,
     switchSession,

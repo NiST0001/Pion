@@ -2,6 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import type { RefObject } from 'react'
 import type { AgentState, TimelineItem } from '../agent/types'
 import { armPendingHistoryRevealRows } from '../utils/historyReveal'
+import { consumedInside, useHistoryPaging } from './useHistoryPaging'
+
+const noNewerHistory = () => false
+// Only tolerate pixel rounding here; the 96px pagination prefetch zone is NOT
+// an instruction to resume following the live conversation.
+const atScrollEnd = (element: HTMLElement) => element.scrollHeight - element.scrollTop - element.clientHeight <= 2
 
 interface UseConversationNavigationOptions {
   scrollRef: RefObject<HTMLDivElement | null>
@@ -17,6 +23,7 @@ interface UseConversationNavigationOptions {
   panelsVisible?: boolean
   loadOlder: (options?: { viaScroll?: boolean }) => Promise<void>
   loadNewer: (options?: { viaScroll?: boolean }) => Promise<void>
+  hasNewerHistory?: () => boolean
 }
 
 function historyAnchor(container: HTMLElement): number {
@@ -35,7 +42,8 @@ export function useConversationNavigation({
   historyJump,
   panelsVisible,
   loadOlder,
-  loadNewer
+  loadNewer,
+  hasNewerHistory = noNewerHistory
 }: UseConversationNavigationOptions) {
   const [visibleHistoryEntryId, setVisibleHistoryEntryId] = useState<string | undefined>()
   const historyScrollFrame = useRef<number | null>(null)
@@ -73,7 +81,23 @@ export function useConversationNavigation({
     surface.style.minHeight = `${reservedHeight.current}px`
   }, [])
 
+  const followEnd = useCallback((element: HTMLElement) => {
+    readingHistory.current = false
+    manualScroll.current = false
+    explicitHistoryEntry.current = undefined
+    reservedHeight.current = 0
+    gestureUntil.current = 0
+    if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
+    element.scrollTop = element.scrollHeight
+    lastScrollTop.current = element.scrollTop
+    nearBottomRef.current = true
+  }, [])
+
   const timelineLength = timeline.length
+  const { onScroll: pageOnScroll } = useHistoryPaging({
+    scrollRef, timelineLength, loadOlder, loadNewer,
+    owner: JSON.stringify([projectCwd, sessionPath, historyJump?.nonce])
+  })
   const lastItem = timeline[timelineLength - 1]
   const lastGrow = lastItem
     ? lastItem.kind === 'assistant'
@@ -136,6 +160,10 @@ export function useConversationNavigation({
     const content = element.querySelector<HTMLElement>('.timeline')
     const contentHeight = content?.offsetHeight ?? element.scrollHeight
     const addedTimelineItems = timelineLength > previousTimelineLength.current
+    if (hasNewerHistory() || (timelineMutation === 'history-append' && addedTimelineItems)) {
+      nearBottomRef.current = false
+      readingHistory.current = true
+    }
     if (timelineMutation === 'prepend' && addedTimelineItems && previousHeight > 0 && pendingJumpNonce.current === null) {
       // Prepending moves existing rows, even during manual scrolling. Keeping
       // the same numeric scrollTop would jump to the newly inserted page.
@@ -158,8 +186,7 @@ export function useConversationNavigation({
     } else if (timelineMutation === 'append') {
       // Follow the newest message only while the user is already near the
       // bottom; never yank someone away who is reading older history.
-      const wasNearBottom = previousHeight - element.scrollTop - element.clientHeight <= 80
-      if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0) && (wasNearBottom || previousHeight === 0)) {
+      if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)) {
         element.scrollTop = element.scrollHeight
       }
     }
@@ -171,7 +198,7 @@ export function useConversationNavigation({
       ? { element: firstRow, top: firstRow.offsetTop, parent: firstRow.offsetParent }
       : null
     lastScrollTop.current = element.scrollTop
-  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, sessionPath, projectCwd, reserveSpace])
+  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, sessionPath, projectCwd, reserveSpace, hasNewerHistory])
 
   // Async siblings above the scroller (run metrics strip, trust banner, error
   // banner) and the composer dock (task/queue panels) mount after a session
@@ -183,30 +210,32 @@ export function useConversationNavigation({
     let previousClientHeight = element.clientHeight
     const observer = new ResizeObserver(() => {
       const nextClientHeight = element.clientHeight
-      if (nextClientHeight === previousClientHeight) return
-      // Keep the user's follow intent. Inferring it from resized geometry
-      // can turn a history reader into a bottom follower.
-      previousClientHeight = nextClientHeight
-      scrollSurfaceRef.current?.style.setProperty('--chat-viewport-height', `${nextClientHeight}px`)
+      // Observe both viewport and content: image/Markdown layout may finish
+      // after the parent render. Geometry must not change the user's intent.
+      if (nextClientHeight !== previousClientHeight) {
+        previousClientHeight = nextClientHeight
+        scrollSurfaceRef.current?.style.setProperty('--chat-viewport-height', `${nextClientHeight}px`)
+      }
       if (loadingRef.current && !hasContentRef.current) return
-      if (pendingJumpNonce.current === null && nearBottomRef.current && !readingHistory.current) {
+      if (pendingJumpNonce.current === null && nearBottomRef.current && !readingHistory.current && !hasNewerHistory()) {
         element.scrollTop = element.scrollHeight
         lastScrollTop.current = element.scrollTop
         nearBottomRef.current = true
       }
     })
     observer.observe(element)
+    if (scrollSurfaceRef.current) observer.observe(scrollSurfaceRef.current)
     return () => observer.disconnect()
-  }, [scrollRef])
+  }, [scrollRef, hasNewerHistory])
 
   // Floating composer panels add bottom padding without changing the
   // scroller's clientHeight, so the resize observer never fires for them.
   useLayoutEffect(() => {
     const element = scrollRef.current
-    if (!element || pendingJumpNonce.current !== null || !nearBottomRef.current || (loadingRef.current && !hasContentRef.current)) return
+    if (!element || pendingJumpNonce.current !== null || !nearBottomRef.current || hasNewerHistory() || (loadingRef.current && !hasContentRef.current)) return
     element.scrollTop = element.scrollHeight
     lastScrollTop.current = element.scrollTop
-  }, [scrollRef, panelsVisible])
+  }, [scrollRef, panelsVisible, hasNewerHistory])
 
   const updateVisibleHistoryEntry = useCallback((): void => {
     const container = scrollRef.current
@@ -240,27 +269,9 @@ export function useConversationNavigation({
     })
   }, [updateVisibleHistoryEntry])
 
-  // A loaded window may fit entirely inside the viewport, leaving no scroll
-  // events to request the adjacent older/newer page.
   useEffect(() => {
-    let cancelled = false
-    const fillViewport = async (): Promise<void> => {
-      const element = scrollRef.current
-      if (!element || element.scrollHeight > element.clientHeight + 16) return
-      // Do not start both directions against the same cursor at once. Once
-      // older content has filled the viewport, newer content is only fetched
-      // when there is still room, such as after a history jump.
-      await loadOlder()
-      if (cancelled) return
-      const current = scrollRef.current
-      if (current && current.scrollHeight <= current.clientHeight + 16) await loadNewer()
-    }
-    void fillViewport()
     scheduleVisibleHistoryUpdate()
-    return () => {
-      cancelled = true
-    }
-  }, [loadNewer, loadOlder, scheduleVisibleHistoryUpdate, scrollRef, sessionPath, timelineLength])
+  }, [scheduleVisibleHistoryUpdate, sessionPath, timelineLength])
 
   useEffect(() => {
     setVisibleHistoryEntryId(undefined)
@@ -347,38 +358,62 @@ export function useConversationNavigation({
       nearBottomRef.current = false
       reserveSpace(element, loadingRef.current && !hasContentRef.current)
     }
-    const wheel = (event: WheelEvent) => { if (event.deltaY !== 0) resume() }
+    const resumeAtEnd = () => {
+      if (!loadingRef.current && hasContentRef.current && !hasNewerHistory() && atScrollEnd(element)) followEnd(element)
+    }
+    const wheel = (event: WheelEvent) => {
+      if (event.ctrlKey || event.deltaY === 0 || consumedInside(event, element, event.deltaY > 0 ? 'newer' : 'older')) return
+      resume()
+      // At the hard end there may be no scroll event. Outward user input is
+      // still an explicit return to the end (e.g. after a history jump).
+      if (event.deltaY > 0) resumeAtEnd()
+    }
+    let touchY: number | undefined
+    const touchStart = (event: TouchEvent) => { touchY = event.touches?.[0]?.clientY; resume() }
+    const touchMove = (event: TouchEvent) => {
+      const y = event.touches?.[0]?.clientY
+      const previousY = touchY
+      touchY = y
+      if (y === undefined || previousY === undefined || y === previousY) return
+      const forward = y < previousY
+      if (consumedInside(event, element, forward ? 'newer' : 'older')) return
+      resume()
+      if (forward) resumeAtEnd()
+    }
     const pointerMove = (event: PointerEvent) => { if (event.buttons) resume() }
     const key = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLElement && (event.target.isContentEditable || ['INPUT', 'TEXTAREA'].includes(event.target.tagName))) return
+      if (event.target instanceof Element && event.target.closest('input, textarea, select, button, [contenteditable]')) return
+      const forward = ['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey)
+      if (consumedInside(event, element, forward ? 'newer' : 'older')) return
       if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) resume()
+      if (['ArrowDown', 'PageDown'].includes(event.key) || (event.key === ' ' && !event.shiftKey)) resumeAtEnd()
       if (event.key === 'End' && !loadingRef.current && hasContentRef.current) {
         event.preventDefault()
-        readingHistory.current = false
+        readingHistory.current = hasNewerHistory()
         manualScroll.current = false
         explicitHistoryEntry.current = undefined
         reservedHeight.current = 0
         if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
         element.scrollTop = element.scrollHeight
         lastScrollTop.current = element.scrollTop
-        nearBottomRef.current = true
+        nearBottomRef.current = !hasNewerHistory()
       }
     }
     element.addEventListener('wheel', wheel, { passive: true })
-    element.addEventListener('touchstart', resume, { passive: true })
-    element.addEventListener('touchmove', resume, { passive: true })
+    element.addEventListener('touchstart', touchStart, { passive: true })
+    element.addEventListener('touchmove', touchMove, { passive: true })
     element.addEventListener('pointermove', pointerMove)
     element.addEventListener('pointerdown', resume)
     element.addEventListener('keydown', key)
     return () => {
       element.removeEventListener('wheel', wheel)
-      element.removeEventListener('touchstart', resume)
-      element.removeEventListener('touchmove', resume)
+      element.removeEventListener('touchstart', touchStart)
+      element.removeEventListener('touchmove', touchMove)
       element.removeEventListener('pointermove', pointerMove)
       element.removeEventListener('pointerdown', resume)
       element.removeEventListener('keydown', key)
     }
-  }, [scrollRef, reserveSpace])
+  }, [scrollRef, reserveSpace, hasNewerHistory, followEnd])
 
   const handleTimelineScroll = useCallback((): void => {
     const element = scrollRef.current
@@ -386,18 +421,20 @@ export function useConversationNavigation({
     const moved = element.scrollTop !== lastScrollTop.current
     const userMoved = Date.now() <= gestureUntil.current && moved
     const movedForward = element.scrollTop > lastScrollTop.current
-    if (userMoved) explicitHistoryEntry.current = undefined
-    const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight <= 96
-    if (userMoved && movedForward && atBottom && !loadingRef.current && hasContentRef.current) {
+    if (userMoved) {
+      explicitHistoryEntry.current = undefined
+      // Keep touch momentum/continuous scrollbar movement associated with
+      // the user's gesture, rather than expiring mid-scroll after 300ms.
+      gestureUntil.current = Date.now() + 300
+    }
+    const atBottom = atScrollEnd(element)
+    const atSessionBottom = atBottom && !hasNewerHistory()
+    if (userMoved && movedForward && atSessionBottom && !loadingRef.current && hasContentRef.current) {
       // Resume only after a real, forward user scroll to the bottom, never
       // because an empty/partially rendered viewport happens to fit on screen.
-      readingHistory.current = false
-      manualScroll.current = false
-      reservedHeight.current = 0
-      if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
-      element.scrollTop = element.scrollHeight
+      followEnd(element)
     }
-    nearBottomRef.current = !readingHistory.current && atBottom
+    nearBottomRef.current = !readingHistory.current && atSessionBottom
     if (!nearBottomRef.current) {
       readingHistory.current = true
       if (!explicitHistoryEntry.current || manualScroll.current) {
@@ -409,10 +446,9 @@ export function useConversationNavigation({
     armPendingHistoryRevealRows(element)
     // Layout compensation can emit scroll too. Its offset was already synced
     // above; do not cascade through every page on those no-movement events.
-    if (moved && !movedForward && element.scrollTop <= 96) void loadOlder({ viaScroll: true })
-    if (moved && movedForward && element.scrollHeight - element.scrollTop - element.clientHeight <= 96) void loadNewer({ viaScroll: true })
+    pageOnScroll(moved, movedForward)
     scheduleVisibleHistoryUpdate()
-  }, [loadNewer, loadOlder, scheduleVisibleHistoryUpdate, scrollRef, reserveSpace])
+  }, [pageOnScroll, scheduleVisibleHistoryUpdate, scrollRef, reserveSpace, hasNewerHistory, followEnd])
 
   return { visibleHistoryEntryId, handleTimelineScroll, scrollSurfaceRef }
 }
