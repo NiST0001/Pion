@@ -1,5 +1,7 @@
-/* Alpha surfaces expose native DWM/Vibrancy/compositor output. There is no
-   CSS backdrop-filter here: it cannot blur other applications behind a window. */
+/* Native material handles the desktop behind the continuous workspace base.
+   Floating summary/input and other panels sample in-window content through
+   independent backplates. Never filter a popup's content ancestor. */
+.surface-filter-definitions { position: absolute; pointer-events: none; }
 html[data-native-surface='true'],
 html[data-native-surface='true'] body,
 html[data-native-surface='true'] #root,
@@ -16,7 +18,109 @@ html[data-native-surface='true'] .dock-header { background: color-mix(in srgb, v
 html[data-native-surface='true'] .dock-review > .review-panel,
 html[data-native-surface='true'] .review-files,
 html[data-native-surface='true'] .review-detail { background: transparent; }
-/* Popovers, code blocks and the terminal retain their solid reading surface. */
+
+html[data-native-surface='true'] .dock-drop-preview > span {
+  background: color-mix(in srgb, var(--bg-elev) 86%, transparent);
+}
+
+/* Kill the base scrim backdrop-filter (blur(3px) on .modal-backdrop): on a
+   transparent window it produces the same ghost artifact. */
+html[data-native-surface='true'] .modal-backdrop { backdrop-filter: none; }
+
+/* A forwards-filled opacity animation remains a backdrop root in Chromium,
+   even at opacity:1. It leaves these backplates sampling an empty layer,
+   yielding black interiors and colored corner fringes after alpha fill.
+   Animate geometry (and scrim color), not ancestor opacity. Release any
+   retained animation state; retain the existing duration/easing and origins. */
+@keyframes pion-frost-enter { from { transform: translateY(6px); } to { transform: none; } }
+@keyframes pion-frost-menu-up { from { transform: translateY(6px) scaleY(.97); } to { transform: none; } }
+@keyframes pion-frost-menu-down { from { transform: translateY(-6px) scaleY(.97); } to { transform: none; } }
+@keyframes pion-frost-scrim { from { background-color: transparent; } }
+html[data-native-surface='true'] :is(.modal, .operations-modal, .confirm-dialog,
+  .tool-permission-modal, .extension-ui-dialog, .run-metrics-detail, .history-navigator-preview) {
+  animation-name: pion-frost-enter;
+  animation-fill-mode: backwards;
+}
+html[data-native-surface='true'] :is(.picker-menu, .context-menu, .context-submenu) {
+  animation-name: pion-frost-menu-down;
+  animation-fill-mode: backwards;
+}
+html[data-native-surface='true'] :is(.composer-inline-controls .picker-menu,
+  .composer-project-menu, .slash-command-menu, .reference-menu) {
+  animation-name: pion-frost-menu-up;
+  animation-fill-mode: backwards;
+}
+html[data-native-surface='true'] :is(.modal-backdrop, .operations-modal-backdrop,
+  .confirm-dialog-backdrop, .tool-permission-backdrop, .extension-ui-backdrop.is-global) {
+  animation-name: pion-frost-scrim;
+  animation-fill-mode: backwards;
+}
+html[data-native-surface='true'] :is(.sidebar, .review-panel, .history-navigator) {
+  animation-fill-mode: backwards;
+}
+
+/* Filter a separate backplate, not the panel ancestor: nested menus and the
+   metrics dropdown must retain access to their own backdrop. Isolation keeps
+   the negative-z backplate inside its panel without changing child layout. */
+html[data-native-surface='true'] :is(.run-metrics-strip, .run-metrics-detail,
+  .composer-row, .task-panel-card, .history-navigator-preview, .dock-layout-menu,
+  .context-menu, .picker-menu, .reference-menu, .slash-command-menu,
+  .modal, .operations-modal, .confirm-dialog, .tool-permission-modal, .extension-ui-dialog) {
+  isolation: isolate;
+  --panel-frost-tint: color-mix(in srgb, var(--bg-elev) 64%, transparent);
+  background: transparent;
+}
+html[data-native-surface='true'] :is(.modal, .operations-modal, .confirm-dialog,
+  .tool-permission-modal, .extension-ui-dialog) { position: relative; }
+html[data-native-surface='true'] :is(.run-metrics-strip, .run-metrics-detail,
+  .composer-row, .task-panel-card, .history-navigator-preview, .dock-layout-menu,
+  .context-menu, .picker-menu, .reference-menu, .slash-command-menu,
+  .modal, .operations-modal, .confirm-dialog, .tool-permission-modal, .extension-ui-dialog)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  background: var(--panel-frost-tint);
+  backdrop-filter: url('#pion-panel-frost');
+}
+
+/* Scrollable leaf popovers need the filter on their own border box. An
+   absolute backplate scrolls away with their contents and exposes the bottom.
+   They do not own another floating popup; the strip/input ancestors still
+   use independent backplates so nested popovers can sample the workspace. */
+html[data-native-surface='true'] :is(.picker-menu, .reference-menu,
+  .slash-command-menu, .run-metrics-detail, .history-navigator-preview) {
+  background: var(--panel-frost-tint);
+  backdrop-filter: url('#pion-panel-frost');
+}
+html[data-native-surface='true'] :is(.picker-menu, .reference-menu,
+  .slash-command-menu, .run-metrics-detail, .history-navigator-preview)::before {
+  content: none;
+}
+
+/* Both rows now float above the same scrolling conversation, like their
+   expanded panels. Keep their lighter tints without disabling local frost. */
+html[data-native-surface='true'] .run-metrics-strip {
+  --panel-frost-tint: color-mix(in srgb, var(--bg-elev) 55%, transparent);
+}
+html[data-native-surface='true'] .composer { background: transparent; }
+html[data-native-surface='true'] .composer-row {
+  --panel-frost-tint: color-mix(in srgb, var(--bg-input) 58%, transparent);
+}
+
+/* Inner columns that previously filled with the opaque base color would punch
+   through the frosted dialog; keep them transparent so the whole modal reads
+   as one surface. Small controls, inputs and cards keep their solid fills. */
+html[data-native-surface='true'] .modal-body.settings-layout,
+html[data-native-surface='true'] .settings-nav,
+html[data-native-surface='true'] .capabilities-nav,
+html[data-native-surface='true'] .plugin-store-body,
+html[data-native-surface='true'] .plugin-store-error,
+html[data-native-surface='true'] .task-history-run { background: transparent; }
+
+/* Code blocks and the terminal retain their solid reading surface. */
 .window-effects-settings h3 { display: flex; align-items: center; gap: 7px; }
 .window-effects-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 12px; color: var(--fg-dim); }
 .window-effects-badge { padding: 2px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--accent-strong); }
@@ -28,4 +132,42 @@ html[data-native-surface='true'] .review-detail { background: transparent; }
   html[data-native-surface='true'] .dock-workspace > [data-dock-panel],
   html[data-native-surface='true'] .titlebar, html[data-native-surface='true'] .dock-toolbar,
   html[data-native-surface='true'] .dock-header { background: Canvas; }
+  /* Restore the pre-frost solid surfaces for overlays and dialogs. */
+  html[data-native-surface='true'] .task-panel-card,
+  html[data-native-surface='true'] .run-metrics-strip,
+  html[data-native-surface='true'] .run-metrics-detail,
+  html[data-native-surface='true'] .history-navigator-preview,
+  html[data-native-surface='true'] .dock-layout-menu,
+  html[data-native-surface='true'] .dock-drop-preview > span,
+  html[data-native-surface='true'] .context-menu,
+  html[data-native-surface='true'] .picker-menu,
+  html[data-native-surface='true'] .reference-menu,
+  html[data-native-surface='true'] .slash-command-menu,
+  html[data-native-surface='true'] .modal,
+  html[data-native-surface='true'] .operations-modal,
+  html[data-native-surface='true'] .confirm-dialog,
+  html[data-native-surface='true'] .tool-permission-modal,
+  html[data-native-surface='true'] .extension-ui-dialog,
+  html[data-native-surface='true'] .task-history-run {
+    background: var(--bg-elev);
+    backdrop-filter: none;
+  }
+  html[data-native-surface='true'] :is(.run-metrics-strip, .run-metrics-detail,
+    .composer-row, .task-panel-card, .history-navigator-preview, .dock-layout-menu,
+    .context-menu, .picker-menu, .reference-menu, .slash-command-menu,
+    .modal, .operations-modal, .confirm-dialog, .tool-permission-modal, .extension-ui-dialog)::before {
+    content: none;
+    backdrop-filter: none;
+  }
+  html[data-native-surface='true'] .composer {
+    background: linear-gradient(to bottom, transparent 0%, var(--bg) 30%);
+  }
+  html[data-native-surface='true'] .composer-row { background: var(--bg-input); }
+  html[data-native-surface='true'] .modal-body.settings-layout,
+  html[data-native-surface='true'] .capabilities-nav,
+  html[data-native-surface='true'] .plugin-store-body,
+  html[data-native-surface='true'] .plugin-store-error { background: var(--bg); }
+  html[data-native-surface='true'] .settings-nav {
+    background: linear-gradient(180deg, var(--surface-tint), var(--bg));
+  }
 }

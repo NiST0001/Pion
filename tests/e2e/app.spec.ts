@@ -70,7 +70,7 @@ test('boots the Electron shell with an immediately editable composer', async ({}
     await expect(page.locator('.sidebar')).toBeVisible()
     await expect(page.locator('.workflow-panel')).toHaveCount(0)
     await expect(page.locator('.verification-panel')).toHaveCount(0)
-    const metrics = page.locator('.main > .run-metrics-strip')
+    const metrics = page.locator('.conversation-shell > .run-metrics-strip')
     await expect(metrics).toContainText('23k tokens')
     // Billing is opt-in. Keep the default-hidden behavior covered instead of
     // assuming the older always-visible cost summary.
@@ -90,6 +90,17 @@ test('boots the Electron shell with an immediately editable composer', async ({}
     await expect(page.locator('.composer-dock .run-metrics-strip')).toHaveCount(0)
     const scroller = page.locator('.chat-scroll')
     const viewportBefore = await scroller.boundingBox()
+    await expect.poll(() => page.locator('.conversation-shell').evaluate((shell) => {
+      const viewport = shell.querySelector('.chat-scroll')!.getBoundingClientRect()
+      const summary = shell.querySelector('.run-metrics-strip')!.getBoundingClientRect()
+      const input = shell.querySelector('.composer-dock')!.getBoundingClientRect()
+      return viewport.top <= summary.top && viewport.bottom >= input.bottom
+    })).toBe(true)
+    const composerHeightBefore = await page.locator('.composer-dock').evaluate((dock) => dock.clientHeight)
+    await composer.fill(Array(6).fill('floating input must not shrink history').join('\n'))
+    await expect.poll(() => page.locator('.composer-dock').evaluate((dock) => dock.clientHeight)).toBeGreaterThan(composerHeightBefore)
+    expect(await scroller.boundingBox()).toEqual(viewportBefore)
+    await composer.fill('draft survives agent preparation')
     await metrics.getByRole('button').hover()
     await page.mouse.down()
     try {

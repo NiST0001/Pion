@@ -4,6 +4,8 @@
 ./dev.sh                 # 推荐入口：自动处理环境变量/依赖体检，见 ./dev.sh --help
 ./dev.sh --x11           # 经 XWayland 运行（规避 wayland+vulkan 告警）
 ./dev.sh --debug-port 9333  # 附带 CDP 调试端口（配 scripts/gui-inspect.mjs）
+./dev.sh --branch         # 交互选择本地分支后启动；目标分支已在其他 worktree 检出时自动转到该 worktree 启动
+./dev.sh --branch <name>  # 直接切到指定本地分支后启动
 
 npm run build          # 产物输出到 out/
 npm run start          # 运行构建产物（preview 模式）
@@ -59,8 +61,9 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 - macOS：调用 `setVibrancy('under-window')`，使用系统 Vibrancy，窗口效果跟随激活状态。此代码路径不意味着已有 macOS 发布包或真机验证。
 - Linux：通过创建时的 `transparent` 窗口交给桌面合成器绘制。默认未创建透明窗口时，启用后需手动重启；关闭视觉效果可立即回退，但恢复普通原生窗口同样需要重启。不会自动重建窗口或重放终端命令。
 - KWin/X11（含明确通过 `--ozone-platform=x11` 启动的 XWayland）：若系统已有 `xprop`，仅对自身窗口设置 `_KDE_NET_WM_BLUR_BEHIND_REGION` 请求原生模糊。缺少工具或模糊未开启时不保证模糊；不会安装工具或修改全局桌面规则。
-- 原生 Wayland、GNOME 等环境使用合成器透明回退，不宣称可用 Electron 通用 API 模糊桌面。`backdrop-filter` 只能处理网页内部内容，不作为原生桌面模糊的替代品。
-- Linux 透明窗口为实验功能：Electron 文档指出透明窗口在部分平台调整尺寸时可能失效，DevTools 也可能影响透明表现。高对比度和原生 API 失败时使用不透明回退；菜单、代码和终端继续保留实底以保证可读性。
+- 原生 Wayland、GNOME 等环境使用合成器透明回退，不宣称可用 Electron 通用 API 模糊桌面。窗口内浮层引用 App.tsx 的 SVG 背景模糊/alpha 填充滤镜，避免清晰背景再次透出；任务/排队和弹窗使用独立背板，不将滤镜加在承载下级浮层的祖先上。可滚动的叶子面板（模型等菜单、统计详情、历史预览）在自身边框盒过滤背景，避免绝对定位背板随列表滚走。原生模式的浮层入场改用几何动画、纱罩用背景色动画，并释放动画保留状态：本机 Electron 对比中，`opacity` 动画的 forwards/both 保留会阻断后代背景采样，导致 alpha 填充后黑底及圆角色斑。保留减少动效/透明度及高对比度回退；不同平台仍需各自真机验证。
+- 输入框和统计条与消息区共用 `.conversation-shell` 的同一 grid 区域，分别贴底/贴顶悬浮；会话底色保持连续，不再按 `.chat-stage` 分段绘制。两者也使用独立局部滤镜背板，菜单/统计详情不受祖先背景滤镜限制。`useConversationOverlays` 观测统计条与输入区域实际高度，只设置首尾滚动 padding 和历史导航避让，不缩短消息视口；详情展开不计入高度。输入增长只在原本跟随末尾时跟随，顶部余量变化补偿阅读位置；历史定位与识别共用无遮挡区参考点。不修改合成器配置，不将窗口内磨砂称为桌面模糊。
+- Linux 透明窗口为实验功能：Electron 文档指出透明窗口在部分平台调整尺寸时可能失效，DevTools 也可能影响透明表现。高对比度和原生 API 失败时使用不透明回退（悬浮面板、菜单和对话框一并恢复实底）；代码和终端继续保留实底以保证可读性。
 
 平台能力参考：[原生窗口材质](https://www.electronjs.org/docs/latest/api/browser-window#winsetbackgroundmaterialmaterial-windows)、[透明窗口限制](https://www.electronjs.org/docs/latest/tutorial/custom-window-styles#limitations)。
 

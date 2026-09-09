@@ -8,6 +8,54 @@ vi.mock('../../src/renderer/src/utils/historyReveal', () => ({ armPendingHistory
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('conversation navigation', () => {
+  it('compensates floating summary clearance without leaving manual reading', () => {
+    let resize = () => {}
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: () => void) { resize = callback }
+      observe() {}
+      disconnect() {}
+    })
+    const element = document.createElement('div')
+    element.style.paddingTop = '38px'
+    Object.defineProperties(element, { scrollHeight: { value: 2000 }, clientHeight: { value: 400 } })
+    const { result } = renderHook(() => useConversationNavigation({
+      scrollRef: { current: element }, timeline: [], timelineMutation: 'replace', busy: false,
+      historyJump: null, loadOlder: vi.fn(async () => {}), loadNewer: vi.fn(async () => {})
+    }))
+    element.dispatchEvent(new WheelEvent('wheel', { deltaY: -200 }))
+    element.scrollTop = 500
+    act(() => result.current.handleTimelineScroll())
+    element.style.paddingTop = '76px'
+    act(() => resize())
+    expect(element.scrollTop).toBe(538)
+    act(() => { result.current.handleTimelineScroll(); resize() })
+    expect(element.scrollTop).toBe(538)
+    element.style.paddingTop = '38px'
+    act(() => resize())
+    expect(element.scrollTop).toBe(500)
+  })
+
+  it('locates history inside the unobscured area between both floating rows', () => {
+    const frames: FrameRequestCallback[] = []
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.push(callback); return frames.length })
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {})
+    const element = document.createElement('div')
+    element.style.setProperty('--conversation-top-clearance', '50px')
+    element.style.setProperty('--conversation-bottom-clearance', '120px')
+    Object.defineProperties(element, { scrollHeight: { value: 2000 }, clientHeight: { value: 400 } })
+    const target = document.createElement('div')
+    target.dataset.entryId = 'target'
+    target.getBoundingClientRect = () => ({ top: 600 - element.scrollTop } as DOMRect)
+    element.append(target)
+    renderHook(() => useConversationNavigation({
+      scrollRef: { current: element }, timeline: [{ kind: 'user', id: 1, text: 'target' }],
+      timelineMutation: 'replace', busy: false, historyJump: { entryId: 'target', nonce: 1 },
+      loadOlder: vi.fn(async () => {}), loadNewer: vi.fn(async () => {})
+    }))
+    act(() => frames.splice(0).forEach((callback) => callback(0)))
+    expect(element.scrollTop).toBeCloseTo(600 - (50 + (400 - 50 - 120) * 0.38))
+  })
+
   it('preserves manual reading on replacement and resizing but follows a genuinely new session', () => {
     let resize = () => undefined as void
     vi.stubGlobal('ResizeObserver', class {

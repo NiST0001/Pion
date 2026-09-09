@@ -1,14 +1,24 @@
-/* Stable containing block for both the scroll viewport and composer dock.
-   The task panel may redistribute space inside this shell, but cannot resize
-   the navigator's coordinate system. */
+/* One continuous viewport, with summary and composer stacked above it.
+   Chrome size only changes scroll clearance, never the viewport rectangle. */
 .conversation-shell {
   position: relative;
   flex: 1;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
+  --conversation-head-gap: 38px;
+  --conversation-tail-gap: 16px;
 }
+
+.conversation-shell > .chat-stage,
+.conversation-shell > .run-metrics-strip,
+.conversation-shell > .composer-dock {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+.conversation-shell > .run-metrics-strip { align-self: start; z-index: 19; }
+.conversation-shell > .composer-dock { align-self: end; }
 
 .chat-stage {
   position: relative;
@@ -26,7 +36,16 @@
 }
 
 .chat-scroll-surface { min-height: 100%; display: flow-root; overflow-anchor: none; }
-.chat-scroll-surface > .empty-state { height: var(--chat-viewport-height, 100%); }
+.chat-scroll-surface > .empty-state {
+  height: max(0px, calc(var(--chat-viewport-height, 100%) - var(--conversation-top-clearance, 0px) - var(--conversation-bottom-clearance, 0px) - var(--conversation-head-gap, 38px) - var(--conversation-tail-gap, 16px)));
+}
+
+.conversation-shell .chat-scroll {
+  padding-top: calc(var(--conversation-top-clearance, 0px) + var(--conversation-head-gap));
+  padding-bottom: calc(var(--conversation-bottom-clearance, 0px) + var(--conversation-tail-gap));
+  scroll-padding-top: var(--conversation-top-clearance, 0px);
+  scroll-padding-bottom: var(--conversation-bottom-clearance, 0px);
+}
 
 .conversation-shell.has-history-navigator .chat-scroll {
   padding-left: 54px;
@@ -34,15 +53,13 @@
 
 /* Floating composer panels overlay the timeline; reserve clearance so a
    bottom-pinned last line always lands above the collapsed panel peek. */
-.conversation-shell.has-composer-panels .chat-scroll {
-  padding-bottom: 46px;
-}
+.conversation-shell.has-composer-panels { --conversation-tail-gap: 46px; }
 
 .history-navigator {
   position: absolute;
   z-index: 18;
-  top: 12px;
-  bottom: 12px;
+  top: calc(var(--conversation-top-clearance, 0px) + 12px);
+  bottom: calc(var(--conversation-bottom-clearance, 0px) + 12px);
   left: 9px;
   width: 36px;
   pointer-events: none;
