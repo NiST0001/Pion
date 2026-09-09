@@ -2,9 +2,10 @@ import { relative, resolve } from 'node:path'
 import {
   createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices,
   getAgentDir, resolveModelScopeWithDiagnostics, SessionManager, SettingsManager,
-  type CreateAgentSessionRuntimeFactory
+  type CreateAgentSessionRuntimeFactory, type AgentSession, type ModelRuntime
 } from '@earendil-works/pi-coding-agent'
 import { askUserTool } from './ask-user'
+import { createSubagentControl, createSubagentRunner } from './subagents'
 
 /** Private host arguments, not a replacement for the public pi CLI. */
 export function parseRuntimeArgs(args: string[], cwd: string) {
@@ -34,11 +35,14 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
     // Each backend belongs to one project. Cross-project switches must go
     // through AgentBridge, which checks the target project's trust first.
     if (relative(root, resolve(cwd)) !== '') throw new Error('跨项目会话切换必须由 Pion 工作台发起')
+    let parent: AgentSession
+    let models: ModelRuntime
+    const subagents = createSubagentControl(createSubagentRunner(() => parent, () => models, cwd, agentDir))
     const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: options.approved })
     const services = await createAgentSessionServices({
       cwd, agentDir, settingsManager,
       modelRuntimeSignal: AbortSignal.timeout(15_000),
-      resourceLoaderOptions: { additionalExtensionPaths: options.extensions }
+      resourceLoaderOptions: { additionalExtensionPaths: options.extensions, extensionFactories: [subagents.extension] }
     })
     const patterns = settingsManager.getEnabledModels()
     const scope = patterns?.length
@@ -54,8 +58,10 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
       model: selected?.model,
       thinkingLevel: selected?.thinkingLevel,
       scopedModels: scope.scopedModels,
-      customTools: [askUserTool]
+      customTools: [askUserTool, subagents.tool]
     })
+    parent = created.session
+    models = services.modelRuntime
     return { ...created, services, diagnostics: [...services.diagnostics, ...scope.diagnostics] }
   }
   return createAgentSessionRuntime(createRuntime, { cwd: root, agentDir, sessionManager })

@@ -16,7 +16,7 @@ import { useWindowEffects } from './hooks/useWindowEffects'
 import { useDeferredMount } from './hooks/useDeferredMount'
 import { useSessionResourceStage } from './hooks/useSessionResourceStage'
 import { useSessionModes } from './hooks/useSessionModes'
-import { deriveAgentTodos, deriveLatestRunChanges } from './agent/timeline'
+import { deriveLatestRunChanges } from './agent/timeline'
 import { deriveWorkingStatus } from './agent/workingStatus'
 import type { FileChange } from './agent/types'
 import type {
@@ -38,6 +38,7 @@ import { QueuedMessagesCard } from './features/session/QueuedMessagesCard'
 import { ComposerSupportPanels } from './features/session/ComposerSupportPanels'
 import { ChatTimeline } from './features/chat/ChatTimeline'
 import { Composer } from './features/chat/Composer'
+import { SubagentsToggle } from './features/chat/SubagentsToggle'
 import { FavoriteSessions, ProjectList, SidebarToolbar } from './features/project/Sidebar'
 import { ReviewPanel } from './features/review/ReviewPanel'
 import { ModelPicker, ThinkingPicker } from './features/settings/ModelPicker'
@@ -282,7 +283,7 @@ export function App(): ReactElement {
   const settingsMounted = useDeferredMount(settingsOpen)
   const newSessionInFlight = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const agentTodos = useMemo(() => deriveAgentTodos(state.timeline) ?? [], [state.timeline])
+  const agentTodos = useMemo(() => (state.tasks ?? []).filter((task) => task.status !== 'deleted'), [state.tasks])
   const { visibleHistoryEntryId, handleTimelineScroll, scrollSurfaceRef } = useConversationNavigation({
     scrollRef,
     timeline: state.timeline,
@@ -997,6 +998,12 @@ export function App(): ReactElement {
               }
               controls={
                 <>
+                  <SubagentsToggle
+                    key={`${activeCwd}:${state.session?.sessionId ?? ''}`}
+                    enabled={state.session?.subagentsEnabled ?? false}
+                    disabled={!state.session?.sessionId || state.status.phase === 'starting' || state.status.phase === 'error' || projectTrust?.decision === 'ask' || ((state.mode === 'plan' || state.busy) && !state.session?.subagentsEnabled)}
+                    onChange={(enabled) => actions.setSubagentsMode(enabled, state.session?.sessionId ?? '')}
+                  />
                   <ModelPicker
                     compact
                     models={state.models}

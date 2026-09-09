@@ -303,6 +303,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC.AgentCommands, () => bridge.getCommands())
   ipcMain.handle(IPC.AgentSetMode, (_event, mode: 'build' | 'plan') => bridge.setMode(mode))
   ipcMain.handle(IPC.AgentSetYolo, (_event, enabled: boolean) => bridge.setYoloMode(enabled === true))
+  ipcMain.handle(IPC.AgentSetSubagents, (event, enabled: boolean, sessionId: string) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口切换子 Agent')
+    return bridge.setSubagentsMode(enabled, sessionId, event.sender.id)
+  })
   ipcMain.handle(IPC.AgentModels, () => bridge.getModels())
   ipcMain.handle(IPC.AgentModelProviders, () => bridge.getModelProviders())
   ipcMain.handle(

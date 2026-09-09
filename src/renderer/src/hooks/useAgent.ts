@@ -170,7 +170,8 @@ export function useAgent() {
     addModelProvider,
     setThinkingLevel,
     setMode,
-    setYoloMode
+    setYoloMode,
+    setSubagentsMode
   } = useAgentModelActions({ api, dispatch, refreshModels })
   const {
     setAutoCompaction,
@@ -233,7 +234,8 @@ export function useAgent() {
       renameSession,
       migrateSessionToProject,
       setSteeringMode,
-      setFollowUpMode
+      setFollowUpMode,
+      setSubagentsMode
     }),
     [
       bootstrap,
@@ -279,7 +281,8 @@ export function useAgent() {
       renameSession,
       migrateSessionToProject,
       setSteeringMode,
-      setFollowUpMode
+      setFollowUpMode,
+      setSubagentsMode
     ]
   )
 

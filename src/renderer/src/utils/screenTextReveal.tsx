@@ -141,10 +141,10 @@ export function RevealText({
 
   return (
     <>
-      {characters.map((character, index) => {
-        const animated = index >= start
-        const delayIndex = index - start
-        const style = animated && mode === 'live'
+      {characters.slice(0, start).join('')}
+      {characters.slice(start).map((character, delayIndex) => {
+        const index = start + delayIndex
+        const style = mode === 'live'
           ? { '--screen-text-reveal-delay': `${Math.min(delayIndex * SCREEN_TEXT_REVEAL_STAGGER_MS, SCREEN_TEXT_REVEAL_MAX_DELAY_MS)}ms` } as CSSProperties
           : undefined
         return (
@@ -152,10 +152,8 @@ export function RevealText({
             key={`${index}:${character}`}
             className={`${SCREEN_TEXT_REVEAL_CHARACTER_CLASS} ${mode === 'history'
               ? SCREEN_TEXT_REVEAL_HISTORY_CLASS
-              : animated
-                ? SCREEN_TEXT_REVEAL_LIVE_CLASS
-                : ''}`.trim()}
-            data-screen-reveal-character={animated ? 'true' : undefined}
+              : SCREEN_TEXT_REVEAL_LIVE_CLASS}`}
+            data-screen-reveal-character="true"
             style={style}
           >
             {character}
@@ -183,11 +181,9 @@ function isVisible(element: HTMLElement, containerRect: DOMRect): boolean {
  */
 export function armScreenTextReveal(container: HTMLElement, root: HTMLElement = container): void {
   const containerRect = container.getBoundingClientRect()
-  const characters = [...root.querySelectorAll<HTMLElement>(`[${SCREEN_TEXT_REVEAL_ATTRIBUTE}]`)]
-    .filter((element) => (
-      element.classList.contains(SCREEN_TEXT_REVEAL_HISTORY_CLASS)
-      && isVisible(element, containerRect)
-    ))
+  const characters = [...root.querySelectorAll<HTMLElement>(
+    `.${SCREEN_TEXT_REVEAL_HISTORY_CLASS}[${SCREEN_TEXT_REVEAL_ATTRIBUTE}]:not(.${SCREEN_TEXT_REVEAL_ARMED_CLASS})`
+  )].filter((element) => isVisible(element, containerRect))
 
   characters.forEach((element, index) => {
     // Re-scans happen when a detail body mounts or the viewport changes.

@@ -271,6 +271,7 @@
 
 .composer-inline-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   min-height: 23px;
@@ -401,5 +402,23 @@
 .send-button.stop-mode {
   opacity: 1;
   cursor: pointer;
+}
+
+.composer-subagents-control { position: relative; display: inline-flex; min-width: 0; }
+.composer-subagents-toggle {
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  padding: 4px 7px; border: 1px solid transparent; border-radius: var(--radius-sm);
+  color: var(--fg-dim); font-size: 11px; background: transparent;
+}
+.composer-subagents-toggle:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.composer-subagents-toggle[aria-pressed='true'] { color: var(--accent-strong); border-color: var(--border); background: var(--bg-hover); }
+.composer-subagents-toggle:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+.composer-subagents-toggle:disabled { opacity: .5; cursor: not-allowed; }
+.composer-subagents-error {
+  position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 5;
+  width: max-content; max-width: min(280px, 65vw); padding: 8px 10px;
+  background: var(--bg-elev); color: var(--fg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-pop); font-size: 12px;
+  white-space: normal; overflow-wrap: anywhere;
 }
 

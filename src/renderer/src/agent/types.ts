@@ -117,6 +117,12 @@ export interface AgentState {
   /** Sessions whose latest completed run has not been opened yet. */
   unreadSessionPaths: string[]
   runningSessionPaths: string[]
+  /** Session task projection; null means not hydrated, [] means explicitly empty. */
+  tasks: AgentTodo[] | null
+  taskRevision: number
+  /** Bounded deduplication of execution/message/persistence result notifications. */
+  taskResultIds: string[]
+  taskRestore?: { id: number; revision: number }
   timeline: TimelineItem[]
   timelineMutation: 'replace' | 'prepend' | 'history-append' | 'append' | null
   timelineLoading: boolean
@@ -149,6 +155,9 @@ export const initialState: AgentState = {
   yolo: false,
   unreadSessionPaths: [],
   runningSessionPaths: [],
+  tasks: null,
+  taskRevision: 0,
+  taskResultIds: [],
   timeline: [],
   timelineMutation: null,
   timelineLoading: false,
@@ -180,6 +189,9 @@ export type Action =
   | { type: 'mode'; mode: AgentMode }
   | { type: 'runningSessionPaths'; paths: string[] }
   | { type: 'event'; event: WireEventInput }
+  | { type: 'beginTaskRestore'; id: number }
+  | { type: 'restoreTasks'; id: number; tasks: AgentTodo[] }
+  | { type: 'cachedTasks'; tasks: AgentTodo[] }
   | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode }
   | { type: 'prependEntries'; items: TimelineItem[] }
   | { type: 'appendEntries'; items: TimelineItem[] }

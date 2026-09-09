@@ -173,7 +173,9 @@ export interface PionApi {
   getRunningSessionPaths(): Promise<string[]>
   /** Session paths with a completed/failed run not yet opened in this window. */
   getUnreadSessionPaths(): Promise<string[]>
-  /** Load a bounded history window; omit before for the newest window. */
+  /** Load a bounded history window plus the latest selected-branch task snapshot;
+   * omit before for the newest window. Task state is not scoped to that page.
+   */
   getEntriesPage(
     before?: number,
     limit?: number,
@@ -204,6 +206,8 @@ export interface PionApi {
   uninstallPlugin(source: string): Promise<PluginUninstallResult>
   setMode(mode: AgentMode): Promise<void>
   setYoloMode(enabled: boolean): Promise<void>
+  /** Requires the selected session ID to reject stale UI actions. */
+  setSubagentsMode(enabled: boolean, sessionId: string): Promise<void>
   setModel(provider: string, modelId: string): Promise<void>
   getThinkingLevels(): Promise<string[]>
   setThinkingLevel(level: string): Promise<void>

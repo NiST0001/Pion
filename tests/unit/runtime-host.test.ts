@@ -34,8 +34,8 @@ it('parses only the private RPC arguments and fails closed on unknown flags', ()
 it('injects a compiled SDK tool, preserves trust gating, and recreates tools for replacement sessions', async () => {
   await createPionRuntime(['--mode', 'rpc', '--no-approve', '--extension', './permissions.ts'], cwd)
   expect(mocks.settings).toHaveBeenCalledWith(cwd, expect.any(String), { projectTrusted: false })
-  expect(mocks.session).toHaveBeenCalledWith(expect.objectContaining({ customTools: [expect.objectContaining({ name: 'pion_ask_user' })] }))
-  expect(mocks.services).toHaveBeenCalledWith(expect.objectContaining({ resourceLoaderOptions: { additionalExtensionPaths: [resolve(cwd, 'permissions.ts')] } }))
+  expect(mocks.session).toHaveBeenCalledWith(expect.objectContaining({ customTools: [expect.objectContaining({ name: 'pion_ask_user' }), expect.objectContaining({ name: 'pion_subagents' })] }))
+  expect(mocks.services).toHaveBeenCalledWith(expect.objectContaining({ resourceLoaderOptions: { additionalExtensionPaths: [resolve(cwd, 'permissions.ts')], extensionFactories: [expect.any(Function)] } }))
   const [factory, target] = mocks.runtime.mock.calls[0]
   await factory({ ...target, sessionStartEvent: { reason: 'new' } })
   expect(mocks.session).toHaveBeenCalledTimes(2)

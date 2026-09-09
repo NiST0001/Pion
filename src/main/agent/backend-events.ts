@@ -70,6 +70,9 @@ export function applyBackendEvent(
     const enabled = data && typeof data === 'object'
       ? (data as Record<string, unknown>).enabled
       : undefined
+    if (appended?.type === 'custom' && appended.customType === 'pion-subagents-state' && typeof enabled === 'boolean') {
+      backend.subagentsEnabled = enabled
+    }
     if (appended?.type === 'custom' && appended.customType === 'plan-mode-state' && typeof enabled === 'boolean') {
       const mode: AgentMode = enabled ? 'plan' : 'build'
       desiredModes.set(backend.key, mode)

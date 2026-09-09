@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   ChevronRight,
@@ -12,18 +12,15 @@ import {
 } from 'lucide-react'
 import type { ToolItem } from '../../agent/types'
 import { diffStats } from '../../agent/timeline'
-import { armHistoryRevealRow } from '../../utils/historyReveal'
 import {
-  appendedCharacterCount,
   assignLineRevealDelay,
-  assignPendingLineDelays,
-  characterCount,
-  RevealText,
+  type TextRevealMode,
   SCREEN_TEXT_REVEAL_LINE_CLASS,
   SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS,
   SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS
 } from '../../utils/screenTextReveal'
 import { DiffView } from '../review/DiffView'
+import { ReviewRevealText } from '../review/ReviewRevealText'
 import { AnimatedDisclosure } from '../common/AnimatedDisclosure'
 
 const TOOL_LABELS: Record<string, string> = {
@@ -36,7 +33,8 @@ const TOOL_LABELS: Record<string, string> = {
   find: '查找文件',
   ls: '目录',
   pion_task: '任务',
-  pion_ask_user: '提问'
+  pion_ask_user: '提问',
+  pion_subagents: '子 Agent'
 }
 
 function truncate(text: string, max: number): string {
@@ -44,45 +42,37 @@ function truncate(text: string, max: number): string {
   return `${text.slice(0, max)}…`
 }
 
+// Mount only inside the disclosure and memoize actual body inputs separately
+// from header/status updates. Closed details do no body segmentation or
+// diff-row parsing; the header's full-diff counts are cached separately.
+const ToolDetails = memo(function ToolDetails({ name, diff, command, outputText, writeContent, mode }: {
+  name: string; diff?: string; command?: string; outputText?: string; writeContent?: string; mode?: TextRevealMode
+}) {
+  const text = (value: string) => mode ? <ReviewRevealText text={value} mode={mode} /> : value
+  return <div className="tool-body" data-live-output="tool-body">
+    {diff && <DiffView diff={diff} dense reveal={mode === 'history'} />}
+    {(name === 'bash' || name === 'powershell') && command && (
+      <pre className="tool-command">{mode === 'history' ? text(`$ ${command}`) : `$ ${command}`}</pre>
+    )}
+    {outputText && !diff && <pre className="tool-output">{text(truncate(outputText, 4000))}</pre>}
+    {name === 'write' && writeContent && <pre className="tool-output">{text(truncate(writeContent, 4000))}</pre>}
+    {!diff && !outputText && !writeContent && <div className="tool-empty"><FolderOpen size={13} />{text('无输出')}</div>}
+  </div>
+})
+
 export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noReveal }: { tool: ToolItem; historical?: boolean; noReveal?: boolean }): ReactElement {
   const [open, setOpen] = useState(false)
-  const rowRef = useRef<HTMLDivElement>(null)
   const revealSuppressed = noReveal === true
-  const previousOpenRef = useRef(false)
   const isEdit = tool.name === 'edit' && Boolean(tool.diff)
   const isWrite = tool.name === 'write'
   const isShell = tool.name === 'bash' || tool.name === 'powershell'
   const label = TOOL_LABELS[tool.name] ?? tool.name
 
-  const stats = tool.diff ? diffStats(tool.diff) : null
+  const stats = useMemo(() => tool.diff ? diffStats(tool.diff) : null, [tool.diff])
   const liveOutput = tool.live === true && !historical
-  const previousBodyTextRef = useRef('')
-  const bodyText = truncate(tool.outputText ?? tool.writeContent ?? '', 4000)
-  const bodyRevealCount = liveOutput
-    ? open && !previousOpenRef.current
-      ? characterCount(bodyText)
-      : appendedCharacterCount(previousBodyTextRef.current, bodyText)
-    : 0
-
-  useLayoutEffect(() => {
-    previousBodyTextRef.current = bodyText
-    previousOpenRef.current = open
-  }, [bodyText, open])
-
-  useLayoutEffect(() => {
-    if (!historical || !open) return
-    const row = rowRef.current
-    const container = row?.closest<HTMLElement>('.chat-scroll')
-    if (!row || !container) return
-    const frame = window.requestAnimationFrame(() => {
-      assignPendingLineDelays(container)
-      armHistoryRevealRow(row, container)
-    })
-    return () => window.cancelAnimationFrame(frame)
-  }, [historical, open])
 
   return (
-    <div ref={rowRef} className={`tool-call tool-${tool.status}${historical ? ' history-reveal' : ''}`}>
+    <div className={`tool-call tool-${tool.status}${historical ? ' history-reveal' : ''}`}>
       <button
         className={`tool-head${revealSuppressed ? '' : ` ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${historical ? SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS : SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS}`}`}
         data-live-output="tool-head"
@@ -131,34 +121,9 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
       </button>
 
       <AnimatedDisclosure open={open}>
-        <div className="tool-body" data-live-output="tool-body">
-          {tool.diff && <DiffView diff={tool.diff} dense reveal={Boolean(historical)} />}
-          {isShell && tool.command && (
-            <pre className="tool-command">{historical
-              ? <RevealText text={`$ ${tool.command}`} mode="history" />
-              : `$ ${tool.command}`}</pre>
-          )}
-          {tool.outputText && !tool.diff && (
-            <pre className="tool-output">{historical
-              ? <RevealText text={truncate(tool.outputText, 4000)} mode="history" />
-              : liveOutput
-                ? <RevealText text={truncate(tool.outputText, 4000)} mode="live" revealCount={bodyRevealCount} />
-                : truncate(tool.outputText, 4000)}</pre>
-          )}
-          {isWrite && tool.writeContent && (
-            <pre className="tool-output">{historical
-              ? <RevealText text={truncate(tool.writeContent, 4000)} mode="history" />
-              : liveOutput
-                ? <RevealText text={truncate(tool.writeContent, 4000)} mode="live" revealCount={bodyRevealCount} />
-                : truncate(tool.writeContent, 4000)}</pre>
-          )}
-          {!tool.diff && !tool.outputText && !tool.writeContent && (
-            <div className="tool-empty">
-              <FolderOpen size={13} />
-              {historical ? <RevealText text="无输出" mode="history" /> : '无输出'}
-            </div>
-          )}
-        </div>
+        <ToolDetails name={tool.name} diff={tool.diff} command={tool.command}
+          outputText={tool.outputText} writeContent={tool.writeContent}
+          mode={revealSuppressed ? undefined : historical ? 'history' : liveOutput ? 'live' : undefined} />
       </AnimatedDisclosure>
     </div>
   )

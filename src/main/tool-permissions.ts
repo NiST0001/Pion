@@ -202,7 +202,7 @@ const DEFAULTS = { read: "allow", write: "allow", shell: "allow", network: "ask"
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const SHELL_TOOLS = new Set(["bash", "powershell"]);
-const PION_INTERNAL_TOOLS = new Set(["pion_task", "pion_ask_user"]);
+const PION_INTERNAL_TOOLS = new Set(["pion_task", "pion_ask_user", "pion_subagents"]);
 const NETWORK_TOOL = /(web|http|fetch|browser|search|crawl|url|download|upload|request|api)/i;
 const NETWORK_COMMAND = /(^|[;&|\s])(curl|wget|ssh|scp|sftp|rsync|telnet|nc|ncat|ftp|gh\s+api|git\s+(clone|fetch|pull|push)|npm\s+(install|publish|view)|pnpm\s+(add|install)|yarn\s+(add|install)|pip\s+install|cargo\s+install|docker\s+pull|kubectl\s+)/i;
 const DESTRUCTIVE_COMMAND = /(\brm\s+[^\n]*(?:-r|-f|--recursive|--force)|\bsudo\b|\b(?:chmod|chown)\b|\bmkfs\b|\bdd\s+[^\n]*\bof=|\b(?:shutdown|reboot|poweroff)\b|\bgit\s+(?:reset\s+--hard|clean\s+-[^\n]*f|checkout\s+--)|:\s*>\s*\/dev\/sd)/i;
@@ -334,17 +334,21 @@ function classify(event, ctx) {
 }
 
 async function checkpointGate(event, ctx) {
-  if (CHECKPOINT_READ_ONLY.has(event.toolName)) return;
+  // Delegated tools re-enter this gate individually with the parent's context.
+  if (event.toolName === "pion_subagents" || CHECKPOINT_READ_ONLY.has(event.toolName)) return;
   if (!ctx.hasUI) return;
   try {
-    await ctx.ui.select(CHECKPOINT_MARKER, ["ready"], { timeout: CHECKPOINT_TIMEOUT });
+    await ctx.ui.select(CHECKPOINT_MARKER, ["ready"], { timeout: CHECKPOINT_TIMEOUT, signal: event.input?.[Symbol.for("pion.subagent.abort")] });
   } catch {
     // A checkpoint failure must never block the tool call itself.
   }
 }
 
 async function gate(event, ctx) {
+  const signal = event.input?.[Symbol.for("pion.subagent.abort")];
+  if (signal?.aborted) return { block: true, reason: "子 Agent 已中止" };
   await checkpointGate(event, ctx);
+  if (signal?.aborted) return { block: true, reason: "子 Agent 已中止" };
   if (PION_INTERNAL_TOOLS.has(event.toolName)) return undefined;
   const request = classify(event, ctx);
   const policy = readPolicy(ctx.cwd);
@@ -362,6 +366,7 @@ async function gate(event, ctx) {
   const canRemember = !forced;
   const metadata = {
     ...request,
+    subagent: typeof event.toolCallId === "string" && event.toolCallId.startsWith("subagent-"),
     cwd: canonical(ctx.cwd),
     sessionPath: ctx.sessionManager.getSessionFile() || undefined,
     canRemember
@@ -370,7 +375,8 @@ async function gate(event, ctx) {
   if (!forced) options.push("allow-session");
   if (canRemember) options.push("allow-project");
   options.push("deny");
-  const choice = await ctx.ui.select(MARKER + JSON.stringify(metadata), options, { timeout: TIMEOUT });
+  const choice = await ctx.ui.select(MARKER + JSON.stringify(metadata), options, { timeout: TIMEOUT, signal });
+  if (signal?.aborted) return { block: true, reason: "子 Agent 已中止" };
   if (choice === "allow-session") {
     sessionAllows.add(sessionKey);
     return undefined;

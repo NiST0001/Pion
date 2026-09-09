@@ -94,7 +94,27 @@ export interface RunOperation {
   revision: number
 }
 
+/** Waiting prompts (including cancelled, never-dispatched queue items) are not metrics. */
+export function isRunMetricsCandidate(run: RunOperation): boolean {
+  return run.state !== 'queued' && (run.state !== 'discarded'
+    || run.dispatchedAt !== undefined || run.agentStartedAt !== undefined)
+}
+
+export function isExecutingRun(run: RunOperation): boolean {
+  return run.state === 'dispatching' || run.state === 'running' || run.state === 'ending'
+}
+
+/** Preserve executing runs before applying a bounded metrics window. */
+export function compareMetricsRuns(left: RunOperation, right: RunOperation): number {
+  return Number(isExecutingRun(right)) - Number(isExecutingRun(left))
+    || (right.agentStartedAt ?? right.dispatchedAt ?? right.createdAt)
+      - (left.agentStartedAt ?? left.dispatchedAt ?? left.createdAt)
+    || right.createdAt - left.createdAt
+}
+
 export interface RunTelemetryQuery {
+  /** Filter queue-only records before limiting; order executing runs first. */
+  metricsOnly?: boolean
   sessionPath?: string
   cwd?: string
   limit?: number

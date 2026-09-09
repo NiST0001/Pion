@@ -151,6 +151,7 @@ const api: PionApi = {
     ipcRenderer.invoke(IPC.PluginsUninstall, source) as Promise<PluginUninstallResult>,
   setMode: (mode: AgentMode) => ipcRenderer.invoke(IPC.AgentSetMode, mode),
   setYoloMode: (enabled: boolean) => ipcRenderer.invoke(IPC.AgentSetYolo, enabled),
+  setSubagentsMode: (enabled: boolean, sessionId: string) => ipcRenderer.invoke(IPC.AgentSetSubagents, enabled, sessionId),
   getAvailableModels: () => ipcRenderer.invoke(IPC.AgentModels),
   listModelProviders: () =>
     ipcRenderer.invoke(IPC.AgentModelProviders) as Promise<ModelProviderInfo[]>,

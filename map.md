@@ -10,7 +10,9 @@
 | src/preload/index.ts | 暴露 window.pion 的类型化桥接 |
 | src/shared/ipc.ts | 请求与事件频道 |
 | src/shared/pion-api.ts | PionApi 接口 |
-| src/shared/types.ts | 共享类型入口 |
+| src/shared/types.ts | 共享类型入口；历史分页响应另带所选分支的最新任务快照 |
+| src/shared/task-history.ts | 原生/旧版任务结果校验、按用户轮次归档；区分有效空快照与错误/缺失结果 |
+| src/shared/operations.ts | 运行/恢复数据契约，以及主进程与 renderer 共用的统计候选筛选、执行状态判定和排序 |
 | src/shared/release-notes.ts | 关于页内置发布日志，按版本倒序维护 |
 | src/shared/terminal.ts | PTY 终端快照与增量输出契约 |
 | src/shared/window-effects.ts | 原生外观后端、启用/生效状态、重启需求与 revision 契约 |
@@ -26,7 +28,9 @@
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态 |
 | src/main/agent/queue-projection.ts | 本地队列与原生队列投影 |
 | src/main/agent/task-planning.ts | 原生任务工具与扩展 |
+| src/main/agent/wire.ts | SDK 条目映射、模式推导、沿当前叶节点祖先链恢复最新任务快照 |
 | src/main/agent-runtime.ts、src/main/agent/runtime-host.ts | 编译后的 SDK RPC 子进程入口、私有启动参数、项目隔离/信任与会话替换时重建内置工具 |
+| src/main/agent/subagents.ts | 内置子 Agent 开关及 SDK 委派：有界并发/取消、父级工具权限与检查点转发、兄弟写入串行化、结果与模型用量汇总 |
 | src/main/agent/ask-user.ts | SDK customTools 内置提问，选项/自由回答、取消和中止保护；不依赖提问插件 |
 | src/main/agent/plan-mode.ts | 计划模式扩展 |
 | src/main/agent/pending-requests.ts | 待处理权限与扩展 UI 请求 |
@@ -34,7 +38,7 @@
 | src/main/tool-permissions.ts | 工具权限规则、worktree 继承与执行闸门 |
 | src/main/projects.ts | 项目列表管理 |
 | src/main/app-settings.ts | 桌面应用设置与会话模型偏好 |
-| src/main/run-store.ts | 运行记录、指标与恢复持久化 |
+| src/main/run-store.ts | 运行记录、指标与恢复持久化；统计专用查询在截取前排除队列记录，不改变默认恢复查询 |
 | src/main/checkpoints.ts | Git 检查点与回滚 |
 | src/main/git-service.ts、git.ts、git/ | Git 工作区服务、命令与解析；numstat.ts 解析分层变更行数 |
 | src/main/verification.ts | 验证计划和自动验证 |
@@ -49,11 +53,11 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| src/renderer/src/agent/types.ts、reducer.ts | UI 状态和事件归约 |
-| src/renderer/src/agent/timeline.ts | 会话条目转时间线、缓存和分页类型 |
+| src/renderer/src/agent/types.ts、reducer.ts | UI 状态和事件归约；独立任务快照、结果有界去重、恢复请求与实时 revision 保护 |
+| src/renderer/src/agent/timeline.ts | 会话条目转时间线、缓存和分页类型；缓存单独保留任务快照，不能以当前页有无任务记录替代 |
 | src/renderer/src/agent/sessionFavorites.ts、sessionOrder.ts | 收藏与排序 |
 | src/renderer/src/hooks/useAgent.ts | Agent hooks 汇总、启动及模型刷新 |
-| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换、跳转窗口、事件驱动的实时索引更新；从当前游标查询是否还有后续历史，避免把页末当成会话末尾 |
+| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换、跳转窗口、任务快照恢复、事件驱动的实时索引更新；从当前游标查询是否还有后续历史，避免把页末当成会话末尾 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
 | src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随；历史参考点避让上下浮层，顶部余量变化补偿阅读位置，显式跳转释放旧占位并锁定目标 |
@@ -61,7 +65,7 @@
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
 | src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1 缓存迁移；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
-| src/renderer/src/hooks/useRunTelemetry.ts、useRunRecovery.ts | 运行统计与恢复 |
+| src/renderer/src/hooks/useRunTelemetry.ts、useRunRecovery.ts | 运行统计与恢复；统计排除未派发队列，执行中优先，按实际派发/启动时间排序，保留有界 revision 防止迟到快照复活已退回队列的记录 |
 | src/renderer/src/hooks/useSessionResourceStage.ts | 会话首次就绪后按阶段启动次级资源；同会话历史加载不中断阶段和实时订阅 |
 | src/renderer/src/hooks/useGitWorkspace.ts | Git UI 数据与操作 |
 | src/renderer/src/hooks/useWindowEffects.ts | 原生外观状态订阅、过期快照保护、设置操作及根元素透明标志 |
@@ -70,11 +74,11 @@
 
 以下目录位于 `src/renderer/src/features/`：
 
-- `chat/`：ChatTimeline（含稳定的滚动占位容器）、ChatMessage、Markdown、ToolCallItem、Composer；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
+- `chat/`：ChatTimeline（含稳定的滚动占位容器）、ChatMessage、Markdown、ToolCallItem、Composer；`SubagentsToggle.tsx` 是输入框内按会话隔离的子 Agent 开关，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
 - `session/`：HistoryNavigator 跳转条、SessionList 会话行、QueuedMessagesCard、TaskPanel、TaskHistoryPanel；`ComposerSupportPanels.tsx` 保持任务/排队面板的网格槽位稳定，支持平滑让位。
 - `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
 - `operations/`：RunMetricsStrip、权限确认、验证、运行恢复和工作流面板。RunMetricsStrip 保留在会话顶部，详情在统计条下方同宽悬浮展开，不占消息区高度；任务/排队面板仍在输入框上方。
-- `review/`：Git 改动列表、差异与审查界面。ModifiedFilesCard 使用工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 共享可见性观察器，保留字符渐入并在结束后回收字符节点。
+- `review/`：Git 改动列表、差异与审查界面。ModifiedFilesCard 使用工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 与工具正文共用可见性观察器，按小段延迟创建动画字符，保留渐入并在结束后回收节点，实时文字仅动画新增后缀；DiffView 对长差异分页，工具内使用有界滚动区，保留全部差异的翻页访问。
 - `settings/`：设置、模型选择器与模型配置页；`ReleaseNotes.tsx` 在关于 Pion 页展示可展开的更新日志；`WindowEffectsSettings.tsx` 提供原生半透明开关、平台能力与重启/兼容说明。
 - `capabilities/`：技能工具列表与插件商店；`SkillsToolsModal.tsx` 将 Pion 内置任务/提问与插件工具区分展示。
 - `chrome/`：窗口标题栏等外壳组件；`DockHeader.tsx` 提供简洁拖动标题、带目标/方向图标的自定义布局菜单和隐藏按钮。
@@ -90,7 +94,7 @@
 - `styles/window-effects.css`：连续工作区底色与局部磨砂；悬浮输入框/统计条、侧栏底部设置/插件商店栏、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。
 - `styles/motion.css`：通用动效、详情网格高度过渡、工具箭头旋转及减少动态效果适配。
-- `utils/screenTextReveal.tsx`、`utils/historyReveal.ts`：文字渐入调度与历史行启用。
+- `utils/screenTextReveal.tsx`、`utils/historyReveal.ts`：文字渐入调度与历史行启用；静态前缀保留为文本节点，扫描跳过已启用字符的重复几何测量。
 - `utils/theme.ts`、`utils/metricsSettings.ts`：主题与统计显示偏好。
 
 上面 styles/、utils/ 简写均相对于 `src/renderer/src/`。
@@ -98,28 +102,33 @@
 ## 测试定位
 
 - `tests/unit/`：后端策略、队列、运行记录、迁移和 reducer 等逻辑测试；`agent-compaction-state.test.ts` 覆盖压缩生命周期、迟到快照与会话切换重置；`compaction-context-usage.test.ts` 覆盖手动/自动压缩后的用量作废、失败保留和新响应用量更新。
+- `tests/unit/session-tasks.test.ts`：缺少工具开始行仍接收任务、重复结果去重、空快照/错误区分、分页及异步恢复保护、分支祖先链和独立缓存。
 - `tests/renderer/`：React 组件及 hooks 测试。
+  - `sessionTasks.test.tsx`：任务记录在历史页之外的恢复、跳转保留面板节点、请求期间实时清空、跨会话迟到结果、缓存无需重绘时恢复快照，以及复制/分叉/删除的任务作用域重置和取消保留。
   - `conversationFollow.test.tsx`：用户离开/接近/回到末尾时的新输出行为、无 scroll 事件时恢复跟随、连续手势和延迟布局；程序化定位不代表用户恢复跟随。
   - `historyPaging.test.tsx`：无 scroll 事件的边界输入、在途去重、嵌套输出区、失败重试、旧填充请求隔离，以及跳转后连续加载多页直到真实会话末尾；区分历史追加与实时追加。
   - `conversationNavigation.test.tsx`：密集短消息定位、底部位置受限时保持明确点击目标；浮层余量变化补偿与无遮挡历史参考点；历史跳转、同会话替换、尺寸变化和程序化滚动不恢复跟随。
   - `conversationOverlays.test.tsx`：统计条/输入区域尺寸观测、详情展开不改变余量、条件挂载与 observer 清理、草稿节点身份保持。
-  - `runTelemetry.test.tsx`：较旧遥测快照或事件不得覆盖压缩后的较新用量状态。
+  - `runTelemetry.test.tsx`：较旧遥测快照或事件不得覆盖压缩后的较新用量状态；排队突增不挤掉执行统计、派发后切换、取消排队不抢占、迟到快照不复活退回队列的记录。
   - `sessionResourceStage.test.tsx`：首次就绪门控、真实会话切换重置，以及历史加载期间统计条/详情保留、订阅不断开并持续更新。
-  - `RunMetricsStrip.test.tsx`：统计摘要、上下文待更新、详情浮层开关与外部点击/Escape 收起。
-  - `AnimatedDisclosure.test.tsx`、`ToolCallItem.test.tsx`：详情按需挂载、收起后清理、快速反向操作、减少动态效果与工具文字渐入。
+  - `RunMetricsStrip.test.tsx`：统计摘要、有限窗口累计口径、上下文待更新、详情浮层开关与外部点击/Escape 收起。
+  - `AnimatedDisclosure.test.tsx`、`ToolCallItem.test.tsx`：详情按需挂载、收起后清理、快速反向操作、减少动态效果、工具文字渐入及字符回收后状态更新不重建正文。
   - `ComposerSupportPanels.test.tsx`：任务/排队槽位切换时保留 DOM、草稿和挂载状态。
   - `HistoryNavigator.test.tsx`：跳转条交互，实时索引增加时保留手动浏览的范围。
-  - `loadingScroll.test.tsx`：初次加载可滚入空白、部分渲染不缩短滚动范围、首个 scroll 前手势生效、会话切换/空加载的程序化 scroll 不锁住占位、分页保留消息屏幕位置及加载中的向上滚动、占位不遮蔽分页位移、补偿不连锁分页、跳转短页前释放旧空白范围且滚至末尾不回拉，以及用户取消待执行跳转。
+  - `loadingScroll.test.tsx`：详情反复展开/动画折叠后回收高度且钳制不恢复跟随、保留无关加载占位、初次加载可滚入空白、部分渲染不缩短滚动范围、首个 scroll 前手势生效、会话切换/空加载的程序化 scroll 不锁住占位、分页保留消息屏幕位置及加载中的向上滚动、占位不遮蔽分页位移、补偿不连锁分页、跳转短页前释放旧空白范围且滚至末尾不回拉，以及用户取消待执行跳转。
   - `liveHistoryIndex.test.tsx`：忙碌时按落盘/完成事件更新索引、在途事件补刷新、过滤 token 增量、读取失败保留与会话隔离。
-  - `Composer.test.tsx`：输入框、@ 参考、回车发送与斜杠命令。
+  - `Composer.test.tsx`：输入框、@ 参考、回车发送与斜杠命令；`SubagentsToggle.test.tsx` 覆盖子 Agent 开关状态、在途去重与跨会话错误隔离。
   - `SortableSidebarGroup.test.tsx`：项目/分支排序持久化及隐藏项、新增项的顺序处理。
   - `SessionList.test.tsx`：会话行状态与未读标记。
-  - `ReviewRevealText.test.tsx`：审查字符动画结束后释放节点。
+  - `ReviewRevealText.test.tsx`：可见分块才创建动画字符、动画结束释放节点、实时追加保留旧块、减少动效不分配字符节点。
+  - `DiffView.test.tsx`：长工具差异限制挂载行数、完整分页访问、追加保留当前页及收缩后的页码校正。
   - `ReleaseNotes.test.tsx`：更新日志版本展示与默认展开状态。
   - `windowEffects.test.tsx`：原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条与实底回退的源码契约（不替代 GPU 真机验证）。
   - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1 迁移、拖动预览与菜单操作时不重挂载内容。
+- `tests/unit/run-store.test.ts`：运行持久化与中断恢复、统计查询在限制条数前过滤排队消息，默认查询保留队列。
 - `tests/unit/terminal-service.test.ts`：项目终端复用、窗口归属校验、有界输出、并发打开和关闭清理（使用模拟 PTY）。
 - `tests/unit/window-effects.test.ts`、`window-effects-settings.test.ts`：模拟原生 API 的平台选择、Linux 重启边界、窗口归属、高对比度/失败回退及偏好持久化；不替代平台真机验证。
+- `tests/unit/subagents.test.ts`、`subagent-runner.test.ts`、`subagents-bridge.test.ts`、`subagent-permissions.test.ts`：默认关闭、有界并发/取消、继承工具与权限拒绝、串行写入、会话归属及迟到请求、子模型计费去重与权限交互取消。
 - `tests/unit/ask-user.test.ts`、`runtime-host.test.ts`：内置提问选择/自定义回答、取消/无 UI/中止、回答长度上限，以及 SDK 工具注入、启动参数与跨项目隔离；`plan-mode.test.ts` 覆盖 SDK 提问工具的计划模式白名单。
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
 - `tests/unit/session-sidebar-sync.test.ts`：新会话首次落盘后的项目列表推送；`optimistic-session.test.ts` 覆盖占位替换和跨项目列表隔离。

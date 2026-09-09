@@ -132,7 +132,7 @@ export function RunMetricsStrip({
         {sessionTotals && (
           <span
             className="run-metric run-metric-session"
-            title={`整个会话累计：输入 ${sessionTotals.usage.input} / 输出 ${sessionTotals.usage.output} / 缓存 ${sessionTotals.usage.cacheRead}`}
+            title={`当前已加载运行累计（不含排队消息）：输入 ${sessionTotals.usage.input} / 输出 ${sessionTotals.usage.output} / 缓存 ${sessionTotals.usage.cacheRead}`}
           >
             <span className="run-metric-session-label">会话</span>
             {showDuration && formatDuration(sessionTotals.duration)}

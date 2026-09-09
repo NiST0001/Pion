@@ -2,7 +2,8 @@
  * SDK 会话形状 -> 渲染进程 wire 类型的映射与判定。
  */
 import type { SessionEntry, SessionTreeNode } from '@earendil-works/pi-coding-agent'
-import type { AgentMode, TreeNodeLite, WireEntry, WireMessage } from '../../shared/types'
+import type { AgentMode, SessionTask, TreeNodeLite, WireEntry, WireMessage } from '../../shared/types'
+import { taskSnapshotFromResult } from '../../shared/task-history'
 import { messageText, messageToolCalls } from '../../shared/types'
 
 /** Derive the current build/plan mode from Pion plan-mode-state custom entries. */
@@ -19,6 +20,29 @@ export function sessionMode(entries: SessionEntry[]): AgentMode {
     if (typeof enabled === 'boolean') mode = enabled ? 'plan' : 'build'
   }
   return mode
+}
+
+/** Latest valid full task snapshot on the selected branch, not the visible page.
+ * Follow parent ids so an abandoned branch cannot resurrect its task list.
+ */
+export function sessionTasks(entries: SessionEntry[], leafId: string | null): SessionTask[] {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]))
+  const visited = new Set<string>()
+  let id = leafId
+  while (id && !visited.has(id)) {
+    visited.add(id)
+    const entry = byId.get(id)
+    if (!entry) break
+    if (entry.type === 'message') {
+      const message = entry.message as unknown as WireMessage
+      if (message.role === 'toolResult') {
+        const tasks = taskSnapshotFromResult(message.toolName, message)
+        if (tasks !== undefined) return tasks // [] is an explicit clear, not missing data.
+      }
+    }
+    id = entry.parentId
+  }
+  return []
 }
 
 function isToolResult(entry: SessionEntry): boolean {

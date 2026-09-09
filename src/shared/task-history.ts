@@ -41,6 +41,16 @@ export function normalizeSessionTasks(raw: unknown): SessionTask[] | undefined {
   return tasks
 }
 
+/** Missing/malformed/error results are not an empty task list. */
+export function taskSnapshotFromResult(toolName: unknown, result: unknown): SessionTask[] | undefined {
+  if (!isTaskToolName(toolName) || !result || typeof result !== 'object') return undefined
+  const record = result as Record<string, unknown>
+  if (record.isError) return undefined
+  const details = record.details
+  if (!details || typeof details !== 'object') return undefined
+  return normalizeSessionTasks((details as Record<string, unknown>).tasks)
+}
+
 function taskKey(task: SessionTask): string {
   return `${typeof task.id}:${String(task.id)}`
 }

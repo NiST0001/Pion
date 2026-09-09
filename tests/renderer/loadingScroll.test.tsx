@@ -5,7 +5,7 @@ import { useConversationNavigation } from '../../src/renderer/src/hooks/useConve
 import type { TimelineItem } from '../../src/renderer/src/agent/types'
 
 beforeEach(() => vi.useFakeTimers())
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 const item: TimelineItem = { kind: 'user', id: 1, text: 'loaded' }
 
 function setup(loading: boolean, content = 0) {
@@ -51,6 +51,59 @@ function setup(loading: boolean, content = 0) {
     }
   }
 }
+
+it('reclaims collapsed detail height even when the outer surface remains pinned', () => {
+  let resize = () => {}
+  const observed: Element[] = []
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: () => void) { resize = callback }
+    observe(element: Element) { observed.push(element) }
+    disconnect() {}
+  })
+  const h = setup(false, 1000)
+  expect(observed).toContain(h.element.querySelector('.timeline'))
+  // Open a detail, scroll inside the expanded history, then collapse it in
+  // several animation frames without changing the timeline array.
+  for (let pass = 0; pass < 2; pass++) {
+    h.content(4000)
+    act(() => resize())
+    h.element.dispatchEvent(new WheelEvent('wheel', { deltaY: -200 }))
+    h.element.scrollTop = 3000
+    act(() => h.result.current.handleTimelineScroll())
+    expect(h.surface.style.minHeight).toBe('4000px')
+    h.content(2500)
+    act(() => resize())
+    expect(h.element.scrollHeight).toBe(2500)
+    h.content(1000)
+    act(() => resize())
+    expect(h.element.scrollHeight).toBe(1000)
+    expect(h.element.scrollTop).toBe(600)
+    act(() => h.result.current.handleTimelineScroll())
+    // Clamping to the smaller end must not silently restore live following.
+    h.content(1400)
+    act(() => resize())
+    expect(h.element.scrollTop).toBe(600)
+  }
+})
+
+it('preserves unrelated loading blank space when a detail later shrinks', () => {
+  let resize = () => {}
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: () => void) { resize = callback }
+    observe() {}
+    disconnect() {}
+  })
+  const h = setup(true)
+  h.element.dispatchEvent(new WheelEvent('wheel', { deltaY: 300 }))
+  h.element.scrollTop = 300
+  act(() => h.result.current.handleTimelineScroll())
+  h.content(400)
+  h.rerender({ ...h.options, timeline: [item], timelineLoading: false })
+  h.content(200)
+  act(() => resize())
+  expect(h.element.scrollHeight).toBe(1000)
+  expect(h.element.scrollTop).toBe(300)
+})
 
 it('lets users scroll into blank loading space and keeps it when partial content arrives', () => {
   const h = setup(true)

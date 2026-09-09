@@ -62,6 +62,8 @@ export interface BackendRecord {
   busy: boolean
   compacting: boolean
   modePrimed?: AgentMode
+  subagentsEnabled?: boolean
+  subagentsModePending?: boolean
   completionState?: 'completed' | 'aborted' | 'failed'
   /** A low-level agent_end asked Pi to continue via retry/compaction. */
   awaitingRetry?: boolean

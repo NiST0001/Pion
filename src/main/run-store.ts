@@ -8,6 +8,8 @@ import type {
   TokenUsage
 } from '../shared/operations'
 
+import { compareMetricsRuns, isRunMetricsCandidate } from '../shared/operations'
+
 interface RunStoreFile {
   version: 1
   runs: RunOperation[]
@@ -151,7 +153,8 @@ export class RunStore {
     return [...this.runs.values()]
       .filter((run) => !sessionPath || run.sessionPath === sessionPath)
       .filter((run) => !cwd || run.cwd === cwd)
-      .sort((left, right) => right.createdAt - left.createdAt)
+      .filter((run) => !query.metricsOnly || isRunMetricsCandidate(run))
+      .sort(query.metricsOnly ? compareMetricsRuns : (left, right) => right.createdAt - left.createdAt)
       .slice(0, limit)
       .map(cloneRun)
   }

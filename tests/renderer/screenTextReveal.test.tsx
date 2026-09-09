@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Markdown } from '../../src/renderer/src/features/chat/Markdown'
 import {
   appendedCharacterCount,
+  armScreenTextReveal,
   resetLineRevealClock,
   RevealText,
   takeLineRevealSlot
@@ -20,6 +21,28 @@ describe('screen text reveal', () => {
     expect(characters).toHaveLength(3)
     expect(characters.map((element) => element.textContent)).toEqual(['A', '\n', '好'])
     expect(characters.every((element) => element.classList.contains('screen-text-reveal-live'))).toBe(true)
+  })
+
+  it('keeps a long settled prefix as text rather than thousands of character spans', () => {
+    const text = 'x'.repeat(10000) + 'new'
+    const { container } = render(<RevealText text={text} mode="live" revealCount={3} />)
+    expect(container.textContent).toBe(text)
+    expect(container.querySelectorAll('span')).toHaveLength(3)
+  })
+
+  it('does not remeasure already armed history characters on later scroll scans', () => {
+    const root = document.createElement('div')
+    root.innerHTML = '<span class="screen-text-reveal-history screen-text-reveal-armed" data-screen-reveal-character="true">a</span><span class="screen-text-reveal-history" data-screen-reveal-character="true">b</span>'
+    const rect = { top: 0, bottom: 10, width: 20, height: 10 } as DOMRect
+    root.getBoundingClientRect = () => rect
+    const oldMeasure = vi.fn(() => rect)
+    const newMeasure = vi.fn(() => rect)
+    ;(root.children[0] as HTMLElement).getBoundingClientRect = oldMeasure
+    ;(root.children[1] as HTMLElement).getBoundingClientRect = newMeasure
+    armScreenTextReveal(root)
+    armScreenTextReveal(root)
+    expect(oldMeasure).not.toHaveBeenCalled()
+    expect(newMeasure).toHaveBeenCalledOnce()
   })
 
   it('assigns each Markdown line one fixed delay that survives re-parses', () => {

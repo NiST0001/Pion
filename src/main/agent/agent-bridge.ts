@@ -86,6 +86,7 @@ import { restoreSessionModelPreference } from './session-preferences'
 import {
   filterToolResults,
   sessionMode,
+  sessionTasks,
   toTreeNodeLite,
   toWireEntry,
   toolCallIds
@@ -499,7 +500,8 @@ export class AgentBridge {
         toolName: parsed.toolName,
         category,
         policyCategories: [...new Set(categories)],
-        summary: parsed.summary,
+        summary: parsed.subagent ? `子 Agent · ${parsed.summary}` : parsed.summary,
+        ...(parsed.subagent ? { subagent: true } : {}),
         detail: parsed.detail,
         risks: parsed.risks,
         canRemember: parsed.canRemember,
@@ -991,7 +993,7 @@ export class AgentBridge {
     }
 
     if (type === 'tool_execution_end') {
-      const tool = event as { toolCallId?: unknown; toolName?: unknown; isError?: unknown }
+      const tool = event as { toolCallId?: unknown; toolName?: unknown; isError?: unknown; result?: { usage?: unknown } }
       if (typeof tool.toolCallId !== 'string') return
       this.runStore.update(runId, (run) => {
         let timing = run.tools.find((candidate) => candidate.toolCallId === tool.toolCallId)
@@ -1003,6 +1005,11 @@ export class AgentBridge {
             startedAt: now
           }
           run.tools.push(timing)
+        }
+        // Child usage is cumulative billing, never the parent's context size.
+        if (tool.toolName === 'pion_subagents' && timing.endedAt === undefined) {
+          const usage = normalizeTokenUsage(tool.result?.usage)
+          if (usage) run.usage = addTokenUsage(run.usage, usage)
         }
         timing.state = tool.isError ? 'failed' : 'completed'
         timing.isError = Boolean(tool.isError)
@@ -1657,6 +1664,9 @@ export class AgentBridge {
       const type = (event as { type?: string }).type
       if (type === 'extension_ui_request' && this.handleExtensionUiRequest(backend, event)) return
 
+      if (type === 'tool_execution_end' && (event as { toolName?: string }).toolName === 'pion_subagents') {
+        this.clearSubagentPermissions(backend)
+      }
       let forwardedEvent = event
       if (type === 'queue_update') {
         const queue = event as { steering?: unknown; followUp?: unknown }
@@ -1744,6 +1754,9 @@ export class AgentBridge {
       if (this.activeKey !== backend.key) return
       if (type === 'agent_start') this.setActiveBackendStatus()
       this.win?.webContents.send(EVENT_CHANNEL, forwardedEvent)
+      if (type === 'entry_appended' && (event as { entry?: { customType?: string } }).entry?.customType === 'pion-subagents-state') {
+        void this.pushSessionInfo()
+      }
       if (typeof type === 'string' && STATE_REFRESH_EVENTS.has(type)) {
         void this.pushSessionInfo()
         void this.refreshSidebarSessions()
@@ -2558,7 +2571,8 @@ export class AgentBridge {
       end,
       total,
       leafId: result.leafId,
-      mode: sessionMode(result.entries)
+      mode: sessionMode(result.entries),
+      taskSnapshot: sessionTasks(result.entries, result.leafId)
     }
   }
 
@@ -2602,6 +2616,38 @@ export class AgentBridge {
     if (enabled) this.yoloSessions.add(key)
     else this.yoloSessions.delete(key)
     void this.pushSessionInfo()
+  }
+
+  private clearSubagentPermissions(backend: BackendRecord): void {
+    for (const request of this.getPendingToolPermissionRequests()) {
+      const pending = this.pendingRequests.getToolPermission(request.id)
+      if (!request.subagent || pending?.backendKey !== backend.key) continue
+      this.respondToExtensionUi(backend.client, pending.extensionRequestId, { value: 'deny' })
+      this.clearToolPermissionRequest(request.id)
+    }
+  }
+
+  async setSubagentsMode(enabled: boolean, sessionId: string, ownerId: number): Promise<void> {
+    if (this.win?.webContents.id !== ownerId) throw new Error('只允许所属主窗口切换子 Agent')
+    if (typeof enabled !== 'boolean' || typeof sessionId !== 'string' || !sessionId || sessionId.length > 200) throw new Error('子 Agent 开关参数无效')
+    const backend = this.getActiveBackend()
+    if (!backend) throw new Error('会话尚未就绪')
+    if (backend.subagentsModePending) throw new Error('子 Agent 开关正在切换')
+    backend.subagentsModePending = true
+    try {
+      await backend.startPromise
+      const [state, commands] = await Promise.all([backend.client.getState(), backend.client.getCommands()])
+      if (this.activeKey !== backend.key || state.sessionId !== sessionId) throw new Error('会话已切换，请重试')
+      if (enabled && (backend.busy || backend.compacting || state.isStreaming || state.isCompacting)) throw new Error('请等待当前执行完成后开启子 Agent')
+      if (enabled && this.desiredModes.get(backend.key) === 'plan') throw new Error('计划模式不启用编码子 Agent')
+      if (!commands.some((command) => command.name === 'pion-subagents')) throw new Error('当前运行时不支持内置子 Agent')
+      await backend.client.prompt(enabled ? '/pion-subagents on' : '/pion-subagents off')
+      backend.subagentsEnabled = enabled
+      if (!enabled) this.clearSubagentPermissions(backend)
+      if (this.activeKey === backend.key) await this.pushSessionInfo()
+    } finally {
+      backend.subagentsModePending = false
+    }
   }
 
   async setMode(mode: AgentMode): Promise<void> {
@@ -2980,7 +3026,9 @@ export class AgentBridge {
   // ---------------------------------------------------------------- state
 
   async getSessionInfo(): Promise<SessionInfo | null> {
+    const backend = this.getActiveBackend()
     const info = await this.getSessionInfoSnapshot()
+    if (info) info.subagentsEnabled = backend?.subagentsEnabled ?? false
     if (info) info.yolo = this.activeKey ? this.yoloSessions.has(this.activeKey) : false
     return info
   }

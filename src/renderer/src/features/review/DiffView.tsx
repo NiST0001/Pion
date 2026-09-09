@@ -1,4 +1,4 @@
-import { memo, useMemo } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { ReviewRevealText } from './ReviewRevealText'
 
@@ -37,6 +37,8 @@ function parseDiff(diff: string): DiffLine[] {
   return lines
 }
 
+export const DIFF_PAGE_SIZE = 120
+
 export const DiffView = memo(function DiffView({
   diff,
   dense = false,
@@ -47,13 +49,26 @@ export const DiffView = memo(function DiffView({
   reveal?: boolean
 }): ReactElement {
   const lines = useMemo(() => parseDiff(diff), [diff])
+  const [page, setPage] = useState(0)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const pageCount = Math.max(1, Math.ceil(lines.length / DIFF_PAGE_SIZE))
+  const currentPage = Math.min(page, pageCount - 1)
+  const start = currentPage * DIFF_PAGE_SIZE
+  useLayoutEffect(() => { setPage((value) => Math.min(value, pageCount - 1)) }, [pageCount])
+  useLayoutEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = 0 }, [currentPage])
 
   return (
     <div className={`diff-view${dense ? ' diff-dense' : ''}`}>
+      {pageCount > 1 && <div className="diff-page-controls" role="group" aria-label="差异分页">
+        <span>第 {currentPage + 1} / {pageCount} 页 · 共 {lines.length} 行</span>
+        <button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</button>
+        <button type="button" disabled={currentPage === pageCount - 1} onClick={() => setPage(currentPage + 1)}>下一页</button>
+      </div>}
+      <div className="diff-table-scroll" ref={scrollRef}>
       <table>
         <tbody>
-          {lines.map((line, i) => (
-            <tr key={i} className={`diff-${line.kind}`}>
+          {lines.slice(start, start + DIFF_PAGE_SIZE).map((line, i) => (
+            <tr key={start + i} className={`diff-${line.kind}`}>
               <td className="diff-num">{line.num}</td>
               <td className="diff-marker">
                 {line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ''}
@@ -69,6 +84,7 @@ export const DiffView = memo(function DiffView({
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   )
 })

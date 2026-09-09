@@ -47,7 +47,7 @@ describe('RunMetricsStrip', () => {
     expect(screen.getByTitle('上下文 12k / 50k')).toBeInTheDocument()
   })
 
-  it('shows whole-session totals beside the current run when provided', () => {
+  it('labels loaded-run totals without claiming complete session coverage', () => {
     render(
       <RunMetricsStrip
         run={run}
@@ -60,6 +60,7 @@ describe('RunMetricsStrip', () => {
     )
     const summary = screen.getByRole('button')
     expect(summary).toHaveTextContent('会话')
+    expect(screen.getByTitle(/当前已加载运行累计（不含排队消息）/)).toBeInTheDocument()
     expect(summary).toHaveTextContent('3m 07s')
     expect(summary).toHaveTextContent('50k')
     expect(summary).toHaveTextContent('$0.240')

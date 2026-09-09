@@ -53,6 +53,22 @@ describe('RunStore', () => {
     expect(restored.get('run-1')?.contextPressure).toBeUndefined()
   })
 
+  it('filters queue-only metrics before limiting without changing recovery queries', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-runs-'))
+    roots.push(root)
+    const store = new RunStore(join(root, 'runs.json'))
+    await store.load()
+    store.create(operation({ id: 'active', state: 'running', createdAt: 1, agentStartedAt: 1 }))
+    store.create(operation({ id: 'finished', state: 'completed', createdAt: 2, agentStartedAt: 2 }))
+    for (let n = 0; n < 30; n++) store.create(operation({ id: `queued-${n}`, state: 'queued', createdAt: 100 + n }))
+    store.create(operation({ id: 'discarded', state: 'discarded', createdAt: 200 }))
+    expect(store.list({ metricsOnly: true, limit: 1 }).map((run) => run.id)).toEqual(['active'])
+    expect(store.list({ metricsOnly: true }).map((run) => run.id)).toEqual(['active', 'finished'])
+    expect(store.list().some((run) => run.state === 'queued')).toBe(true)
+    expect(store.list()[0].id).toBe('discarded')
+    await store.flush()
+  })
+
   it('marks uncertain active runs interrupted without replaying queued prompts', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pion-runs-'))
     roots.push(root)

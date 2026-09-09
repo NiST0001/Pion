@@ -1,25 +1,37 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { RunOperation, RunTelemetryUpdate } from '../../../shared/types'
+import { compareMetricsRuns, isExecutingRun, isRunMetricsCandidate } from '../../../shared/operations'
 
 const VISIBLE_RUN_LIMIT = 20
-const LIVE_STATES = new Set<RunOperation['state']>(['queued', 'dispatching', 'running', 'ending'])
 
 function belongsToSelection(run: RunOperation, sessionPath?: string, cwd?: string): boolean {
   if (sessionPath && run.sessionPath === sessionPath) return true
   return Boolean(cwd && run.cwd === cwd && (!sessionPath || !run.sessionPath))
 }
 
-function mergeRuns(current: RunOperation[], update: RunTelemetryUpdate, sessionPath?: string, cwd?: string): RunOperation[] {
-  const byId = new Map(current.map((run) => [run.id, run]))
+interface TelemetryState {
+  runs: RunOperation[]
+  revisions: Map<string, number>
+}
+const emptyTelemetry = (): TelemetryState => ({ runs: [], revisions: new Map() })
+
+function mergeRuns(current: TelemetryState, update: RunTelemetryUpdate, sessionPath?: string, cwd?: string): TelemetryState {
+  const revisions = new Map(current.revisions)
+  const byId = new Map(current.runs.map((run) => [run.id, run]))
   for (const run of update.runs) {
-    const existing = byId.get(run.id)
-    if (existing && existing.revision > run.revision) continue
-    if (belongsToSelection(run, sessionPath, cwd)) byId.set(run.id, run)
+    if (Math.max(revisions.get(run.id) ?? -1, byId.get(run.id)?.revision ?? -1) > run.revision) continue
+    revisions.delete(run.id)
+    revisions.set(run.id, run.revision)
+    // Keep bounded tombstones for requeued/discarded records too, so a late
+    // initial snapshot cannot resurrect their older running state.
+    if (revisions.size > 256) revisions.delete(revisions.keys().next().value!)
+    if (belongsToSelection(run, sessionPath, cwd) && isRunMetricsCandidate(run)) byId.set(run.id, run)
     else byId.delete(run.id)
   }
-  return [...byId.values()]
-    .sort((left, right) => right.createdAt - left.createdAt)
-    .slice(0, VISIBLE_RUN_LIMIT)
+  return {
+    revisions,
+    runs: [...byId.values()].sort(compareMetricsRuns).slice(0, VISIBLE_RUN_LIMIT)
+  }
 }
 
 export function useRunTelemetry({
@@ -38,25 +50,26 @@ export function useRunTelemetry({
   activeRun: RunOperation | null
   loading: boolean
 } {
-  const [runs, setRuns] = useState<RunOperation[]>([])
+  const [telemetry, setTelemetry] = useState<TelemetryState>(emptyTelemetry)
+  const runs = telemetry.runs
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
     if (!enabled || !hasBridge || (!sessionPath && !cwd)) {
-      setRuns([])
+      setTelemetry(emptyTelemetry())
       setLoading(false)
       return
     }
     let active = true
     setLoading(true)
-    setRuns([])
+    setTelemetry(emptyTelemetry())
     const off = window.pion.onRunTelemetry((update) => {
-      if (active) setRuns((current) => mergeRuns(current, update, sessionPath, cwd))
+      if (active) setTelemetry((current) => mergeRuns(current, update, sessionPath, cwd))
     })
-    void window.pion.getRunTelemetry({ sessionPath, cwd, limit: VISIBLE_RUN_LIMIT })
+    void window.pion.getRunTelemetry({ sessionPath, cwd, limit: VISIBLE_RUN_LIMIT, metricsOnly: true })
       .then((result) => {
         if (!active) return
-        setRuns((current) => mergeRuns(current, { runs: result }, sessionPath, cwd))
+        setTelemetry((current) => mergeRuns(current, { runs: result }, sessionPath, cwd))
       })
       .catch((error: unknown) => {
         console.error('[pion] failed to load run telemetry:', error)
@@ -72,7 +85,7 @@ export function useRunTelemetry({
 
   const latestRun = runs[0] ?? null
   const activeRun = useMemo(
-    () => runs.find((run) => LIVE_STATES.has(run.state)) ?? null,
+    () => runs.find(isExecutingRun) ?? null,
     [runs]
   )
   return { runs, latestRun, activeRun, loading }

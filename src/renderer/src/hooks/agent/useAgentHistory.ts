@@ -82,8 +82,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       : { path, ...revealedCache, loading: false, loadId }
     historyCursor.current = cursor
     storeTimelineCache(timelineCache.current, path, revealedCache)
+    if (cached.tasks !== undefined && cached.tasks !== null) dispatch({ type: 'cachedTasks', tasks: cached.tasks })
     showTimeline(path, items, revealedCache.mode)
-  }, [showTimeline])
+  }, [dispatch, showTimeline])
 
   // Keep a loaded session's rendered timeline in memory. Switching back to a
   // retained backend should restore this snapshot instead of transferring and
@@ -102,9 +103,10 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     storeTimelineCache(timelineCache.current, path, {
       ...cached,
       items: state.timeline,
-      mode: state.mode
+      mode: state.mode,
+      tasks: state.tasks
     })
-  }, [state.mode, state.timeline])
+  }, [state.mode, state.timeline, state.tasks])
 
   /** Load only the newest history window; older windows are fetched on demand. */
   const reloadTimeline = useCallback(async (sessionPath?: string): Promise<void> => {
@@ -113,6 +115,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const path = sessionPath
       ?? timelineOwnerPath.current
       ?? (await api.getState().catch(() => null))?.sessionFile
+    if (loadId !== timelineLoadId.current) return
+    // Capture the reducer's revision atomically, before the asynchronous read.
+    dispatch({ type: 'beginTaskRestore', id: loadId })
     const cached = path ? timelineCache.current.get(path) : undefined
     const keepVisibleCache = Boolean(path && cached && timelineOwnerPath.current === path)
     historyCursor.current = null
@@ -138,6 +143,10 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
         error: '会话历史加载失败，请重新选择该会话或检查会话文件是否仍然存在。'
       })
       return
+    }
+
+    if (page.taskSnapshot !== undefined) {
+      dispatch({ type: 'restoreTasks', id: loadId, tasks: page.taskSnapshot })
     }
 
     if (
@@ -380,6 +389,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       if (!api) return ''
       const result = await api.forkAt(entryId)
       if (!result.cancelled) {
+        dispatch({ type: 'clearTimeline' })
         timelineOwnerPath.current = undefined
         historyCursor.current = null
         await reloadTimeline()
@@ -387,7 +397,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       }
       return ''
     },
-    [api, reloadTimeline]
+    [api, dispatch, reloadTimeline]
   )
 
   const switchSession = useCallback(
@@ -483,6 +493,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       )
     )
     const limit = Math.min(getViewportHistoryPageSize(), end)
+    dispatch({ type: 'beginTaskRestore', id: loadId })
     dispatch({ type: 'timelineLoading', loading: true })
 
     let page = null
@@ -497,6 +508,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       return
     }
 
+    if (page.taskSnapshot !== undefined) {
+      dispatch({ type: 'restoreTasks', id: loadId, tasks: page.taskSnapshot })
+    }
     const items = entriesToTimeline(
       page.entries,
       collectToolResults([...page.entries, ...page.toolResults])

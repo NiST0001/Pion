@@ -67,6 +67,7 @@ export function useConversationNavigation({
   const observedJumpNonce = useRef<number | undefined>(undefined)
   const scrollSurfaceRef = useRef<HTMLDivElement>(null)
   const reservedHeight = useRef(0)
+  const observedContentHeight = useRef(0)
   const manualScroll = useRef(false)
   const gestureUntil = useRef(0)
   const lastScrollTop = useRef(0)
@@ -163,6 +164,8 @@ export function useConversationNavigation({
     const previousHeight = previousTimelineHeight.current
     const content = element.querySelector<HTMLElement>('.timeline')
     const contentHeight = content?.offsetHeight ?? element.scrollHeight
+    // Page replacement/prepend is handled here, not as a disclosure collapse.
+    observedContentHeight.current = content?.offsetHeight ?? 0
     const addedTimelineItems = timelineLength > previousTimelineLength.current
     if (hasNewerHistory() || (timelineMutation === 'history-append' && addedTimelineItems)) {
       nearBottomRef.current = false
@@ -213,7 +216,24 @@ export function useConversationNavigation({
     if (!element || typeof ResizeObserver !== 'function') return
     let previousClientHeight = element.clientHeight
     let previousPaddingTop = parseFloat(getComputedStyle(element).paddingTop) || 0
+    const content = element.querySelector<HTMLElement>('.timeline')
     const observer = new ResizeObserver(() => {
+      const nextContentHeight = content?.offsetHeight ?? 0
+      const shrink = observedContentHeight.current - nextContentHeight
+      observedContentHeight.current = nextContentHeight
+      if (shrink > 0 && !loadingRef.current && content && reservedHeight.current > 0) {
+        // A collapsed tool/thinking/detail must not leave its expanded height
+        // pinned by manual reading. Remove only the lost content extent so a
+        // genuine loading placeholder is not discarded wholesale.
+        const remaining = Math.max(0, reservedHeight.current - shrink)
+        reservedHeight.current = remaining <= nextContentHeight ? 0 : remaining
+        if (scrollSurfaceRef.current) {
+          scrollSurfaceRef.current.style.minHeight = reservedHeight.current > 0 ? `${reservedHeight.current}px` : ''
+        }
+        // Browser clamping after shrink is programmatic, not a new gesture or
+        // permission to resume live following.
+        lastScrollTop.current = element.scrollTop
+      }
       const nextClientHeight = element.clientHeight
       const nextPaddingTop = parseFloat(getComputedStyle(element).paddingTop) || 0
       const topDisplacement = nextPaddingTop - previousPaddingTop
@@ -237,8 +257,10 @@ export function useConversationNavigation({
     })
     observer.observe(element)
     if (scrollSurfaceRef.current) observer.observe(scrollSurfaceRef.current)
+    // The outer min-height can hide a collapse from the surface observer.
+    if (content) observer.observe(content)
     return () => observer.disconnect()
-  }, [scrollRef, hasNewerHistory])
+  }, [scrollRef, hasNewerHistory, timelineLoading, timelineLength])
 
   // Panel visibility also changes bottom clearance in the current commit;
   // synchronize an existing follow intent without waiting for a resize delivery.

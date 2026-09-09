@@ -8,6 +8,7 @@ import type {
   WireMessage
 } from '../../../shared/types'
 import { messageImages, messageText, messageThinking } from '../../../shared/types'
+import { taskSnapshotFromResult } from '../../../shared/task-history'
 import { orderSessions, reorderSessionsByPaths } from './sessionOrder'
 import {
   applyToolResult,
@@ -168,6 +169,21 @@ export function reducer(state: AgentState, action: Action): AgentState {
       return { ...state, runningSessionPaths: action.paths }
     case 'unreadSessions':
       return { ...state, unreadSessionPaths: action.paths }
+    case 'beginTaskRestore':
+      return { ...state, taskRestore: { id: action.id, revision: state.taskRevision } }
+    case 'restoreTasks': {
+      const pending = state.taskRestore
+      if (pending?.id !== action.id) return state
+      return {
+        ...state,
+        // A reply started before a live update must not rewind it (including clear).
+        tasks: pending.revision === state.taskRevision ? action.tasks : state.tasks,
+        taskRestore: undefined
+      }
+    }
+    case 'cachedTasks':
+      // A live clear is authoritative too; only seed a still-unknown projection.
+      return state.tasks === null ? { ...state, tasks: action.tasks } : state
     case 'loadEntries':
       return {
         ...state,
@@ -207,6 +223,10 @@ export function reducer(state: AgentState, action: Action): AgentState {
     case 'clearTimeline':
       return {
         ...state,
+        tasks: null,
+        taskRevision: 0,
+        taskResultIds: [],
+        taskRestore: undefined,
         timeline: [],
         mode: 'build',
         yolo: false,
@@ -229,6 +249,25 @@ export function reducer(state: AgentState, action: Action): AgentState {
 function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
   // trusted boundary: unmodelled event types fall through to the default branch
   const event = input as WireEvent
+  // Task state belongs to the session, not to whichever tool rows are mounted.
+  // Persisted/message results also recover a missed tool_execution_start/end.
+  const taskMessage = event.type === 'message_end' ? event.message
+    : event.type === 'entry_appended' && event.entry?.type === 'message' ? event.entry.message : undefined
+  const tasks = event.type === 'tool_execution_end' && !event.isError
+    ? taskSnapshotFromResult(event.toolName, event.result)
+    : taskMessage?.role === 'toolResult'
+      ? taskSnapshotFromResult(taskMessage.toolName, taskMessage)
+      : undefined
+  const resultId = event.type === 'tool_execution_end' ? event.toolCallId : taskMessage?.toolCallId
+  if (tasks !== undefined && (typeof resultId !== 'string' || !state.taskResultIds.includes(resultId))) {
+    state = {
+      ...state,
+      tasks,
+      taskRevision: state.taskRevision + 1,
+      taskResultIds: typeof resultId === 'string'
+        ? [...state.taskResultIds.slice(-255), resultId] : state.taskResultIds
+    }
+  }
   switch (event.type) {
     case 'agent_start':
       return { ...state, busy: true, compacting: false, compactionEventState: false }
@@ -300,6 +339,7 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
 
     case 'message_end': {
       const { message } = event
+      if (message?.role === 'toolResult') return state
       const text = messageText(message)
       const thinking = messageThinking(message)
       const timeline = state.timeline.flatMap((item) => {

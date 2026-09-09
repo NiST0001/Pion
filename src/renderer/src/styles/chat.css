@@ -634,6 +634,19 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
   font-size: 11.5px;
 }
 
+.diff-table-scroll { overflow: auto; }
+.diff-dense .diff-table-scroll { max-height: 360px; }
+.diff-page-controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 6px 8px; border-bottom: 1px solid var(--border-soft);
+  color: var(--fg-dim); font-size: 11px;
+}
+.diff-page-controls > span { flex: 1; }
+.diff-page-controls button { padding: 3px 6px; border-radius: var(--radius-sm); white-space: nowrap; }
+.diff-page-controls button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.diff-page-controls button:disabled { opacity: .45; cursor: not-allowed; }
+.diff-page-controls button:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 1px; }
+
 .diff-view table {
   border-collapse: collapse;
   width: 100%;

@@ -115,7 +115,9 @@ export function deriveAgentTaskRuns(timeline: TimelineItem[]): AgentTaskRun[] {
 }
 
 /**
- * Tasks for the live panel. Keep every state from the current planned turn so
+ * Legacy timeline-only projection; the live panel must use AgentState.tasks
+ * because a history window can omit its user or task records.
+ * Keep every state from the current planned turn so
  * completed rows remain visible. A later user message does not erase that
  * finished plan by itself; the prior plan disappears only when the next turn
  * actually invokes the task tool (normally its required empty `clear` snapshot).
@@ -359,6 +361,8 @@ export function getViewportHistoryPageSize(): number {
 const MAX_TIMELINE_CACHE = 10
 
 export interface TimelineCacheEntry {
+  /** Full session task projection, not derived from these cached rows. */
+  tasks?: AgentTodo[] | null
   items: TimelineItem[]
   mode: AgentMode
   apiBefore: number
@@ -383,8 +387,9 @@ export function storeTimelineCache(
   path: string,
   entry: TimelineCacheEntry
 ): void {
+  const tasks = entry.tasks === undefined ? cache.get(path)?.tasks : entry.tasks
   cache.delete(path)
-  cache.set(path, entry)
+  cache.set(path, { ...entry, tasks })
   while (cache.size > MAX_TIMELINE_CACHE) {
     const oldest = cache.keys().next().value
     if (typeof oldest !== 'string') break

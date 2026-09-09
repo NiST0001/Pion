@@ -88,6 +88,8 @@ export interface SessionInfo {
   autoCompactionEnabled?: boolean
   /** True when this session auto-approves every tool-permission prompt. */
   yolo?: boolean
+  /** Per-runtime opt-in; reset when the session backend is recreated. */
+  subagentsEnabled?: boolean
   steeringMode?: 'all' | 'one-at-a-time'
   followUpMode?: 'all' | 'one-at-a-time'
   messageCount: number
@@ -180,6 +182,10 @@ export interface SessionEntriesPage {
   entries: WireEntry[]
   /** Tool results for calls in the page, including results outside its bounds. */
   toolResults: WireEntry[]
+  /** Latest tasks on the selected branch, independent of the visible window.
+   * Omitted by older callers; [] explicitly means no active tasks.
+   */
+  taskSnapshot?: SessionTask[]
   start: number
   end: number
   total: number
@@ -310,6 +316,7 @@ export interface ToolPermissionRequest {
   summary: string
   detail: string
   risks: ToolPermissionRisk[]
+  subagent?: boolean
   canRemember: boolean
   createdAt: number
   timeoutAt: number

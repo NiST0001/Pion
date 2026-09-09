@@ -96,7 +96,13 @@ export function useAgentModelActions({
     [api]
   )
 
+  const setSubagentsMode = useCallback(async (enabled: boolean, sessionId: string): Promise<void> => {
+    if (!api) throw new Error('preload 桥未加载')
+    await api.setSubagentsMode(enabled, sessionId)
+  }, [api])
+
   return {
+    setSubagentsMode,
     setModel,
     listModelProviders,
     loginModelProvider,

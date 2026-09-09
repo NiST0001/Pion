@@ -42,9 +42,12 @@ export function useAgentSessionActions({
         historyCursor.current = null
       }
       const result = await api.deleteSession(sessionPath)
-      if (result.activeSessionChanged) await reloadTimeline()
+      if (result.activeSessionChanged) {
+        dispatch({ type: 'clearTimeline' })
+        await reloadTimeline()
+      }
     },
-    [api, historyCursor, reloadTimeline, timelineCache, timelineOwnerPath]
+    [api, dispatch, historyCursor, reloadTimeline, timelineCache, timelineOwnerPath]
   )
 
   const copySession = useCallback(
@@ -52,12 +55,13 @@ export function useAgentSessionActions({
       if (!api) return
       const result = await api.copySession(sessionPath)
       if (!result.cancelled) {
+        dispatch({ type: 'clearTimeline' })
         timelineOwnerPath.current = undefined
         historyCursor.current = null
         await reloadTimeline()
       }
     },
-    [api, historyCursor, reloadTimeline, timelineOwnerPath]
+    [api, dispatch, historyCursor, reloadTimeline, timelineOwnerPath]
   )
 
   const getSessionForkMessages = useCallback(
@@ -73,12 +77,13 @@ export function useAgentSessionActions({
       if (!api) return ''
       const result = await api.forkSession(sessionPath, entryId)
       if (result.cancelled) return ''
+      dispatch({ type: 'clearTimeline' })
       timelineOwnerPath.current = undefined
       historyCursor.current = null
       await reloadTimeline()
       return result.text
     },
-    [api, historyCursor, reloadTimeline, timelineOwnerPath]
+    [api, dispatch, historyCursor, reloadTimeline, timelineOwnerPath]
   )
 
   return {

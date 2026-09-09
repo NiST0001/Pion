@@ -12,6 +12,7 @@ export interface ParsedToolPermission {
   detail: string
   risks: ToolPermissionRequest['risks']
   canRemember: boolean
+  subagent?: boolean
 }
 
 const CATEGORIES = new Set(['read', 'write', 'shell', 'network', 'external'])
@@ -34,6 +35,7 @@ export function parseToolPermissionMetadata(title: string): ParsedToolPermission
       detail?: unknown
       risks?: unknown
       canRemember?: unknown
+      subagent?: unknown
     }
     const categories = Array.isArray(metadata.policyCategories)
       ? metadata.policyCategories.filter((value): value is ToolPermissionCategory => (
@@ -65,7 +67,8 @@ export function parseToolPermissionMetadata(title: string): ParsedToolPermission
             || value === 'destructive-command'
           ))
         : [],
-      canRemember: metadata.canRemember === true
+      canRemember: metadata.canRemember === true,
+      ...(metadata.subagent === true ? { subagent: true } : {})
     }
   } catch {
     return null
