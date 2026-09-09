@@ -90,7 +90,7 @@ test('boots the Electron shell with an immediately editable composer', async ({}
     await page.getByRole('button', { name: '设置', exact: true }).click()
     const settings = page.locator('.settings-modal')
     await expect(settings).toBeVisible()
-    await settings.getByRole('button', { name: /会话.*压缩与消息行为/ }).click()
+    await settings.getByRole('button', { name: /会话.*消息行为与子代理/ }).click()
     const showCost = settings.locator('.setting-row').filter({ hasText: '显示计费' }).getByRole('switch')
     await expect(showCost).toHaveAttribute('aria-checked', 'false')
     await showCost.click()
