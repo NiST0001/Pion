@@ -86,17 +86,33 @@ it('does not let a delayed snapshot disable a newer native effect', async () => 
   expect(document.documentElement.dataset.nativeSurface).toBe('false')
 })
 
+it.each([
+  { state: { ...initial, enabled: true, active: true, backend: 'windows-dwm' as const, blur: 'native' as const }, notice: '' },
+  { state: { ...initial, enabled: true, active: true }, notice: '当前系统仅支持透明效果。' },
+  { state: { ...initial, available: false }, notice: '当前系统不支持此效果。' },
+  { state: { ...initial, enabled: true }, notice: '当前效果未生效。' }
+])('shows only essential glass-effect status: $notice', async ({ state, notice }) => {
+  window.pion = { getWindowEffects: vi.fn().mockResolvedValue({ ...state, message: '技术说明：合成器 Acrylic Wayland' }),
+    onWindowEffects: () => vi.fn() } as unknown as PionApi
+  render(<WindowEffectsSettings />)
+  await act(async () => undefined)
+  expect(screen.getByRole('switch', { name: '毛玻璃' })).toHaveAttribute('aria-checked', String(state.enabled))
+  expect(screen.queryByText(/合成器|Acrylic|Wayland|原生半透明/)).not.toBeInTheDocument()
+  if (notice) expect(screen.getByRole('status')).toHaveTextContent(notice)
+  else expect(screen.queryByRole('status')).not.toBeInTheDocument()
+})
+
 it('shows Linux restart requirements without claiming desktop blur or enabling renderer alpha early', async () => {
   const set = vi.fn().mockResolvedValue({ ...initial, enabled: true, restartRequired: true, revision: 1,
     message: '设置已保存，重启 Pion 后启用 Linux 合成器透明。' })
   window.pion = { getWindowEffects: vi.fn().mockResolvedValue(initial), onWindowEffects: () => vi.fn(), setWindowEffects: set } as unknown as PionApi
   render(<WindowEffectsSettings />)
   await act(async () => undefined)
-  fireEvent.click(screen.getByRole('switch', { name: '原生半透明' }))
+  fireEvent.click(screen.getByRole('switch', { name: '毛玻璃' }))
   await act(async () => undefined)
   expect(set).toHaveBeenCalledWith(true)
   expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'true')
-  expect(screen.getByText('重启后生效')).toBeInTheDocument()
-  expect(screen.getByText(/Wayland\/GNOME 不保证桌面模糊/)).toBeInTheDocument()
+  expect(screen.getByRole('status')).toHaveTextContent('重启 Pion 后生效。')
+  expect(screen.queryByText(/合成器|Wayland|原生半透明/)).not.toBeInTheDocument()
   expect(document.documentElement.dataset.nativeSurface).not.toBe('true')
 })

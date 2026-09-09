@@ -68,6 +68,32 @@ function renderSettings(
   )
 }
 
+it('keeps four immediately applied themes without a redundant live-preview section', () => {
+  const root = document.documentElement
+  const priorTheme = root.dataset.theme
+  const priorScheme = root.style.colorScheme
+  const stored = localStorage.getItem('pion:theme')
+  try {
+    renderSettings(settingsActions())
+    fireEvent.click(screen.getByRole('button', { name: /外观/ }))
+    expect(screen.queryByText('实时预览')).not.toBeInTheDocument()
+    expect(screen.queryByText(/陶土主题会统一调整/)).not.toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: '毛玻璃' })).toBeInTheDocument()
+    expect(document.querySelectorAll('.theme-choice')).toHaveLength(4)
+    fireEvent.click(screen.getByRole('button', { name: /陶土浅色/ }))
+    expect(root.dataset.theme).toBe('terracotta-light')
+    expect(localStorage.getItem('pion:theme')).toBe('terracotta-light')
+    fireEvent.click(screen.getByRole('button', { name: /陶土深色/ }))
+    expect(root.dataset.theme).toBe('terracotta-dark')
+  } finally {
+    if (priorTheme === undefined) delete root.dataset.theme
+    else root.dataset.theme = priorTheme
+    root.style.colorScheme = priorScheme
+    if (stored === null) localStorage.removeItem('pion:theme')
+    else localStorage.setItem('pion:theme', stored)
+  }
+})
+
 describe('SettingsModal provider setup', () => {
   it('adds a compatible provider from the models page', async () => {
     const addModelProvider = vi.fn(async () => undefined)

@@ -35,6 +35,7 @@ import { ModelsPage } from './ModelsPage'
 import { PageHeading } from './SettingsPageHeading'
 import { ReleaseNotes } from './ReleaseNotes'
 import { WindowEffectsSettings } from './WindowEffectsSettings'
+import { SubagentSettings } from './SubagentSettings'
 import { SESSION_PREVIEW_OPTIONS } from '../../utils/sessionPreview'
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { currentTheme, saveTheme, THEMES } from '../../utils/theme'
@@ -252,7 +253,7 @@ export function SettingsModal({
               active={page === 'session'}
               icon={<MessageSquare size={15} />}
               label="会话"
-              description="压缩与消息行为"
+              description="消息行为与子代理"
               onClick={() => setPage('session')}
             />
             <NavItem
@@ -312,7 +313,7 @@ export function SettingsModal({
                 <PageHeading
                   kicker="SESSION"
                   title="会话"
-                  description="控制当前 pi agent 会话的生命周期和消息处理方式。"
+                  description="控制会话生命周期、消息行为与子代理全局默认参数。"
                 />
 
                 <div className="settings-section">
@@ -474,6 +475,8 @@ export function SettingsModal({
                   </div>
                 </div>
 
+                <SubagentSettings />
+
                 <div className="settings-section">
                   <div className="settings-section-title">通知</div>
                   <div className="setting-row" data-setting="completion-notifications">
@@ -597,10 +600,9 @@ export function SettingsModal({
                 <PageHeading
                   kicker="APPEARANCE"
                   title="外观"
-                  description="四套外观任选，更改立即应用并保存在本机。"
                 />
                 <div className="settings-section theme-section">
-                  <div className="settings-section-title">工作台主题</div>
+                  <div className="settings-section-title">主题</div>
                   <div className="theme-grid">
                     {THEMES.map((theme) => (
                       <button
@@ -632,29 +634,6 @@ export function SettingsModal({
                 </div>
                 <WindowEffectsSettings />
 
-                <div className="appearance-preview-card">
-                  <div className="settings-section-title">实时预览</div>
-                  <div className="appearance-preview">
-                    <div className="preview-toolbar">
-                      <span className="preview-brand"><span className="preview-brand-mark">π⁺</span> Pion</span>
-                      <span className="preview-dot" />
-                    </div>
-                    <div className="preview-body">
-                      <div className="preview-line preview-line-short" />
-                      <div className="preview-line" />
-                      <div className="preview-bubble">
-                        陶土主题全局视觉预览
-                      </div>
-                    </div>
-                    <div className="preview-input">
-                      <span>描述任务…</span>
-                      <span className="preview-send">↑</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="settings-note">
-                  <Palette size={14} /> 陶土主题会统一调整全局视觉，仅保存在本机，不会上传或写入项目文件。
-                </div>
               </section>
             )}
 

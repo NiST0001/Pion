@@ -2,10 +2,13 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { createSubagentControl, type SubagentResult } from '../../src/main/agent/subagents'
 
+import { DEFAULT_SUBAGENT_SETTINGS, type SubagentSettings } from '../../src/shared/subagents'
+
 const context = {} as ExtensionContext
 afterEach(() => vi.useRealTimers())
-function setup(run: Parameters<typeof createSubagentControl>[0] = async (task) => ({ name: task.name, status: 'completed', text: 'done' })) {
-  const control = createSubagentControl(run)
+function setup(run: Parameters<typeof createSubagentControl>[0] = async (task) => ({ name: task.name, status: 'completed', text: 'done' }),
+  getSettings: () => SubagentSettings | Promise<SubagentSettings> = () => ({ ...DEFAULT_SUBAGENT_SETTINGS })) {
+  const control = createSubagentControl(run, getSettings)
   const handlers = new Map<string, (...args: any[]) => any>()
   const commands = new Map<string, { handler: (args: string, ctx: { isIdle: () => boolean }) => Promise<void> }>()
   let tools = ['read', 'bash', 'pion_subagents']
@@ -45,6 +48,7 @@ it('starts siblings concurrently, preserves result order and rejects overlapping
   const h = setup(run)
   await h.toggle('on')
   const pending = h.execute()
+  await Promise.resolve()
   expect(run).toHaveBeenCalledTimes(2)
   await expect(h.execute()).rejects.toThrow('批次')
   releases[1](); releases[0]()
@@ -61,12 +65,62 @@ it.each(['off', 'parent', 'shutdown', 'timeout'])('cancels children through %s',
   await h.toggle('on')
   const parent = new AbortController()
   const pending = h.execute(parent.signal)
+  await Promise.resolve()
   if (reason === 'off') await h.toggle('off')
   if (reason === 'parent') parent.abort()
   if (reason === 'shutdown') h.handlers.get('session_shutdown')!()
   if (reason === 'timeout') await vi.advanceTimersByTimeAsync(10 * 60_000)
   const result = await pending
   expect((result.details as { results: SubagentResult[] }).results.every((child) => child.status === 'aborted')).toBe(true)
+})
+
+it('snapshots global settings per batch and applies changed limits only to the next batch', async () => {
+  let settings = { ...DEFAULT_SUBAGENT_SETTINGS }
+  const release: (() => void)[] = []
+  const snapshots: Readonly<SubagentSettings>[] = []
+  const h = setup((task, _signal, _progress, limits) => {
+    snapshots.push(limits!)
+    return new Promise((resolve) => release.push(() => resolve({ name: task.name, status: 'completed', text: 'ok' })))
+  }, () => settings)
+  await h.toggle('on')
+  const pending = h.execute()
+  await Promise.resolve()
+  settings = { ...settings, maxParallel: 1, maxTurns: 5 }
+  expect(snapshots).toHaveLength(2)
+  expect(snapshots[0].maxTurns).toBe(24)
+  expect(Object.isFrozen(snapshots[0])).toBe(true)
+  release.forEach((done) => done())
+  await pending
+  await expect(h.execute()).rejects.toThrow('最多 1 个')
+  expect(snapshots).toHaveLength(2)
+  const prompt = await h.handlers.get('before_agent_start')!({ systemPrompt: 'base' })
+  expect(prompt.systemPrompt).toContain('1 children per batch')
+})
+
+it('rejects overlapping calls while settings are loading and releases the batch lock on failure', async () => {
+  let reject!: (error: Error) => void
+  const getSettings = vi.fn<() => Promise<SubagentSettings>>().mockImplementationOnce(() => new Promise<SubagentSettings>((_resolve, fail) => { reject = fail }))
+    .mockResolvedValue({ ...DEFAULT_SUBAGENT_SETTINGS })
+  const h = setup(undefined, getSettings)
+  await h.toggle('on')
+  const pending = h.execute()
+  await expect(h.execute()).rejects.toThrow('批次')
+  const failed = expect(pending).rejects.toThrow('配置不可读')
+  reject(new Error('配置不可读'))
+  await failed
+  await expect(h.execute()).resolves.toBeDefined()
+})
+
+it('uses the configured batch timeout', async () => {
+  vi.useFakeTimers()
+  const h = setup((task, signal) => new Promise((resolve) => {
+    signal.addEventListener('abort', () => resolve({ name: task.name, status: 'aborted', text: 'timeout' }), { once: true })
+  }), () => ({ ...DEFAULT_SUBAGENT_SETTINGS, timeoutMinutes: 1 }))
+  await h.toggle('on')
+  const pending = h.execute()
+  await Promise.resolve()
+  await vi.advanceTimersByTimeAsync(60_000)
+  expect(((await pending).details as { results: SubagentResult[] }).results.every((child) => child.status === 'aborted')).toBe(true)
 })
 
 it('keeps controllers isolated between parent sessions and rejects invalid commands', async () => {

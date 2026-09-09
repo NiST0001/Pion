@@ -2,6 +2,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
+import { subagentSettingsFilePath } from '../subagent-settings'
 import {
   ProjectTrustStore,
   RpcClient,
@@ -500,7 +501,7 @@ export class AgentBridge {
         toolName: parsed.toolName,
         category,
         policyCategories: [...new Set(categories)],
-        summary: parsed.subagent ? `子 Agent · ${parsed.summary}` : parsed.summary,
+        summary: parsed.subagent ? `子代理 · ${parsed.summary}` : parsed.summary,
         ...(parsed.subagent ? { subagent: true } : {}),
         detail: parsed.detail,
         risks: parsed.risks,
@@ -1775,7 +1776,8 @@ export class AgentBridge {
       cliPath,
       cwd,
       args,
-      env: { PION_TOOL_PERMISSION_CONFIG: this.toolPermissionStore.filePath }
+      env: { PION_TOOL_PERMISSION_CONFIG: this.toolPermissionStore.filePath,
+        PION_SUBAGENT_SETTINGS_FILE: subagentSettingsFilePath() }
     })
     const backend = {
       key,
@@ -2628,19 +2630,19 @@ export class AgentBridge {
   }
 
   async setSubagentsMode(enabled: boolean, sessionId: string, ownerId: number): Promise<void> {
-    if (this.win?.webContents.id !== ownerId) throw new Error('只允许所属主窗口切换子 Agent')
-    if (typeof enabled !== 'boolean' || typeof sessionId !== 'string' || !sessionId || sessionId.length > 200) throw new Error('子 Agent 开关参数无效')
+    if (this.win?.webContents.id !== ownerId) throw new Error('只允许所属主窗口切换子代理')
+    if (typeof enabled !== 'boolean' || typeof sessionId !== 'string' || !sessionId || sessionId.length > 200) throw new Error('子代理开关参数无效')
     const backend = this.getActiveBackend()
     if (!backend) throw new Error('会话尚未就绪')
-    if (backend.subagentsModePending) throw new Error('子 Agent 开关正在切换')
+    if (backend.subagentsModePending) throw new Error('子代理开关正在切换')
     backend.subagentsModePending = true
     try {
       await backend.startPromise
       const [state, commands] = await Promise.all([backend.client.getState(), backend.client.getCommands()])
       if (this.activeKey !== backend.key || state.sessionId !== sessionId) throw new Error('会话已切换，请重试')
-      if (enabled && (backend.busy || backend.compacting || state.isStreaming || state.isCompacting)) throw new Error('请等待当前执行完成后开启子 Agent')
-      if (enabled && this.desiredModes.get(backend.key) === 'plan') throw new Error('计划模式不启用编码子 Agent')
-      if (!commands.some((command) => command.name === 'pion-subagents')) throw new Error('当前运行时不支持内置子 Agent')
+      if (enabled && (backend.busy || backend.compacting || state.isStreaming || state.isCompacting)) throw new Error('请等待当前执行完成后开启子代理')
+      if (enabled && this.desiredModes.get(backend.key) === 'plan') throw new Error('计划模式不启用编码子代理')
+      if (!commands.some((command) => command.name === 'pion-subagents')) throw new Error('当前运行时不支持内置子代理')
       await backend.client.prompt(enabled ? '/pion-subagents on' : '/pion-subagents off')
       backend.subagentsEnabled = enabled
       if (!enabled) this.clearSubagentPermissions(backend)

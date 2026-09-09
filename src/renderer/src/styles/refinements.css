@@ -1154,8 +1154,7 @@ button.tool-head.screen-text-reveal-line {
   line-height: 1.6;
 }
 
-.settings-page > .settings-section,
-.appearance-preview-card {
+.settings-page > .settings-section {
   background: rgba(var(--accent-rgb), 0.035);
   border-color: var(--border);
   border-radius: 12px;
@@ -1221,11 +1220,6 @@ button.tool-head.screen-text-reveal-line {
 .theme-choice.active {
   background: var(--accent-soft);
   border-color: rgba(var(--accent-rgb), 0.72);
-}
-
-.appearance-preview {
-  border-color: var(--border);
-  border-radius: 10px;
 }
 
 .review-panel {

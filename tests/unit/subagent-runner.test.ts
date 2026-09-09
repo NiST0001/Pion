@@ -1,6 +1,7 @@
 import { beforeEach, expect, it, vi } from 'vitest'
 import type { AgentSession, ModelRuntime } from '@earendil-works/pi-coding-agent'
 import { createSubagentRunner } from '../../src/main/agent/subagents'
+import { DEFAULT_SUBAGENT_SETTINGS } from '../../src/shared/subagents'
 
 const mocks = vi.hoisted(() => ({ create: vi.fn(), loader: vi.fn() }))
 vi.mock('@earendil-works/pi-coding-agent', async (original) => ({
@@ -70,6 +71,25 @@ it('does not create a model request after cancellation during setup', async () =
   controller.abort()
   await expect(h.run({ name: 'worker', task: 'edit' }, controller.signal, () => {})).rejects.toThrow('中止')
   expect(mocks.create).not.toHaveBeenCalled()
+})
+
+it('honors the snapshotted turn and result-length limits', async () => {
+  const h = setup()
+  let notify!: (event: { type: 'turn_start' }) => void
+  const abort = vi.fn(async () => {})
+  mocks.create.mockImplementationOnce(async () => ({ session: {
+    agent: {}, messages: [{ role: 'assistant', stopReason: 'stop' }], abort, dispose: h.dispose,
+    subscribe: (listener: typeof notify) => { notify = listener; return () => {} },
+    getLastAssistantText: () => 'x'.repeat(2000),
+    prompt: async () => { for (let n = 0; n < 3; n++) notify({ type: 'turn_start' }) }
+  } }))
+  const result = await h.run({ name: 'worker', task: 'inspect' }, new AbortController().signal, () => {},
+    { ...DEFAULT_SUBAGENT_SETTINGS, maxTurns: 2, maxResultChars: 1000 })
+  expect(result.status).toBe('aborted')
+  expect(result.text).toContain('轮数上限')
+  expect(result.text).toContain('[结果已截断]')
+  expect(result.text.match(/x/g)).toHaveLength(1000)
+  expect(abort).toHaveBeenCalled()
 })
 
 it('namespaces child tool IDs and serializes sibling writes', async () => {

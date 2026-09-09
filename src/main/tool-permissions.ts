@@ -346,9 +346,9 @@ async function checkpointGate(event, ctx) {
 
 async function gate(event, ctx) {
   const signal = event.input?.[Symbol.for("pion.subagent.abort")];
-  if (signal?.aborted) return { block: true, reason: "子 Agent 已中止" };
+  if (signal?.aborted) return { block: true, reason: "子代理已中止" };
   await checkpointGate(event, ctx);
-  if (signal?.aborted) return { block: true, reason: "子 Agent 已中止" };
+  if (signal?.aborted) return { block: true, reason: "子代理已中止" };
   if (PION_INTERNAL_TOOLS.has(event.toolName)) return undefined;
   const request = classify(event, ctx);
   const policy = readPolicy(ctx.cwd);
@@ -376,7 +376,7 @@ async function gate(event, ctx) {
   if (canRemember) options.push("allow-project");
   options.push("deny");
   const choice = await ctx.ui.select(MARKER + JSON.stringify(metadata), options, { timeout: TIMEOUT, signal });
-  if (signal?.aborted) return { block: true, reason: "子 Agent 已中止" };
+  if (signal?.aborted) return { block: true, reason: "子代理已中止" };
   if (choice === "allow-session") {
     sessionAllows.add(sessionKey);
     return undefined;

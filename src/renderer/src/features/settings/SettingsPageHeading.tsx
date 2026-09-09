@@ -7,13 +7,13 @@ export function PageHeading({
 }: {
   kicker: string
   title: string
-  description: string
+  description?: string
 }): ReactElement {
   return (
     <div className="settings-page-heading">
       <div className="settings-page-kicker">{kicker}</div>
       <h3>{title}</h3>
-      <p>{description}</p>
+      {description && <p>{description}</p>}
     </div>
   )
 }

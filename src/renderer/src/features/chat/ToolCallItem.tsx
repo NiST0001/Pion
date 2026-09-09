@@ -34,7 +34,7 @@ const TOOL_LABELS: Record<string, string> = {
   ls: '目录',
   pion_task: '任务',
   pion_ask_user: '提问',
-  pion_subagents: '子 Agent'
+  pion_subagents: '子代理'
 }
 
 function truncate(text: string, max: number): string {

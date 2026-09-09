@@ -14,6 +14,7 @@ import { ProjectStore } from './projects'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
 import { TerminalService } from './terminal-service'
 import { WindowEffectsService } from './window-effects'
+import { assertSubagentSettingsOwner, SubagentSettingsStore } from './subagent-settings'
 import type {
   AddModelProviderInput,
   ExtensionUiResponse,
@@ -37,6 +38,8 @@ if (userDataOverride) app.setPath('userData', resolve(userDataOverride))
 const runStore = new RunStore(join(app.getPath('userData'), 'pion-runs.json'))
 const terminals = new TerminalService()
 const appSettings = new AppSettings()
+const subagentSettings = new SubagentSettingsStore()
+let mainWindowId: number | undefined
 const windowEffects = new WindowEffectsService(appSettings, {
   platform: process.platform, release: release(), ozonePlatform: app.commandLine.getSwitchValue('ozone-platform'),
   sessionType: process.env.XDG_SESSION_TYPE, desktop: process.env.XDG_CURRENT_DESKTOP,
@@ -132,6 +135,8 @@ function createWindow(): void {
     }
   })
 
+  const ownerId = win.webContents.id
+  mainWindowId = ownerId
   const push = (list: ProjectMeta[]): void => {
     if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.Projects, list)
   }
@@ -148,6 +153,7 @@ function createWindow(): void {
     pushMaximized()
   })
   win.on('closed', () => {
+    if (mainWindowId === ownerId) mainWindowId = undefined
     bridge.unbind(win)
     verification.unbind(win)
     workflows.unbind(win)
@@ -180,6 +186,14 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle(IPC.GetSubagentSettings, (event) => {
+    assertSubagentSettingsOwner(event, mainWindowId)
+    return subagentSettings.get()
+  })
+  ipcMain.handle(IPC.SetSubagentSettings, (event, settings: unknown) => {
+    assertSubagentSettingsOwner(event, mainWindowId)
+    return subagentSettings.set(settings)
+  })
   const appearanceOwner = (event: Electron.IpcMainInvokeEvent): number => {
     if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口操作外观')
     return event.sender.id
@@ -304,7 +318,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.AgentSetMode, (_event, mode: 'build' | 'plan') => bridge.setMode(mode))
   ipcMain.handle(IPC.AgentSetYolo, (_event, enabled: boolean) => bridge.setYoloMode(enabled === true))
   ipcMain.handle(IPC.AgentSetSubagents, (event, enabled: boolean, sessionId: string) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口切换子 Agent')
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口切换子代理')
     return bridge.setSubagentsMode(enabled, sessionId, event.sender.id)
   })
   ipcMain.handle(IPC.AgentModels, () => bridge.getModels())

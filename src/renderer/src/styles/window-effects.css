@@ -121,9 +121,6 @@ html[data-native-surface='true'] .plugin-store-error,
 html[data-native-surface='true'] .task-history-run { background: transparent; }
 
 /* Code blocks and the terminal retain their solid reading surface. */
-.window-effects-settings h3 { display: flex; align-items: center; gap: 7px; }
-.window-effects-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; font-size: 12px; color: var(--fg-dim); }
-.window-effects-badge { padding: 2px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--accent-strong); }
 .window-effects-note { margin: 8px 0 0; font-size: 11px; line-height: 1.7; color: var(--fg-faint); }
 @media (prefers-reduced-transparency: reduce), (forced-colors: active) {
   html[data-native-surface='true'], html[data-native-surface='true'] body,

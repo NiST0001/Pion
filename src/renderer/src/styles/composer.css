@@ -410,8 +410,21 @@
   padding: 4px 7px; border: 1px solid transparent; border-radius: var(--radius-sm);
   color: var(--fg-dim); font-size: 11px; background: transparent;
 }
-.composer-subagents-toggle:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
-.composer-subagents-toggle[aria-pressed='true'] { color: var(--accent-strong); border-color: var(--border); background: var(--bg-hover); }
+.composer-subagents-toggle[aria-pressed='false']:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.composer-subagents-toggle[aria-pressed='true'] {
+  color: var(--on-accent);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.composer-subagents-toggle[aria-pressed='true']:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+.composer-subagents-state { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; }
+.composer-subagents-toggle[aria-pressed='false'] .composer-subagents-state { color: var(--fg-dim); }
+@media (forced-colors: active) {
+  .composer-subagents-toggle[aria-pressed='true'] { border: 2px solid Highlight; }
+}
 .composer-subagents-toggle:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 .composer-subagents-toggle:disabled { opacity: .5; cursor: not-allowed; }
 .composer-subagents-error {

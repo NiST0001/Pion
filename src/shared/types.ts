@@ -7,6 +7,7 @@
  */
 
 export type { PionApi } from './pion-api'
+export type { SubagentSettings } from './subagents'
 export type {
   DurableRunCheckpoint,
   GitCommitResult,

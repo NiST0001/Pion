@@ -3,6 +3,7 @@
  * from the data contracts makes the IPC facade easy to audit without moving
  * the existing `shared/types` import path used by the application.
  */
+import type { SubagentSettings } from './subagents'
 import type {
   AddModelProviderInput,
   AgentCapabilities,
@@ -208,6 +209,9 @@ export interface PionApi {
   setYoloMode(enabled: boolean): Promise<void>
   /** Requires the selected session ID to reject stale UI actions. */
   setSubagentsMode(enabled: boolean, sessionId: string): Promise<void>
+  /** Global defaults; each backend snapshots them at the next child batch. */
+  getSubagentSettings(): Promise<SubagentSettings>
+  setSubagentSettings(settings: SubagentSettings): Promise<SubagentSettings>
   setModel(provider: string, modelId: string): Promise<void>
   getThinkingLevels(): Promise<string[]>
   setThinkingLevel(level: string): Promise<void>

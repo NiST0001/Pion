@@ -56,8 +56,8 @@ const BUILTIN_TOOLS: BuiltinToolInfo[] = [
   },
   {
     name: 'pion_subagents',
-    title: '并行子 Agent',
-    description: '输入框内按会话开启，最多 3 个子 Agent 并行编码；沿用主会话工具权限与检查点，关闭会中止子任务。产生额外模型用量，后端重建后默认关闭。'
+    title: '并行子代理',
+    description: '输入框内按会话开启；数量、超时和轮数可在设置 → 会话中调整，下一批生效。沿用主会话工具权限与检查点，关闭会中止子任务。产生额外模型用量，后端重建后默认关闭。'
   }
 ]
 
