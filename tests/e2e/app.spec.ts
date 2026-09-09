@@ -68,6 +68,18 @@ test('boots the Electron shell with an immediately editable composer', async ({}
     await expect(composer).toHaveValue('draft survives agent preparation')
     await expect(page.locator('.titlebar')).toBeVisible()
     await expect(page.locator('.sidebar')).toBeVisible()
+    const sidebarFooter = page.locator('.sidebar-footer')
+    await expect(sidebarFooter).toHaveCSS('position', 'absolute')
+    await expect(sidebarFooter.getByRole('button')).toHaveCount(2)
+    // The floating controls must leave enough scrollable tail space for the
+    // last session rather than covering it with an unreserved overlay.
+    expect(await page.locator('.sidebar').evaluate((sidebar) => {
+      const footer = sidebar.querySelector<HTMLElement>('.sidebar-footer')!
+      const scroll = sidebar.querySelector<HTMLElement>('.sidebar-scroll')!
+      const style = getComputedStyle(footer)
+      return parseFloat(getComputedStyle(scroll).paddingBottom)
+        >= footer.getBoundingClientRect().height + parseFloat(style.bottom)
+    })).toBe(true)
     await expect(page.locator('.workflow-panel')).toHaveCount(0)
     await expect(page.locator('.verification-panel')).toHaveCount(0)
     const metrics = page.locator('.conversation-shell > .run-metrics-strip')

@@ -3,6 +3,7 @@
    ========================================================================== */
 
 .sidebar {
+  position: relative;
   width: var(--sidebar-w);
   flex-shrink: 0;
   display: flex;
@@ -19,11 +20,16 @@
 }
 
 .sidebar-footer {
+  position: absolute;
+  z-index: 2;
+  inset: auto 12px 12px;
   display: flex;
   gap: 6px;
-  flex-shrink: 0;
-  padding: 8px 10px 10px;
-  border-top: 1px solid var(--border-soft);
+  padding: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-pop);
 }
 
 .sidebar-settings {

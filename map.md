@@ -87,7 +87,7 @@
 - `src/renderer/src/styles/`：按功能拆分的 CSS；`refinements/` 为细化样式。
 - `styles/refinements/project.css`：会话运行流光、未读标记和项目列表细节。
 - `styles/dock.css`、`styles/terminal.css`：模块化工作区、拖动反馈、分隔条及终端面板。
-- `styles/window-effects.css`：连续工作区底色与局部磨砂；悬浮输入框/统计条、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
+- `styles/window-effects.css`：连续工作区底色与局部磨砂；悬浮输入框/统计条、侧栏底部设置/插件商店栏、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。
 - `styles/motion.css`：通用动效、详情网格高度过渡、工具箭头旋转及减少动态效果适配。
 - `utils/screenTextReveal.tsx`、`utils/historyReveal.ts`：文字渐入调度与历史行启用。
@@ -124,7 +124,7 @@
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
 - `tests/unit/session-sidebar-sync.test.ts`：新会话首次落盘后的项目列表推送；`optimistic-session.test.ts` 覆盖占位替换和跨项目列表隔离。
   - `historyReveal.test.tsx`、`screenTextReveal.test.tsx`：渐入行为。
-- `tests/e2e/app.spec.ts`：Electron 启动、统计计费开关、统计按压不缩放、统计条/输入框覆盖完整消息视口、多行输入与详情展开不改变视口尺寸、详情同宽、插件卸载及 Git 审查提交场景。
+- `tests/e2e/app.spec.ts`：Electron 启动、侧栏设置/插件商店悬浮栏及列表底部避让、统计计费开关、统计按压不缩放、统计条/输入框覆盖完整消息视口、多行输入与详情展开不改变视口尺寸、详情同宽、插件卸载及 Git 审查提交场景。
 - `tests/e2e/session-scroll.spec.ts`：独立临时项目和会话，在真实 Electron DOM 中反复长/短会话切换、注入加载期间的延迟 scroll，检查后端就绪前后不存在残留空白滚动范围；不使用现有用户会话。
 - `vitest.config.ts`、`playwright.config.ts`：测试配置；E2E 在 CI 中同时输出 GitHub 断言注释，便于定位失败。
 

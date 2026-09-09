@@ -90,13 +90,9 @@ body {
 }
 
 .sidebar-scroll {
-  padding: 14px 10px 18px;
-}
-
-.sidebar-footer {
-  padding: 10px 12px 12px;
-  background: var(--bg-elev);
-  border-top-color: var(--border);
+  /* Keep the final session reachable above the floating settings/store bar. */
+  padding: 14px 10px 80px;
+  scroll-padding-bottom: 80px;
 }
 
 .sidebar-settings {

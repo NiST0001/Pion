@@ -65,7 +65,7 @@ html[data-native-surface='true'] :is(.sidebar, .review-panel, .history-navigator
 html[data-native-surface='true'] :is(.run-metrics-strip, .run-metrics-detail,
   .composer-row, .task-panel-card, .history-navigator-preview, .dock-layout-menu,
   .context-menu, .picker-menu, .reference-menu, .slash-command-menu,
-  .modal, .operations-modal, .confirm-dialog, .tool-permission-modal, .extension-ui-dialog) {
+  .modal, .operations-modal, .confirm-dialog, .tool-permission-modal, .extension-ui-dialog, .sidebar-footer) {
   isolation: isolate;
   --panel-frost-tint: color-mix(in srgb, var(--bg-elev) 64%, transparent);
   background: transparent;
@@ -75,7 +75,7 @@ html[data-native-surface='true'] :is(.modal, .operations-modal, .confirm-dialog,
 html[data-native-surface='true'] :is(.run-metrics-strip, .run-metrics-detail,
   .composer-row, .task-panel-card, .history-navigator-preview, .dock-layout-menu,
   .context-menu, .picker-menu, .reference-menu, .slash-command-menu,
-  .modal, .operations-modal, .confirm-dialog, .tool-permission-modal, .extension-ui-dialog)::before {
+  .modal, .operations-modal, .confirm-dialog, .tool-permission-modal, .extension-ui-dialog, .sidebar-footer)::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -133,6 +133,7 @@ html[data-native-surface='true'] .task-history-run { background: transparent; }
   html[data-native-surface='true'] .titlebar, html[data-native-surface='true'] .dock-toolbar,
   html[data-native-surface='true'] .dock-header { background: Canvas; }
   /* Restore the pre-frost solid surfaces for overlays and dialogs. */
+  html[data-native-surface='true'] .sidebar-footer,
   html[data-native-surface='true'] .task-panel-card,
   html[data-native-surface='true'] .run-metrics-strip,
   html[data-native-surface='true'] .run-metrics-detail,
@@ -155,7 +156,7 @@ html[data-native-surface='true'] .task-history-run { background: transparent; }
   html[data-native-surface='true'] :is(.run-metrics-strip, .run-metrics-detail,
     .composer-row, .task-panel-card, .history-navigator-preview, .dock-layout-menu,
     .context-menu, .picker-menu, .reference-menu, .slash-command-menu,
-    .modal, .operations-modal, .confirm-dialog, .tool-permission-modal, .extension-ui-dialog)::before {
+    .modal, .operations-modal, .confirm-dialog, .tool-permission-modal, .extension-ui-dialog, .sidebar-footer)::before {
     content: none;
     backdrop-filter: none;
   }
