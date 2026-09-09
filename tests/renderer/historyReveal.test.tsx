@@ -60,7 +60,7 @@ describe('history text reveal', () => {
     expect(second).toHaveClass('history-reveal-armed')
   })
 
-  it('keeps the global order when a later row mounts after an earlier row', () => {
+  it('starts newly mounted text without remeasuring or delaying behind armed text', () => {
     const container = document.createElement('div')
     const first = document.createElement('div')
     const firstCharacter = document.createElement('span')
@@ -69,12 +69,13 @@ describe('history text reveal', () => {
     document.body.append(container)
     container.getBoundingClientRect = () => rect(100, 0, 80, 300)
     first.getBoundingClientRect = () => rect(120, 0)
-    firstCharacter.getBoundingClientRect = () => rect(120, 0, 10, 8)
+    firstCharacter.getBoundingClientRect = vi.fn(() => rect(120, 0, 10, 8))
     first.className = 'history-reveal'
     firstCharacter.dataset.screenRevealCharacter = ''
     firstCharacter.className = 'screen-text-reveal-history'
 
     armHistoryRevealRow(first, container)
+    vi.mocked(firstCharacter.getBoundingClientRect).mockClear()
 
     const second = document.createElement('div')
     const secondCharacter = document.createElement('span')
@@ -88,7 +89,8 @@ describe('history text reveal', () => {
     armHistoryRevealRow(second, container)
 
     expect(firstCharacter.style.getPropertyValue('--screen-text-reveal-delay')).toBe('0ms')
-    expect(secondCharacter.style.getPropertyValue('--screen-text-reveal-delay')).toBe('1.2ms')
+    expect(secondCharacter.style.getPropertyValue('--screen-text-reveal-delay')).toBe('0ms')
+    expect(firstCharacter.getBoundingClientRect).not.toHaveBeenCalled()
   })
 
   it('can arm newly mounted detail text in an already armed row', () => {
