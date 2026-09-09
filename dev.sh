@@ -152,14 +152,20 @@ if [ "$PICK_BRANCH" -eq 1 ]; then
 fi
 
 # --- 4. 依赖体检 -------------------------------------------------------------
-# vite 与 electron-vite/react 一同检查：部分安装/占位 node_modules 会缺 vite
-if [ ! -f node_modules/electron-vite/package.json ] || [ ! -f node_modules/react/package.json ] || [ ! -f node_modules/vite/package.json ]; then
+# 用 require.resolve 而非文件存在性检查：空文件/占位 node_modules 骗得过
+# [ -f package.json ]，但骗不过模块解析
+if ! node -e "require.resolve('electron-vite'); require.resolve('react'); require.resolve('vite')" >/dev/null 2>&1; then
   echo "[dev] node_modules 缺失或不完整，安装依赖（约 1-2 分钟）..."
   npm install --include=dev --no-audit --no-fund
 fi
 if [ ! -x node_modules/electron/dist/electron ]; then
   if [ -f node_modules/electron/install.js ]; then
     echo "[dev] Electron 二进制缺失（安装脚本被 npm 白名单拦截），经镜像补装..."
+    # 直接 node 调用不会继承 .npmrc 的镜像配置，显式传递
+    if [ -z "${ELECTRON_MIRROR:-}" ]; then
+      mirror="$(npm config get electron_mirror 2>/dev/null || true)"
+      [ -n "$mirror" ] && [ "$mirror" != "undefined" ] && export ELECTRON_MIRROR="$mirror"
+    fi
     node node_modules/electron/install.js
   else
     echo "[dev] electron 包不完整，重装 electron（约 1-2 分钟）..."

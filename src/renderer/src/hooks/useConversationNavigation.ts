@@ -27,7 +27,11 @@ interface UseConversationNavigationOptions {
 }
 
 function historyAnchor(container: HTMLElement): number {
-  return container.getBoundingClientRect().top + container.clientTop + Math.min(container.clientHeight * 0.38, 260)
+  const style = getComputedStyle(container)
+  const top = Math.min(container.clientHeight, parseFloat(style.getPropertyValue('--conversation-top-clearance')) || 0)
+  const bottom = parseFloat(style.getPropertyValue('--conversation-bottom-clearance')) || 0
+  const visibleHeight = Math.max(0, container.clientHeight - top - bottom)
+  return container.getBoundingClientRect().top + container.clientTop + top + Math.min(visibleHeight * 0.38, 260)
 }
 
 export function useConversationNavigation({
@@ -200,16 +204,24 @@ export function useConversationNavigation({
     lastScrollTop.current = element.scrollTop
   }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, sessionPath, projectCwd, reserveSpace, hasNewerHistory])
 
-  // Async siblings above the scroller (run metrics strip, trust banner, error
-  // banner) and the composer dock (task/queue panels) mount after a session
-  // switch or mid-run and shrink the viewport. Preserve follow intent rather
-  // than deriving it again from the changed viewport geometry.
+  // Banners resize the viewport; floating summary/composer rows change its
+  // padding. Preserve follow intent for both instead of deriving it again
+  // from changed geometry. Top-clearance changes must preserve a reader's
+  // current message position as well as their numeric scroll offset.
   useEffect(() => {
     const element = scrollRef.current
     if (!element || typeof ResizeObserver !== 'function') return
     let previousClientHeight = element.clientHeight
+    let previousPaddingTop = parseFloat(getComputedStyle(element).paddingTop) || 0
     const observer = new ResizeObserver(() => {
       const nextClientHeight = element.clientHeight
+      const nextPaddingTop = parseFloat(getComputedStyle(element).paddingTop) || 0
+      const topDisplacement = nextPaddingTop - previousPaddingTop
+      previousPaddingTop = nextPaddingTop
+      if (topDisplacement !== 0 && element.scrollTop > 0 && pendingJumpNonce.current === null) {
+        element.scrollTop += topDisplacement
+        lastScrollTop.current = element.scrollTop
+      }
       // Observe both viewport and content: image/Markdown layout may finish
       // after the parent render. Geometry must not change the user's intent.
       if (nextClientHeight !== previousClientHeight) {
@@ -228,8 +240,8 @@ export function useConversationNavigation({
     return () => observer.disconnect()
   }, [scrollRef, hasNewerHistory])
 
-  // Floating composer panels add bottom padding without changing the
-  // scroller's clientHeight, so the resize observer never fires for them.
+  // Panel visibility also changes bottom clearance in the current commit;
+  // synchronize an existing follow intent without waiting for a resize delivery.
   useLayoutEffect(() => {
     const element = scrollRef.current
     if (!element || pendingJumpNonce.current !== null || !nearBottomRef.current || hasNewerHistory() || (loadingRef.current && !hasContentRef.current)) return

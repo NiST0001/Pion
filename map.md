@@ -56,7 +56,8 @@
 | src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换、跳转窗口、事件驱动的实时索引更新；从当前游标查询是否还有后续历史，避免把页末当成会话末尾 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
-| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随（含延迟内容布局）、统一历史定位参考点、显式跳转时释放旧占位并锁定目标、高亮与尺寸变化处理 |
+| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随；历史参考点避让上下浮层，顶部余量变化补偿阅读位置，显式跳转释放旧占位并锁定目标 |
+| src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让；不测量展开详情、不重挂载消息或草稿 |
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
 | src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1 缓存迁移；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
@@ -86,7 +87,7 @@
 - `src/renderer/src/styles/`：按功能拆分的 CSS；`refinements/` 为细化样式。
 - `styles/refinements/project.css`：会话运行流光、未读标记和项目列表细节。
 - `styles/dock.css`、`styles/terminal.css`：模块化工作区、拖动反馈、分隔条及终端面板。
-- `styles/window-effects.css`：原生材质上的主题半透明背景，保持代码/终端/浮层实底与高对比度回退，不用 CSS 模拟桌面模糊。
+- `styles/window-effects.css`：连续工作区底色与局部磨砂；悬浮输入框/统计条、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。
 - `styles/motion.css`：通用动效、详情网格高度过渡、工具箭头旋转及减少动态效果适配。
 - `utils/screenTextReveal.tsx`、`utils/historyReveal.ts`：文字渐入调度与历史行启用。
@@ -100,7 +101,8 @@
 - `tests/renderer/`：React 组件及 hooks 测试。
   - `conversationFollow.test.tsx`：用户离开/接近/回到末尾时的新输出行为、无 scroll 事件时恢复跟随、连续手势和延迟布局；程序化定位不代表用户恢复跟随。
   - `historyPaging.test.tsx`：无 scroll 事件的边界输入、在途去重、嵌套输出区、失败重试、旧填充请求隔离，以及跳转后连续加载多页直到真实会话末尾；区分历史追加与实时追加。
-  - `conversationNavigation.test.tsx`：密集短消息定位、底部位置受限时保持明确点击目标；历史跳转、同会话替换、尺寸变化和程序化滚动不恢复跟随；用户返回底部与会话切换恢复跟随。
+  - `conversationNavigation.test.tsx`：密集短消息定位、底部位置受限时保持明确点击目标；浮层余量变化补偿与无遮挡历史参考点；历史跳转、同会话替换、尺寸变化和程序化滚动不恢复跟随。
+  - `conversationOverlays.test.tsx`：统计条/输入区域尺寸观测、详情展开不改变余量、条件挂载与 observer 清理、草稿节点身份保持。
   - `runTelemetry.test.tsx`：较旧遥测快照或事件不得覆盖压缩后的较新用量状态。
   - `sessionResourceStage.test.tsx`：首次就绪门控、真实会话切换重置，以及历史加载期间统计条/详情保留、订阅不断开并持续更新。
   - `RunMetricsStrip.test.tsx`：统计摘要、上下文待更新、详情浮层开关与外部点击/Escape 收起。
@@ -114,7 +116,7 @@
   - `SessionList.test.tsx`：会话行状态与未读标记。
   - `ReviewRevealText.test.tsx`：审查字符动画结束后释放节点。
   - `ReleaseNotes.test.tsx`：更新日志版本展示与默认展开状态。
-  - `windowEffects.test.tsx`：原生效果实时状态不被旧快照覆盖、Linux 重启提示及未生效时不启用透明 CSS。
+  - `windowEffects.test.tsx`：原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条与实底回退的源码契约（不替代 GPU 真机验证）。
   - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1 迁移、拖动预览与菜单操作时不重挂载内容。
 - `tests/unit/terminal-service.test.ts`：项目终端复用、窗口归属校验、有界输出、并发打开和关闭清理（使用模拟 PTY）。
 - `tests/unit/window-effects.test.ts`、`window-effects-settings.test.ts`：模拟原生 API 的平台选择、Linux 重启边界、窗口归属、高对比度/失败回退及偏好持久化；不替代平台真机验证。
@@ -122,14 +124,14 @@
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
 - `tests/unit/session-sidebar-sync.test.ts`：新会话首次落盘后的项目列表推送；`optimistic-session.test.ts` 覆盖占位替换和跨项目列表隔离。
   - `historyReveal.test.tsx`、`screenTextReveal.test.tsx`：渐入行为。
-- `tests/e2e/app.spec.ts`：Electron 启动、统计计费开关、统计按压不缩放、详情浮层与顶部统计条同宽且展开不改变消息区尺寸、插件卸载及 Git 审查提交场景。
+- `tests/e2e/app.spec.ts`：Electron 启动、统计计费开关、统计按压不缩放、统计条/输入框覆盖完整消息视口、多行输入与详情展开不改变视口尺寸、详情同宽、插件卸载及 Git 审查提交场景。
 - `tests/e2e/session-scroll.spec.ts`：独立临时项目和会话，在真实 Electron DOM 中反复长/短会话切换、注入加载期间的延迟 scroll，检查后端就绪前后不存在残留空白滚动范围；不使用现有用户会话。
 - `vitest.config.ts`、`playwright.config.ts`：测试配置；E2E 在 CI 中同时输出 GitHub 断言注释，便于定位失败。
 
 ## 开发、安装与发布
 
 - `package.json`：依赖与脚本；`electron.vite.config.ts`：构建入口。
-- `dev.sh`：本地开发启动；`scripts/`：安装与诊断脚本。
+- `dev.sh`：本地开发启动，支持 `--branch [name]` 选择/切换分支（其他 worktree 占用的分支自动转到对应 worktree 启动）；`scripts/`：安装与诊断脚本。
 - `scripts/install-local.sh`：本机安装、默认递增版本。
 - `electron-builder.yml`、`build/`：分发包配置与图标。
 - `.github/workflows/quality.yml`：质量检查；`release.yml`：标签触发发布；`release-notes.yml`：发布成功后读取该版本内置日志并同步 GitHub Release 说明，也支持指定已有标签手动同步。

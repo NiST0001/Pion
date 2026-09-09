@@ -8,6 +8,7 @@ import { useRunRecovery } from './hooks/useRunRecovery'
 import { useVerification } from './hooks/useVerification'
 import { useAppInteractionState } from './hooks/useAppInteractionState'
 import { useConversationNavigation } from './hooks/useConversationNavigation'
+import { useConversationOverlays } from './hooks/useConversationOverlays'
 import { useWorkflows } from './hooks/useWorkflows'
 import { useGitWorkspace } from './hooks/useGitWorkspace'
 import { usePanelLayout } from './hooks/usePanelLayout'
@@ -118,6 +119,7 @@ export function App(): ReactElement {
     cwd: resourceCwd
   })
   const displayedRun = runTelemetry.activeRun ?? runTelemetry.latestRun
+  const conversationShellRef = useConversationOverlays(Boolean(displayedRun))
   const [showMetricDuration, setShowMetricDuration] = useState(() => readShowMetricDuration())
   const [showMetricCost, setShowMetricCost] = useState(() => readShowMetricCost())
   const sessionTotals = useMemo(() => {
@@ -743,6 +745,19 @@ export function App(): ReactElement {
 
   return (
     <div className="app">
+      {/* Keep this resource mounted for overlay backplates and scrollable leaf
+          popovers. Separate backplates let the floating input/summary and
+          their nested menus sample the conversation independently. */}
+      <svg width="0" height="0" aria-hidden="true" focusable="false" className="surface-filter-definitions">
+        <defs>
+          <filter id="pion-panel-frost" x="0" y="0" width="100%" height="100%" colorInterpolationFilters="sRGB">
+            <feGaussianBlur stdDeviation="12" edgeMode="duplicate" />
+            <feComponentTransfer>
+              <feFuncA type="linear" slope="0" intercept="1" />
+            </feComponentTransfer>
+          </filter>
+        </defs>
+      </svg>
       <TitleBar
         cwd={state.status.cwd}
         sessionName={state.session?.sessionName}
@@ -870,14 +885,13 @@ export function App(): ReactElement {
             onRestoreCheckpoint={(runId) => void runRecovery.restoreCheckpoint(runId)}
           />
 
-          <RunMetricsStrip
-            run={displayedRun}
-            sessionTotals={sessionTotals}
-            showDuration={showMetricDuration}
-            showCost={showMetricCost}
-          />
-
-          <div className={`conversation-shell${historyNavigatorVisible ? ' has-history-navigator' : ''}${(hasTaskPanel || hasQueuedMessages) ? ' has-composer-panels' : ''}`}>
+          <div ref={conversationShellRef} className={`conversation-shell${historyNavigatorVisible ? ' has-history-navigator' : ''}${(hasTaskPanel || hasQueuedMessages) ? ' has-composer-panels' : ''}`}>
+            <RunMetricsStrip
+              run={displayedRun}
+              sessionTotals={sessionTotals}
+              showDuration={showMetricDuration}
+              showCost={showMetricCost}
+            />
             <HistoryNavigator
               index={state.historyIndex}
               activeEntryId={visibleHistoryEntryId}
