@@ -5,7 +5,7 @@ import { useConversationNavigation } from '../../src/renderer/src/hooks/useConve
 import type { TimelineItem } from '../../src/renderer/src/agent/types'
 
 vi.mock('../../src/renderer/src/utils/historyReveal', () => ({ armPendingHistoryRevealRows: vi.fn() }))
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren() })
 
 describe('conversation navigation', () => {
   it('compensates floating summary clearance without leaving manual reading', () => {
@@ -17,6 +17,9 @@ describe('conversation navigation', () => {
     })
     const element = document.createElement('div')
     element.style.paddingTop = '38px'
+    // Attach the fixture so jsdom invalidates computed styles on padding changes,
+    // as it does for the real mounted scroll viewport.
+    document.body.append(element)
     Object.defineProperties(element, { scrollHeight: { value: 2000 }, clientHeight: { value: 400 } })
     const { result } = renderHook(() => useConversationNavigation({
       scrollRef: { current: element }, timeline: [], timelineMutation: 'replace', busy: false,
