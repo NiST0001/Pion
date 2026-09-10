@@ -15,6 +15,7 @@ import { IPC, IPC_EVENTS } from '../shared/ipc'
 import { TerminalService } from './terminal-service'
 import { WindowEffectsService } from './window-effects'
 import { assertSubagentSettingsOwner, SubagentSettingsStore } from './subagent-settings'
+import { assertThemeSettingsOwner, ThemeSettingsStore } from './theme-settings'
 import type {
   AddModelProviderInput,
   ExtensionUiResponse,
@@ -39,6 +40,7 @@ const runStore = new RunStore(join(app.getPath('userData'), 'pion-runs.json'))
 const terminals = new TerminalService()
 const appSettings = new AppSettings()
 const subagentSettings = new SubagentSettingsStore()
+const themeSettings = new ThemeSettingsStore()
 let mainWindowId: number | undefined
 const windowEffects = new WindowEffectsService(appSettings, {
   platform: process.platform, release: release(), ozonePlatform: app.commandLine.getSwitchValue('ozone-platform'),
@@ -186,6 +188,14 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  ipcMain.handle(IPC.GetTheme, (event) => {
+    assertThemeSettingsOwner(event, mainWindowId)
+    return themeSettings.get()
+  })
+  ipcMain.handle(IPC.SetTheme, (event, theme: unknown) => {
+    assertThemeSettingsOwner(event, mainWindowId)
+    return themeSettings.set(theme)
+  })
   ipcMain.handle(IPC.GetSubagentSettings, (event) => {
     assertSubagentSettingsOwner(event, mainWindowId)
     return subagentSettings.get()

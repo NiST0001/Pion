@@ -40,6 +40,57 @@ it('defaults off and gates execution even if a stale tool list advertises delega
   expect(h.appendEntry).toHaveBeenLastCalledWith('pion-subagents-state', { enabled: false })
 })
 
+it('injects proactive delegation only while enabled and preserves the original prompt', async () => {
+  const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: 'done' }))
+  const h = setup(run)
+  const prompt = () => h.handlers.get('before_agent_start')!({ systemPrompt: 'Project: no tests without approval.' })
+  expect((await prompt()).systemPrompt).toContain('Pion subagents: OFF.')
+  await h.toggle('on')
+  const on = (await prompt()).systemPrompt
+  expect(on).toMatch(/^Project: no tests without approval\./)
+  expect(on).toContain('The user has enabled proactive delegation')
+  expect(on).toContain('use pion_subagents early')
+  expect(on).toContain('without waiting for the user')
+  expect(on).toContain('disjoint file ownership')
+  expect(on).toContain('Handle trivial tasks, tightly dependent work, or conflicting edits directly')
+  expect(on).toContain('not approval for otherwise restricted actions')
+  // Opt-in guides the model; opening the switch does not itself start children.
+  expect(run).not.toHaveBeenCalled()
+  await h.toggle('off')
+  const off = (await prompt()).systemPrompt
+  expect(off).toContain('Pion subagents: OFF.')
+  expect(off).not.toContain('use pion_subagents early')
+})
+
+it('does not advertise usable delegation or restore a tool hidden by another mode', async () => {
+  const h = setup()
+  await h.toggle('on')
+  h.tools().splice(h.tools().indexOf('pion_subagents'), 1)
+  const { systemPrompt } = await h.handlers.get('before_agent_start')!({ systemPrompt: 'Read-only mode' })
+  expect(systemPrompt).toContain('not available in the current active tool set')
+  expect(systemPrompt).not.toContain('use pion_subagents early')
+  expect(h.tools()).not.toContain('pion_subagents')
+})
+
+it('withholds proactive instructions if settings cannot be read', async () => {
+  const h = setup(undefined, async () => { throw new Error('bad settings') })
+  await h.toggle('on')
+  const { systemPrompt } = await h.handlers.get('before_agent_start')!({ systemPrompt: 'base' })
+  expect(systemPrompt).toContain('settings are unreadable. Do not delegate')
+  expect(systemPrompt).not.toContain('use pion_subagents early')
+})
+
+it('does not restore ON guidance if switched off while settings are loading', async () => {
+  let resolve!: (settings: SubagentSettings) => void
+  const h = setup(undefined, () => new Promise<SubagentSettings>((done) => { resolve = done }))
+  await h.toggle('on')
+  const pending = h.handlers.get('before_agent_start')!({ systemPrompt: 'base' })
+  await h.toggle('off')
+  resolve({ ...DEFAULT_SUBAGENT_SETTINGS })
+  expect((await pending).systemPrompt).toContain('Pion subagents: OFF.')
+  expect(h.tools()).not.toContain('pion_subagents')
+})
+
 it('starts siblings concurrently, preserves result order and rejects overlapping batches', async () => {
   const releases: Array<() => void> = []
   const run = vi.fn((task: { name: string }) => new Promise<{ name: string; status: 'completed'; text: string }>((resolve) => {

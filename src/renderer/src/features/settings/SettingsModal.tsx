@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   Bot,
@@ -133,6 +133,8 @@ export function SettingsModal({
   const [exporting, setExporting] = useState(false)
   const [autoRetry, setAutoRetry] = useState(true)
   const [selectedTheme, setSelectedTheme] = useState<ThemeId>(currentTheme())
+  const [themeSaveError, setThemeSaveError] = useState('')
+  const themeSaveRevision = useRef(0)
   const [stderr, setStderr] = useState('')
   const [modelBusy, setModelBusy] = useState('')
   const [modelError, setModelError] = useState('')
@@ -612,7 +614,11 @@ export function SettingsModal({
                         aria-pressed={selectedTheme === theme.id}
                         onClick={() => {
                           setSelectedTheme(theme.id)
-                          saveTheme(theme.id)
+                          setThemeSaveError('')
+                          const revision = ++themeSaveRevision.current
+                          void saveTheme(theme.id).catch(() => {
+                            if (themeSaveRevision.current === revision) setThemeSaveError('主题保存失败，请重新选择后重试。')
+                          })
                         }}
                       >
                         <span className={`theme-card-preview ${theme.id}`}>
@@ -632,6 +638,7 @@ export function SettingsModal({
                     ))}
                   </div>
                 </div>
+                {themeSaveError && <p className="settings-inline-error" role="alert">{themeSaveError}</p>}
                 <WindowEffectsSettings />
 
               </section>

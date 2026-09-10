@@ -46,15 +46,20 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
     // Plan-mode restoration can restore a previous tool list. Off remains off.
     pi.on('before_agent_start', async (event) => {
       if (!enabled) sync()
-      let limits = ''
+      let guidance = ''
       if (enabled) {
         try {
           const settings = validateSubagentSettings(await getSettings())
-          limits = ` Current limit: ${settings.maxParallel} children per batch, ${settings.timeoutMinutes} minutes, ${settings.maxTurns} turns per child. Limits are re-read at each batch.`
-        } catch { limits = ' Settings are unreadable. Do not delegate until the user repairs the subagent settings.' }
+          // Other modes/extensions may hide the tool. Never undo their filtering
+          // merely to satisfy a delegation preference.
+          guidance = pi.getActiveTools().includes(TOOL)
+            ? 'ON. The user has enabled proactive delegation. As the parent agent, assess substantial tasks for useful independent workstreams before doing all the work yourself. When a safe split exists, use pion_subagents early for bounded code investigation, implementation, or review tasks without waiting for the user to explicitly request delegation. Assign explicit context, constraints, and disjoint file ownership; retain coordination, integration, and final verification yourself. Use only as many children as useful. Handle trivial tasks, tightly dependent work, or conflicting edits directly; do not invent extra work just to use agents. Respect user/project restrictions: this toggle is not approval for otherwise restricted actions. Do not claim delegation occurred without actual tool results.'
+            : 'ON, but pion_subagents is not available in the current active tool set. Work directly within the current mode; do not reactivate it or delegate through plugins, shell commands, or other workarounds.'
+          guidance += ` Current limit: ${settings.maxParallel} children per batch, ${settings.timeoutMinutes} minutes, ${settings.maxTurns} turns per child. Limits are re-read at each batch.`
+        } catch { guidance = 'ON, but settings are unreadable. Do not delegate until the user repairs the subagent settings.' }
       }
       return { systemPrompt: `${event.systemPrompt}\n\nPion subagents: ${enabled
-        ? 'ON. You may use pion_subagents for independent tasks. Assign disjoint files and explicit constraints; you own integration and final verification.' + limits
+        ? guidance
         : 'OFF. Work as the main agent only. Do not delegate via plugins, shell commands, or other workarounds.'}` }
     })
     pi.registerCommand('pion-subagents', {

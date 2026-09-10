@@ -4,8 +4,9 @@ import { expect, it, vi } from 'vitest'
 import { SubagentsToggle } from '../../src/renderer/src/features/chat/SubagentsToggle'
 import { readFileSync } from 'node:fs'
 
-it('uses a neutral off-hover and a solid accent for enabled state', () => {
+it('uses a capsule shape, neutral off-hover and solid accent for enabled state', () => {
   const css = readFileSync('src/renderer/src/styles/composer.css', 'utf8')
+  expect(css).toMatch(/\.composer-subagents-toggle\s*\{[^}]*border-radius: 999px;/)
   expect(css).toMatch(/\.composer-subagents-toggle\[aria-pressed='false'\]:hover:not\(:disabled\)\s*\{[^}]*background: var\(--bg-hover\)/)
   expect(css).toMatch(/\.composer-subagents-toggle\[aria-pressed='true'\]\s*\{[^}]*background: var\(--accent\)/)
 })

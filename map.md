@@ -13,6 +13,7 @@
 | src/shared/types.ts | 共享类型入口；历史分页响应另带所选分支的最新任务快照 |
 | src/shared/task-history.ts | 原生/旧版任务结果校验、按用户轮次归档；区分有效空快照与错误/缺失结果 |
 | src/shared/operations.ts | 运行/恢复数据契约，以及主进程与 renderer 共用的统计候选筛选、执行状态判定和排序 |
+| src/shared/theme.ts | 四套主题 ID、默认主题与跨进程校验 |
 | src/shared/subagents.ts | 子代理参数类型、默认值、硬边界与跨进程校验 |
 | src/shared/release-notes.ts | 关于页内置发布日志，按版本倒序维护 |
 | src/shared/terminal.ts | PTY 终端快照与增量输出契约 |
@@ -31,7 +32,8 @@
 | src/main/agent/task-planning.ts | 原生任务工具与扩展 |
 | src/main/agent/wire.ts | SDK 条目映射、模式推导、沿当前叶节点祖先链恢复最新任务快照 |
 | src/main/agent-runtime.ts、src/main/agent/runtime-host.ts | 编译后的 SDK RPC 子进程入口、私有启动参数、项目隔离/信任与会话替换时重建内置工具 |
-| src/main/agent/subagents.ts | 内置子代理开关及 SDK 委派：每批读取并冻结全局限制、有界并发/取消、父级工具权限与检查点转发、兄弟写入串行化、结果与模型用量汇总 |
+| src/main/agent/subagents.ts | 内置子代理开关及 SDK 委派：可用时注入复杂任务主动委派策略，不可用时不绕过工具过滤；每批读取并冻结全局限制、有界并发/取消、父级工具权限与检查点转发、兄弟写入串行化、结果与模型用量汇总 |
+| src/main/theme-settings.ts | 独立用户主题文件的原子持久化、读取及所属主窗口/主帧校验 |
 | src/main/subagent-settings.ts | 子代理全局设置的校验、串行原子写入与 userData 配置路径 |
 | src/main/agent/ask-user.ts | SDK customTools 内置提问，选项/自由回答、取消和中止保护；不依赖提问插件 |
 | src/main/agent/plan-mode.ts | 计划模式扩展 |
@@ -63,7 +65,7 @@
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
 | src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随；历史参考点避让上下浮层，顶部余量变化补偿阅读位置，显式跳转释放旧占位并锁定目标 |
-| src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让；不测量展开详情、不重挂载消息或草稿 |
+| src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让，权限请求面板复用底部余量定位在输入框上方；不测量展开详情、不重挂载消息或草稿 |
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
 | src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1 缓存迁移；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
@@ -76,7 +78,7 @@
 
 以下目录位于 `src/renderer/src/features/`：
 
-- `chat/`：ChatTimeline（含稳定的滚动占位容器）、ChatMessage、Markdown、ToolCallItem、Composer；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
+- `chat/`：ChatTimeline（含稳定的滚动占位容器）、ChatMessage、Markdown、ToolCallItem、Composer；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
 - `session/`：HistoryNavigator 跳转条、SessionList 会话行、QueuedMessagesCard、TaskPanel、TaskHistoryPanel；`ComposerSupportPanels.tsx` 保持任务/排队面板的网格槽位稳定，支持平滑让位。
 - `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
 - `operations/`：RunMetricsStrip、权限确认、验证、运行恢复和工作流面板。RunMetricsStrip 保留在会话顶部，详情在统计条下方同宽悬浮展开，不占消息区高度；任务/排队面板仍在输入框上方。
@@ -97,7 +99,7 @@
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。
 - `styles/motion.css`：通用动效、详情网格高度过渡、工具箭头旋转及减少动态效果适配。
 - `utils/screenTextReveal.tsx`、`utils/historyReveal.ts`：文字渐入调度与历史行启用；静态前缀保留为文本节点，扫描跳过已启用字符的重复几何测量。
-- `utils/theme.ts`、`utils/metricsSettings.ts`：主题与统计显示偏好。
+- `utils/theme.ts`：主题即时应用、用户配置恢复、旧 localStorage 迁移和异步保存；`utils/metricsSettings.ts`：统计显示偏好。
 
 上面 styles/、utils/ 简写均相对于 `src/renderer/src/`。
 
@@ -119,19 +121,21 @@
   - `HistoryNavigator.test.tsx`：跳转条交互，实时索引增加时保留手动浏览的范围。
   - `loadingScroll.test.tsx`：详情反复展开/动画折叠后回收高度且钳制不恢复跟随、保留无关加载占位、初次加载可滚入空白、部分渲染不缩短滚动范围、首个 scroll 前手势生效、会话切换/空加载的程序化 scroll 不锁住占位、分页保留消息屏幕位置及加载中的向上滚动、占位不遮蔽分页位移、补偿不连锁分页、跳转短页前释放旧空白范围且滚至末尾不回拉，以及用户取消待执行跳转。
   - `liveHistoryIndex.test.tsx`：忙碌时按落盘/完成事件更新索引、在途事件补刷新、过滤 token 增量、读取失败保留与会话隔离。
-  - `Composer.test.tsx`：输入框、@ 参考、回车发送与斜杠命令；`SubagentsToggle.test.tsx` 覆盖子代理开启/关闭文字、悬浮不改变状态、在途去重与跨会话错误隔离；`SubagentSettings.test.tsx` 覆盖配置加载、校验、保存去重、失败保留草稿和恢复默认。
+  - `Composer.test.tsx`：输入框、@ 参考、回车发送与斜杠命令；`SubagentsToggle.test.tsx` 覆盖胶囊形样式契约、子代理开启/关闭文字、悬浮不改变状态、在途去重与跨会话错误隔离；`SubagentSettings.test.tsx` 覆盖配置加载、校验、保存去重、失败保留草稿和恢复默认。
   - `SortableSidebarGroup.test.tsx`：项目/分支排序持久化及隐藏项、新增项的顺序处理。
   - `SessionList.test.tsx`：会话行状态与未读标记。
   - `ReviewRevealText.test.tsx`：可见分块才创建动画字符、动画结束释放节点、实时追加保留旧块、减少动效不分配字符节点。
   - `DiffView.test.tsx`：长工具差异限制挂载行数、完整分页访问、追加保留当前页及收缩后的页码校正。
   - `ReleaseNotes.test.tsx`：更新日志版本展示与默认展开状态。
+  - `theme.test.ts`：主题文件优先、旧缓存迁移、不可写缓存、读取失败不覆盖、迟到恢复及保存失败重试。
   - `SettingsModal.test.tsx`：提供商设置及外观页移除冗余预览后仍即时切换四套主题。
-  - `windowEffects.test.tsx`：毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条与实底回退的源码契约（不替代 GPU 真机验证）。
+  - `windowEffects.test.tsx`：毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条、权限请求避让输入框与实底回退的源码契约（不替代 GPU 真机验证）。
   - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1 迁移、拖动预览与菜单操作时不重挂载内容。
 - `tests/unit/run-store.test.ts`：运行持久化与中断恢复、统计查询在限制条数前过滤排队消息，默认查询保留队列。
 - `tests/unit/terminal-service.test.ts`：项目终端复用、窗口归属校验、有界输出、并发打开和关闭清理（使用模拟 PTY）。
 - `tests/unit/window-effects.test.ts`、`window-effects-settings.test.ts`：模拟原生 API 的平台选择、Linux 重启边界、窗口归属、高对比度/失败回退及偏好持久化；不替代平台真机验证。
-- `tests/unit/subagents.test.ts`、`subagent-runner.test.ts`、`subagents-bridge.test.ts`、`subagent-permissions.test.ts`：默认关闭、每批配置快照与下一批变更、配置读取期间的批次锁、有界并发/超时/轮数/摘要长度、继承工具与权限拒绝、串行写入、会话归属及迟到请求、子模型计费去重与权限交互取消。
+- `tests/unit/subagents.test.ts`、`subagent-runner.test.ts`、`subagents-bridge.test.ts`、`subagent-permissions.test.ts`：默认关闭、主动委派提示与原始约束保留、工具不可用/配置失败/读取期间关闭的提示隔离、每批配置快照与下一批变更、配置读取期间的批次锁、有界并发/超时/轮数/摘要长度、继承工具与权限拒绝、串行写入、会话归属及迟到请求、子模型计费去重与权限交互取消。
+- `tests/unit/theme-settings.test.ts`：主题跨实例恢复、参数校验、损坏文件保护、窗口归属及安装脚本同步范围契约。
 - `tests/unit/subagent-settings.test.ts`：所属窗口/主帧校验、参数硬边界、全局设置原子持久化、现有运行时读取更新配置和损坏配置拒绝。
 - `tests/unit/ask-user.test.ts`、`runtime-host.test.ts`：内置提问选择/自定义回答、取消/无 UI/中止、回答长度上限，以及 SDK 工具注入、启动参数与跨项目隔离；`plan-mode.test.ts` 覆盖 SDK 提问工具的计划模式白名单。
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
@@ -145,7 +149,7 @@
 
 - `package.json`：依赖与脚本；`electron.vite.config.ts`：构建入口。
 - `dev.sh`：本地开发启动，支持 `--branch [name]` 选择/切换分支（其他 worktree 占用的分支自动转到对应 worktree 启动）；`scripts/`：安装与诊断脚本。
-- `scripts/install-local.sh`：本机安装、默认递增版本。
+- `scripts/install-local.sh`：本机安装、默认递增版本；删除同步限于生成目录与依赖，保留用户配置。
 - `electron-builder.yml`、`build/`：分发包配置与图标。
 - `.github/workflows/quality.yml`：质量检查；`release.yml`：标签触发发布；`release-notes.yml`：发布成功后读取该版本内置日志并同步 GitHub Release 说明，也支持指定已有标签手动同步。
 - `docs/development.md`：开发说明；`docs/coding-agent-platform.md`：设计资料。

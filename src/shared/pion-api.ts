@@ -4,6 +4,7 @@
  * the existing `shared/types` import path used by the application.
  */
 import type { SubagentSettings } from './subagents'
+import type { ThemeId } from './theme'
 import type {
   AddModelProviderInput,
   AgentCapabilities,
@@ -209,6 +210,8 @@ export interface PionApi {
   setYoloMode(enabled: boolean): Promise<void>
   /** Requires the selected session ID to reject stale UI actions. */
   setSubagentsMode(enabled: boolean, sessionId: string): Promise<void>
+  getTheme(): Promise<ThemeId | null>
+  setTheme(theme: ThemeId): Promise<ThemeId>
   /** Global defaults; each backend snapshots them at the next child batch. */
   getSubagentSettings(): Promise<SubagentSettings>
   setSubagentSettings(settings: SubagentSettings): Promise<SubagentSettings>

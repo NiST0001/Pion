@@ -57,8 +57,11 @@ if [ ! -f out/main/index.js ]; then
 fi
 
 echo "[install] 安装应用到 $APP_DIR ..."
-mkdir -p "$APP_DIR"
-rsync -a --delete out package.json "$APP_DIR/"
+# Limit deletion to generated files; never mirror/delete the application root
+# or Chromium/user configuration directories during an upgrade.
+mkdir -p "$APP_DIR/out"
+rsync -a --delete out/ "$APP_DIR/out/"
+cp package.json "$APP_DIR/package.json"
 
 echo "[install] 同步运行时依赖（剔除开发依赖）..."
 LIST="$(mktemp)"
@@ -71,7 +74,8 @@ if [ -s "$LIST" ]; then
   tar -cf - -T "$LIST" | tar -xf - -C "$APP_DIR"
 else
   echo "[install] 警告：无法枚举生产依赖，回退为完整复制 node_modules" >&2
-  rsync -a --delete node_modules "$APP_DIR/"
+  mkdir -p "$APP_DIR/node_modules"
+  rsync -a --delete node_modules/ "$APP_DIR/node_modules/"
 fi
 rm -f "$LIST"
 # Electron 在 package.json 里属 devDependency，但它是桌面应用运行时本体

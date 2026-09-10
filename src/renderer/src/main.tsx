@@ -4,7 +4,7 @@ import { App } from './App'
 import { loadTheme } from './utils/theme'
 import './styles.css'
 
-loadTheme()
+const themeReady = loadTheme()
 
 // Chromium may turn a pointer-focused control into :focus-visible when the
 // user merely presses Shift, producing a large native white outline. Track
@@ -21,10 +21,12 @@ window.addEventListener('pointerdown', () => {
 const container = document.getElementById('root')
 if (!container) throw new Error('#root not found')
 
-createRoot(container).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-)
-
-console.log('[pion] renderer booted, preload bridge:', typeof window.pion)
+// Restore the durable preference before components capture their initial theme.
+void themeReady.then(() => {
+  createRoot(container).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  )
+  console.log('[pion] renderer booted, preload bridge:', typeof window.pion)
+})

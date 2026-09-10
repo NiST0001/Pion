@@ -407,7 +407,7 @@
 .composer-subagents-control { position: relative; display: inline-flex; min-width: 0; }
 .composer-subagents-toggle {
   display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
-  padding: 4px 7px; border: 1px solid transparent; border-radius: var(--radius-sm);
+  padding: 4px 8px; border: 1px solid transparent; border-radius: 999px;
   color: var(--fg-dim); font-size: 11px; background: transparent;
 }
 .composer-subagents-toggle[aria-pressed='false']:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }

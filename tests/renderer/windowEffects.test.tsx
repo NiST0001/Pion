@@ -67,6 +67,19 @@ it('keeps a continuous conversation base and frosts the floating input and summa
   expect(layout).toContain('padding-bottom: calc(var(--conversation-bottom-clearance, 0px)')
 })
 
+it('positions permission requests above the measured composer without reserving message space', () => {
+  // Source contract: actual geometry requires Electron, not jsdom.
+  const css = readFileSync('src/renderer/src/styles/permissions.css', 'utf8')
+  const backdrop = css.match(/\.tool-permission-backdrop\s*\{([^}]*)\}/)?.[1] ?? ''
+  expect(backdrop).toContain('position: absolute')
+  expect(backdrop).toContain('bottom: var(--conversation-bottom-clearance, 0px)')
+  expect(backdrop).toContain('align-items: flex-end')
+  const overlays = readFileSync('src/renderer/src/hooks/useConversationOverlays.ts', 'utf8')
+  expect(overlays).toContain("shell.querySelector<HTMLElement>('.composer-dock')")
+  expect(overlays).toContain("shell.style.setProperty('--conversation-bottom-clearance'")
+  expect(overlays).toContain('observer.observe(composer)')
+})
+
 const initial: WindowEffectsState = { enabled: false, active: false, available: true, restartRequired: false,
   backend: 'linux-alpha', blur: 'none', message: 'opaque', revision: 0 }
 
