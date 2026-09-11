@@ -47,7 +47,9 @@ function agentHarness(methods: Partial<AgentBridge> = {}) {
   const pushProjects = vi.fn()
   const withSessionOperation = vi.fn<AgentBridge['withSessionOperation']>(async (operation) => await operation())
   const bridge = { ...methods, withSessionOperation }
-  registerAgentIpc({ ipcMain: ipc.ipcMain, bridge: bridge as AgentBridge, projects, pushProjects })
+  // This harness supplies only the methods exercised by each route case, not
+  // the bridge's private runtime/lifecycle state.
+  registerAgentIpc({ ipcMain: ipc.ipcMain, bridge: bridge as unknown as AgentBridge, projects, pushProjects })
   return { ...ipc, bridge, withSessionOperation, projects, pushProjects }
 }
 
