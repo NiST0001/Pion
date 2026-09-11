@@ -110,6 +110,22 @@ describe('message revert history', () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => { cleanup(); vi.useRealTimers() })
 
+  it('loads an unpersisted session without mistaking an absent revert for a matching mutation', async () => {
+    const getState = vi.fn<PionApi['getState']>().mockResolvedValue(null)
+    const getEntriesPage = vi.fn<PionApi['getEntriesPage']>().mockResolvedValue(page())
+    const api = { getState, getEntriesPage } as unknown as PionApi
+    const hook = renderHook(() => {
+      const [state, dispatch] = useReducer(reducer, initialState)
+      const history = useAgentHistory({ api, state, dispatch })
+      return { state, history }
+    })
+    await act(async () => { await hook.result.current.history.reloadTimeline() })
+    expect(getState).toHaveBeenCalledOnce()
+    expect(getEntriesPage).toHaveBeenCalledWith(undefined, expect.any(Number), undefined)
+    expect(hook.result.current.state.timeline).toHaveLength(2)
+    expect(hook.result.current.state.timelineError).toBeUndefined()
+  })
+
   it('restores the same session branch, tasks, index and cache while returning text and images', async () => {
     const h = await setup()
     const pending = deferred<MessageRevertResult>()

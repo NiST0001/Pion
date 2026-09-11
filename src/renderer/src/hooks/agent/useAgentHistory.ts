@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { Dispatch } from 'react'
-import type { AgentMode, HistoryLandmark, MessageRevertResult, PionApi } from '../../../../shared/types'
+import type { AgentMode, HistoryLandmark, MessageRevertResult, PionApi, SessionHistoryIndex } from '../../../../shared/types'
 import type { Action, AgentState, TimelineItem } from '../../agent/types'
 import {
   collectToolResults,
@@ -193,7 +193,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       ?? timelineOwnerPath.current
       ?? (await api.getState().catch(() => null))?.sessionFile
     const mutation = revertInFlight.current
-    if (mutation?.path === path && !mutation.settled) await mutation.done
+    if (mutation && mutation.path === path && !mutation.settled) await mutation.done
     if (loadId !== timelineLoadId.current) return
     // Capture the reducer's revision atomically, before the asynchronous read.
     dispatch({ type: 'beginTaskRestore', id: loadId })
@@ -420,7 +420,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       if (loadId !== historyIndexLoadId.current || timelineOwnerPath.current !== sessionPath) return
       do {
         flight.dirty = false
-        const index = await api.getHistoryIndex(sessionPath).catch(() => null)
+        const index: SessionHistoryIndex | null = await api.getHistoryIndex(sessionPath).catch(() => null)
         // Transient reads must not remove the rail. A late snapshot must not
         // replace the index belonging to a newly selected history window.
         if (index?.sessionPath === sessionPath && loadId === historyIndexLoadId.current && timelineOwnerPath.current === sessionPath) {
