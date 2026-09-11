@@ -159,6 +159,13 @@ export class RunStore {
       .map(cloneRun)
   }
 
+  /** Safety gates must examine the entire bounded ledger, not a display page. */
+  hasUnsettledSessionRuns(sessionPath: string): boolean {
+    const target = resolve(sessionPath)
+    return [...this.runs.values()].some((run) => run.sessionPath === target
+      && (run.state === 'queued' || ACTIVE_STATES.has(run.state)))
+  }
+
   update(id: string, mutate: (run: RunOperation) => void): RunOperation | null {
     const run = this.runs.get(id)
     if (!run) return null

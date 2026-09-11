@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { Dispatch } from 'react'
-import type { AgentMode, HistoryLandmark, PionApi } from '../../../../shared/types'
+import type { AgentMode, HistoryLandmark, MessageRevertResult, PionApi } from '../../../../shared/types'
 import type { Action, AgentState, TimelineItem } from '../../agent/types'
 import {
   collectToolResults,
@@ -49,12 +49,85 @@ interface UseAgentHistoryOptions {
 export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions) {
   const timelineLoadId = useRef(0)
   const historyIndexLoadId = useRef(0)
+  const historyIndexAppliedId = useRef(0)
   const historyIndexInFlight = useRef<{ path: string; promise: Promise<void>; dirty: boolean } | null>(null)
   const historyJumpNonce = useRef(0)
   const timelineCache = useRef(new Map<string, TimelineCacheEntry>())
   const historyCursor = useRef<HistoryCursor | null>(null)
   const timelineOwnerPath = useRef<string | undefined>(undefined)
   const expectedTimeline = useRef<{ path: string; items: TimelineItem[] } | null>(null)
+  const currentState = useRef(state)
+  currentState.current = state
+  // A cleared owner must not immediately re-adopt the snapshot from before
+  // an explicit new/switch intent. Only a subsequent authoritative snapshot
+  // may claim an otherwise unowned live timeline.
+  const invalidatedOwnerSnapshot = useRef<AgentState['session'] | undefined>(undefined)
+  const selectionRef = useRef({
+    generation: 0,
+    ownerPath: timelineOwnerPath.current,
+    cwd: state.status.cwd,
+    sessionId: state.session?.sessionId,
+    sessionPath: state.session?.sessionFile
+  })
+  const readSelection = useCallback(() => {
+    const previous = selectionRef.current
+    const current = currentState.current
+    const session = current.session
+    if (!timelineOwnerPath.current && session?.sessionFile && session.sessionId
+      && current.status.phase === 'running' && session !== invalidatedOwnerSnapshot.current) {
+      // Fresh sessions do not load history before their first live messages.
+      // Establish ownership without replacing those rows, before consumers
+      // capture the selection generation (in particular, before undo starts).
+      timelineOwnerPath.current = session.sessionFile
+    }
+    const ownerPath = timelineOwnerPath.current
+    const cwd = current.status.cwd ?? previous.cwd
+    const sameOwner = previous.ownerPath === ownerPath && previous.cwd === cwd
+    // Backend restart/errors can temporarily clear state.session. They do not
+    // select another conversation; retain its logical identity through gaps.
+    const sessionId = session?.sessionId ?? (sameOwner ? previous.sessionId : undefined)
+    const sessionPath = session?.sessionFile ?? (sameOwner ? previous.sessionPath : undefined)
+    if (previous.ownerPath !== ownerPath || previous.cwd !== cwd
+      || previous.sessionId !== sessionId || previous.sessionPath !== sessionPath) {
+      selectionRef.current = {
+        generation: previous.generation + 1,
+        ownerPath,
+        cwd,
+        sessionId,
+        sessionPath
+      }
+    }
+    return selectionRef.current
+  }, [])
+  const { ownerPath: logicalOwnerPath, sessionId: logicalSessionId } = readSelection()
+  useEffect(() => () => {
+    selectionRef.current = { ...selectionRef.current, generation: selectionRef.current.generation + 1 }
+    ++timelineLoadId.current
+    ++historyIndexLoadId.current
+    historyIndexInFlight.current = null
+  }, [])
+
+  // A mutation keeps the old view paintable, but no reader may publish a
+  // pre-mutation branch. New selections of that path wait for its outcome.
+  const revertInFlight = useRef<{ path: string; settled: boolean; done: Promise<void> } | null>(null)
+  const branchRevisions = useRef(new Map<string, number>())
+  const invalidateHistoryReads = useCallback((): number => {
+    const loadId = ++timelineLoadId.current
+    ++historyIndexLoadId.current
+    historyIndexInFlight.current = null
+    const cursor = historyCursor.current
+    if (cursor) historyCursor.current = { ...cursor, loadId, loading: false }
+    dispatch({ type: 'beginTaskRestore', id: loadId })
+    return loadId
+  }, [dispatch])
+  // Explicit intent matters even when a switch is cancelled, or A -> B -> A
+  // happens before React commits a different session snapshot.
+  const invalidateSelection = useCallback((): void => {
+    const selection = readSelection()
+    invalidatedOwnerSnapshot.current = currentState.current.session
+    selectionRef.current = { ...selection, generation: selection.generation + 1 }
+    invalidateHistoryReads()
+  }, [invalidateHistoryReads, readSelection])
 
   // Read the authoritative cursor at event time, not a potentially stale
   // React snapshot. A loaded page's end is not necessarily the session end.
@@ -69,7 +142,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     dispatch({ type: 'loadEntries', items, mode })
   }, [])
 
-  const restoreCachedTimeline = useCallback((path: string, cached: TimelineCacheEntry): void => {
+  const restoreCachedTimeline = useCallback((path: string, cached: TimelineCacheEntry, revision: number): boolean => {
+    if (revision !== (branchRevisions.current.get(path) ?? 0)
+      || (revertInFlight.current?.path === path && !revertInFlight.current.settled)) return false
     const loadId = ++timelineLoadId.current
     // Cached snapshots may contain live-created rows without `historical`, or
     // rows whose first reveal already ran before they were cached. Clone the
@@ -84,6 +159,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     storeTimelineCache(timelineCache.current, path, revealedCache)
     if (cached.tasks !== undefined && cached.tasks !== null) dispatch({ type: 'cachedTasks', tasks: cached.tasks })
     showTimeline(path, items, revealedCache.mode)
+    return true
   }, [dispatch, showTimeline])
 
   // Keep a loaded session's rendered timeline in memory. Switching back to a
@@ -95,7 +171,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     if (expected) expectedTimeline.current = null
 
     const path = timelineOwnerPath.current
-    if (!path) return
+    if (!path || state.timelineLoading
+      || (revertInFlight.current?.path === path && !revertInFlight.current.settled)) return
     const cached = timelineCache.current.get(path)
     if (!cached) return
     const cursor = historyCursor.current
@@ -106,7 +183,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       mode: state.mode,
       tasks: state.tasks
     })
-  }, [state.mode, state.timeline, state.tasks])
+  }, [state.mode, state.timeline, state.tasks, state.timelineLoading])
 
   /** Load only the newest history window; older windows are fetched on demand. */
   const reloadTimeline = useCallback(async (sessionPath?: string): Promise<void> => {
@@ -115,6 +192,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const path = sessionPath
       ?? timelineOwnerPath.current
       ?? (await api.getState().catch(() => null))?.sessionFile
+    const mutation = revertInFlight.current
+    if (mutation?.path === path && !mutation.settled) await mutation.done
     if (loadId !== timelineLoadId.current) return
     // Capture the reducer's revision atomically, before the asynchronous read.
     dispatch({ type: 'beginTaskRestore', id: loadId })
@@ -208,7 +287,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   const loadOlder = useCallback(async (options?: { viaScroll?: boolean }): Promise<void> => {
     if (!api) return
     const cursor = historyCursor.current
-    if (!cursor || cursor.loading || cursor.complete) return
+    if (!cursor || timelineOwnerPath.current !== cursor.path
+      || cursor.loadId !== timelineLoadId.current || cursor.loading || cursor.complete
+      || (revertInFlight.current?.path === cursor.path && !revertInFlight.current.settled)) return
     cursor.loading = true
     const loadId = cursor.loadId
     try {
@@ -223,7 +304,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
           getViewportHistoryPageSize(),
           cursor.path
         )
-        if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+        if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor
+          || timelineOwnerPath.current !== cursor.path) return
         cursor.toolResults = page.toolResults
         cursor.apiBefore = page.start
         cursor.leafId = page.leafId
@@ -266,7 +348,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   const loadNewer = useCallback(async (options?: { viaScroll?: boolean }): Promise<void> => {
     if (!api) return
     const cursor = historyCursor.current
-    if (!cursor || cursor.loading || cursor.newerComplete) return
+    if (!cursor || timelineOwnerPath.current !== cursor.path
+      || cursor.loadId !== timelineLoadId.current || cursor.loading || cursor.newerComplete
+      || (revertInFlight.current?.path === cursor.path && !revertInFlight.current.settled)) return
     cursor.loading = true
     const loadId = cursor.loadId
     try {
@@ -275,7 +359,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
         const end = Math.min(cursor.total, cursor.apiAfter + getViewportHistoryPageSize())
         const limit = Math.max(1, end - cursor.apiAfter)
         const page = await api.getEntriesPage(end, limit, cursor.path)
-        if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor) return
+        if (!page || loadId !== timelineLoadId.current || historyCursor.current !== cursor
+          || timelineOwnerPath.current !== cursor.path) return
         cursor.apiAfter = page.end
         cursor.toolResults = page.toolResults
         cursor.leafId = page.leafId
@@ -330,12 +415,16 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const flight = { path: sessionPath, promise: Promise.resolve(), dirty: false }
     historyIndexInFlight.current = flight
     flight.promise = (async () => {
+      const mutation = revertInFlight.current
+      if (mutation?.path === sessionPath && !mutation.settled) await mutation.done
+      if (loadId !== historyIndexLoadId.current || timelineOwnerPath.current !== sessionPath) return
       do {
         flight.dirty = false
         const index = await api.getHistoryIndex(sessionPath).catch(() => null)
         // Transient reads must not remove the rail. A late snapshot must not
         // replace the index belonging to a newly selected history window.
-        if (index && loadId === historyIndexLoadId.current && timelineOwnerPath.current === sessionPath) {
+        if (index?.sessionPath === sessionPath && loadId === historyIndexLoadId.current && timelineOwnerPath.current === sessionPath) {
+          historyIndexAppliedId.current = loadId
           dispatch({ type: 'historyIndex', index })
         }
       } while (flight.dirty && loadId === historyIndexLoadId.current && timelineOwnerPath.current === sessionPath)
@@ -345,6 +434,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     return flight.promise
   }, [api])
 
+  // Snapshot metadata and startup completion can move the persisted leaf
+  // without a message landmark. Watch these bounded changes, not snapshot
+  // identity, streaming text or token usage; keep the live rows untouched.
   useEffect(() => {
     const sessionPath = state.session?.sessionFile
     if (
@@ -353,24 +445,32 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       || timelineOwnerPath.current !== sessionPath
     ) return
     void refreshHistoryIndex(sessionPath)
-  }, [refreshHistoryIndex, state.session?.sessionFile, state.timelineLoading])
+  }, [
+    refreshHistoryIndex, state.session?.sessionFile, state.session?.sessionId,
+    state.session?.messageCount, state.session?.provider, state.session?.modelId,
+    state.session?.model, state.session?.thinkingLevel, state.session?.sessionName,
+    state.session?.subagentsEnabled, state.status.phase, state.timelineLoading
+  ])
 
   useEffect(() => {
-    const path = state.session?.sessionFile
-    if (!api || !path) return
+    const path = logicalOwnerPath
+    if (!api || !path || !logicalSessionId) return
     let timer: number | undefined
     const off = api.onEvent((event) => {
       if (event.type === 'entry_appended') {
-        const entry = event.entry as { type?: string; message?: { role?: string } } | undefined
-        if (entry?.type !== 'compaction' && (entry?.type !== 'message' || !['user', 'assistant'].includes(entry.message?.role ?? ''))) return
+        const entry = event.entry as { id?: string } | undefined
+        if (!entry?.id) return
       }
       if (event.type === 'message_end') {
         const message = event.message as { role?: string } | undefined
-        if (!['user', 'assistant'].includes(message?.role ?? '')) return
+        if (!message?.role) return
       }
-      // Persisted entries supply real, jumpable IDs. Do not read the entire
-      // index for each streamed token or for unrelated background sessions.
-      if (!['entry_appended', 'message_end', 'agent_settled', 'compaction_end'].includes(event.type)
+      // Every persisted entry can move the branch leaf, even when custom,
+      // model/thinking/name metadata or tool results add no visible landmark.
+      // Lifecycle/snapshot refreshes also cover cold-start appends that occur
+      // before IPC subscriptions are ready. Never scan for streamed tokens.
+      if (!['entry_appended', 'message_end', 'agent_settled', 'compaction_end',
+        'session_info_changed', 'thinking_level_changed', 'model_changed'].includes(event.type)
         || timelineOwnerPath.current !== path || timer !== undefined) return
       timer = window.setTimeout(() => {
         timer = undefined
@@ -381,12 +481,13 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       off()
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [api, refreshHistoryIndex, state.session?.sessionFile])
+  }, [api, refreshHistoryIndex, logicalOwnerPath, logicalSessionId])
 
   /** Fork before a user message; resolves with the message text for prefill. */
   const forkAt = useCallback(
     async (entryId: string): Promise<string> => {
       if (!api) return ''
+      invalidateSelection()
       const result = await api.forkAt(entryId)
       if (!result.cancelled) {
         dispatch({ type: 'clearTimeline' })
@@ -397,20 +498,24 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       }
       return ''
     },
-    [api, dispatch, reloadTimeline]
+    [api, dispatch, invalidateSelection, reloadTimeline]
   )
 
   const switchSession = useCallback(
     async (sessionPath: string): Promise<{ cancelled: boolean }> => {
       if (!api) return { cancelled: true }
+      invalidateSelection()
       const previousPath = timelineOwnerPath.current
       const previousCached = previousPath ? timelineCache.current.get(previousPath) : undefined
+      const previousRevision = previousPath ? branchRevisions.current.get(previousPath) ?? 0 : 0
+      const cacheRevision = branchRevisions.current.get(sessionPath) ?? 0
       const cached = timelineCache.current.get(sessionPath)
       const restorableLimit = getViewportHistoryPageSize()
       const restorableCache = cached && cached.items.length <= restorableLimit
+        && !(revertInFlight.current?.path === sessionPath && !revertInFlight.current.settled)
         ? cached
         : undefined
-      if (cached && !restorableCache) timelineCache.current.delete(sessionPath)
+      if (cached && cached.items.length > restorableLimit) timelineCache.current.delete(sessionPath)
 
       ++historyIndexLoadId.current
       historyIndexInFlight.current = null
@@ -430,21 +535,22 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       // Phase 2 mounts a bounded cached conversation with historical opacity
       // markers. Clearing in the prior paint guarantees the fade replays.
       let requestLoadId = selectionLoadId
-      if (restorableCache) {
-        restoreCachedTimeline(sessionPath, restorableCache)
+      if (restorableCache && restoreCachedTimeline(sessionPath, restorableCache, cacheRevision)) {
         requestLoadId = timelineLoadId.current
       }
 
       const restorePreviousTimeline = (): void => {
-        if (previousPath && previousCached) {
-          restoreCachedTimeline(previousPath, previousCached)
-        } else {
+        if (!(previousPath && previousCached && restoreCachedTimeline(previousPath, previousCached, previousRevision))) {
           historyCursor.current = null
           timelineOwnerPath.current = previousPath
           expectedTimeline.current = null
           dispatch({ type: 'clearTimeline' })
         }
       }
+
+      const mutation = revertInFlight.current
+      if (mutation?.path === sessionPath && !mutation.settled) await mutation.done
+      if (requestLoadId !== timelineLoadId.current) return { cancelled: true }
 
       let result: { cancelled: boolean }
       try {
@@ -468,8 +574,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
 
       // Phase 2 finishes with a bounded newest history window. Give its opacity
       // cascade a real paint before indexing the full session or enabling Git.
-      await reloadTimeline(sessionPath)
+      const content = reloadTimeline(sessionPath)
       const contentLoadId = timelineLoadId.current
+      await content
       await waitForNextPaint()
       if (contentLoadId !== timelineLoadId.current) return { cancelled: true }
 
@@ -478,12 +585,14 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       await refreshHistoryIndex(sessionPath)
       return result
     },
-    [api, refreshHistoryIndex, reloadTimeline, restoreCachedTimeline]
+    [api, invalidateSelection, refreshHistoryIndex, reloadTimeline, restoreCachedTimeline]
   )
 
   const jumpToHistoryLandmark = useCallback(async (landmark: HistoryLandmark): Promise<void> => {
-    const index = state.historyIndex
-    if (!api || !index || !index.sessionPath || index.totalEntries <= 0) return
+    const index = currentState.current.historyIndex
+    if (!api || !index || !index.sessionPath || index.totalEntries <= 0
+      || timelineOwnerPath.current !== index.sessionPath
+      || (revertInFlight.current?.path === index.sessionPath && !revertInFlight.current.settled)) return
     const loadId = ++timelineLoadId.current
     const end = Math.min(
       index.totalEntries,
@@ -517,7 +626,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     )
     // Keep the in-flight assistant message pinned to the end of the jumped
     // window so the live stream keeps rendering instead of being dropped.
-    const liveItems = state.timeline.filter((item) => (
+    const liveItems = currentState.current.timeline.filter((item) => (
       item.kind === 'assistant'
       && item.streaming
       && !items.some((pageItem) => pageItem.id === item.id)
@@ -556,10 +665,98 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       entryId: landmark.entryId,
       nonce: ++historyJumpNonce.current
     })
-  }, [api, showTimeline, state.historyIndex])
+  }, [api, showTimeline])
 
+  /** Undo conversation context in place; file rollback is a separate action. */
+  const revertMessage = useCallback(async (entryId: string): Promise<MessageRevertResult | null> => {
+    if (!api || revertInFlight.current) return null
+    const selection = readSelection()
+    const current = currentState.current
+    const session = current.session
+    const path = selection.ownerPath
+    if (!entryId || !path || !session?.sessionId || session.sessionFile !== path
+      || current.status.phase !== 'running') {
+      throw new Error('请等待当前会话就绪后再撤销消息。')
+    }
+    if (current.busy || current.compacting || session.isStreaming || session.isCompacting
+      || (session.pendingMessageCount ?? 0) > 0
+      || current.queued.steering > 0 || current.queued.followUp > 0
+      || current.queuedMessages.steering.length > 0 || current.queuedMessages.followUp.length > 0
+      || current.queuedMessages.nativeFollowUpCount > 0) {
+      throw new Error('请等待会话空闲并清空排队消息后再撤销。')
+    }
+    const index = current.historyIndex
+    const expectedLeafId = index?.sessionPath === path && index.leafId !== undefined
+      ? index.leafId : timelineCache.current.get(path)?.leafId
+    if (expectedLeafId !== null && (typeof expectedLeafId !== 'string' || expectedLeafId.length === 0)) {
+      throw new Error('无法确认当前会话分支，请重新选择会话后再撤销。')
+    }
+
+    let release!: () => void
+    const mutation = { path, settled: false, done: new Promise<void>((resolve) => { release = resolve }) }
+    revertInFlight.current = mutation
+    invalidateHistoryReads()
+    // An invalidated jump/reload must not leave its spinner running on failure.
+    if (current.timelineLoading) dispatch({ type: 'timelineLoading', loading: false })
+    const stillSelected = (): boolean => readSelection() === selection
+      && timelineOwnerPath.current === path
+    try {
+      let result: MessageRevertResult
+      try {
+        result = await api.revertMessage({ sessionPath: path, sessionId: session.sessionId, entryId, expectedLeafId })
+      } catch (error) {
+        if (!stillSelected()) return null
+        throw error
+      }
+
+      // This is unconditional: even a background success invalidates cached
+      // snapshots (including ones captured by an in-flight switch/cancellation).
+      timelineCache.current.delete(path)
+      branchRevisions.current.set(path, (branchRevisions.current.get(path) ?? 0) + 1)
+      // A cancelled selection can still own A's old cursor. Drop that cursor
+      // without touching B's view, so a later scroll cannot re-cache old rows.
+      if (historyCursor.current?.path === path) historyCursor.current = null
+      mutation.settled = true
+      if (!stillSelected()) return null
+
+      invalidateHistoryReads()
+      const indexReadBoundary = historyIndexLoadId.current
+      historyCursor.current = null
+      expectedTimeline.current = null
+      dispatch({ type: 'runCheckpoint', checkpoint: null })
+      dispatch({ type: 'tree', tree: null })
+      dispatch({ type: 'historyIndex', index: null })
+      dispatch({ type: 'resetHistoryNavigation' })
+      dispatch({ type: 'clearTimeline' })
+      // clearTimeline resets per-session switches. Retain the latest session
+      // snapshot while the idle backend reopens the selected persisted branch.
+      dispatch({ type: 'session', session: currentState.current.session })
+      // API success and view hydration are separate outcomes. The restored
+      // draft must survive a transient history failure; show that error in place.
+      try {
+        await Promise.all([reloadTimeline(path), refreshHistoryIndex(path)])
+        if (stillSelected() && historyIndexAppliedId.current <= indexReadBoundary) dispatch({
+          type: 'timelineError',
+          error: '消息已撤销，但会话历史索引加载失败，请重新选择会话。'
+        })
+      } catch (error) {
+        if (stillSelected()) dispatch({
+          type: 'timelineError',
+          error: `消息已撤销，但会话历史加载失败：${error instanceof Error ? error.message : String(error)}`
+        })
+      }
+      return stillSelected() ? result : null
+    } finally {
+      mutation.settled = true
+      release()
+      if (revertInFlight.current === mutation) revertInFlight.current = null
+    }
+  }, [api, dispatch, invalidateHistoryReads, readSelection, refreshHistoryIndex, reloadTimeline])
 
   return {
+    selectionRef,
+    invalidateSelection,
+    revertMessage,
     timelineLoadId,
     historyIndexLoadId,
     historyIndexInFlight,

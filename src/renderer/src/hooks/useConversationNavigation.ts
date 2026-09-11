@@ -19,6 +19,8 @@ interface UseConversationNavigationOptions {
   sessionPath?: string
   historyIndexSessionPath?: string
   historyJump: AgentState['historyJump']
+  /** Explicit same-session branch replacement (undo), not an ordinary reload. */
+  historyResetRevision?: number
   /** Floating composer panels add bottom clearance; re-pin when they toggle. */
   panelsVisible?: boolean
   loadOlder: (options?: { viaScroll?: boolean }) => Promise<void>
@@ -44,6 +46,7 @@ export function useConversationNavigation({
   sessionPath,
   historyIndexSessionPath,
   historyJump,
+  historyResetRevision = 0,
   panelsVisible,
   loadOlder,
   loadNewer,
@@ -61,6 +64,7 @@ export function useConversationNavigation({
   const nearBottomRef = useRef(true)
   const navigationSession = useRef(sessionPath)
   const navigationProject = useRef(projectCwd)
+  const observedHistoryResetRevision = useRef(historyResetRevision)
   const readingHistory = useRef(false)
   const explicitHistoryEntry = useRef<string | undefined>(undefined)
   const pendingJumpNonce = useRef<number | null>(null)
@@ -101,7 +105,7 @@ export function useConversationNavigation({
   const timelineLength = timeline.length
   const { onScroll: pageOnScroll } = useHistoryPaging({
     scrollRef, timelineLength, loadOlder, loadNewer,
-    owner: JSON.stringify([projectCwd, sessionPath, historyJump?.nonce])
+    owner: JSON.stringify([projectCwd, sessionPath, historyJump?.nonce, historyResetRevision])
   })
   const lastItem = timeline[timelineLength - 1]
   const lastGrow = lastItem
@@ -119,6 +123,28 @@ export function useConversationNavigation({
     loadingRef.current = timelineLoading
     hasContentRef.current = timelineLength > 0
     scrollSurfaceRef.current?.style.setProperty('--chat-viewport-height', `${element.clientHeight}px`)
+    if (observedHistoryResetRevision.current !== historyResetRevision) {
+      observedHistoryResetRevision.current = historyResetRevision
+      // Undo selects a different branch without changing the session path.
+      // Its old reading window, jump and gestures no longer describe this
+      // content. Release the surface BEFORE locating the new branch's end;
+      // empty loading may then reserve fresh, provisional space as usual.
+      pendingJumpNonce.current = null
+      observedJumpNonce.current = historyJump?.nonce
+      previousTimelineHeight.current = 0
+      previousTimelineLength.current = 0
+      previousContentHeight.current = 0
+      observedContentHeight.current = 0
+      prependAnchor.current = null
+      if (historyScrollFrame.current !== null) window.cancelAnimationFrame(historyScrollFrame.current)
+      historyScrollFrame.current = null
+      if (historyHighlightTimer.current !== null) window.clearTimeout(historyHighlightTimer.current)
+      historyHighlightTimer.current = null
+      highlightedHistoryRow.current?.classList.remove('history-jump-target')
+      highlightedHistoryRow.current = null
+      setVisibleHistoryEntryId(undefined)
+      followEnd(element)
+    }
     if (navigationSession.current !== sessionPath || navigationProject.current !== projectCwd) {
       const assigningFirstPath = navigationProject.current === projectCwd && navigationSession.current === undefined && sessionPath !== undefined && manualScroll.current
       navigationSession.current = sessionPath
@@ -205,7 +231,7 @@ export function useConversationNavigation({
       ? { element: firstRow, top: firstRow.offsetTop, parent: firstRow.offsetParent }
       : null
     lastScrollTop.current = element.scrollTop
-  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, sessionPath, projectCwd, reserveSpace, hasNewerHistory])
+  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, historyResetRevision, sessionPath, projectCwd, reserveSpace, hasNewerHistory, followEnd])
 
   // Banners resize the viewport; floating summary/composer rows change its
   // padding. Preserve follow intent for both instead of deriving it again
@@ -305,7 +331,7 @@ export function useConversationNavigation({
 
   useEffect(() => {
     scheduleVisibleHistoryUpdate()
-  }, [scheduleVisibleHistoryUpdate, sessionPath, timelineLength])
+  }, [scheduleVisibleHistoryUpdate, sessionPath, timelineLength, historyResetRevision])
 
   useEffect(() => {
     setVisibleHistoryEntryId(undefined)
@@ -313,7 +339,7 @@ export function useConversationNavigation({
 
   useLayoutEffect(() => {
     const jump = historyJump
-    if (!jump) return
+    if (!jump || pendingJumpNonce.current !== jump.nonce) return
     const frame = window.requestAnimationFrame(() => {
       if (pendingJumpNonce.current !== jump.nonce) return
       const container = scrollRef.current
@@ -350,7 +376,7 @@ export function useConversationNavigation({
       }, 1_600)
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [historyJump?.nonce, scrollRef])
+  }, [historyJump?.nonce, historyResetRevision, scrollRef])
 
   // Arm eager historical rows after scroll restoration. Lazy chat rows also
   // arm themselves when their chunk finishes mounting; otherwise Suspense can
@@ -447,7 +473,7 @@ export function useConversationNavigation({
       element.removeEventListener('pointerdown', resume)
       element.removeEventListener('keydown', key)
     }
-  }, [scrollRef, reserveSpace, hasNewerHistory, followEnd])
+  }, [scrollRef, reserveSpace, hasNewerHistory, followEnd, historyResetRevision])
 
   const handleTimelineScroll = useCallback((): void => {
     const element = scrollRef.current

@@ -23,6 +23,9 @@ export function useAgent() {
   const modelRefreshId = useRef(0)
   const optimisticSessionTimers = useRef(new Map<string, number>())
   const {
+    selectionRef,
+    invalidateSelection,
+    revertMessage,
     timelineLoadId,
     historyIndexLoadId,
     historyIndexInFlight,
@@ -68,6 +71,7 @@ export function useAgent() {
   const start = useCallback(
     async (cwd: string) => {
       if (!api) return
+      invalidateSelection()
       ++timelineLoadId.current
       ++historyIndexLoadId.current
       historyIndexInFlight.current = null
@@ -80,7 +84,7 @@ export function useAgent() {
       await api.startAgent(cwd)
       await Promise.all([reloadTimeline(), refreshModels()])
     },
-    [api, reloadTimeline, refreshModels]
+    [api, invalidateSelection, reloadTimeline, refreshModels]
   )
 
   const bootstrap = useCallback(async () => {
@@ -122,7 +126,7 @@ export function useAgent() {
     removeQueuedMessage,
     abort,
     rollbackRunCheckpoint,
-    newSession
+    newSession: createNewSession
   } = useAgentRunActions({
     api,
     state,
@@ -141,10 +145,10 @@ export function useAgent() {
   const {
     reorderSessions,
     refreshProjectSessions,
-    deleteSession,
-    copySession,
+    deleteSession: removeSession,
+    copySession: duplicateSession,
     getSessionForkMessages,
-    forkSession
+    forkSession: createForkSession
   } = useAgentSessionActions({
     api,
     dispatch,
@@ -179,7 +183,7 @@ export function useAgent() {
     compactNow,
     exportHtml,
     renameSession,
-    migrateSessionToProject,
+    migrateSessionToProject: moveSessionToProject,
     setSteeringMode,
     setFollowUpMode
   } = useAgentSettingsActions({
@@ -189,8 +193,32 @@ export function useAgent() {
     refreshHistoryIndex
   })
 
+  // Record explicit selection intent before awaiting the backend. Session IDs
+  // alone cannot distinguish an undo started before a quick A -> B -> A switch.
+  const newSession = useCallback(async (): Promise<void> => {
+    invalidateSelection()
+    await createNewSession()
+  }, [createNewSession, invalidateSelection])
+  const deleteSession = useCallback(async (path: string): Promise<void> => {
+    if (timelineOwnerPath.current === path) invalidateSelection()
+    await removeSession(path)
+  }, [invalidateSelection, removeSession, timelineOwnerPath])
+  const copySession = useCallback(async (path: string): Promise<void> => {
+    invalidateSelection()
+    await duplicateSession(path)
+  }, [duplicateSession, invalidateSelection])
+  const forkSession = useCallback(async (path: string, entryId: string): Promise<string> => {
+    invalidateSelection()
+    return createForkSession(path, entryId)
+  }, [createForkSession, invalidateSelection])
+  const migrateSessionToProject = useCallback(async (cwd: string): Promise<string | null> => {
+    invalidateSelection()
+    return moveSessionToProject(cwd)
+  }, [invalidateSelection, moveSessionToProject])
+
   const actions = useMemo(
     () => ({
+      revertMessage,
       bootstrap,
       start,
       loadOlder,
@@ -238,6 +266,7 @@ export function useAgent() {
       setSubagentsMode
     }),
     [
+      revertMessage,
       bootstrap,
       start,
       loadOlder,
@@ -286,5 +315,5 @@ export function useAgent() {
     ]
   )
 
-  return { state, actions, hasBridge: Boolean(api) }
+  return { state, actions, selectionRef, hasBridge: Boolean(api) }
 }

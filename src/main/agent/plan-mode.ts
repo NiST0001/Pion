@@ -49,7 +49,11 @@ const PLAN_PROMPT = [
 export default function (pi) {
   let enabled = false;
   let toolsBeforePlanMode;
-  let hasStateEntry = false;
+  let persistedState = JSON.stringify(stateSnapshot());
+
+  function stateSnapshot() {
+    return { version: 1, enabled, toolsBeforePlanMode };
+  }
 
   function availableToolNames() {
     return new Set(pi.getAllTools().map((tool) => tool.name));
@@ -84,27 +88,29 @@ export default function (pi) {
   }
 
   function persist() {
-    hasStateEntry = true;
-    pi.appendEntry(STATE_ENTRY_TYPE, {
-      version: 1,
-      enabled,
-      toolsBeforePlanMode,
-    });
+    const state = stateSnapshot();
+    const serialized = JSON.stringify(state);
+    if (serialized === persistedState) return;
+    pi.appendEntry(STATE_ENTRY_TYPE, state);
+    // Only a successful append becomes the baseline; shutdown can retry a
+    // changed state whose earlier append failed.
+    persistedState = serialized;
   }
 
   function restore(ctx) {
     const wasEnabled = enabled;
-    hasStateEntry = false;
     let restored;
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== "custom" || entry.customType !== STATE_ENTRY_TYPE) continue;
       restored = entry.data;
-      hasStateEntry = true;
     }
     enabled = restored?.enabled === true;
     toolsBeforePlanMode = Array.isArray(restored?.toolsBeforePlanMode)
       ? restored.toolsBeforePlanMode.filter((name) => typeof name === "string")
       : undefined;
+    // The selected branch is the saved baseline, not the previous session.
+    // Capture it before enable/restoreTools can capture or clear saved tools.
+    persistedState = JSON.stringify(stateSnapshot());
     if (enabled) enableTools();
     else if (wasEnabled || toolsBeforePlanMode !== undefined) restoreTools();
   }
@@ -179,7 +185,9 @@ export default function (pi) {
   });
 
   pi.on("session_shutdown", async () => {
-    if (enabled || toolsBeforePlanMode !== undefined || hasStateEntry) persist();
+    // An unchanged state must not advance the leaf merely because this
+    // runtime is stopping (in particular before conversation-only undo).
+    persist();
   });
 }
 `}

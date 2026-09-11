@@ -107,6 +107,8 @@ export interface AgentState {
   tree: { tree: TreeNodeLite[]; leafId: string | null } | null
   historyIndex: SessionHistoryIndex | null
   historyJump: { entryId: string; nonce: number } | null
+  /** Explicit destructive branch selection, independent of ordinary history replacement. */
+  historyResetRevision: number
   projects: ProjectMeta[]
   models: ModelOption[]
   thinkingLevels: string[]
@@ -147,6 +149,7 @@ export const initialState: AgentState = {
   tree: null,
   historyIndex: null,
   historyJump: null,
+  historyResetRevision: 0,
   projects: [],
   models: [],
   thinkingLevels: [],
@@ -181,6 +184,7 @@ export type Action =
   | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
   | { type: 'historyIndex'; index: SessionHistoryIndex | null }
   | { type: 'historyJump'; entryId: string; nonce: number }
+  | { type: 'resetHistoryNavigation' }
   | { type: 'projects'; projects: ProjectMeta[] }
   | { type: 'reorderSessions'; cwd: string; paths: string[] }
   | { type: 'models'; models: ModelOption[] }

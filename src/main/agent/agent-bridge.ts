@@ -24,6 +24,8 @@ import type {
   ExtensionUiResponse,
   ForkMessageOption,
   ImageContent,
+  MessageRevertRequest,
+  MessageRevertResult,
   ModelOption,
   ModelProviderAuthState,
   ModelProviderAuthType,
@@ -76,6 +78,8 @@ import { parseToolPermissionMetadata } from './tool-permission-request'
 import { ensureNativeTaskExtension } from './task-planning'
 import { ensureNativePlanModeExtension } from './plan-mode'
 import { BackendPool } from './backend-pool'
+import { revertSessionMessage } from './message-revert'
+import { stopForHistory } from './stop-for-history'
 import { applyBackendEvent } from './backend-events'
 import { PendingRequestStore } from './pending-requests'
 import { projectQueueSnapshot } from './queue-projection'
@@ -87,6 +91,7 @@ import { loadAgentCapabilities } from './capabilities'
 import { restoreSessionModelPreference } from './session-preferences'
 import {
   filterToolResults,
+  sessionBranch,
   sessionMode,
   sessionTasks,
   toTreeNodeLite,
@@ -144,6 +149,8 @@ export class AgentBridge {
   private readonly backendPool = new BackendPool()
   private stopping = false
   private readonly backendKeysBySessionPath = new Map<string, string>()
+  /** Only failed paths, latched for this bridge's lifetime; pool eviction/stop is not exit proof. */
+  private quarantinedSessionPaths?: Set<string>
   private readonly desiredModes = new Map<string, AgentMode>()
   /** Sessions whose latest completed run the user has not opened yet. */
   private readonly unreadSessionPaths = new Set<string>()
@@ -163,6 +170,9 @@ export class AgentBridge {
   private providerAuthOperation: ProviderAuthOperation | null = null
   private newSessionInFlight: Promise<void> | null = null
   private sessionSelectionGeneration = 0
+  private messageRevertInFlight = false
+  private sessionOperationsInFlight = 0
+  private historyRevision = 0
   private activeKey: string | null = null
   private activeCwd: string | undefined
   private activeSessionPath: string | undefined
@@ -194,9 +204,33 @@ export class AgentBridge {
     return this.activeKey ? this.backendPool.get(this.activeKey) ?? null : null
   }
 
+  private assertHistoryAvailable(): void {
+    if (this.messageRevertInFlight) throw new Error('正在撤销消息，请稍后重试')
+  }
+
+  private assertSessionNotQuarantined(sessionPath?: string): void {
+    if (sessionPath && this.quarantinedSessionPaths?.has(resolve(sessionPath))) {
+      throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
+    }
+  }
+
+  /** IPC reservation covers even the pre-dispatch awaits before backend.busy is set. */
+  async withSessionOperation<T>(operation: () => T | Promise<T>): Promise<T> {
+    this.assertHistoryAvailable()
+    this.sessionOperationsInFlight += 1
+    try {
+      return await operation()
+    } finally {
+      this.sessionOperationsInFlight -= 1
+    }
+  }
+
   /** Compatibility accessor for methods that operate on the selected session. */
   private get client(): RpcClient | null {
-    return this.getActiveBackend()?.client ?? null
+    const backend = this.getActiveBackend()
+    this.assertSessionNotQuarantined(this.activeSessionPath ?? backend?.sessionPath)
+    if (backend?.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
+    return backend?.client ?? null
   }
 
   bind(win: BrowserWindow): void {
@@ -1187,6 +1221,7 @@ export class AgentBridge {
     const backend = await this.ensureActiveBackend()
     if (resolve(backend.cwd) !== resolve(source.cwd)) throw new Error('待恢复运行不属于当前工作区')
     const state = await backend.client.getState()
+    this.assertHistoryAvailable()
     if (state.isStreaming || backend.busy || backend.compacting) {
       throw new Error('当前会话仍在运行，请完成或中止后再恢复')
     }
@@ -1304,10 +1339,13 @@ export class AgentBridge {
    * Unsaved sessions have no file to move and just switch the project.
    */
   async migrateSessionToProject(targetCwd: string): Promise<string | null> {
+    this.assertHistoryAvailable()
     const target = resolve(targetCwd)
     const fromCwd = this.activeCwd
-    if (!fromCwd || resolve(fromCwd) === target) return this.activeSessionPath ?? null
     const backend = this.getActiveBackend()
+    this.assertSessionNotQuarantined(this.activeSessionPath ?? backend?.sessionPath)
+    if (backend?.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
+    if (!fromCwd || resolve(fromCwd) === target) return this.activeSessionPath ?? null
     if (backend) {
       await backend.startPromise
       const state = await backend.client.getState().catch(() => null)
@@ -1332,8 +1370,13 @@ export class AgentBridge {
 
     const source = resolve(sessionPath)
     const targetDir = this.sessionDirFor(target)
-    await mkdir(targetDir, { recursive: true })
     const targetPath = join(targetDir, basename(source))
+    // A logical stop can remove every backend record without proving exit.
+    // Reject both ends before even creating the destination bucket.
+    this.assertHistoryAvailable()
+    this.assertSessionNotQuarantined(source)
+    this.assertSessionNotQuarantined(targetPath)
+    await mkdir(targetDir, { recursive: true })
     const content = await readFile(source, 'utf8')
     const lines = content.split('\n')
     try {
@@ -1345,7 +1388,11 @@ export class AgentBridge {
     } catch {
       // Keep the original first line if it is not a JSON header.
     }
+    this.assertHistoryAvailable()
+    this.assertSessionNotQuarantined(source)
+    this.assertSessionNotQuarantined(targetPath)
     await writeFile(targetPath, lines.join('\n'), 'utf8')
+    this.assertSessionNotQuarantined(source)
     if (targetPath !== source) await unlink(source).catch(() => undefined)
     this.sessionManagers.delete(source)
     this.sessionManagers.delete(targetPath)
@@ -1452,6 +1499,8 @@ export class AgentBridge {
   private dispatchNextLocalFollowUp(backend: BackendRecord): void {
     if (
       this.stopping
+      || this.messageRevertInFlight
+      || backend.historyStopFailed
       || backend.busy
       || backend.localQueueDispatchPromise
       || backend.localQueueDispatching
@@ -1663,7 +1712,8 @@ export class AgentBridge {
 
   private attachBackendEvents(backend: BackendRecord): void {
     backend.client.onEvent((event) => {
-      if (this.stopping) return
+      if (this.stopping || backend.historyMutation || backend.historyStopFailed
+        || this.backendPool.get(backend.key) !== backend) return
       const type = (event as { type?: string }).type
       if (type === 'extension_ui_request' && this.handleExtensionUiRequest(backend, event)) return
 
@@ -1772,8 +1822,10 @@ export class AgentBridge {
     cwd: string,
     sessionPath?: string
   ): Promise<BackendRecord> {
+    this.assertSessionNotQuarantined(sessionPath)
     const cliPath = pionRuntimePath()
     const args = await this.backendArgs(cwd, sessionPath)
+    this.assertSessionNotQuarantined(sessionPath)
     const client = new RpcClient({
       cliPath,
       cwd,
@@ -1841,9 +1893,15 @@ export class AgentBridge {
     cwd: string,
     sessionPath?: string
   ): Promise<BackendRecord> {
+    this.assertHistoryAvailable()
+    this.assertSessionNotQuarantined(sessionPath)
     return this.backendPool.startWithLimit(
       key,
-      () => this.createBackend(key, cwd, sessionPath),
+      () => {
+        this.assertHistoryAvailable()
+        this.assertSessionNotQuarantined(sessionPath)
+        return this.createBackend(key, cwd, sessionPath)
+      },
       () => this.stopping,
       (victim) => this.stopBackend(victim)
     )
@@ -1868,6 +1926,8 @@ export class AgentBridge {
   }
 
   private async ensureActiveBackend(): Promise<BackendRecord> {
+    this.assertHistoryAvailable()
+    this.assertSessionNotQuarantined(this.activeSessionPath)
     if (this.stopping) throw new Error('agent 正在停止')
     if (this.providerMutationInFlight && !this.providerReloading) {
       throw new Error('提供商配置或认证正在进行，请完成或取消后再启动 Agent')
@@ -1895,11 +1955,18 @@ export class AgentBridge {
       await backend.startPromise
       if (this.activeKey === backend.key) this.setActiveBackendStatus()
     }
+    this.assertHistoryAvailable()
+    this.assertSessionNotQuarantined(backend.sessionPath)
+    if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
     return backend
   }
 
   private async syncBackendSession(backend: BackendRecord): Promise<void> {
+    if (backend.historyMutation || backend.historyStopFailed) return
+    const revision = this.historyRevision
     const state = await backend.client.getState().catch(() => null)
+    if (revision !== this.historyRevision || backend.historyMutation || backend.historyStopFailed
+      || this.backendPool.get(backend.key) !== backend) return
     const sessionPath = state?.sessionFile
     if (!sessionPath) return
     const normalizedPath = resolve(sessionPath)
@@ -1954,13 +2021,16 @@ export class AgentBridge {
       'Pion 已退出；本轮及未发送的排队消息都未自动重放。'
     )))
     this.pendingRequests.clearAll()
+    // Do not clear quarantinedSessionPaths: SDK stop() may already have lost
+    // its child handle. Dropping a record/mapping does not prove writer exit.
     this.backendPool.clear()
     this.backendKeysBySessionPath.clear()
     this.pushRunningSessionPaths()
     this.activeKey = null
     this.activeCwd = undefined
     this.activeSessionPath = undefined
-    await Promise.all(backends.map(async ({ client }) => {
+    await Promise.all(backends.map(async ({ client, historyStopFailed }) => {
+      if (historyStopFailed) return // a null-handle retry cannot establish exit
       try {
         await client.stop()
       } catch {
@@ -1976,6 +2046,7 @@ export class AgentBridge {
   async send(message: string, images: ImageContent[] = []): Promise<void> {
     const backend = await this.ensureActiveBackend()
     const state = await backend.client.getState().catch(() => null)
+    this.assertHistoryAvailable()
     if (state?.isStreaming && !state.isCompacting && !backend.compacting) {
       // Enter uses Pi's steering path, but it is an immediate insertion rather
       // than a user follow-up. Keep it out of the visible queue card.
@@ -2035,6 +2106,7 @@ export class AgentBridge {
   async queue(message: string, images: ImageContent[] = []): Promise<void> {
     const backend = await this.ensureActiveBackend()
     const state = await backend.client.getState().catch(() => null)
+    this.assertHistoryAvailable()
     if (
       state?.isStreaming
       || state?.isCompacting
@@ -2085,9 +2157,10 @@ export class AgentBridge {
     cwd: string,
     message: string
   ): Promise<RunOperation | null> {
-    if (this.providerMutationInFlight) return null
+    if (this.providerMutationInFlight || this.messageRevertInFlight) return null
     if (!sessionPath) return null
     const target = resolve(sessionPath)
+    this.assertSessionNotQuarantined(target)
     let key = this.backendKeysBySessionPath.get(target) ?? target
     let backend = this.backendPool.get(key)
     if (!backend) {
@@ -2103,7 +2176,8 @@ export class AgentBridge {
       await backend.startPromise
     }
     const state = await backend.client.getState()
-    if (state.isStreaming || state.isCompacting || backend.busy || backend.compacting) return null
+    if (this.messageRevertInFlight || backend.historyStopFailed
+      || state.isStreaming || state.isCompacting || backend.busy || backend.compacting) return null
     // Reserve the backend while preparing the checkpoint and sending the
     // repair prompt; verification callbacks may otherwise race each other.
     backend.busy = true
@@ -2196,6 +2270,8 @@ export class AgentBridge {
 
   private openSessionManager(sessionPath: string): SessionManager {
     const target = resolve(sessionPath)
+    // Even SDK open() can migrate/repair a file; do not treat it as read-only.
+    this.assertSessionNotQuarantined(target)
     const cached = this.sessionManagers.get(target)
     if (cached) return cached
     const manager = SessionManager.open(target)
@@ -2211,7 +2287,9 @@ export class AgentBridge {
    */
   private async openCurrentSessionManager(sessionPath: string): Promise<SessionManager> {
     const target = resolve(sessionPath)
+    this.assertSessionNotQuarantined(target)
     const file = await stat(target)
+    this.assertSessionNotQuarantined(target)
     const signature = `${file.dev}:${file.ino}:${file.size}:${file.mtimeMs}`
     const cached = this.sessionManagers.get(target)
     if (cached && this.sessionManagerSignatures.get(target) === signature) return cached
@@ -2223,12 +2301,13 @@ export class AgentBridge {
 
   private activateLogicalSession(sessionPath: string, cwd?: string): void {
     const target = resolve(sessionPath)
+    this.assertSessionNotQuarantined(target)
     this.activeSessionPath = target
     this.activeKey = this.backendKeysBySessionPath.get(target) ?? target
     this.activeCwd = resolve(cwd ?? this.activeCwd ?? this.status.cwd ?? dirname(target))
     try {
       const manager = this.openSessionManager(target)
-      this.desiredModes.set(this.activeKey, sessionMode(manager.getEntries()))
+      this.desiredModes.set(this.activeKey, sessionMode(manager.getBranch()))
     } catch {
       this.desiredModes.set(this.activeKey, 'build')
     }
@@ -2265,6 +2344,7 @@ export class AgentBridge {
     if (!this.sessionModelPreferences) return
     try {
       const target = resolve(sessionPath)
+      this.assertSessionNotQuarantined(target)
       const context = SessionManager.open(target).buildSessionContext()
       if (!context.model) return
       await this.sessionModelPreferences.setSessionModel(target, {
@@ -2290,6 +2370,116 @@ export class AgentBridge {
     await this.pushSessionInfo()
     void this.refreshSidebarSessions()
     return { text: result.text, cancelled: false }
+  }
+
+  /** Rewind conversation only, with exactly one writer and a durable SDK branch marker. */
+  async revertMessage(request: MessageRevertRequest, ownerId: number): Promise<MessageRevertResult> {
+    if (!this.win || this.win.webContents.id !== ownerId) throw new Error('只允许所属主窗口撤销消息')
+    this.assertHistoryAvailable()
+    if (!request || typeof request.sessionPath !== 'string' || !request.sessionPath || request.sessionPath.length > 16_000
+      || typeof request.sessionId !== 'string' || !request.sessionId || request.sessionId.length > 200
+      || typeof request.entryId !== 'string' || !request.entryId || request.entryId.length > 200
+      || (request.expectedLeafId !== null && (typeof request.expectedLeafId !== 'string'
+        || !request.expectedLeafId || request.expectedLeafId.length > 200))) throw new Error('无效的消息撤销参数')
+    const target = resolve(request.sessionPath)
+    const backend = this.getActiveBackend()
+    if (!backend || backend.phase !== 'running' || backend.historyStopFailed
+      || this.activeSessionPath !== target || backend.sessionPath !== target) throw new Error('请等待所选会话就绪后再撤销')
+    if (this.stopping || this.providerMutationInFlight || this.newSessionInFlight || this.sessionOperationsInFlight > 0
+      || this.backendPool.pendingStartCount > 0
+      || backend.busy || backend.compacting || backend.awaitingRetry || backend.activeRunId
+      || backend.pendingRunIds.length > 0 || (backend.localFollowUps?.length ?? 0) > 0
+      || (backend.companionRunIds?.length ?? 0) > 0 || (backend.directSteering?.length ?? 0) > 0
+      || (backend.rawQueue?.steering.length ?? 0) > 0 || (backend.rawQueue?.followUp.length ?? 0) > 0
+      || backend.localQueueDispatching || backend.localQueueDispatchPromise || backend.runCompletionPromise
+      || backend.checkpointCreatePromise || backend.checkpointRefreshPromise || backend.subagentsModePending
+      || this.runStore.hasUnsettledSessionRuns(target)
+      || this.getPendingToolPermissionRequests().some((item) => item.sessionPath === target)
+      || this.getPendingExtensionUiRequests().some((item) => item.sessionPath === target)) {
+      throw new Error('请等待运行、压缩及收尾完成，并清空排队消息后再撤销')
+    }
+    const generation = this.sessionSelectionGeneration
+    const assertOwner = (): void => {
+      if (this.stopping || this.win?.webContents.id !== ownerId || this.activeKey !== backend.key
+        || this.activeSessionPath !== target || generation !== this.sessionSelectionGeneration) {
+        throw new Error('会话已切换，未撤销消息')
+      }
+    }
+    this.messageRevertInFlight = true
+    this.historyRevision += 1
+    backend.historyMutation = true
+    backend.busy = true // reserve against pool eviction; never mark this as an Agent run
+    let writerStopped = false
+    let stoppingWriter = false
+    try {
+      const [state, history] = await Promise.all([backend.client.getState(), backend.client.getEntries()])
+      assertOwner()
+      if (state.sessionId !== request.sessionId || !state.sessionFile || resolve(state.sessionFile) !== target
+        || state.isStreaming || state.isCompacting || state.pendingMessageCount > 0) throw new Error('会话状态已变化，请刷新后重试')
+      const branch = sessionBranch(history.entries, history.leafId)
+      const position = branch.findIndex((entry) => entry.id === request.entryId
+        && entry.type === 'message' && entry.message.role === 'user')
+      if (history.leafId !== request.expectedLeafId || position < 0) throw new Error('会话分支已变化，请刷新后重试')
+      const mode = sessionMode(branch.slice(0, position))
+
+      // RpcClient.stop() alone can resolve before SIGKILL has actually exited.
+      // Do not use a second SessionManager writer until this stronger barrier.
+      stoppingWriter = true
+      await stopForHistory(backend.client)
+      writerStopped = true
+      this.clearBackendToolPermissionRequests(backend.key)
+      this.clearBackendExtensionUiRequests(backend.key)
+      if (this.backendPool.get(backend.key) === backend) this.backendPool.delete(backend.key)
+      if (this.backendKeysBySessionPath.get(target) === backend.key) this.backendKeysBySessionPath.delete(target)
+      this.sessionManagers.delete(target)
+      this.sessionManagerSignatures.delete(target)
+      assertOwner()
+      // Synchronous revalidation + append: no selection/other host mutation can
+      // interleave between the final identity check and the durable commit.
+      const result = revertSessionMessage(request)
+      // The commit is already durable; metadata or display refresh failure
+      // must not turn it into failed undo and discard the restored draft.
+      try {
+        this.historyRevision += 1
+        this.desiredModes.set(backend.key, mode)
+        const latest = this.runStore.list({ sessionPath: target, metricsOnly: true, limit: 1 })[0]
+        if (latest) this.runStore.update(latest.id, (run) => {
+          run.contextTokens = undefined
+          run.contextPressure = undefined
+          run.contextUsagePending = true
+          run.liveUsage = undefined
+        }) // Historical billing and project-file checkpoints remain untouched.
+        this.pushRunCheckpoint()
+        this.pushRunningSessionPaths()
+        await this.refresh()
+      } catch (error) {
+        console.warn('[pion] reverted history refresh failed:', error)
+      }
+      return result
+    } catch (error) {
+      if (stoppingWriter && !writerStopped) {
+        // The SDK may have cleared its process pointer before actual exit. Do
+        // not retry from a null pointer or start another writer for this path.
+        backend.historyStopFailed = true
+        this.quarantinedSessionPaths ??= new Set<string>()
+        this.quarantinedSessionPaths.add(target)
+        backend.phase = 'error'
+        if (this.activeKey === backend.key) this.setStatus({ phase: 'error', cwd: backend.cwd,
+          error: '无法确认 Agent 已退出；未修改会话。请重启 Pion 后再试。' })
+      }
+      throw error
+    } finally {
+      backend.historyMutation = false
+      backend.busy = false
+      this.messageRevertInFlight = false
+      this.historyRevision += 1
+      // Recreate only the idle session runtime (never a window or terminal).
+      // Restores SDK context/tools/tasks from the selected persisted branch.
+      if (writerStopped && !this.stopping && this.activeSessionPath === target && this.activeKey === backend.key) {
+        void Promise.resolve().then(() => this.ensureActiveBackend())
+          .then(() => this.pushSessionInfo()).catch(() => undefined)
+      }
+    }
   }
 
   /** Select a session and load its backend once, reusing it on later visits. */
@@ -2323,6 +2513,7 @@ export class AgentBridge {
    */
   private async resolveListedSession(sessionPath: string): Promise<string> {
     const requested = resolve(sessionPath)
+    this.assertSessionNotQuarantined(requested)
     if (!(await pathExists(requested))) throw new Error('会话不存在')
     try {
       const manager = await this.openCurrentSessionManager(requested)
@@ -2357,8 +2548,11 @@ export class AgentBridge {
   }
 
   private async stopBackend(key: string): Promise<void> {
+    this.assertHistoryAvailable()
     const backend = this.backendPool.get(key)
     if (!backend) return
+    this.assertSessionNotQuarantined(backend.sessionPath)
+    if (backend.historyStopFailed) throw new Error('旧 Agent 退出状态未知，请重启 Pion 后再操作此会话')
     await this.interruptBackendRuns(
       backend,
       'Agent 后端已停止；本轮及未发送的排队消息未自动重放。'
@@ -2383,6 +2577,7 @@ export class AgentBridge {
     await this.stopBackend(backendKey)
     const active = this.activeSessionPath === target
 
+    this.assertSessionNotQuarantined(target)
     await unlink(target)
     const wasUnread = this.unreadSessionPaths.delete(target)
     if (wasUnread) this.pushUnreadSessions()
@@ -2482,7 +2677,7 @@ export class AgentBridge {
         : this.activeSessionPath ?? backend?.sessionPath
       if (!target) return null
       const manager = await this.openCurrentSessionManager(target)
-      const entries = manager.getEntries()
+      const entries = manager.getBranch()
       let ordinal = 0
       let pendingResponse = -1
       const landmarks: SessionHistoryIndex['landmarks'] = []
@@ -2515,6 +2710,7 @@ export class AgentBridge {
       })
       return {
         sessionPath: resolve(target),
+        leafId: manager.getLeafId(),
         totalEntries: entries.length,
         landmarks
       }
@@ -2528,7 +2724,7 @@ export class AgentBridge {
     const manager = await this.openCurrentSessionManager(target)
     const events: SessionTaskHistoryEvent[] = []
 
-    for (const entry of manager.getEntries()) {
+    for (const entry of manager.getBranch()) {
       if (entry.type !== 'message') continue
       if (entry.message.role === 'user') {
         events.push({
@@ -2560,6 +2756,7 @@ export class AgentBridge {
   ): Promise<SessionEntriesPage | null> {
     const result = await this.getActiveEntries(sessionPath)
     if (!result) return null
+    result.entries = sessionBranch(result.entries, result.leafId)
 
     const total = result.entries.length
     const end = typeof before === 'number' && Number.isFinite(before)
@@ -2634,10 +2831,12 @@ export class AgentBridge {
   }
 
   async setSubagentsMode(enabled: boolean, sessionId: string, ownerId: number): Promise<void> {
+    this.assertHistoryAvailable()
     if (this.win?.webContents.id !== ownerId) throw new Error('只允许所属主窗口切换子代理')
     if (typeof enabled !== 'boolean' || typeof sessionId !== 'string' || !sessionId || sessionId.length > 200) throw new Error('子代理开关参数无效')
     const backend = this.getActiveBackend()
     if (!backend) throw new Error('会话尚未就绪')
+    if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
     if (backend.subagentsModePending) throw new Error('子代理开关正在切换')
     backend.subagentsModePending = true
     try {
@@ -2657,6 +2856,7 @@ export class AgentBridge {
   }
 
   async setMode(mode: AgentMode): Promise<void> {
+    this.assertHistoryAvailable()
     const key = this.activeKey
     if (!key) throw new Error('没有活动会话')
     const backend = this.getActiveBackend()
@@ -2664,8 +2864,10 @@ export class AgentBridge {
       this.desiredModes.set(key, mode)
       return
     }
+    if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
     await backend.startPromise
     const currentState = await backend.client.getState().catch(() => null)
+    this.assertHistoryAvailable()
     if (
       backend.busy
       || backend.compacting
@@ -2722,6 +2924,7 @@ export class AgentBridge {
   }
 
   private beginProviderMutation(): void {
+    this.assertHistoryAvailable()
     if (this.providerMutationInFlight) {
       throw new Error('已有提供商配置或认证操作正在进行')
     }
@@ -2922,6 +3125,7 @@ export class AgentBridge {
   }
 
   async compactNow(customInstructions?: string): Promise<void> {
+    this.assertHistoryAvailable()
     const client = this.client
     if (!client) throw new Error('agent 未启动')
     await client.compact(customInstructions?.trim() || undefined)
@@ -2946,6 +3150,7 @@ export class AgentBridge {
   }
 
   async renameSession(name: string, sessionPath?: string): Promise<void> {
+    this.assertHistoryAvailable()
     if (typeof name !== 'string') throw new Error('会话名称无效')
     const normalizedName = name.replace(/[\r\n]+/g, ' ').trim()
     if (!normalizedName) throw new Error('会话名称不能为空')
@@ -2954,7 +3159,9 @@ export class AgentBridge {
     if (!sessionPath) {
       const backend = this.getActiveBackend()
       if (!backend) throw new Error('agent 未启动')
+      if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
       await backend.startPromise
+      this.assertHistoryAvailable()
       await backend.client.setSessionName(normalizedName)
       await this.syncBackendSession(backend)
       await this.pushSessionInfo()
@@ -2965,8 +3172,11 @@ export class AgentBridge {
     const target = await this.resolveListedSession(sessionPath)
     const backendKey = this.backendKeysBySessionPath.get(target) ?? target
     const backend = this.backendPool.get(backendKey)
+    this.assertHistoryAvailable()
     if (backend) {
+      if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
       await backend.startPromise
+      this.assertHistoryAvailable()
       await backend.client.setSessionName(normalizedName)
       this.sessionManagers.delete(target)
       this.sessionManagerSignatures.delete(target)
@@ -3034,6 +3244,7 @@ export class AgentBridge {
   async getSessionInfo(): Promise<SessionInfo | null> {
     const backend = this.getActiveBackend()
     const info = await this.getSessionInfoSnapshot()
+    if (backend !== this.getActiveBackend()) return null
     if (info) info.subagentsEnabled = backend?.subagentsEnabled ?? DEFAULT_SUBAGENTS_ENABLED
     if (info) info.yolo = this.activeKey ? this.yoloSessions.has(this.activeKey) : false
     return info
@@ -3096,10 +3307,11 @@ export class AgentBridge {
   }
 
   private async pushSessionInfo(): Promise<void> {
+    const revision = this.historyRevision
     const activeKey = this.activeKey
     const activeSessionPath = this.activeSessionPath
     const info = await this.getSessionInfo()
-    if (this.activeKey !== activeKey || this.activeSessionPath !== activeSessionPath) return
+    if (revision !== this.historyRevision || this.activeKey !== activeKey || this.activeSessionPath !== activeSessionPath) return
     this.win?.webContents.send(STATE_CHANNEL, info)
   }
 
@@ -3112,6 +3324,7 @@ export class AgentBridge {
 
   /** Push state + session list + branch tree to the renderer. */
   private async refresh(): Promise<void> {
+    const revision = this.historyRevision
     const activeKey = this.activeKey
     const activeSessionPath = this.activeSessionPath
     const activeCwd = this.activeCwd
@@ -3123,6 +3336,7 @@ export class AgentBridge {
     // A slow response from the previous backend must never overwrite the
     // state of a session selected while the refresh was in flight.
     if (
+      revision !== this.historyRevision ||
       this.activeKey !== activeKey ||
       this.activeSessionPath !== activeSessionPath ||
       this.activeCwd !== activeCwd

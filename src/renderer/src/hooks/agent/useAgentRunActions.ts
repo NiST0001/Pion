@@ -36,8 +36,8 @@ export function useAgentRunActions({
 }: UseAgentRunActionsOptions) {
   const send = useCallback(
     async (message: string, images: ImageContent[] = []): Promise<void> => {
-      const prompt = message.trim()
-      if (!api || (prompt === '' && images.length === 0)) return
+      // Composer normalizes ordinary drafts; restored text must reach IPC verbatim.
+      if (!api || (message.trim() === '' && images.length === 0)) return
 
       const cwd = state.status.cwd
       const session = state.session
@@ -50,7 +50,7 @@ export function useAgentRunActions({
         : null
       if (shouldProject && cwd && session && optimisticKey) {
         const now = Date.now()
-        const preview = prompt.replace(/\s+/g, ' ').slice(0, 90) || '图片消息'
+        const preview = message.trim().replace(/\s+/g, ' ').slice(0, 90) || '图片消息'
         const optimisticSession: SessionMeta = {
           projectCwd: cwd,
           path: session.sessionFile ?? `pion:pending:${session.sessionId}`,
@@ -72,7 +72,7 @@ export function useAgentRunActions({
       }
 
       try {
-        await api.send(prompt, images)
+        await api.send(message, images)
         await refreshModels()
       } catch (error) {
         if (optimisticKey && cwd && session) {
@@ -90,7 +90,7 @@ export function useAgentRunActions({
   const queue = useCallback(
     async (message: string, images: ImageContent[] = []): Promise<void> => {
       if (!api || (message.trim() === '' && images.length === 0)) return
-      await api.queue(message.trim(), images)
+      await api.queue(message, images)
       await refreshModels()
     },
     [api, refreshModels]

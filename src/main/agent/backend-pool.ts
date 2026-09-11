@@ -71,6 +71,8 @@ export class BackendPool {
         return Boolean(
           backend
           && !backend.busy
+          && !backend.historyMutation
+          && !backend.historyStopFailed
           && backend.phase !== 'starting'
           && backend.pendingRunIds.length === 0
           && !backend.localQueueDispatching

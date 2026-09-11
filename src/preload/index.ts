@@ -122,6 +122,7 @@ const api: PionApi = {
   getState: () => ipcRenderer.invoke(IPC.AgentState),
   newSession: () => ipcRenderer.invoke(IPC.AgentNewSession),
   forkAt: (entryId) => ipcRenderer.invoke(IPC.AgentFork, entryId),
+  revertMessage: (request) => ipcRenderer.invoke(IPC.AgentRevertMessage, request),
   switchSession: (sessionPath) => ipcRenderer.invoke(IPC.AgentSwitchSession, sessionPath),
   deleteSession: (sessionPath) => ipcRenderer.invoke(IPC.AgentDeleteSession, sessionPath),
   copySession: (sessionPath) => ipcRenderer.invoke(IPC.AgentCopySession, sessionPath),

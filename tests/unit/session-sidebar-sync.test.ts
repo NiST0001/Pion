@@ -10,13 +10,15 @@ it('publishes a new session once it is listed, including when another project is
   const session = { path, projectCwd: cwd, id: 'new' }
   const send = vi.fn()
   const listSessions = vi.fn().mockResolvedValueOnce([]).mockResolvedValue([session])
+  const backendPool = new Map<string, BackendRecord>()
   const bridge = Object.assign(Object.create(AgentBridge.prototype), {
-    activeKey: 'other-session',
+    activeKey: 'other-session', backendPool, historyRevision: 0,
     sessionManagers: new Map(), sessionManagerSignatures: new Map(), backendKeysBySessionPath: new Map(),
     updateRunSession: vi.fn(), pushRunningSessionPaths: vi.fn(), restoreQueuedRuns: vi.fn(),
     listSessions, win: { webContents: { send } }
   }) as { syncBackendSession: (backend: BackendRecord) => Promise<void> }
   const backend = { key: 'new', cwd, client: { getState: vi.fn().mockResolvedValue({ sessionFile: path, sessionId: 'new' }) } } as unknown as BackendRecord
+  backendPool.set(backend.key, backend)
   await bridge.syncBackendSession(backend)
   expect(send).not.toHaveBeenCalled()
   expect(backend.sidebarPublishedSessionPath).toBeUndefined()

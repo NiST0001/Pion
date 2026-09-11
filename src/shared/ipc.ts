@@ -1,8 +1,8 @@
 /**
  * IPC 频道名单一事实来源。
  *
- * 主进程注册 handler（main/index.ts）、AgentBridge 推送事件、preload 桥
- * （preload/index.ts）统一引用此处常量，避免三处字符串各自漂移。
+ * 主进程注册 handler（main/index.ts 与 main/ipc/）、AgentBridge 推送事件、
+ * preload 桥（preload/index.ts）统一引用此处常量，避免频道字符串各自漂移。
  */
 
 /** renderer -> main 的 invoke/send 频道。 */
@@ -50,6 +50,7 @@ export const IPC = {
   AgentState: 'pion:agent-state',
   AgentNewSession: 'pion:agent-new-session',
   AgentFork: 'pion:agent-fork',
+  AgentRevertMessage: 'pion:agent-revert-message',
   AgentSwitchSession: 'pion:agent-switch-session',
   AgentDeleteSession: 'pion:agent-delete-session',
   AgentCopySession: 'pion:agent-copy-session',

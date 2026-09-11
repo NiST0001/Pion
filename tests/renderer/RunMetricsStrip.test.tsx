@@ -88,7 +88,7 @@ describe('RunMetricsStrip', () => {
     render(<RunMetricsStrip run={{ ...run, contextUsagePending: true }} />)
     expect(screen.getByRole('button')).not.toHaveTextContent('24%')
     fireEvent.click(screen.getByRole('button'))
-    expect(screen.getByText('上下文').nextElementSibling).toHaveTextContent('压缩后待更新')
+    expect(screen.getByText('上下文').nextElementSibling).toHaveTextContent('上下文待更新')
   })
 
   it('reveals authoritative context and cost details on demand', () => {

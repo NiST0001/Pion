@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 import { flushSync } from 'react-dom'
 import { Settings, Store, PanelLeft, PanelRight, TerminalSquare, RotateCcw, PanelsTopLeft } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
+import { useMessageRevert } from './hooks/useMessageRevert'
 import { useRunTelemetry } from './hooks/useRunTelemetry'
 import { useRunRecovery } from './hooks/useRunRecovery'
 import { useVerification } from './hooks/useVerification'
@@ -53,12 +54,9 @@ import { ProjectTrustBanner } from './features/project/ProjectTrustBanner'
 import { HistoryNavigator } from './features/session/HistoryNavigator'
 import { ToolPermissionModal } from './features/operations/ToolPermissionModal'
 import { ExtensionUiModal } from './features/common/ExtensionUiModal'
-import { ConfirmDialog } from './features/common/ConfirmDialog'
 import { RunMetricsStrip } from './features/operations/RunMetricsStrip'
 import { RunRecoveryBanner } from './features/operations/RunRecoveryBanner'
-import { VerificationPanel } from './features/operations/VerificationPanel'
-import { WorkflowPanel } from './features/operations/WorkflowPanel'
-import { OperationsModal } from './features/operations/OperationsModal'
+import { WorkbenchDialogs } from './app/WorkbenchDialogs'
 import type { OperationsPanelKind } from './features/operations/OperationsModal'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
 import type { SessionPreviewDensity } from './utils/sessionPreview'
@@ -71,16 +69,6 @@ import type { PendingReviewSelection } from './utils/reviewPaths'
 import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
 
 const TerminalPanel = lazy(() => import('./features/terminal/TerminalPanel').then((module) => ({ default: module.TerminalPanel })))
-const LazyBranchCreateModal = lazy(() => import('./features/project/BranchCreateModal')
-  .then((module) => ({ default: module.BranchCreateModal })))
-const LazySettingsModal = lazy(() => import('./features/settings/SettingsModal')
-  .then((module) => ({ default: module.SettingsModal })))
-const LazySkillsToolsModal = lazy(() => import('./features/capabilities/SkillsToolsModal')
-  .then((module) => ({ default: module.SkillsToolsModal })))
-const LazyPluginStoreModal = lazy(() => import('./features/capabilities/PluginStoreModal')
-  .then((module) => ({ default: module.PluginStoreModal })))
-const LazyTaskHistoryPanel = lazy(() => import('./features/session/TaskHistoryPanel')
-  .then((module) => ({ default: module.TaskHistoryPanel })))
 
 const PION_LOCAL_SLASH_COMMANDS: SlashCommandInfo[] = [
   { name: 'plan', description: '切换 Pion 只读计划模式，不直接执行实现', source: 'pion' },
@@ -91,7 +79,7 @@ const PION_LOCAL_SLASH_COMMANDS: SlashCommandInfo[] = [
 const LOCAL_SLASH_COMMAND_NAMES = PION_LOCAL_SLASH_COMMANDS.map((command) => command.name)
 
 export function App(): ReactElement {
-  const { state, actions, hasBridge } = useAgent()
+  const { state, actions, selectionRef, hasBridge } = useAgent()
   useWindowEffects(true)
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
   const [operationsPanel, setOperationsPanel] = useState<OperationsPanelKind | null>(null)
@@ -295,6 +283,7 @@ export function App(): ReactElement {
     sessionPath: resourceSessionPath,
     historyIndexSessionPath: state.historyIndex?.sessionPath,
     historyJump: state.historyJump,
+    historyResetRevision: state.historyResetRevision,
     panelsVisible: state.queuedMessages.steering.length > 0
       || state.queuedMessages.followUp.length > 0
       || (state.mode !== 'plan' && agentTodos.length > 0),
@@ -321,6 +310,22 @@ export function App(): ReactElement {
     const sessions = Object.values(state.sessionsByProject).flat()
     return orderFavoriteSessions(sessions, favoriteSessionPaths)
   }, [favoriteSessionPaths, state.sessionsByProject])
+
+  const messageRevert = useMessageRevert({
+    scope: `${resourceCwd ?? ''}\u0000${selectedSession?.path ?? selectionRef.current.ownerPath ?? resourceSessionPath ?? ''}`,
+    selectionRef,
+    revertMessage: actions.revertMessage,
+    disabledReason: !hasBridge || state.status.phase !== 'running' || !state.session?.sessionFile
+      || resourceSessionPath !== state.session.sessionFile
+      ? '请等待所选会话就绪'
+      : state.busy || state.compacting || state.session.isStreaming || state.session.isCompacting
+        || runningSessionPathSet.has(state.session.sessionFile) || rollbackBusy || migrationBusy
+        || toolPermissionRequests.length > 0 || extensionUiRequests.length > 0
+        ? '请等待执行、压缩和收尾完成'
+        : state.queued.steering > 0 || state.queued.followUp > 0 || (state.session.pendingMessageCount ?? 0) > 0
+          ? '请先处理或移除排队消息'
+          : state.timelineLoading || state.timelineError ? '请先等待会话历史加载完成' : undefined
+  })
 
   const handleToggleFavorite = useCallback((path: string): void => {
     setFavoriteSessionPaths((current) => current.includes(path)
@@ -451,6 +456,7 @@ export function App(): ReactElement {
       if (
         cwd === state.status.cwd &&
         path === state.session?.sessionFile &&
+        selectionRef.current.ownerPath === path && !state.timelineError &&
         (state.status.phase === 'running' || state.status.phase === 'starting')
       ) {
         setSelectedSession(null)
@@ -484,7 +490,7 @@ export function App(): ReactElement {
         console.error('[pion] 切换会话失败', error)
       }
     },
-    [actions, capturedReviewChange, reviewPath, selectedSession, state.session?.sessionFile, state.status.cwd]
+    [actions, capturedReviewChange, reviewPath, selectedSession, selectionRef, state.session?.sessionFile, state.status.cwd, state.status.phase, state.timelineError]
   )
 
   const handleDeleteSession = useCallback(
@@ -913,8 +919,11 @@ export function App(): ReactElement {
                 starting={state.status.phase === 'starting'}
                 cwd={state.status.cwd}
                 hasSessions={state.sessions.length > 1}
-                canFork={state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
+                canFork={!messageRevert.draftFrozen && state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
                 onFork={handleFork}
+                canRevert={messageRevert.canRevert}
+                onRevert={messageRevert.requestRevert}
+                revertDisabledReason={messageRevert.disabledReason}
 
                 agentActivity={agentActivity}
                 workingStatus={workingStatus}
@@ -975,9 +984,12 @@ export function App(): ReactElement {
             />
             <Composer
               busy={state.busy}
-              disabled={!state.status.cwd}
+              disabled={!state.status.cwd || messageRevert.draftFrozen}
               sendDisabled={state.status.phase === 'starting' || state.status.phase === 'error' || projectTrust?.decision === 'ask'}
               prefill={prefill}
+              restoreDraft={messageRevert.restoreDraft}
+              onDraftAvailabilityChange={messageRevert.onDraftAvailabilityChange}
+              onRestoreDraftConsumed={messageRevert.onRestoreDraftConsumed}
               history={messageHistory}
               commands={composerCommands}
               contextPressure={displayedRun?.contextPressure}
@@ -1075,172 +1087,130 @@ export function App(): ReactElement {
         </div>}
       </div>
 
-      {operationsPanel && (
-        <OperationsModal kind={operationsPanel} onClose={closeOperationsPanel}>
-          {operationsPanel === 'agents' ? (
-            <WorkflowPanel
-              embedded
-              cwd={state.status.cwd}
-              workflows={workflows.workflows}
-              selected={workflows.selected}
-              loading={workflows.loading}
-              busy={workflows.busy}
-              error={workflows.error}
-              onSelect={workflows.select}
-              onCreate={workflows.create}
-              onStart={workflows.start}
-              onApprovePlan={workflows.approvePlan}
-              onRepair={workflows.repair}
-              onWaiveTests={workflows.waiveTests}
-              onResume={workflows.resume}
-              onCancel={workflows.cancel}
-              onMerge={workflows.merge}
-              onCleanup={workflows.cleanup}
-            />
-          ) : (
-            <VerificationPanel
-              embedded
-              plan={verification.plan}
-              policy={verification.policy}
-              run={verification.latestRun}
-              activeRun={verification.activeRun}
-              liveLog={verification.liveLog}
-              loading={verification.loading}
-              busy={verification.busy}
-              error={verification.error}
-              onStart={(kinds) => void verification.start(kinds)}
-              onRerun={(runId) => void verification.rerun(runId)}
-              onCancel={(runId) => void verification.cancel(runId)}
-              onPolicyChange={(updates) => void verification.updatePolicy(updates)}
-              onRepair={(prompt) => {
-                setPrefill(prompt)
-                closeOperationsPanel()
-              }}
-            />
-          )}
-        </OperationsModal>
-      )}
-
-      <ConfirmDialog
-        open={rollbackConfirmOpen}
-        title="撤销本轮修改"
-        message="工作区将恢复到发送本轮任务之前。"
-        detail={rollbackError || '发送前已有的暂存、未暂存和未跟踪文件会保留；本轮开始后的手动修改也会一并撤销。'}
-        confirmLabel="确认撤销"
-        tone="accent"
-        busy={rollbackBusy}
-        onConfirm={() => void confirmRollbackRun()}
-        onCancel={() => {
-          if (!rollbackBusy) setRollbackConfirmOpen(false)
+      <WorkbenchDialogs
+        operations={{
+          kind: operationsPanel,
+          onClose: closeOperationsPanel,
+          workflow: {
+            cwd: state.status.cwd,
+            workflows: workflows.workflows,
+            selected: workflows.selected,
+            loading: workflows.loading,
+            busy: workflows.busy,
+            error: workflows.error,
+            onSelect: workflows.select,
+            onCreate: workflows.create,
+            onStart: workflows.start,
+            onApprovePlan: workflows.approvePlan,
+            onRepair: workflows.repair,
+            onWaiveTests: workflows.waiveTests,
+            onResume: workflows.resume,
+            onCancel: workflows.cancel,
+            onMerge: workflows.merge,
+            onCleanup: workflows.cleanup
+          },
+          verification: {
+            plan: verification.plan,
+            policy: verification.policy,
+            run: verification.latestRun,
+            activeRun: verification.activeRun,
+            liveLog: verification.liveLog,
+            loading: verification.loading,
+            busy: verification.busy,
+            error: verification.error,
+            onStart: (kinds) => void verification.start(kinds),
+            onRerun: (runId) => void verification.rerun(runId),
+            onCancel: (runId) => void verification.cancel(runId),
+            onPolicyChange: (updates) => void verification.updatePolicy(updates),
+            onRepair: (prompt) => {
+              setPrefill(prompt)
+              closeOperationsPanel()
+            }
+          }
         }}
-      />
-      <ConfirmDialog
-        open={planModeExitDialog.open}
-        title="确认进入构建模式"
-        message="计划模式只允许资料收集，不会修改文件或创建 Pion 任务。"
-        detail={planModeExitDialog.error || '确认后将恢复编辑、写入和终端工具；此操作不会自动开始执行，仍需发送下一条执行请求。'}
-        confirmLabel="切换到构建模式"
-        tone="accent"
-        busy={planModeExitDialog.busy}
-        onConfirm={planModeExitDialog.onConfirm}
-        onCancel={planModeExitDialog.onCancel}
-      />
-      <ConfirmDialog
-        open={yoloDialog.open}
-        title="确认开启 YOLO 模式"
-        message="YOLO 模式会自动批准本会话的所有工具权限请求，包括写入文件和执行终端命令。"
-        detail={yoloDialog.error || '开启后不再弹出权限确认，也不会写入项目权限规则；发送 /yolo off 或点击 YOLO 标识可随时关闭。'}
-        confirmLabel="开启 YOLO"
-        tone="danger"
-        busy={yoloDialog.busy}
-        onConfirm={yoloDialog.onConfirm}
-        onCancel={yoloDialog.onCancel}
-      />
-      <ConfirmDialog
-        open={migrationTarget !== null}
-        title="迁移会话到项目"
-        message={`将会话迁移到 ${state.projects.find((project) => project.cwd === migrationTarget)?.name ?? migrationTarget}？`}
-        detail={migrationError || '会话文件会移动到目标项目的会话目录，并在那里继续。运行中的会话需要先等待完成。'}
-        confirmLabel="迁移"
-        tone="accent"
-        busy={migrationBusy}
-        onConfirm={() => void confirmProjectMigration()}
-        onCancel={() => {
-          if (!migrationBusy) setMigrationTarget(null)
+        confirmations={{
+          messageRevert: messageRevert.confirmation,
+          rollback: {
+            open: rollbackConfirmOpen,
+            error: rollbackError,
+            busy: rollbackBusy,
+            onConfirm: () => void confirmRollbackRun(),
+            onCancel: () => {
+              if (!rollbackBusy) setRollbackConfirmOpen(false)
+            }
+          },
+          planModeExit: planModeExitDialog,
+          yolo: yoloDialog,
+          migration: {
+            open: migrationTarget !== null,
+            projectName: state.projects.find((project) => project.cwd === migrationTarget)?.name ?? migrationTarget,
+            error: migrationError,
+            busy: migrationBusy,
+            onConfirm: () => void confirmProjectMigration(),
+            onCancel: () => {
+              if (!migrationBusy) setMigrationTarget(null)
+            }
+          }
         }}
-      />
-      {taskHistoryMounted && (
-        <Suspense fallback={null}>
-          <LazyTaskHistoryPanel
-            session={taskHistorySession}
-            onClose={closeTaskHistory}
-          />
-        </Suspense>
-      )}
-      {capabilitiesMounted && (
-        <Suspense fallback={null}>
-          <LazySkillsToolsModal
-            open={capabilitiesOpen}
-            onClose={closeCapabilities}
-          />
-        </Suspense>
-      )}
-      {pluginStoreMounted && (
-        <Suspense fallback={null}>
-          <LazyPluginStoreModal
-            open={pluginStoreOpen}
-            onClose={closePluginStore}
-          />
-        </Suspense>
-      )}
-      {branchDialogMounted && (
-        <Suspense fallback={null}>
-          <LazyBranchCreateModal
-            open={branchDialogCwd !== null}
-            projectName={state.projects.find((project) => project.cwd === branchDialogCwd)?.name ?? '当前项目'}
-            projectCwd={branchDialogCwd ?? ''}
-            onClose={closeBranchDialog}
-            onSubmit={handleCreateBranch}
-          />
-        </Suspense>
-      )}
-      {settingsMounted && (
-        <Suspense fallback={null}>
-          <LazySettingsModal
-            open={settingsOpen}
-            session={state.session}
-            models={state.models}
-            modelProviderAuthState={modelProviderAuthState}
-            agentBusy={state.busy}
-            completionNotificationsEnabled={completionNotificationsEnabled}
-            onCompletionNotificationsChange={(enabled) => void handleCompletionNotificationsChange(enabled)}
-            sessionPreviewDensity={sessionPreviewDensity}
-            onSessionPreviewDensityChange={handleSessionPreviewDensityChange}
-            historyNavGap={historyNavGap}
-            onHistoryNavGapChange={handleHistoryNavGapChange}
-            historyNavMaxVisible={historyNavMaxVisible}
-            onHistoryNavMaxVisibleChange={handleHistoryNavMaxVisibleChange}
-            showMetricDuration={showMetricDuration}
-            showMetricCost={showMetricCost}
-            onMetricDurationChange={(value) => {
+        taskHistory={{
+          mounted: taskHistoryMounted,
+          dialog: { session: taskHistorySession, onClose: closeTaskHistory }
+        }}
+        capabilities={{
+          mounted: capabilitiesMounted,
+          dialog: { open: capabilitiesOpen, onClose: closeCapabilities }
+        }}
+        pluginStore={{
+          mounted: pluginStoreMounted,
+          dialog: { open: pluginStoreOpen, onClose: closePluginStore }
+        }}
+        branch={{
+          mounted: branchDialogMounted,
+          dialog: {
+            open: branchDialogCwd !== null,
+            projectName: state.projects.find((project) => project.cwd === branchDialogCwd)?.name,
+            projectCwd: branchDialogCwd ?? '',
+            onClose: closeBranchDialog,
+            onSubmit: handleCreateBranch
+          }
+        }}
+        settings={{
+          mounted: settingsMounted,
+          dialog: {
+            open: settingsOpen,
+            session: state.session,
+            models: state.models,
+            modelProviderAuthState,
+            agentBusy: state.busy,
+            completionNotificationsEnabled,
+            onCompletionNotificationsChange: (enabled) => void handleCompletionNotificationsChange(enabled),
+            sessionPreviewDensity,
+            onSessionPreviewDensityChange: handleSessionPreviewDensityChange,
+            historyNavGap,
+            onHistoryNavGapChange: handleHistoryNavGapChange,
+            historyNavMaxVisible,
+            onHistoryNavMaxVisibleChange: handleHistoryNavMaxVisibleChange,
+            showMetricDuration,
+            showMetricCost,
+            onMetricDurationChange: (value) => {
               setShowMetricDuration(value)
               saveShowMetricDuration(value)
-            }}
-            onMetricCostChange={(value) => {
+            },
+            onMetricCostChange: (value) => {
               setShowMetricCost(value)
               saveShowMetricCost(value)
-            }}
-            projectTrust={projectTrust}
-            projectTrustBusy={projectTrustBusy || state.busy || state.status.phase === 'starting'}
-            projectTrustError={projectTrustError}
-            onProjectTrustChange={(decision) => void handleProjectTrustChange(decision)}
-            toolPermissionPolicy={toolPermissionPolicy}
-            toolPermissionBusy={toolPermissionBusy}
-            toolPermissionError={toolPermissionError}
-            onToolPermissionChange={(category, decision) => void handleToolPermissionChange(category, decision)}
-            onToolPermissionReset={() => void handleToolPermissionReset()}
-            onClose={closeSettings}
-            actions={{
+            },
+            projectTrust,
+            projectTrustBusy: projectTrustBusy || state.busy || state.status.phase === 'starting',
+            projectTrustError,
+            onProjectTrustChange: (decision) => void handleProjectTrustChange(decision),
+            toolPermissionPolicy,
+            toolPermissionBusy,
+            toolPermissionError,
+            onToolPermissionChange: (category, decision) => void handleToolPermissionChange(category, decision),
+            onToolPermissionReset: () => void handleToolPermissionReset(),
+            onClose: closeSettings,
+            actions: {
               setModel: actions.setModel,
               listModelProviders: actions.listModelProviders,
               loginModelProvider: actions.loginModelProvider,
@@ -1255,10 +1225,10 @@ export function App(): ReactElement {
               renameSession: actions.renameSession,
               setSteeringMode: actions.setSteeringMode,
               setFollowUpMode: actions.setFollowUpMode
-            }}
-          />
-        </Suspense>
-      )}
+            }
+          }
+        }}
+      />
     </div>
   )
 }

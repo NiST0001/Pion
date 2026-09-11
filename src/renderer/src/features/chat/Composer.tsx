@@ -3,18 +3,23 @@ import type { KeyboardEvent, ReactElement, ReactNode } from 'react'
 import { ArrowUp, AtSign, Hammer, ListTodo, ShieldAlert, Square } from 'lucide-react'
 import type { AgentMode, ImageContent, SlashCommandInfo } from '../../../../shared/types'
 
-import { buildReferenceMessage, REFERENCE_TRIGGER_RE } from './composerReferences'
+import { REFERENCE_TRIGGER_RE } from './composerReferences'
 import { ComposerAttachments } from './ComposerAttachments'
 import { ReferenceMenu, SlashCommandMenu } from './ComposerMenus'
 import { useComposerReferences } from './useComposerReferences'
 
 interface ComposerProps {
   busy: boolean
-  /** No workspace is available, so even drafting is unavailable. */
+  /** No workspace is available, or a destructive operation has frozen drafting. */
   disabled: boolean
   /** The draft stays editable while the backend/trust gate is preparing. */
   sendDisabled: boolean
   prefill: string
+  /** One-shot, non-destructive restoration; ids must be unique for this Composer. */
+  restoreDraft?: { id: string; text: string; images: ImageContent[] }
+  /** True only for exactly empty text (whitespace is a draft), no attachments or reads. */
+  onDraftAvailabilityChange?: (available: boolean) => void
+  onRestoreDraftConsumed?: (id: string, restored: boolean) => void
   /** 当前会话中的用户消息，按时间顺序用于上下键导航。 */
   history: string[]
   /** 输入框底部、工作模式左侧的项目选择器 */
@@ -44,6 +49,9 @@ export function Composer({
   disabled,
   sendDisabled,
   prefill,
+  restoreDraft,
+  onDraftAvailabilityChange,
+  onRestoreDraftConsumed,
   history,
   projectSelector,
   controls,
@@ -65,11 +73,24 @@ export function Composer({
   const [commandIndex, setCommandIndex] = useState(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const valueRef = useRef('')
+  const restoredTextRef = useRef<string | null>(null)
+  const consumedRestoresRef = useRef(new Set<string>())
+  const draftCallbacksRef = useRef({ onDraftAvailabilityChange, onRestoreDraftConsumed })
+  draftCallbacksRef.current = { onDraftAvailabilityChange, onRestoreDraftConsumed }
+  const reportDraftAvailability = useCallback((available: boolean): void => {
+    draftCallbacksRef.current.onDraftAvailabilityChange?.(available)
+  }, [])
+  const markDraftUnavailable = useCallback((): void => {
+    reportDraftAvailability(false)
+  }, [reportDraftAvailability])
   const historyIndexRef = useRef<number | null>(null)
   const historyDraftRef = useRef('')
   const {
     pendingReferences,
     pendingImages,
+    getReferenceDraft,
+    restoreImages,
+    buildMessage,
     referenceError,
     readingReferences,
     fileInputRef,
@@ -80,11 +101,7 @@ export function Composer({
     clearReferences,
     openReferencePicker,
     insertReferenceToken
-  } = useComposerReferences({ valueRef, setValue, textareaRef })
-
-  useEffect(() => {
-    valueRef.current = value
-  }, [value])
+  } = useComposerReferences({ valueRef, setValue, textareaRef, disabled, onDraftAvailabilityChange: reportDraftAvailability })
 
   const resetHistoryNavigation = useCallback((): void => {
     historyIndexRef.current = null
@@ -94,7 +111,9 @@ export function Composer({
   useEffect(() => {
     if (prefill) {
       resetHistoryNavigation()
+      restoredTextRef.current = null
       valueRef.current = prefill
+      markDraftUnavailable()
       setValue(prefill)
       textareaRef.current?.focus()
       requestAnimationFrame(() => {
@@ -104,7 +123,40 @@ export function Composer({
         }
       })
     }
-  }, [prefill, resetHistoryNavigation])
+  }, [prefill, resetHistoryNavigation, markDraftUnavailable])
+
+  useEffect(() => {
+    if (!restoreDraft || consumedRestoresRef.current.has(restoreDraft.id)) return
+    // Consume refusals too: clearing a newer draft must not revive an old undo.
+    consumedRestoresRef.current.add(restoreDraft.id)
+    const references = getReferenceDraft()
+    const restored = valueRef.current === '' && references.references.length === 0 && !references.reading
+    if (restored) {
+      resetHistoryNavigation()
+      restoredTextRef.current = restoreDraft.text
+      valueRef.current = restoreDraft.text
+      markDraftUnavailable()
+      setValue(restoreDraft.text)
+      restoreImages(restoreDraft.images)
+      requestAnimationFrame(() => {
+        const element = textareaRef.current
+        if (!element) return
+        element.style.height = 'auto'
+        element.style.height = `${Math.min(element.scrollHeight, 200)}px`
+        if (!element.disabled) element.focus()
+      })
+    }
+    // Deliberately independent of disabled: undo keeps editing frozen until
+    // its successful result has been restored and acknowledged.
+    draftCallbacksRef.current.onRestoreDraftConsumed?.(restoreDraft.id, restored)
+  }, [restoreDraft, getReferenceDraft, restoreImages, resetHistoryNavigation, markDraftUnavailable])
+
+  useEffect(() => {
+    const references = getReferenceDraft()
+    draftCallbacksRef.current.onDraftAvailabilityChange?.(
+      valueRef.current === '' && references.references.length === 0 && !references.reading
+    )
+  }, [value, pendingReferences, readingReferences, onDraftAvailabilityChange, getReferenceDraft])
 
   const moveHistory = useCallback(
     (direction: 'up' | 'down'): boolean => {
@@ -114,7 +166,7 @@ export function Composer({
 
       if (direction === 'up') {
         if (currentIndex === null) {
-          historyDraftRef.current = value
+          historyDraftRef.current = valueRef.current
           nextIndex = history.length - 1
         } else if (currentIndex > 0) {
           nextIndex = currentIndex - 1
@@ -127,7 +179,9 @@ export function Composer({
           nextIndex = currentIndex + 1
         } else {
           historyIndexRef.current = null
+          restoredTextRef.current = null
           valueRef.current = historyDraftRef.current
+          markDraftUnavailable()
           setValue(historyDraftRef.current)
           requestAnimationFrame(() => {
             const element = textareaRef.current
@@ -141,7 +195,9 @@ export function Composer({
 
       historyIndexRef.current = nextIndex
       const nextValue = history[nextIndex]
+      restoredTextRef.current = null
       valueRef.current = nextValue
+      markDraftUnavailable()
       setValue(nextValue)
       requestAnimationFrame(() => {
         const element = textareaRef.current
@@ -151,15 +207,17 @@ export function Composer({
       })
       return true
     },
-    [history, value]
+    [history, markDraftUnavailable]
   )
 
   const clearValue = useCallback((): void => {
+    restoredTextRef.current = null
     valueRef.current = ''
+    markDraftUnavailable()
     setValue('')
     resetHistoryNavigation()
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
-  }, [resetHistoryNavigation])
+  }, [resetHistoryNavigation, markDraftUnavailable])
 
   const autoSize = (element: HTMLTextAreaElement): void => {
     element.style.height = 'auto'
@@ -186,7 +244,7 @@ export function Composer({
     ? null
     : Math.round(Math.max(0, Math.min(contextPressure, 1)) * 100)
   const contextLabel = contextPercent === null
-    ? contextUsagePending ? '上下文已压缩，等待下一次模型响应更新用量' : '上下文占用尚不可用'
+    ? contextUsagePending ? '上下文已变化，等待下一次模型响应更新用量' : '上下文占用尚不可用'
     : `当前会话上下文已使用 ${contextPercent}%${contextTokens !== undefined && contextWindow
       ? `（${Math.round(contextTokens).toLocaleString()} / ${Math.round(contextWindow).toLocaleString()} tokens）`
       : ''}`
@@ -196,29 +254,29 @@ export function Composer({
   }, [slashQuery])
 
   const submit = useCallback(() => {
-    const text = value.trim()
-    if ((text === '' && pendingReferences.length === 0) || disabled || readingReferences || (sendDisabled && !localCommandReady)) return
+    const references = getReferenceDraft()
+    const text = valueRef.current === restoredTextRef.current ? valueRef.current : valueRef.current.trim()
+    if ((text.trim() === '' && references.references.length === 0) || disabled || references.reading || (sendDisabled && !localCommandReady)) return
     onSend(
-      localCommandReady ? text : buildReferenceMessage(text, pendingReferences),
-      localCommandReady ? [] : pendingImages
+      localCommandReady ? text.trim() : buildMessage(text),
+      localCommandReady ? [] : references.images
     )
     clearValue()
     if (!localCommandReady) clearReferences()
-  }, [value, pendingReferences, pendingImages, disabled, readingReferences, sendDisabled, localCommandReady, onSend, clearValue, clearReferences])
+  }, [getReferenceDraft, buildMessage, disabled, sendDisabled, localCommandReady, onSend, clearValue, clearReferences])
 
   const queue = useCallback(() => {
-    const text = value.trim()
-    if ((text === '' && pendingReferences.length === 0) || disabled || readingReferences || (sendDisabled && !localCommandReady)) return
-    if (localCommandReady) onSend(text, [])
-    else onQueue(buildReferenceMessage(text, pendingReferences), pendingImages)
+    const references = getReferenceDraft()
+    const text = valueRef.current === restoredTextRef.current ? valueRef.current : valueRef.current.trim()
+    if ((text.trim() === '' && references.references.length === 0) || disabled || references.reading || (sendDisabled && !localCommandReady)) return
+    if (localCommandReady) onSend(text.trim(), [])
+    else onQueue(buildMessage(text), references.images)
     clearValue()
     if (!localCommandReady) clearReferences()
   }, [
-    value,
-    pendingReferences,
-    pendingImages,
+    getReferenceDraft,
+    buildMessage,
     disabled,
-    readingReferences,
     sendDisabled,
     localCommandReady,
     onSend,
@@ -228,6 +286,10 @@ export function Composer({
   ])
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (disabled) {
+      event.preventDefault()
+      return
+    }
     if (showCommandMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
       event.preventDefault()
       setCommandIndex((current) => {
@@ -311,11 +373,14 @@ export function Composer({
   }
 
   const selectSlashCommand = (index: number): void => {
+    if (disabled) return
     const command = commandOptions[index]
     if (!command) return
     resetHistoryNavigation()
     const nextValue = `/${command.name} `
+    restoredTextRef.current = null
     valueRef.current = nextValue
+    markDraftUnavailable()
     setValue(nextValue)
     setCommandIndex(0)
     requestAnimationFrame(() => {
@@ -360,9 +425,12 @@ export function Composer({
             aria-controls={showCommandMenu ? 'slash-command-menu' : showReferenceMenu ? 'reference-menu' : undefined}
             rows={1}
             onChange={(event) => {
+              if (disabled) return
               resetHistoryNavigation()
-              valueRef.current = event.target.value
-              setValue(event.target.value)
+              const nextValue = event.target.value
+              valueRef.current = nextValue
+              markDraftUnavailable()
+              setValue(nextValue)
               autoSize(event.target)
             }}
             onPaste={handlePaste}
@@ -379,6 +447,7 @@ export function Composer({
             type="file"
             accept="image/*,text/*,.bash,.c,.cc,.cfg,.conf,.cpp,.cs,.css,.csv,.dockerfile,.env,.gitignore,.go,.graphql,.gql,.h,.hpp,.htm,.html,.ini,.java,.js,.json,.jsonc,.jsx,.kt,.less,.lock,.log,.markdown,.md,.mdx,.mjs,.mts,.patch,.php,.py,.rb,.rs,.sass,.scss,.sh,.sql,.svelte,.swift,.toml,.ts,.tsx,.txt,.vue,.xml,.yaml,.yml,.zsh"
             multiple
+            disabled={disabled}
             tabIndex={-1}
             aria-label="选择图像或参考文件"
             onChange={handleFileInputChange}

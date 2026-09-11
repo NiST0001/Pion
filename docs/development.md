@@ -47,6 +47,8 @@ npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 
 
 `pion_ask_user` 直接作为 SDK `customTools` 编入 Pion，不使用插件商店、用户插件目录、第三方问答插件或运行时生成的提问扩展文件。它每次提出一个明确问题，可给出 2–8 个选项，始终支持自定义回答；无选项时直接输入回答。取消、现有交互通道超时或中止不会选择默认答案，也不代表权限授权。回答保存在会话并发送给模型，不应用来收集密码或密钥。
 
+会话提问面板与工具权限面板一样，使用输入区域的实测高度悬浮在输入框上方；输入增高时同步让位，不挤压消息视口或重建回答草稿。提供商认证等全局交互保持窗口居中，不采用此偏移。
+
 会话后端运行编译产物 `out/main/agent-runtime.mjs`：通过 SDK runtime factory 在启动、新会话、恢复、fork 时注册内置工具，再使用上游 `runRpcMode`，继续复用现有请求 ID、会话所属关系、交互队列和 React 对话框。协议虽然沿用上游的 `extension_ui_request/response` 名称，但工具本身是 SDK 工具而不是插件。计划模式仅额外放行 SDK 来源的 `pion_ask_user`；问答不创建写入检查点，也不替代后续写入的权限检查。
 
 私有入口只接收 Pion 发送的 RPC、项目批准、扩展路径及会话路径参数，不作为完整 pi CLI 对外使用。跨项目替换必须由主进程重新核对目标项目信任并选择对应后端，不能把原项目批准直接带入另一目录。独立验证/工作流继续使用原有 pi CLI。
@@ -64,6 +66,16 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 任务面板读取 `AgentState.tasks`，不再扫描当前可见时间线来决定显隐。`getEntriesPage` 在分页内容之外返回 `taskSnapshot`，由主进程沿所选叶节点的祖先链查找最新有效任务结果；任务记录不在当前页、经历压缩或位于另一分支时，不会误用窗口内容或废弃分支的任务。
 
 实时 `tool_execution_end`、任务结果的 `message_end` / `entry_appended` 可独立更新快照，不要求工具开始行仍在页面中。工具调用 ID 使用有界去重；恢复请求记录 revision，请求期间的新任务结果优先。错误/缺失数据与有效空列表分开处理：明确清空才清空已有任务，普通历史加载失败保留当前快照。时间线缓存另存任务状态，分页不覆盖它；真实会话切换、复制/分叉或删除活动会话重置任务作用域。按用户轮次归档的任务历史仍由 `deriveSessionTaskRuns` 单独处理。
+
+## 用户消息撤销
+
+用户消息的“撤销”回到该消息之前，将文字和图片恢复到空输入框；所选消息及之后的条目仍在同一 JSONL 的旧分支中，不回滚项目文件。已有草稿（含纯空白）、附件或异步读取时不覆盖；确认后冻结输入直到恢复完成。撤销与现有 Git 检查点“撤销本轮修改”是不同操作。
+
+typed IPC 校验主窗口、主帧、会话 ID/路径及预期叶节点。`AgentBridge` 从 IPC 进入时预留异步变更，空闲门控包含运行、压缩、队列、派发/收尾 Promise、检查点及完整运行账本。先停止对应空闲 SDK 子进程，并由 `stop-for-history.ts` 确认真实退出；上游 `RpcClient.stop()` 提前返回不能视为写入许可。无法确认退出时拒绝修改并隔离路径，逻辑 stop/start、池清理或迁移不解除隔离。此私有进程适配须在 SDK 升级时复核。
+
+`message-revert.ts` 只在旧写入者退出后重新校验完整文件、当前分支及内容，用 SDK `branch(parentId)` / `resetLeaf()` 和普通 custom 标记持久化新叶节点，不直接修剪 JSONL、不生成摘要或调用导航扩展。内置计划扩展关闭时不重复保存未变化状态，避免无意义地移动叶节点；真实的退出期间历史变化仍拒绝旧请求。随后只重新加载会话后端，不重建窗口或终端；子代理按既有后端重建规则恢复默认开启。
+
+消息分页、索引、模式及任务历史按所选分支祖先链读取；完整诊断条目/树仍保留旧分支。renderer 作废旧缓存及在途读取，显式 revision 释放旧阅读高度、手势和分页延续；普通缓存刷新仍保护手动阅读。实时会话首次持久化及元数据落盘都会更新叶节点，后端暂时无状态不等同于用户切换。撤销成功后即使后端重启或历史刷新失败仍保留草稿恢复结果；更换项目/会话后的迟到结果不注入新输入框。上下文占用标记待更新，历史计费用量不删除。
 
 ## 内置子代理
 
@@ -117,11 +129,17 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 ```
 src/
 ├── main/                 # Electron 主进程
-│   ├── index.ts          # 窗口创建 + IPC 注册
+│   ├── index.ts          # 服务实例、窗口生命周期与 IPC 注册装配
+│   ├── ipc/              # 显式注入服务的领域路由，不持有生命周期
+│   │   ├── agent.ts      # Agent、会话、权限、项目信任与分支
+│   │   ├── git.ts        # Git 工作区、差异与操作
+│   │   └── window.ts     # 窗口控制、原生外观与终端
 │   ├── agent/            # Agent RPC 桥接、Pion 扩展与 wire 映射
 │   │   ├── agent-bridge.ts       # IPC facade
 │   │   ├── backend-pool.ts       # 后台实例池与 FIFO 淘汰
 │   │   ├── backend-events.ts     # RPC 状态迁移
+│   │   ├── message-revert.ts     # 独占写入的 SDK 会话分支回退
+│   │   ├── stop-for-history.ts   # 回退前确认 SDK 子进程真实退出
 │   │   ├── pending-requests.ts   # 权限、扩展 UI 与认证请求队列
 │   │   ├── queue-projection.ts   # Pi 原始队列与 Pion 本地队列投影
 │   │   ├── provider-auth-ui.ts   # 提供商认证交互适配
@@ -162,7 +180,9 @@ src/
 └── renderer/
     ├── index.html
     └── src/
-        ├── App.tsx               # 停靠工作区装配
+        ├── App.tsx               # 停靠工作区装配、控制器与弹窗挂载门控
+        ├── app/
+        │   └── WorkbenchDialogs.tsx # 受控弹窗装配，独立 lazy/Suspense 槽位
         ├── agent/                # Agent 状态、时间线回放/缓存、会话排序
         │   ├── types.ts
         │   ├── reducer.ts
@@ -175,6 +195,7 @@ src/
         │   │   ├── useAgentSessionActions.ts
         │   │   └── useAgentSubscriptions.ts
         │   ├── useAgent.ts          # 对外 facade
+        │   ├── useMessageRevert.ts  # 撤销确认与按选择隔离的草稿恢复
         │   ├── usePanelLayout.ts    # 窗口状态与显隐
         │   ├── useDockLayout.ts     # 嵌套分栏几何、落点预览与尺寸
         │   ├── useGitWorkspace.ts
@@ -203,6 +224,8 @@ src/
 
 按功能定位更多源码与测试请参阅根目录 [map.md](../map.md)；旧 components 与主进程 re-export 空壳已移除。
 
+- `src/main/ipc/` 只注册通过参数传入的同一服务实例，保留 handler 的参数、返回值、错误及既有主帧/owner 校验；全局设置、验证/工作流、项目列表等其余路由仍由 `src/main/index.ts` 注册。这是职责拆分，不代表全部 IPC 已补齐窗口归属校验，也不改 SDK 子进程入口或 asar 解包边界。
+- `src/renderer/src/app/WorkbenchDialogs.tsx` 通过分组 props 装配操作面板、确认与延迟加载弹窗，不新增 DOM 容器或统一大 Suspense。App 继续拥有控制器、状态与首次挂载门控；各弹窗关闭/重开遵循原生命周期，聊天区权限浮层、终端、滚动宿主和 SVG 背板不移动。
 - 审查树的纯构建/路径计算在 `review/reviewFileTreeModel.ts`，分组折叠与行渲染在 `review/ReviewFileTree.tsx`；`ReviewPanel.tsx` 保留选择、提交和冲突编辑编排。分组保持独立折叠状态，拆分不改变原快照更新、提交草稿和空列表的挂载规则。
 - 设置页分别由 `ModelsPage.tsx`、`SessionPage.tsx`、`SecurityPage.tsx`、`AppearancePage.tsx`、`AboutPage.tsx` 和 `DiagnosticsPage.tsx` 渲染；`SettingsModal.tsx` 继续持有原有草稿、操作状态、日志与主题 revision，页面通过 props/callbacks 接入，保持原切页和关闭规则。以上简写路径位于 `src/renderer/src/features/` 对应功能目录。
 
@@ -212,5 +235,5 @@ src/
 - 本机安装使用 `scripts/install-local.sh`；分发包配置位于 `electron-builder.yml`，推送 v* 标签触发 GitHub Release 工作流。
 - 模型/思考等级切换、会话树、fork、斜杠命令、计划模式、手动压缩与 HTML 导出均已接入。
 - 工具策略保存在 Electron userData 下的 `pion-tool-permissions.json`；运行时生成的全局 Pi 权限门扩展位于 `runtime/` 子目录。
-- 会话文件由 pi 自身管理（JSONL，按目录分桶），Pion 只读扫描列表；跨项目点击会话时交给对应的 pi 后台加载。
+- 会话文件由 pi SDK 管理（JSONL，按目录分桶），列表扫描保持只读；消息撤销在旧写入者退出后用 SDK 追加持久分支标记。跨项目点击会话时交给对应的 pi 后台加载。
 - `useAgent.ts`、`AgentBridge`、`GitService` 和 `WorkflowManager` 保留为对外 facade；具体缓存、进程、解析、交互和 runner 逻辑放在同领域子模块中。

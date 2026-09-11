@@ -220,9 +220,12 @@ export function reducer(state: AgentState, action: Action): AgentState {
       }
     case 'timelineError':
       return { ...state, timelineLoading: false, timelineError: action.error }
+    case 'resetHistoryNavigation':
+      return { ...state, historyResetRevision: state.historyResetRevision + 1, historyJump: null }
     case 'clearTimeline':
       return {
         ...state,
+        historyJump: null,
         tasks: null,
         taskRevision: 0,
         taskResultIds: [],

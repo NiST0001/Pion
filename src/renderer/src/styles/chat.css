@@ -178,23 +178,43 @@
   min-width: 0;
 }
 
-.fork-button {
+.message-actions {
   align-self: flex-end;
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 10.5px;
+}
+
+.fork-button,
+.revert-button {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 4px;
+  font-size: 12px;
   color: var(--fg-faint);
   padding: 2px 7px;
   border-radius: 999px;
   border: 1px solid transparent;
+  white-space: nowrap;
   transition: all 0.12s ease;
 }
 
-.fork-button:hover {
-  color: var(--accent-strong);
+.fork-button:hover,
+.revert-button:hover:not(:disabled) {
+  color: var(--fg);
   border-color: rgba(var(--accent-rgb), 0.35);
   background: var(--accent-soft);
+}
+
+.revert-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+html.pion-keyboard-focus .message-actions button:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
 }
 
 .bubble-error {

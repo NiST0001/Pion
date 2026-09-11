@@ -27,7 +27,7 @@
 - 输入 `/` 打开动态斜杠命令菜单，支持 Pi 内置 `/compact`、`/new`、`/name`、`/clone`，Pion 内置 `/plan`、`/verify`、`/agents`、`/yolo`（自动批准本会话工具权限，开启需确认、不写入权限规则），以及扩展、提示词模板和技能命令
 - Pi 官方插件商店：原生目录可直接安装和卸载，支持全部/已安装/未安装筛选及目录外已安装包管理（`https://pi.dev/packages`）
 - 技能与工具中心：展示当前配置和已安装插件提供的技能、扩展工具及来源
-- 对话区左侧提供完整会话历史导航轨：按用户消息显示位置标记，悬停预览问题与回复，点击可加载并居中定位；可在设置中限制可见条数，超出后用滚轮浏览窗口
+- 对话区左侧提供当前分支的完整历史导航轨：按用户消息显示位置标记，悬停预览问题与回复，点击可加载并居中定位；可在设置中限制可见条数，超出后用滚轮浏览窗口
 - 会话支持收藏；收藏区固定显示在搜索框下方，点击收藏项会同步选中项目会话
 
 ### 项目
@@ -41,6 +41,7 @@
 - Git 分支以 worktree 树显示；可在分支行直接创建独立 worktree，或使用铅笔按钮重命名当前本地分支，名称校验和 Git 操作由主进程完成
 - 会话列表：按项目目录扫描 `~/.pi/agent/sessions/`，点击后只加载接近当前屏幕的一小段最新窗口；滚到顶部/底部才按需加载相邻历史，不会一次挂载整段会话
 - 会话支持复制与从任意用户消息处分叉（fork）；fork 后时间线回到分叉点，输入框自动预填原消息
+- 用户消息旁的“撤销”可回到该消息之前，并恢复文字和图片到空输入框；后续对话保留在同一会话的旧分支，不回滚项目文件。需要等待运行/压缩/收尾完成，并处理排队消息和已有草稿
 - 构建模式的原生任务系统,自带 `pion_task` 工具
 
 ### 审查与运行闭环
@@ -112,6 +113,8 @@ src/
 │   │   ├── agent-bridge.ts       # IPC facade
 │   │   ├── backend-pool.ts       # 后台实例池与 FIFO 淘汰
 │   │   ├── backend-events.ts     # RPC 状态迁移
+│   │   ├── message-revert.ts     # SDK 会话分支持久回退
+│   │   ├── stop-for-history.ts   # 回退前确认旧写入进程退出
 │   │   ├── pending-requests.ts   # 权限、扩展 UI 与认证请求队列
 │   │   ├── queue-projection.ts   # Pi 原始队列与 Pion 本地队列投影
 │   │   ├── provider-auth-ui.ts   # 提供商认证交互适配
@@ -163,6 +166,7 @@ src/
         │   │   ├── useAgentSessionActions.ts
         │   │   └── useAgentSubscriptions.ts
         │   ├── useAgent.ts          # 对外 facade
+        │   ├── useMessageRevert.ts  # 撤销确认与文字/图片草稿恢复
         │   ├── usePanelLayout.ts
         │   ├── useGitWorkspace.ts
         │   ├── useRunRecovery.ts

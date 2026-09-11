@@ -16,6 +16,8 @@ import type {
   ExtensionUiResponse,
   ForkMessageOption,
   ImageContent,
+  MessageRevertRequest,
+  MessageRevertResult,
   ModelOption,
   ModelProviderAuthState,
   ModelProviderAuthType,
@@ -155,6 +157,8 @@ export interface PionApi {
   newSession(): Promise<void>
   /** Fork the session at an entry; resolves with the message text at the fork point. */
   forkAt(entryId: string): Promise<{ text: string; cancelled: boolean }>
+  /** Return before a user message in the same session; keep old branches and all project files. */
+  revertMessage(request: MessageRevertRequest): Promise<MessageRevertResult>
   /** Switch to another session file and load/reuse its backend. */
   switchSession(sessionPath: string): Promise<{ cancelled: boolean }>
   /** Delete a persisted session file. */
@@ -167,15 +171,15 @@ export interface PionApi {
   forkSession(sessionPath: string, entryId: string): Promise<{ text: string; cancelled: boolean }>
   /** Full entry list of the active session (kept for diagnostics/compatibility). */
   getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null>
-  /** User-message landmarks spanning the full persisted session. */
+  /** User-message landmarks spanning the selected persisted branch. */
   getHistoryIndex(sessionPath?: string): Promise<SessionHistoryIndex | null>
-  /** Compact per-user-message todo history, parsed without transferring full entries. */
+  /** Selected-branch task history, parsed without transferring full entries. */
   getSessionTaskHistory(sessionPath: string): Promise<SessionTaskRun[]>
   /** Persisted session paths whose retained backends are actively processing a run. */
   getRunningSessionPaths(): Promise<string[]>
   /** Session paths with a completed/failed run not yet opened in this window. */
   getUnreadSessionPaths(): Promise<string[]>
-  /** Load a bounded history window plus the latest selected-branch task snapshot;
+  /** Load a bounded selected-branch history window plus its latest task snapshot;
    * omit before for the newest window. Task state is not scoped to that page.
    */
   getEntriesPage(

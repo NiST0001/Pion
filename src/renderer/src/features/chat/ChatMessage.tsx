@@ -1,6 +1,6 @@
 import { memo, useLayoutEffect, useRef } from 'react'
 import type { ReactElement } from 'react'
-import { GitBranch } from 'lucide-react'
+import { GitBranch, Undo2 } from 'lucide-react'
 import type { TimelineItem } from '../../agent/types'
 import { armHistoryRevealRow } from '../../utils/historyReveal'
 import {
@@ -20,9 +20,19 @@ interface ChatMessageProps {
   item: Extract<TimelineItem, { kind: 'assistant' | 'user' }>
   onFork?: (entryId: string) => void
   canFork: boolean
+  canRevert?: boolean
+  onRevert?: (entryId: string) => void
+  revertDisabledReason?: string
 }
 
-export const ChatMessage = memo(function ChatMessage({ item, onFork, canFork }: ChatMessageProps): ReactElement | null {
+export const ChatMessage = memo(function ChatMessage({
+  item,
+  onFork,
+  canFork,
+  canRevert,
+  onRevert,
+  revertDisabledReason
+}: ChatMessageProps): ReactElement | null {
   const rowRef = useRef<HTMLDivElement>(null)
   // Paged history carries noReveal on the item itself; it never waterfalls.
   const revealSuppressed = item.noReveal === true
@@ -46,6 +56,7 @@ export const ChatMessage = memo(function ChatMessage({ item, onFork, canFork }: 
   }, [error, thinking])
 
   if (item.kind === 'user') {
+    const entryId = item.entryId
     return (
       <div ref={rowRef} className={`row row-user${item.historical ? ' history-reveal' : ''}`} data-entry-id={item.entryId}>
         <div
@@ -69,15 +80,32 @@ export const ChatMessage = memo(function ChatMessage({ item, onFork, canFork }: 
               ))}
             </div>
           )}
-          {canFork && item.entryId && (
-            <button
-              className="fork-button"
-              title="从此消息分叉新分支"
-              onClick={() => onFork?.(item.entryId as string)}
-            >
-              <GitBranch size={12} />
-              分叉
-            </button>
+          {entryId && (canFork || onRevert) && (
+            <div className="message-actions">
+              {canFork && (
+                <button
+                  type="button"
+                  className="fork-button"
+                  title="从此消息分叉新分支"
+                  onClick={() => onFork?.(entryId)}
+                >
+                  <GitBranch size={12} aria-hidden="true" />
+                  分叉
+                </button>
+              )}
+              {onRevert && (
+                <button
+                  type="button"
+                  className="revert-button"
+                  disabled={!canRevert}
+                  title={revertDisabledReason || '撤销到此消息之前；不回滚文件'}
+                  onClick={() => onRevert(entryId)}
+                >
+                  <Undo2 size={12} aria-hidden="true" />
+                  撤销
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>

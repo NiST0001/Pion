@@ -153,7 +153,7 @@ export function RunMetricsStrip({
             <span><small>推理</small><strong>{formatTokens(metrics.usage.reasoning)}</strong></span>
             <span>
               <small>上下文</small>
-              <strong>{run.contextUsagePending ? '压缩后待更新' : run.contextTokens !== undefined
+              <strong>{run.contextUsagePending ? '上下文待更新' : run.contextTokens !== undefined
                 ? `${formatTokens(run.contextTokens)}${run.contextWindow !== undefined ? ` / ${formatTokens(run.contextWindow)}` : ''}`
                 : '未知'}</strong>
             </span>

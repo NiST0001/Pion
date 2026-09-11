@@ -213,10 +213,28 @@ export interface SessionTaskRun {
   tasks: SessionTask[]
 }
 
-/** One user-message marker in the full persisted session history. */
+/** Undo only conversation context; project files are never restored by this operation. */
+export interface MessageRevertRequest {
+  sessionPath: string
+  sessionId: string
+  entryId: string
+  expectedLeafId: string | null
+}
+
+export interface MessageRevertResult {
+  sessionPath: string
+  sessionId: string
+  entryId: string
+  previousLeafId: string | null
+  leafId: string
+  text: string
+  images: ImageContent[]
+}
+
+/** One user-message marker in the selected persisted branch. */
 export interface HistoryLandmark {
   entryId: string
-  /** Zero-based position in SessionManager.getEntries(). */
+  /** Zero-based position in the selected branch's entries. */
   entryIndex: number
   ordinal: number
   snippet: string
@@ -226,6 +244,8 @@ export interface HistoryLandmark {
 
 export interface SessionHistoryIndex {
   sessionPath: string
+  /** Latest persisted branch selection; older hosts may omit it. */
+  leafId?: string | null
   totalEntries: number
   landmarks: HistoryLandmark[]
 }

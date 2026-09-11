@@ -10,6 +10,12 @@
   pointer-events: none;
 }
 
+/* Workspace questions share the permission panel's measured composer offset.
+   Global provider-auth dialogs remain centered in the full window. */
+.extension-ui-backdrop:not(.is-global) {
+  bottom: var(--conversation-bottom-clearance, 0px);
+}
+
 .extension-ui-backdrop.is-global {
   position: fixed;
   z-index: 141;

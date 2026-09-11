@@ -22,6 +22,22 @@ export function sessionMode(entries: SessionEntry[]): AgentMode {
   return mode
 }
 
+/** Physical JSONL order contains abandoned branches; UI paging follows only ancestry. */
+export function sessionBranch(entries: SessionEntry[], leafId: string | null): SessionEntry[] {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]))
+  const branch: SessionEntry[] = []
+  const visited = new Set<string>()
+  let id = leafId
+  while (id !== null) {
+    const entry = byId.get(id)
+    if (!entry || visited.has(id)) throw new Error('会话分支不完整，无法读取历史')
+    visited.add(id)
+    branch.push(entry)
+    id = entry.parentId
+  }
+  return branch.reverse()
+}
+
 /** Latest valid full task snapshot on the selected branch, not the visible page.
  * Follow parent ids so an abandoned branch cannot resurrect its task list.
  */

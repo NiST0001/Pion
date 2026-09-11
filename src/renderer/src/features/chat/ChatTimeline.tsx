@@ -25,6 +25,9 @@ export interface ChatTimelineProps {
   hasSessions: boolean
   canFork: boolean
   onFork: (entryId: string) => void
+  canRevert?: boolean
+  onRevert?: (entryId: string) => void
+  revertDisabledReason?: string
   agentActivity: boolean
   workingStatus: WorkingStatus
   latestRunChanges: FileChange[]
@@ -49,6 +52,9 @@ export function ChatTimeline({
   hasSessions,
   canFork,
   onFork,
+  canRevert,
+  onRevert,
+  revertDisabledReason,
   agentActivity,
   workingStatus,
   latestRunChanges,
@@ -100,6 +106,9 @@ export function ChatTimeline({
                 item={item}
                 canFork={canFork}
                 onFork={onFork}
+                canRevert={canRevert}
+                onRevert={onRevert}
+                revertDisabledReason={revertDisabledReason}
               />
             )
           )}

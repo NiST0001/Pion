@@ -61,6 +61,10 @@ export interface BackendRecord {
   phase: BackendPhase
   busy: boolean
   compacting: boolean
+  /** Reserved until the old writer has exited and the conversation branch is persisted. */
+  historyMutation?: boolean
+  /** Never reuse/evict a writer whose actual process exit could not be confirmed. */
+  historyStopFailed?: boolean
   modePrimed?: AgentMode
   subagentsEnabled?: boolean
   subagentsModePending?: boolean
