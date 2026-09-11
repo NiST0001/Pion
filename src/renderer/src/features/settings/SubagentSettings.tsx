@@ -55,7 +55,7 @@ export function SubagentSettings() {
 
   return <form className="settings-section subagent-settings" onSubmit={(event) => { event.preventDefault(); void save() }}>
     <div className="settings-section-title">子代理</div>
-    <p className="setting-desc">全局默认值，保存后从下一批任务开始使用，不中断当前批次。开关仍由各会话独立控制、默认关闭；权限与检查点规则不变。</p>
+    <p className="setting-desc">全局参数，保存后从下一批任务开始使用，不中断当前批次。子代理默认开启，可在输入框按会话关闭；重建后端会恢复默认开启。权限与检查点规则不变。</p>
     {FIELDS.map(({ key, label, description }) => <label className="setting-row" key={key}>
       <span><span className="setting-label">{label}</span><span className="setting-desc subagent-setting-description">{description}</span></span>
       <input className="setting-input" type="number" aria-label={label} required step={1}

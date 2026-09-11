@@ -11,7 +11,7 @@ function setup(run: Parameters<typeof createSubagentControl>[0] = async (task) =
   const control = createSubagentControl(run, getSettings)
   const handlers = new Map<string, (...args: any[]) => any>()
   const commands = new Map<string, { handler: (args: string, ctx: { isIdle: () => boolean }) => Promise<void> }>()
-  let tools = ['read', 'bash', 'pion_subagents']
+  let tools = ['read', 'bash']
   const appendEntry = vi.fn()
   control.extension({
     on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
@@ -26,35 +26,63 @@ function setup(run: Parameters<typeof createSubagentControl>[0] = async (task) =
   }
 }
 
-it('defaults off and gates execution even if a stale tool list advertises delegation', async () => {
+it('defaults on and still gates execution after the user explicitly turns it off', async () => {
   const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: 'done' }))
   const h = setup(run)
-  expect(h.tools()).not.toContain('pion_subagents')
-  await expect(h.execute()).rejects.toThrow('已关闭')
-  expect(run).not.toHaveBeenCalled()
-  await h.toggle('on')
   expect(h.tools()).toContain('pion_subagents')
   await h.execute()
+  expect(run).toHaveBeenCalledTimes(2)
   await h.toggle('off')
+  await expect(h.execute()).rejects.toThrow('已关闭')
   expect(h.tools()).not.toContain('pion_subagents')
   expect(h.appendEntry).toHaveBeenLastCalledWith('pion-subagents-state', { enabled: false })
+})
+
+it('restores the default-on tool after a backend session restart', async () => {
+  const h = setup()
+  await h.toggle('off')
+  expect(h.tools()).not.toContain('pion_subagents')
+  h.handlers.get('session_start')!()
+  expect(h.tools()).toContain('pion_subagents')
+  const prompt = await h.handlers.get('before_agent_start')!({ systemPrompt: 'base' })
+  expect(prompt.systemPrompt).toContain('Subagents are enabled by default')
+})
+
+it('hides the default-on tool in plan mode and restores it after exiting', async () => {
+  const h = setup()
+  const plan = await h.handlers.get('before_agent_start')!({ systemPrompt: 'base\n\n[PION PLAN MODE]\nread only' })
+  expect(plan.systemPrompt).toContain('not available in the current active tool set')
+  expect(h.tools()).not.toContain('pion_subagents')
+  const build = await h.handlers.get('before_agent_start')!({ systemPrompt: 'base' })
+  expect(build.systemPrompt).toContain('Subagents are enabled by default')
+  expect(h.tools()).toContain('pion_subagents')
+})
+
+it('does not inject the tool into a read-only mode during startup', async () => {
+  const h = setup()
+  h.tools().splice(h.tools().indexOf('bash'), 1)
+  h.handlers.get('session_start')!()
+  expect(h.tools()).not.toContain('pion_subagents')
+  const prompt = await h.handlers.get('before_agent_start')!({ systemPrompt: 'plan' })
+  expect(prompt.systemPrompt).toContain('not available in the current active tool set')
 })
 
 it('injects proactive delegation only while enabled and preserves the original prompt', async () => {
   const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: 'done' }))
   const h = setup(run)
   const prompt = () => h.handlers.get('before_agent_start')!({ systemPrompt: 'Project: no tests without approval.' })
+  await h.toggle('off')
   expect((await prompt()).systemPrompt).toContain('Pion subagents: OFF.')
   await h.toggle('on')
   const on = (await prompt()).systemPrompt
   expect(on).toMatch(/^Project: no tests without approval\./)
-  expect(on).toContain('The user has enabled proactive delegation')
+  expect(on).toContain('Subagents are enabled by default')
   expect(on).toContain('use pion_subagents early')
   expect(on).toContain('without waiting for the user')
   expect(on).toContain('disjoint file ownership')
   expect(on).toContain('Handle trivial tasks, tightly dependent work, or conflicting edits directly')
   expect(on).toContain('not approval for otherwise restricted actions')
-  // Opt-in guides the model; opening the switch does not itself start children.
+  // The default-on capability guides the model; it does not itself start children.
   expect(run).not.toHaveBeenCalled()
   await h.toggle('off')
   const off = (await prompt()).systemPrompt
@@ -89,6 +117,40 @@ it('does not restore ON guidance if switched off while settings are loading', as
   resolve({ ...DEFAULT_SUBAGENT_SETTINGS })
   expect((await pending).systemPrompt).toContain('Pion subagents: OFF.')
   expect(h.tools()).not.toContain('pion_subagents')
+})
+
+it.each([1, 2, 4, 8])('guides batch width using the current configured limit %i', async (maxParallel) => {
+  const h = setup(undefined, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel }))
+  await h.toggle('on')
+  const { systemPrompt } = await h.handlers.get('before_agent_start')!({ systemPrompt: 'base' })
+  if (maxParallel === 1) {
+    expect(systemPrompt).toContain('one child per batch')
+    expect(systemPrompt).not.toContain('put 2–')
+    await expect(h.control.tool.execute('single', { tasks: [{ name: 'one', task: 'inspect' }] }, undefined, undefined, context)).resolves.toBeDefined()
+  } else {
+    expect(systemPrompt).toContain(`put 2–${maxParallel} useful tasks in ONE pion_subagents call's tasks array`)
+    expect(systemPrompt).toContain('Do not serialize independent work as separate one-task calls')
+  }
+  expect(systemPrompt).toContain('Keep dependent follow-up work for later batches')
+  expect(systemPrompt).toContain('never invent tasks to fill slots')
+  expect(systemPrompt).toContain('Reassess useful parallel work at each major stage')
+})
+
+it('starts a full four-child batch before any child finishes', async () => {
+  const releases: Array<() => void> = []
+  const run = vi.fn((task: { name: string }) => new Promise<SubagentResult>((resolve) => {
+    releases.push(() => resolve({ name: task.name, status: 'completed', text: 'done' }))
+  }))
+  const h = setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 4 }))
+  await h.toggle('on')
+  const tasks = ['a', 'b', 'c', 'd'].map((name) => ({ name, task: `Inspect independent module ${name}` }))
+  const pending = h.control.tool.execute('four', { tasks }, undefined, undefined, context)
+  await Promise.resolve()
+  expect(run).toHaveBeenCalledTimes(4)
+  expect(h.control.tool.executionMode).toBe('sequential')
+  releases.reverse().forEach((release) => release())
+  const result = await pending
+  expect((result.details as { results: SubagentResult[] }).results.map((r) => r.name)).toEqual(['a', 'b', 'c', 'd'])
 })
 
 it('starts siblings concurrently, preserves result order and rejects overlapping batches', async () => {
@@ -176,9 +238,12 @@ it('uses the configured batch timeout', async () => {
 
 it('keeps controllers isolated between parent sessions and rejects invalid commands', async () => {
   const a = setup(), b = setup()
-  await a.toggle('on')
-  expect(b.tools()).not.toContain('pion_subagents')
+  await a.toggle('off')
+  expect(a.tools()).not.toContain('pion_subagents')
+  expect(b.tools()).toContain('pion_subagents')
+  await b.toggle('off')
   await expect(b.execute()).rejects.toThrow('已关闭')
   await expect(a.toggle('enable')).rejects.toThrow('用法')
+  await a.toggle('on')
   expect(a.tools()).toContain('pion_subagents')
 })

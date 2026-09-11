@@ -1,20 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
-  Bot,
-  Check,
   Cpu,
-  Download,
-  FileText,
   Info,
-  Loader2,
   MessageSquare,
   Palette,
-  RefreshCw,
-  Settings2,
-  ShieldAlert,
   ShieldCheck,
-  ShieldOff,
   SlidersHorizontal,
   X
 } from 'lucide-react'
@@ -30,17 +21,15 @@ import type {
   ToolPermissionCategory,
   ToolPermissionDecision
 } from '../../../../shared/types'
-import { ToolPermissionSettings } from './ToolPermissionSettings'
 import { ModelsPage } from './ModelsPage'
-import { PageHeading } from './SettingsPageHeading'
-import { ReleaseNotes } from './ReleaseNotes'
-import { WindowEffectsSettings } from './WindowEffectsSettings'
-import { SubagentSettings } from './SubagentSettings'
-import { SESSION_PREVIEW_OPTIONS } from '../../utils/sessionPreview'
+import { SessionPage } from './SessionPage'
+import { SecurityPage } from './SecurityPage'
+import { AppearancePage } from './AppearancePage'
+import { AboutPage } from './AboutPage'
+import { DiagnosticsPage } from './DiagnosticsPage'
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
-import { currentTheme, saveTheme, THEMES } from '../../utils/theme'
+import { currentTheme, saveTheme } from '../../utils/theme'
 import type { ThemeId } from '../../utils/theme'
-import pkg from '../../../../../package.json'
 
 export interface SettingsActions {
   setModel(provider: string, modelId: string): Promise<void>
@@ -125,6 +114,7 @@ export function SettingsModal({
   onClose,
   actions
 }: SettingsModalProps): ReactElement | null {
+  // Page views mount on navigation; keep the existing drafts and in-flight state in this host.
   const [page, setPage] = useState<SettingsPage>('models')
   const [name, setName] = useState(session?.sessionName ?? '')
   const [nameSaved, setNameSaved] = useState(false)
@@ -226,7 +216,14 @@ export function SettingsModal({
     setStderr((await window.pion.getStderr()).slice(-6000) || '(空)')
   }
 
-  const piVersion = (pkg.dependencies?.['@earendil-works/pi-coding-agent'] ?? '').replace(/^\^/, '')
+  const handleThemeSelect = (themeId: ThemeId): void => {
+    setSelectedTheme(themeId)
+    setThemeSaveError('')
+    const revision = ++themeSaveRevision.current
+    void saveTheme(themeId).catch(() => {
+      if (themeSaveRevision.current === revision) setThemeSaveError('主题保存失败，请重新选择后重试。')
+    })
+  }
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -311,427 +308,76 @@ export function SettingsModal({
             )}
 
             {page === 'session' && (
-              <section key="session" className="settings-page">
-                <PageHeading
-                  kicker="SESSION"
-                  title="会话"
-                  description="控制会话生命周期、消息行为与子代理全局默认参数。"
-                />
-
-                <div className="settings-section">
-                  <div className="settings-section-title">当前会话</div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">会话名称</div>
-                      <div className="setting-desc">显示在标题栏与会话列表</div>
-                    </div>
-                    <div className="setting-inline">
-                      <input
-                        className="setting-input"
-                        value={name}
-                        placeholder="未命名"
-                        onChange={(event) => setName(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') void handleRename()
-                        }}
-                      />
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        disabled={name.trim() === '' || name.trim() === session?.sessionName}
-                        onClick={() => void handleRename()}
-                      >
-                        {nameSaved ? '已保存' : '保存'}
-                      </button>
-                    </div>
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">自动压缩</div>
-                      <div className="setting-desc">上下文接近窗口时自动总结</div>
-                    </div>
-                    <Toggle
-                      on={session?.autoCompactionEnabled ?? true}
-                      onChange={(value) => void actions.setAutoCompaction(value)}
-                    />
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">自动重试</div>
-                      <div className="setting-desc">请求失败时自动重试</div>
-                    </div>
-                    <Toggle
-                      on={autoRetry}
-                      onChange={(value) => {
-                        setAutoRetry(value)
-                        void actions.setAutoRetry(value)
-                      }}
-                    />
-                  </div>
-                </div>
-
-                <div className="settings-section">
-                  <div className="settings-section-title">统计显示</div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">显示用时</div>
-                      <div className="setting-desc">统计面板显示每轮与整个会话的耗时</div>
-                    </div>
-                    <Toggle
-                      on={showMetricDuration}
-                      onChange={onMetricDurationChange}
-                    />
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">显示计费</div>
-                      <div className="setting-desc">统计面板显示每轮与整个会话的费用</div>
-                    </div>
-                    <Toggle
-                      on={showMetricCost}
-                      onChange={onMetricCostChange}
-                    />
-                  </div>
-                </div>
-
-                <div className="settings-section">
-                  <div className="settings-section-title">消息行为</div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">转向消息模式</div>
-                      <div className="setting-desc">运行中注入的后续消息如何排队</div>
-                    </div>
-                    <Segmented
-                      value={session?.steeringMode ?? 'all'}
-                      options={[
-                        { value: 'all', label: '全部' },
-                        { value: 'one-at-a-time', label: '逐条' }
-                      ]}
-                      onChange={(value) => void actions.setSteeringMode(value as 'all' | 'one-at-a-time')}
-                    />
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">追加消息模式</div>
-                      <div className="setting-desc">运行结束后排队的消息如何执行</div>
-                    </div>
-                    <Segmented
-                      value={session?.followUpMode ?? 'all'}
-                      options={[
-                        { value: 'all', label: '全部' },
-                        { value: 'one-at-a-time', label: '逐条' }
-                      ]}
-                      onChange={(value) => void actions.setFollowUpMode(value as 'all' | 'one-at-a-time')}
-                    />
-                  </div>
-                </div>
-
-                <div className="settings-section">
-                  <div className="settings-section-title">会话列表</div>
-                  <div className="setting-row" data-setting="session-preview-density">
-                    <div>
-                      <div className="setting-label">会话预览程度</div>
-                      <div className="setting-desc">调整左侧会话选择条显示的信息量</div>
-                    </div>
-                    <Segmented
-                      value={sessionPreviewDensity}
-                      options={SESSION_PREVIEW_OPTIONS.map(({ value, label }) => ({ value, label }))}
-                      onChange={(value) => onSessionPreviewDensityChange(value as SessionPreviewDensity)}
-                    />
-                  </div>
-
-                  <div className="setting-row" data-setting="history-nav-gap">
-                    <div>
-                      <div className="setting-label">历史导航条间距</div>
-                      <div className="setting-desc">调整会话历史快速跳转条的疏密</div>
-                    </div>
-                    <div className="setting-range">
-                      <input
-                        type="range"
-                        min={2}
-                        max={16}
-                        step={1}
-                        value={historyNavGap}
-                        onChange={(event) => onHistoryNavGapChange(Number(event.target.value))}
-                      />
-                      <span className="setting-range-value">{historyNavGap}px</span>
-                    </div>
-                  </div>
-
-                  <div className="setting-row" data-setting="history-nav-max-visible">
-                    <div>
-                      <div className="setting-label">历史导航最大条数</div>
-                      <div className="setting-desc">一次显示的标记数量；超出后可在导航条上用滚轮浏览</div>
-                    </div>
-                    <div className="setting-range">
-                      <input
-                        type="range"
-                        min={8}
-                        max={120}
-                        step={1}
-                        value={historyNavMaxVisible}
-                        onChange={(event) => onHistoryNavMaxVisibleChange(Number(event.target.value))}
-                      />
-                      <span className="setting-range-value">{historyNavMaxVisible}条</span>
-                    </div>
-                  </div>
-                </div>
-
-                <SubagentSettings />
-
-                <div className="settings-section">
-                  <div className="settings-section-title">通知</div>
-                  <div className="setting-row" data-setting="completion-notifications">
-                    <div>
-                      <div className="setting-label">会话完成通知</div>
-                      <div className="setting-desc">agent 输出完成后发送系统通知</div>
-                    </div>
-                    <Toggle
-                      on={completionNotificationsEnabled}
-                      onChange={onCompletionNotificationsChange}
-                    />
-                  </div>
-                </div>
-
-                <div className="settings-section">
-                  <div className="settings-section-title">工具</div>
-                  <div className="setting-actions-grid">
-                    <button type="button" className="action-card" disabled={compacting} onClick={() => void handleCompact()}>
-                      {compacting ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}
-                      <span>
-                        <strong>{compacting ? '压缩中…' : '立即压缩'}</strong>
-                        <small>总结并压缩当前上下文</small>
-                      </span>
-                    </button>
-                    <button type="button" className="action-card" disabled={exporting} onClick={() => void handleExport()}>
-                      {exporting ? <Loader2 size={15} className="spin" /> : <Download size={15} />}
-                      <span>
-                        <strong>导出 HTML</strong>
-                        <small>{exportPath || '生成可分享的会话页面'}</small>
-                      </span>
-                    </button>
-                  </div>
-                </div>
-              </section>
+              <SessionPage
+                session={session}
+                name={name}
+                nameSaved={nameSaved}
+                onNameChange={setName}
+                onRename={() => void handleRename()}
+                autoRetry={autoRetry}
+                onAutoCompactionChange={(value) => void actions.setAutoCompaction(value)}
+                onAutoRetryChange={(value) => {
+                  setAutoRetry(value)
+                  void actions.setAutoRetry(value)
+                }}
+                showMetricDuration={showMetricDuration}
+                showMetricCost={showMetricCost}
+                onMetricDurationChange={onMetricDurationChange}
+                onMetricCostChange={onMetricCostChange}
+                onSteeringModeChange={(value) => void actions.setSteeringMode(value)}
+                onFollowUpModeChange={(value) => void actions.setFollowUpMode(value)}
+                sessionPreviewDensity={sessionPreviewDensity}
+                onSessionPreviewDensityChange={onSessionPreviewDensityChange}
+                historyNavGap={historyNavGap}
+                onHistoryNavGapChange={onHistoryNavGapChange}
+                historyNavMaxVisible={historyNavMaxVisible}
+                onHistoryNavMaxVisibleChange={onHistoryNavMaxVisibleChange}
+                completionNotificationsEnabled={completionNotificationsEnabled}
+                onCompletionNotificationsChange={onCompletionNotificationsChange}
+                compacting={compacting}
+                onCompact={() => void handleCompact()}
+                exportPath={exportPath}
+                exporting={exporting}
+                onExport={() => void handleExport()}
+              />
             )}
 
             {page === 'security' && (
-              <section key="security" className="settings-page security-page">
-                <PageHeading
-                  kicker="SECURITY"
-                  title="安全与信任"
-                  description="控制项目本地 Pi 资源加载，以及 Agent 工具调用前的允许、询问与拒绝策略。"
-                />
-
-                <div
-                  className={`project-trust-card project-trust-card-${projectTrust?.decision ?? 'unknown'}`}
-                  data-setting="project-trust"
-                >
-                  <div className="project-trust-card-icon">
-                    {projectTrust?.decision === 'trusted'
-                      ? <ShieldCheck size={20} />
-                      : projectTrust?.decision === 'untrusted'
-                        ? <ShieldOff size={20} />
-                        : <ShieldAlert size={20} />}
-                  </div>
-                  <div className="project-trust-card-copy">
-                    <span>当前项目</span>
-                    <strong>{projectTrustLabel(projectTrust)}</strong>
-                    <small title={projectTrust?.cwd}>{projectTrust?.cwd ?? '尚未选择项目'}</small>
-                  </div>
-                </div>
-
-                {projectTrustError && <div className="settings-inline-error">{projectTrustError}</div>}
-
-                <div className="settings-section">
-                  <div className="settings-section-title">项目资源</div>
-                  <div className="setting-row setting-row-stacked">
-                    <div>
-                      <div className="setting-label">Pi 项目信任</div>
-                      <div className="setting-desc">{projectTrustDescription(projectTrust)}</div>
-                    </div>
-                    {projectTrust?.requiresTrust && (
-                      <div className="project-trust-settings-actions">
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          disabled={projectTrustBusy || projectTrust.decision === 'untrusted'}
-                          onClick={() => onProjectTrustChange(false)}
-                        >
-                          <ShieldOff size={12} /> 不信任
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost-button"
-                          disabled={projectTrustBusy || projectTrust.source === 'default' || projectTrust.source === 'inherited' || projectTrust.source === 'not-required'}
-                          onClick={() => onProjectTrustChange(null)}
-                        >
-                          恢复默认
-                        </button>
-                        <button
-                          type="button"
-                          className="ghost-button project-trust-settings-approve"
-                          disabled={projectTrustBusy || projectTrust.decision === 'trusted'}
-                          onClick={() => onProjectTrustChange(true)}
-                        >
-                          {projectTrustBusy && <Loader2 size={12} className="spin" />}
-                          <ShieldCheck size={12} /> 信任项目
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <ToolPermissionSettings
-                  policy={toolPermissionPolicy}
-                  busy={toolPermissionBusy}
-                  error={toolPermissionError}
-                  onChange={onToolPermissionChange}
-                  onReset={onToolPermissionReset}
-                />
-
-                <div className="settings-note security-note">
-                  <ShieldAlert size={14} />
-                  项目信任与工具确认都是策略保护层，不是文件、命令或网络沙箱；真正隔离仍需要容器或虚拟机。
-                </div>
-              </section>
+              <SecurityPage
+                projectTrust={projectTrust}
+                projectTrustBusy={projectTrustBusy}
+                projectTrustError={projectTrustError}
+                onProjectTrustChange={onProjectTrustChange}
+                toolPermissionPolicy={toolPermissionPolicy}
+                toolPermissionBusy={toolPermissionBusy}
+                toolPermissionError={toolPermissionError}
+                onToolPermissionChange={onToolPermissionChange}
+                onToolPermissionReset={onToolPermissionReset}
+              />
             )}
 
             {page === 'appearance' && (
-              <section key="appearance" className="settings-page">
-                <PageHeading
-                  kicker="APPEARANCE"
-                  title="外观"
-                />
-                <div className="settings-section theme-section">
-                  <div className="settings-section-title">主题</div>
-                  <div className="theme-grid">
-                    {THEMES.map((theme) => (
-                      <button
-                        type="button"
-                        key={theme.id}
-                        className={`theme-choice${selectedTheme === theme.id ? ' active' : ''}`}
-                        aria-pressed={selectedTheme === theme.id}
-                        onClick={() => {
-                          setSelectedTheme(theme.id)
-                          setThemeSaveError('')
-                          const revision = ++themeSaveRevision.current
-                          void saveTheme(theme.id).catch(() => {
-                            if (themeSaveRevision.current === revision) setThemeSaveError('主题保存失败，请重新选择后重试。')
-                          })
-                        }}
-                      >
-                        <span className={`theme-card-preview ${theme.id}`}>
-                          <span className="theme-card-top"><i /><i /><i /></span>
-                          <span className="theme-card-content">
-                            <i className="theme-card-line short" />
-                            <i className="theme-card-line" />
-                            <i className="theme-card-pill" />
-                          </span>
-                        </span>
-                        <span className="theme-choice-copy">
-                          <strong>{theme.name}</strong>
-                          <small>{theme.description}</small>
-                        </span>
-                        {selectedTheme === theme.id && <Check size={15} className="theme-choice-check" />}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                {themeSaveError && <p className="settings-inline-error" role="alert">{themeSaveError}</p>}
-                <WindowEffectsSettings />
-
-              </section>
+              <AppearancePage
+                selectedTheme={selectedTheme}
+                themeSaveError={themeSaveError}
+                onThemeSelect={handleThemeSelect}
+              />
             )}
 
-            {page === 'about' && (
-              <section key="about" className="settings-page about-page">
-                <PageHeading
-                  kicker="ABOUT"
-                  title="关于 Pion"
-                  description="本地优先的 pi coding agent 工作台。"
-                />
-                <div className="about-hero">
-                  <div className="about-logo">π⁺</div>
-                  <div>
-                    <h3>Pion</h3>
-                    <p>让项目、会话、分支与变更审查集中在一个安静的工作区。</p>
-                  </div>
-                </div>
-                <div className="about-details">
-                  <InfoRow label="Pion 版本" value={pkg.version} />
-                  <InfoRow label="pi agent" value={piVersion || '未知'} mono />
-                  <InfoRow label="运行时" value="Electron · React · Vite" />
-                  <InfoRow label="配置目录" value="~/.pi/agent" mono />
-                </div>
-                <ReleaseNotes />
-                <div className="settings-section about-features">
-                  <div className="settings-section-title">工作台能力</div>
-                  <div className="feature-list">
-                    <Feature icon={<Bot size={14} />} title="RPC 驱动" text="通过 pi RPC 子进程运行本地 agent。" />
-                    <Feature icon={<Settings2 size={14} />} title="会话分支" text="支持会话复制、分支、恢复与变更审查。" />
-                    <Feature icon={<Palette size={14} />} title="本地设置" text="模型与外观偏好留在本机，不修改项目文件。" />
-                  </div>
-                </div>
-              </section>
-            )}
+            {page === 'about' && <AboutPage />}
 
             {page === 'diagnostics' && (
-              <section key="diagnostics" className="settings-page">
-                <PageHeading
-                  kicker="DIAGNOSTICS"
-                  title="诊断"
-                  description="查看当前 agent 状态和 RPC 子进程的 stderr 输出。"
-                />
-                <div className="diagnostics-grid">
-                  <InfoRow label="会话 ID" value={session?.sessionId?.slice(0, 16) ?? '—'} mono />
-                  <InfoRow label="工作目录" value={session?.sessionFile ?? '—'} mono />
-                  <InfoRow label="消息数量" value={String(session?.messageCount ?? 0)} />
-                  <InfoRow label="当前模型" value={session?.model ?? '—'} />
-                </div>
-                <div className="settings-section diagnostics-log">
-                  <div className="diagnostics-log-head">
-                    <div>
-                      <div className="settings-section-title">agent stderr</div>
-                      <div className="setting-desc">仅显示最近 6000 个字符</div>
-                    </div>
-                    <button type="button" className="ghost-button" onClick={() => void refreshStderr()}>
-                      <FileText size={12} /> 刷新日志
-                    </button>
-                  </div>
-                  {stderr === '' ? (
-                    <div className="diagnostics-empty">点击“刷新日志”读取子进程输出。</div>
-                  ) : (
-                    <pre className="settings-stderr">{stderr}</pre>
-                  )}
-                </div>
-              </section>
+              <DiagnosticsPage
+                session={session}
+                stderr={stderr}
+                onRefreshStderr={() => void refreshStderr()}
+              />
             )}
           </main>
         </div>
       </div>
     </div>
   )
-}
-
-function projectTrustLabel(trust: ProjectTrustInfo | null): string {
-  if (!trust) return '等待状态'
-  if (!trust.requiresTrust) return '无需额外授权'
-  if (trust.decision === 'trusted') return '已信任项目资源'
-  if (trust.decision === 'untrusted') return '未信任项目资源'
-  return '等待你的决定'
-}
-
-function projectTrustDescription(trust: ProjectTrustInfo | null): string {
-  if (!trust) return '选择项目后显示信任状态。'
-  if (!trust.requiresTrust) return '当前项目没有需要信任确认的本地 Pi 资源。'
-  if (trust.decision === 'trusted') {
-    return '项目的 .pi 设置、技能、提示词、软件包和扩展会在 Agent 启动时加载。'
-  }
-  if (trust.decision === 'untrusted') {
-    return '项目本地资源会被跳过；用户级和命令行扩展仍然可用。'
-  }
-  return '首次运行 Agent 前必须选择是否加载项目提供的本地资源。'
 }
 
 function NavItem({
@@ -755,63 +401,6 @@ function NavItem({
         <small>{description}</small>
       </span>
     </button>
-  )
-}
-
-function InfoRow({ label, value, mono = false }: { label: string; value: string; mono?: boolean }): ReactElement {
-  return (
-    <div className="info-row">
-      <span>{label}</span>
-      <strong className={mono ? 'mono' : ''} title={value}>{value}</strong>
-    </div>
-  )
-}
-
-function Feature({ icon, title, text }: { icon: ReactElement; title: string; text: string }): ReactElement {
-  return (
-    <div className="feature-item">
-      <span className="feature-icon">{icon}</span>
-      <span><strong>{title}</strong><small>{text}</small></span>
-    </div>
-  )
-}
-
-function Toggle({ on, onChange }: { on: boolean; onChange: (value: boolean) => void }): ReactElement {
-  return (
-    <button
-      type="button"
-      className={`toggle${on ? ' on' : ''}`}
-      role="switch"
-      aria-checked={on}
-      onClick={() => onChange(!on)}
-    >
-      <span className="toggle-knob" />
-    </button>
-  )
-}
-
-function Segmented({
-  value,
-  options,
-  onChange
-}: {
-  value: string
-  options: Array<{ value: string; label: string }>
-  onChange: (value: string) => void
-}): ReactElement {
-  return (
-    <div className="segmented">
-      {options.map((option) => (
-        <button
-          type="button"
-          key={option.value}
-          className={option.value === value ? 'active' : ''}
-          onClick={() => onChange(option.value)}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
   )
 }
 

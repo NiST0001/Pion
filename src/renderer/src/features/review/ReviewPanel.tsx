@@ -1,21 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import {
   AlertTriangle,
   Check,
-  ChevronDown,
-  ChevronRight,
   FileDiff,
-  FilePenLine,
-  FilePlus2,
-  Folder,
-  FolderOpen,
   GitCommitHorizontal,
   Loader2,
   Minus,
   RotateCcw,
   Save,
-  Trash2,
   X
 } from 'lucide-react'
 import type { FileChange } from '../../agent/types'
@@ -23,7 +16,6 @@ import type {
   GitConflictContent,
   GitDiffScope,
   GitFileDiff,
-  GitFileStatus,
   GitOperation,
   GitSelectionRequest,
   GitWorkspaceSnapshot,
@@ -32,6 +24,7 @@ import type {
 import { ConfirmDialog } from '../common/ConfirmDialog'
 import { DiffView } from './DiffView'
 import { GitDiffView } from './GitDiffView'
+import { ReviewFileTree } from './ReviewFileTree'
 
 interface PendingDiscard {
   paths?: string[]
@@ -88,233 +81,6 @@ function operationLabel(operation: GitOperation): string {
   if (operation === 'cherry-pick') return 'Cherry-pick'
   if (operation === 'revert') return 'Revert'
   return ''
-}
-
-function fileIcon(file: GitFileStatus): ReactElement {
-  if (file.kind === 'added' || file.kind === 'untracked') return <FilePlus2 size={14} />
-  if (file.kind === 'deleted') return <Trash2 size={14} />
-  if (file.conflicted) return <AlertTriangle size={14} />
-  return <FilePenLine size={14} />
-}
-
-interface ReviewFileTreeDirectory {
-  type: 'directory'
-  name: string
-  path: string
-  fileCount: number
-  children: ReviewFileTreeNode[]
-}
-
-interface ReviewFileTreeFile {
-  type: 'file'
-  name: string
-  path: string
-  file: GitFileStatus
-}
-
-type ReviewFileTreeNode = ReviewFileTreeDirectory | ReviewFileTreeFile
-
-interface MutableReviewDirectory {
-  name: string
-  path: string
-  directories: Map<string, MutableReviewDirectory>
-  files: GitFileStatus[]
-}
-
-function buildFileTree(files: GitFileStatus[]): ReviewFileTreeNode[] {
-  const root: MutableReviewDirectory = {
-    name: '',
-    path: '',
-    directories: new Map(),
-    files: []
-  }
-
-  for (const file of files) {
-    const parts = file.path.split('/').filter(Boolean)
-    const fileName = parts.pop() ?? file.path
-    let directory = root
-    for (const name of parts) {
-      const path = directory.path ? `${directory.path}/${name}` : name
-      let child = directory.directories.get(name)
-      if (!child) {
-        child = { name, path, directories: new Map(), files: [] }
-        directory.directories.set(name, child)
-      }
-      directory = child
-    }
-    directory.files.push({ ...file, path: file.path || fileName })
-  }
-
-  const materialize = (directory: MutableReviewDirectory): ReviewFileTreeNode[] => {
-    const directories: ReviewFileTreeDirectory[] = [...directory.directories.values()]
-      .sort((left, right) => left.name.localeCompare(right.name))
-      .map((child) => {
-        const children = materialize(child)
-        return {
-          type: 'directory',
-          name: child.name,
-          path: child.path,
-          fileCount: children.reduce((count, node) => (
-            count + (node.type === 'file' ? 1 : node.fileCount)
-          ), 0),
-          children
-        }
-      })
-    const leafFiles: ReviewFileTreeFile[] = [...directory.files]
-      .sort((left, right) => left.path.localeCompare(right.path))
-      .map((file) => ({
-        type: 'file',
-        name: file.path.split('/').at(-1) ?? file.path,
-        path: file.path,
-        file
-      }))
-    return [...directories, ...leafFiles]
-  }
-
-  return materialize(root)
-}
-
-function parentDirectories(path: string): string[] {
-  const parts = path.split('/').filter(Boolean)
-  parts.pop()
-  return parts.map((_, index) => parts.slice(0, index + 1).join('/'))
-}
-
-function FileTreeRows({
-  nodes,
-  depth,
-  scope,
-  selectedPath,
-  activeScope,
-  collapsed,
-  onToggleDirectory,
-  onSelect
-}: {
-  nodes: ReviewFileTreeNode[]
-  depth: number
-  scope: GitDiffScope
-  selectedPath: string | null
-  activeScope: GitDiffScope
-  collapsed: Set<string>
-  onToggleDirectory: (path: string) => void
-  onSelect: (path: string, scope: GitDiffScope) => void
-}): ReactElement {
-  const rowStyle = (rowDepth: number) => ({
-    '--review-tree-indent': `${rowDepth * 14}px`
-  }) as CSSProperties
-
-  return (
-    <>
-      {nodes.map((node) => {
-        if (node.type === 'directory') {
-          const isCollapsed = collapsed.has(node.path)
-          return (
-            <div className="review-tree-branch" role="none" key={`directory:${node.path}`}>
-              <button
-                type="button"
-                role="treeitem"
-                className="review-tree-directory"
-                style={rowStyle(depth)}
-                aria-expanded={!isCollapsed}
-                aria-label={`${isCollapsed ? '展开' : '收起'}目录 ${node.path}`}
-                title={node.path}
-                onClick={() => onToggleDirectory(node.path)}
-              >
-                {isCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                {isCollapsed ? <Folder size={13} /> : <FolderOpen size={13} />}
-                <span>{node.name}</span>
-                <span className="review-tree-count">{node.fileCount}</span>
-              </button>
-              {!isCollapsed && (
-                <div className="review-tree-group" role="group">
-                  <FileTreeRows
-                    nodes={node.children}
-                    depth={depth + 1}
-                    scope={scope}
-                    selectedPath={selectedPath}
-                    activeScope={activeScope}
-                    collapsed={collapsed}
-                    onToggleDirectory={onToggleDirectory}
-                    onSelect={onSelect}
-                  />
-                </div>
-              )}
-            </div>
-          )
-        }
-
-        const { file } = node
-        return (
-          <button
-            type="button"
-            role="treeitem"
-            key={`${scope}:${file.path}`}
-            className={`review-file-item review-tree-file${selectedPath === file.path && (file.conflicted || activeScope === scope) ? ' active' : ''}${file.conflicted ? ' conflicted' : ''}`}
-            style={rowStyle(depth)}
-            onClick={() => onSelect(file.path, scope)}
-            title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
-          >
-            <span className="review-tree-file-spacer" aria-hidden="true" />
-            {fileIcon(file)}
-            <span className="review-file-name">{node.name}</span>
-            <span className="git-file-code">{scope === 'staged' ? file.indexCode : file.worktreeCode}</span>
-          </button>
-        )
-      })}
-    </>
-  )
-}
-
-function FileTree({
-  title,
-  files,
-  scope,
-  selectedPath,
-  activeScope,
-  onSelect
-}: {
-  title: string
-  files: GitFileStatus[]
-  scope: GitDiffScope
-  selectedPath: string | null
-  activeScope: GitDiffScope
-  onSelect: (path: string, scope: GitDiffScope) => void
-}): ReactElement | null {
-  const nodes = useMemo(() => buildFileTree(files), [files])
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
-
-  useEffect(() => {
-    if (!selectedPath || activeScope !== scope) return
-    const parents = new Set(parentDirectories(selectedPath))
-    setCollapsed((current) => {
-      const next = new Set([...current].filter((path) => !parents.has(path)))
-      return next.size === current.size ? current : next
-    })
-  }, [activeScope, scope, selectedPath])
-
-  if (files.length === 0) return null
-  return (
-    <section className="git-file-group">
-      <div className="review-section-head"><span>{title}</span><span className="review-count">{files.length}</span></div>
-      <div className="review-file-tree" role="tree" aria-label={`${title}文件树`}>
-        <FileTreeRows
-          nodes={nodes}
-          depth={0}
-          scope={scope}
-          selectedPath={selectedPath}
-          activeScope={activeScope}
-          collapsed={collapsed}
-          onToggleDirectory={(path) => setCollapsed((current) => {
-            const next = new Set(current)
-            if (next.has(path)) next.delete(path)
-            else next.add(path)
-            return next
-          })}
-          onSelect={onSelect}
-        />
-      </div>
-    </section>
-  )
 }
 
 export function ReviewPanel({
@@ -447,9 +213,9 @@ export function ReviewPanel({
               : files.length === 0 ? <div className="review-empty-files"><Check size={17} /><span>工作区干净</span></div>
                 : (
                   <>
-                    <FileTree key="conflicts" title="冲突" files={conflicts} scope="unstaged" selectedPath={selectedPath} activeScope={scope} onSelect={selectFile} />
-                    <FileTree key="staged" title="已暂存" files={staged} scope="staged" selectedPath={selectedPath} activeScope={scope} onSelect={selectFile} />
-                    <FileTree key="unstaged" title="修改" files={unstaged} scope="unstaged" selectedPath={selectedPath} activeScope={scope} onSelect={selectFile} />
+                    <ReviewFileTree key="conflicts" title="冲突" files={conflicts} scope="unstaged" selectedPath={selectedPath} activeScope={scope} onSelect={selectFile} />
+                    <ReviewFileTree key="staged" title="已暂存" files={staged} scope="staged" selectedPath={selectedPath} activeScope={scope} onSelect={selectFile} />
+                    <ReviewFileTree key="unstaged" title="修改" files={unstaged} scope="unstaged" selectedPath={selectedPath} activeScope={scope} onSelect={selectFile} />
                   </>
                 )}
 

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
 import { subagentSettingsFilePath } from '../subagent-settings'
+import { DEFAULT_SUBAGENTS_ENABLED } from '../../shared/subagents'
 import {
   ProjectTrustStore,
   RpcClient,
@@ -1451,6 +1452,7 @@ export class AgentBridge {
   private dispatchNextLocalFollowUp(backend: BackendRecord): void {
     if (
       this.stopping
+      || backend.busy
       || backend.localQueueDispatchPromise
       || backend.localQueueDispatching
       || backend.localQueueBlocked
@@ -1790,6 +1792,7 @@ export class AgentBridge {
       pendingRunIds: [],
       localFollowUps: [],
       directSteering: [],
+      subagentsEnabled: DEFAULT_SUBAGENTS_ENABLED,
       companionRunIds: [],
       rawQueue: { steering: [], followUp: [] },
       startPromise: Promise.resolve()
@@ -1988,11 +1991,12 @@ export class AgentBridge {
       || backend.busy
       || backend.compacting
       || backend.localQueueDispatching
-      || (backend.localFollowUps?.length ?? 0) > 0
+      || backend.localQueueDispatchPromise
+      || backend.runCompletionPromise
     ) {
-      // There is a short idle-looking gap between Pi's settled event and the
-      // next locally dispatched follow-up. Queue here instead of racing that
-      // prompt (or trying to steer during compaction).
+      // Protect the dispatch/compaction transition instead of racing a prompt
+      // or trying to steer during compaction. Existing local follow-ups do not
+      // force Enter into this branch; an idle backend sends Enter immediately.
       await this.queue(message, images)
     } else {
       // Reserve the backend before checkpoint/mode preparation. Both calls are
@@ -3030,7 +3034,7 @@ export class AgentBridge {
   async getSessionInfo(): Promise<SessionInfo | null> {
     const backend = this.getActiveBackend()
     const info = await this.getSessionInfoSnapshot()
-    if (info) info.subagentsEnabled = backend?.subagentsEnabled ?? false
+    if (info) info.subagentsEnabled = backend?.subagentsEnabled ?? DEFAULT_SUBAGENTS_ENABLED
     if (info) info.yolo = this.activeKey ? this.yoloSessions.has(this.activeKey) : false
     return info
   }

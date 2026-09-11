@@ -19,6 +19,7 @@ import { useSessionModes } from './hooks/useSessionModes'
 import { deriveLatestRunChanges } from './agent/timeline'
 import { deriveWorkingStatus } from './agent/workingStatus'
 import type { FileChange } from './agent/types'
+import { DEFAULT_SUBAGENTS_ENABLED } from '../../shared/subagents'
 import type {
   BranchInfo,
   GitDiffScope,
@@ -1000,8 +1001,8 @@ export function App(): ReactElement {
                 <>
                   <SubagentsToggle
                     key={`${activeCwd}:${state.session?.sessionId ?? ''}`}
-                    enabled={state.session?.subagentsEnabled ?? false}
-                    disabled={!state.session?.sessionId || state.status.phase === 'starting' || state.status.phase === 'error' || projectTrust?.decision === 'ask' || ((state.mode === 'plan' || state.busy) && !state.session?.subagentsEnabled)}
+                    enabled={state.mode === 'plan' ? false : state.session?.subagentsEnabled ?? DEFAULT_SUBAGENTS_ENABLED}
+                    disabled={!state.session?.sessionId || state.status.phase === 'starting' || state.status.phase === 'error' || state.mode === 'plan' || projectTrust?.decision === 'ask' || (state.busy && !(state.session?.subagentsEnabled ?? DEFAULT_SUBAGENTS_ENABLED))}
                     onChange={(enabled) => actions.setSubagentsMode(enabled, state.session?.sessionId ?? '')}
                   />
                   <ModelPicker

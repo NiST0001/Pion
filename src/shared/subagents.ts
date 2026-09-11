@@ -13,6 +13,8 @@ export const SUBAGENT_LIMITS = {
   maxResultChars: { min: 1000, max: 32000 }
 } as const
 
+export const DEFAULT_SUBAGENTS_ENABLED = true
+
 export const DEFAULT_SUBAGENT_SETTINGS: Readonly<SubagentSettings> = Object.freeze({
   maxParallel: 3, timeoutMinutes: 10, maxTurns: 24, maxResultChars: 16000
 })
