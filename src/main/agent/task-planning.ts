@@ -41,14 +41,16 @@ const TOOL_NAME = "pion_task";
 const ACTIONS = ["clear", "create", "update", "delete", "list", "get"];
 const STATUSES = ["pending", "in_progress", "completed", "deleted"];
 const POLICY = [
-  "## Pion native turn-scoped task policy",
+  "## Pion native task continuity policy",
   "- Use pion_task as the only task-management tool. Never call todo or rely on an external todo plugin.",
-  "- Scope tasks to the current user message only; never maintain a session-wide backlog.",
-  "- For a complex turn that needs tasks, call pion_task clear exactly once before creating the current turn's tasks. Do not call pion_task for trivial or conversational turns.",
-  "- Create a fresh plan from the current user message. Do not reuse task ids or carry pending/completed tasks from an earlier user message into this turn.",
-  "- Mark each current-turn task in_progress before work and completed immediately when done. Keep exactly one task in_progress.",
-  "- Finish all unblocked current-turn tasks before the final response. If blocked, keep the affected task in_progress and explain the blocker in the same response.",
-  "- Pion archives snapshots from the transcript, so completed tasks do not need to remain an active backlog."
+  "- Decide whether to continue, revise, or replace the existing plan from the user's goal and the current session branch's tasks. A new user message is not a plan reset.",
+  "- For follow-ups, corrections, or requests to continue the same goal, reuse task ids, completed progress, and dependencies; update or append tasks as needed. Use list/get when the existing task state is unclear.",
+  "- Use clear only when you decide a genuinely different goal needs a replacement plan or the user asks to discard/reset it. Before replacing unfinished work, explain what is being set aside; ask if the user's intent is consequentially ambiguous. Do not silently lose unfinished work.",
+  "- Trivial questions and conversational turns do not require a new plan and must not clear an existing one. Do not resume unrelated work merely because it remains on the list.",
+  "- Choose task count and granularity from the actual work: independently executable, verifiable steps with dependencies where useful.",
+  "- Mark a task in_progress before working on it and completed only after its completion criteria are met. Keep exactly one task in_progress while working; pause it to pending before switching tasks.",
+  "- A plan may span multiple user messages. Preserve unfinished tasks and report progress, blockers, and next steps honestly; do not mark work completed or clear it merely to end a response. Task state is not authorization to bypass tool permissions or user approval.",
+  "- Pion archives snapshots from the transcript; archived history does not replace the active plan needed to continue the same goal."
 ].join("\n");
 
 const Params = Type.Object({
@@ -126,11 +128,11 @@ export default function (pi) {
     name: TOOL_NAME,
     label: "Pion Tasks",
     description: "Native Pion task planning. Actions: clear, create, update, delete, list, get. Status: pending, in_progress, completed, deleted.",
-    promptSnippet: "Manage the current user turn's multi-step plan with Pion-native tasks",
+    promptSnippet: "Manage multi-step plans across messages; decide whether to continue, revise, or replace existing tasks",
     promptGuidelines: [
-      "Use pion_task for complex work with three or more steps; skip it for trivial or conversational requests.",
-      "Call pion_task clear once before creating a new turn plan, then keep exactly one task in_progress.",
-      "Complete tasks immediately after validation; leave blocked work in_progress and explain the blocker."
+      "Use pion_task when the work benefits from a tracked plan; choose independently verifiable tasks based on the actual work.",
+      "Inspect existing tasks when needed. Continue or revise the same goal across user messages; clear only for a deliberate plan replacement or requested reset, not on every message.",
+      "Keep exactly one task in_progress while working. Complete only finished work; preserve unfinished tasks and explain blockers or pauses without bypassing user approval."
     ],
     parameters: Params,
     async execute(_toolCallId, params) {

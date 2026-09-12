@@ -35,7 +35,7 @@
 | src/main/agent/backend-pool.ts | 后端保留和容量管理 |
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态 |
 | src/main/agent/queue-projection.ts | 本地队列与原生队列投影 |
-| src/main/agent/task-planning.ts | 原生任务工具与扩展 |
+| src/main/agent/task-planning.ts | 原生任务工具与扩展；AI 按目标判断继续、调整或替换跨消息计划，显式 clear 才重置，保留分支恢复与单一进行中约束 |
 | src/main/agent/wire.ts | SDK 条目映射、所选分支祖先链与模式推导、沿当前叶节点恢复最新任务快照 |
 | src/main/agent-runtime.ts、src/main/agent/runtime-host.ts | 编译后的 SDK RPC 子进程入口、私有启动参数、项目隔离/信任与会话替换时重建内置工具 |
 | src/main/agent/subagents.ts | 内置子代理开关及 SDK 委派：可用时注入复杂任务主动委派与按当前上限合并独立任务到同一并发批次的策略，不可用时不绕过工具过滤；每批读取并冻结全局限制、有界并发/取消、父级工具权限与检查点转发、兄弟写入串行化、结果与模型用量汇总 |
@@ -145,6 +145,7 @@
   - `WorkbenchDialogs.test.tsx`：首次按需 lazy 加载、关闭/重开及兄弟弹窗切换时的组件身份、草稿与独立挂起隔离，受控确认、操作页/修复回调透传，以及真实设置弹窗原有打开重置和在途操作保留；下游 mocks 在用例内注册并清理。
   - `windowEffects.test.tsx`：毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条、权限请求避让输入框与实底回退的源码契约（不替代 GPU 真机验证）。
   - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1 迁移、拖动预览与菜单操作时不重挂载内容。
+- `tests/unit/task-planning.test.ts`：跨消息任务 ID/状态/依赖保留、长计划、显式清空、当前分支生命周期恢复、单一进行中约束、模式隐藏及任务延续提示契约；不调用真实模型。
 - `tests/unit/run-store.test.ts`：运行持久化与中断恢复、统计查询在限制条数前过滤队列，默认查询保留队列；撤销空闲门控扫描完整账本，不被展示条数限制掩盖旧队列。
 - `tests/unit/agent-bridge-send-queue.test.ts`：已有排队消息时 Enter 优先直接发送并保留原有队列。
 - `tests/unit/message-revert.test.ts`、`stop-for-history.test.ts`、`agent-bridge-message-revert.test.ts`：SDK 持久分支、首条/元数据/压缩/图片、损坏或不支持内容拒绝、真实退出与超时隔离、会话/owner/队列/在途门控、退出后分支校验、重启失败保留结果及沿分支分页/索引/任务；计划扩展关闭时不重复落盘由 `plan-mode.test.ts` 覆盖。

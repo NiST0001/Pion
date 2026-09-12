@@ -5,6 +5,7 @@
 // The normal test command still runs each source test independently.
 import '../unit/task-history.test'
 import '../unit/plan-mode.test'
+import '../unit/task-planning.test'
 import '../unit/timeline.test'
 import '../renderer/historyReveal.test'
 import '../renderer/screenTextReveal.test'
