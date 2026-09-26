@@ -174,6 +174,124 @@ describe('SDK-only message revert', () => {
       .toEqual(position === 'before' ? [] : ['compactionSummary', 'user', 'assistant'])
   })
 
+  it.each([null, { content: 'model-only replacement' },
+    { content: [{ type: 'text' as const, text: 'model-only block' }] },
+    { content: [{ type: 'text' as const, text: ' original\n' }, images[0]] }])(
+    'preserves raw user content and the old tree across usage/context edits: %j', (replacement) => {
+      const { manager } = createSession()
+      const system = manager.appendMessage({ role: 'system', content: '', sections: { preamble: 'fixture' },
+        toolsAdded: [], timestamp: 0 })
+      const selected = user(manager, [{ type: 'text', text: ' original\n' }, images[0]])
+      const reply = assistant(manager)
+      const tool = manager.appendMessage({ role: 'toolResult', toolCallId: 'call', toolName: 'fixture',
+        content: [{ type: 'text', text: 'result' }], isError: false, timestamp: 3 })
+      const custom = manager.appendCustomMessageEntry('fixture', 'custom', false)
+      const usage = { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cacheWrite1h: 1, reasoning: 1,
+        totalTokens: 10, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }
+      manager.appendUsage('future_category', 'fixture-provider', 'fixture-model', usage, 'note')
+      manager.appendContextEdit(reply, { content: [
+        { type: 'thinking', thinking: '', thinkingSignature: 'opaque', redacted: true },
+        { type: 'toolCall', id: 'fixture-call', name: 'fixture', arguments: {}, namespace: 'fixture' }
+      ] })
+      manager.appendContextEdit(reply, { content: 'assistant replacement' })
+      manager.appendContextEdit(tool, { content: 'tool replacement' })
+      manager.appendContextEdit(custom, { content: [images[1]] })
+      manager.appendContextEdit(selected, replacement)
+      const target = targetFor(manager, selected)
+      const before = readFileSync(target.sessionPath, 'utf8')
+      const oldBranch = manager.getBranch()
+      expect(readMessageRevertTarget(target)).toMatchObject({ text: ' original\n', images: [images[0]] })
+      expect(readFileSync(target.sessionPath, 'utf8')).toBe(before)
+      const result = revertSessionMessage(target)
+      const reopened = SessionManager.open(target.sessionPath)
+      expect(result).toMatchObject({ text: ' original\n', images: [images[0]] })
+      expect(readFileSync(target.sessionPath, 'utf8').startsWith(before)).toBe(true)
+      expect(reopened.getEntries().slice(0, -1)).toEqual(oldBranch)
+      expect(reopened.getBranch(target.expectedLeafId!)).toEqual(oldBranch)
+      expect(reopened.getBranch().map((entry) => entry.id)).toEqual([system, result.leafId])
+      expect(reopened.buildSessionContext().messages.map((message) => message.role)).toEqual(['system'])
+      expectRejectedUnchanged({ ...target, entryId: system, expectedLeafId: result.leafId })
+    }
+  )
+
+  it('accepts retain-none compaction with a system checkpoint and preserves its old tree', () => {
+    const { manager } = createSession()
+    manager.appendMessage({ role: 'system', content: 'fixture instructions', timestamp: 0 })
+    user(manager, 'summarized')
+    assistant(manager)
+    const compact = manager.appendCompaction('retain none', null, 100)
+    expect(manager.getEntry(compact)).toMatchObject({ firstKeptEntryId: compact, systemMessage: { role: 'system' } })
+    const selected = user(manager)
+    assistant(manager)
+    const target = targetFor(manager, selected)
+    const oldBranch = manager.getBranch()
+    const result = revertSessionMessage(target)
+    const reopened = SessionManager.open(target.sessionPath)
+    expect(reopened.getBranch(target.expectedLeafId!)).toEqual(oldBranch)
+    expect(reopened.getEntry(result.leafId)?.parentId).toBe(compact)
+    expect(reopened.buildSessionContext().messages.map((message) => message.role)).toEqual(['system', 'compactionSummary'])
+  })
+
+  it.each([
+    ['missing kind', (entry: Record<string, unknown>) => { delete entry.kind }],
+    ['invalid kind', (entry: Record<string, unknown>) => { entry.kind = 12 }],
+    ['invalid provider', (entry: Record<string, unknown>) => { entry.provider = null }],
+    ['invalid model', (entry: Record<string, unknown>) => { entry.model = {} }],
+    ['missing usage', (entry: Record<string, unknown>) => { delete entry.usage }],
+    ['missing counters', (entry: Record<string, unknown>) => { entry.usage = { cost: {} } }],
+    ['negative counter', (entry: Record<string, unknown>) => { (entry.usage as Record<string, unknown>).input = -1 }],
+    ['invalid optional counter', (entry: Record<string, unknown>) => { (entry.usage as Record<string, unknown>).reasoning = '1' }],
+    ['invalid cost', (entry: Record<string, unknown>) => { (entry.usage as Record<string, unknown>).cost = null }],
+    ['invalid note', (entry: Record<string, unknown>) => { entry.note = false }]
+  ] as const)('rejects damaged usage: %s', (_name, mutate) => {
+    const { manager } = createSession()
+    const selected = user(manager)
+    assistant(manager)
+    manager.appendUsage('cache_warm', 'fixture', 'fixture', { input: 0, output: 0, cacheRead: 1, cacheWrite: 0,
+      totalTokens: 1, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
+    const target = targetFor(manager, selected)
+    writeFileSync(target.sessionPath, damageEntries(readFileSync(target.sessionPath, 'utf8'), (entries) => {
+      mutate(entries.find((entry) => entry.type === 'usage')!)
+    }))
+    expectRejectedUnchanged(target)
+  })
+
+  it.each([
+    'missing target', 'forward target', 'other branch', 'system target', 'custom state target', 'edit target',
+    'missing replacement', 'bare string', 'bare array', 'missing content', 'invalid block', 'invalid text', 'extra replacement field'
+  ])('rejects damaged context edit: %s', (damage) => {
+    const { manager } = createSession()
+    const system = manager.appendMessage({ role: 'system', content: 'fixture', timestamp: 0 })
+    const selected = user(manager)
+    assistant(manager)
+    const other = user(manager, 'other branch')
+    manager.branch(selected)
+    const custom = manager.appendCustomEntry('state', {})
+    const previousEdit = manager.appendContextEdit(selected, null)
+    const edit = manager.appendContextEdit(selected, { content: 'replacement' })
+    const later = user(manager, 'later')
+    const target = targetFor(manager, selected)
+    writeFileSync(target.sessionPath, damageEntries(readFileSync(target.sessionPath, 'utf8'), (entries) => {
+      const entry = entries.find((candidate) => candidate.id === edit)!
+      switch (damage) {
+        case 'missing target': entry.targetId = 'missing'; break
+        case 'forward target': entry.targetId = later; break
+        case 'other branch': entry.targetId = other; break
+        case 'system target': entry.targetId = system; break
+        case 'custom state target': entry.targetId = custom; break
+        case 'edit target': entry.targetId = previousEdit; break
+        case 'missing replacement': delete entry.replacement; break
+        case 'bare string': entry.replacement = 'replacement'; break
+        case 'bare array': entry.replacement = []; break
+        case 'missing content': entry.replacement = {}; break
+        case 'invalid block': entry.replacement = { content: [{ type: 'future' }] }; break
+        case 'invalid text': entry.replacement = { content: [{ type: 'text', text: 42 }] }; break
+        case 'extra replacement field': entry.replacement = { content: 'valid', role: 'user' }; break
+      }
+    }))
+    expectRejectedUnchanged(target)
+  })
+
   it('accepts a prior SDK fork whose branch summary refers to history in the source file', () => {
     const { manager } = createSession()
     user(manager, 'ancestor')
@@ -242,6 +360,7 @@ describe('SDK-only message revert', () => {
     ['self-cycle', (source: string) => damageEntries(source, (entries) => { entries[1].parentId = entries[1].id })],
     ['forward parent', (source: string) => damageEntries(source, (entries) => { entries[1].parentId = entries[2].id })],
     ['null message', (source: string) => damageEntries(source, (entries) => { entries[2].message = null })],
+    ['unknown entry', (source: string) => damageEntries(source, (entries) => { entries[2].type = 'future_record' })],
     ['missing header', (source: string) => source.slice(source.indexOf('\n') + 1)]
   ] satisfies [string, (source: string) => string | Buffer][])('rejects %s before SDK writes and leaves corrupt bytes unchanged', (_name, damage) => {
     const { manager } = createSession()

@@ -7,7 +7,123 @@ import type { TimelineItem } from '../../src/renderer/src/agent/types'
 vi.mock('../../src/renderer/src/utils/historyReveal', () => ({ armPendingHistoryRevealRows: vi.fn() }))
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren() })
 
+function markerFixture() {
+  const frames = new Map<number, FrameRequestCallback>()
+  let frameId = 0
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.set(++frameId, callback); return frameId })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id) })
+  const flush = () => act(() => {
+    const pending = [...frames.values()]
+    frames.clear()
+    pending.forEach((callback) => callback(0))
+  })
+  let resize = () => {}
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: () => void) { resize = callback }
+    observe() {}
+    disconnect() {}
+  })
+  const element = document.createElement('div')
+  document.body.append(element)
+  Object.defineProperties(element, { scrollHeight: { value: 3000 }, clientHeight: { value: 400, configurable: true } })
+  const content = document.createElement('div')
+  content.className = 'timeline'
+  element.append(content)
+  const positions = [400, 800]
+  const rows = positions.map((_, index) => {
+    const row = document.createElement('div')
+    row.className = 'row-user'
+    row.dataset.entryId = `entry-${index}`
+    row.getBoundingClientRect = () => ({ top: positions[index] - element.scrollTop } as DOMRect)
+    content.append(row)
+    return row
+  })
+  const options: Parameters<typeof useConversationNavigation>[0] = {
+    scrollRef: { current: element }, timeline: [{ kind: 'user', id: 1, text: 'first' }],
+    timelineMutation: 'replace', busy: false, sessionPath: '/a', historyJump: null,
+    loadOlder: vi.fn(async () => {}), loadNewer: vi.fn(async () => {})
+  }
+  const hook = renderHook((props) => useConversationNavigation(props), { initialProps: options })
+  element.dispatchEvent(new WheelEvent('wheel', { deltaY: -200 }))
+  element.scrollTop = 500
+  act(() => hook.result.current.handleTimelineScroll())
+  flush()
+  return { ...hook, options, element, rows, positions, frames, flush, resize: () => act(() => resize()) }
+}
+
 describe('conversation navigation', () => {
+  it('recomputes a same-length replacement without scrolling or paging', () => {
+    const f = markerFixture()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-0')
+    f.rows[0].dataset.entryId = 'replacement'
+    f.rerender({ ...f.options, timeline: [{ kind: 'user', id: 2, text: 'replacement' }] })
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('replacement')
+    expect(f.element.scrollTop).toBe(500)
+    expect(f.options.loadOlder).not.toHaveBeenCalled()
+    expect(f.options.loadNewer).not.toHaveBeenCalled()
+  })
+
+  it.each(['content', 'viewport', 'clearance'] as const)('updates the active marker after %s layout without a scroll event', (change) => {
+    const f = markerFixture()
+    if (change === 'content') f.positions[1] = 640
+    if (change === 'viewport') {
+      f.positions[1] = 740
+      Object.defineProperty(f.element, 'clientHeight', { value: 1000 })
+    }
+    if (change === 'clearance') f.element.style.setProperty('--conversation-top-clearance', '300px')
+    f.resize()
+    f.resize()
+    expect(f.frames.size).toBe(1)
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-1')
+    expect(f.element.scrollTop).toBe(500)
+    f.rerender({ ...f.options, timeline: [...f.options.timeline] })
+    expect(f.element.scrollTop).toBe(500) // marker refresh did not restore follow intent
+    expect(f.options.loadOlder).not.toHaveBeenCalled()
+    expect(f.options.loadNewer).not.toHaveBeenCalled()
+  })
+
+  it('recomputes when the history index arrives late rather than clearing the marker', () => {
+    const f = markerFixture()
+    f.positions[1] = 640
+    f.rerender({ ...f.options, historyIndexSessionPath: '/a' })
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-1')
+    expect(f.element.scrollTop).toBe(500)
+  })
+
+  it('does not choose a closer future user while the current long turn spans the reference point', () => {
+    const f = markerFixture()
+    // Reference = 652; future row 800 is closer than current row 400.
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-0')
+    f.positions[1] = 652
+    f.resize()
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-1')
+  })
+
+  it('keeps an explicit selection through replacement, late index and layout until actual user scrolling', () => {
+    const f = markerFixture()
+    const jumped = { ...f.options, historyJump: { entryId: 'entry-1', nonce: 1 } }
+    f.rerender(jumped)
+    f.flush()
+    const position = f.element.scrollTop
+    f.positions[1] = 2000
+    f.rerender({ ...jumped, timeline: [...jumped.timeline], historyIndexSessionPath: '/a' })
+    f.resize()
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-1')
+    expect(f.element.scrollTop).toBe(position)
+    f.element.dispatchEvent(new WheelEvent('wheel', { deltaY: -20 }))
+    f.resize()
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-1') // input alone has not moved the viewport
+    f.element.scrollTop -= 20
+    act(() => f.result.current.handleTimelineScroll())
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-0')
+  })
   it('compensates floating summary clearance without leaving manual reading', () => {
     let resize = () => {}
     vi.stubGlobal('ResizeObserver', class {

@@ -6,7 +6,7 @@ const HISTORY_STOP_TIMEOUT_MS = 5000
 type HistoryProcess = Pick<ChildProcess, 'exitCode' | 'signalCode' | 'once' | 'removeListener'>
 
 /**
- * Private adapter for the lockfile-pinned pi SDK 0.85.1 RpcClient. Its `process`
+ * Private adapter for the lockfile-pinned pi SDK 0.87.1 RpcClient. Its `process`
  * field is ChildProcess | null; stop() sends SIGTERM, then SIGKILL after 1s, but
  * resolves and clears that field without waiting for SIGKILL's actual exit.
  * Like AgentBridge.respondToExtensionUi, this must be reviewed on SDK upgrades.

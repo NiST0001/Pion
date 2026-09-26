@@ -102,6 +102,38 @@ export function useConversationNavigation({
     nearBottomRef.current = true
   }, [])
 
+  // Active-marker tracking is read-only and independently frame-coalesced;
+  // neither layout delivery nor an index refresh represents a scroll gesture.
+  const updateVisibleHistoryEntry = useCallback((): void => {
+    const container = scrollRef.current
+    if (!container) return
+    // Keep a clicked landmark authoritative until actual user scrolling,
+    // including when layout or a late history index cannot align its row.
+    if (explicitHistoryEntry.current) {
+      setVisibleHistoryEntryId(explicitHistoryEntry.current)
+      return
+    }
+    const rows = [...container.querySelectorAll<HTMLElement>('.row-user[data-entry-id]')]
+    const anchor = historyAnchor(container)
+    // A user's turn lasts until the next user row reaches the reference point.
+    // Nearest row-top distance selects a future turn while a long message or
+    // its assistant/tool response still spans the reference point.
+    let active = rows[0]
+    for (const row of rows) {
+      if (row.getBoundingClientRect().top > anchor) break
+      active = row
+    }
+    setVisibleHistoryEntryId(active?.dataset.entryId)
+  }, [scrollRef])
+
+  const scheduleVisibleHistoryUpdate = useCallback((): void => {
+    if (historyScrollFrame.current !== null) return
+    historyScrollFrame.current = window.requestAnimationFrame(() => {
+      historyScrollFrame.current = null
+      updateVisibleHistoryEntry()
+    })
+  }, [updateVisibleHistoryEntry])
+
   const timelineLength = timeline.length
   const { onScroll: pageOnScroll } = useHistoryPaging({
     scrollRef, timelineLength, loadOlder, loadNewer,
@@ -244,6 +276,7 @@ export function useConversationNavigation({
     let previousPaddingTop = parseFloat(getComputedStyle(element).paddingTop) || 0
     const content = element.querySelector<HTMLElement>('.timeline')
     const observer = new ResizeObserver(() => {
+      scheduleVisibleHistoryUpdate()
       const nextContentHeight = content?.offsetHeight ?? 0
       const shrink = observedContentHeight.current - nextContentHeight
       observedContentHeight.current = nextContentHeight
@@ -286,7 +319,7 @@ export function useConversationNavigation({
     // The outer min-height can hide a collapse from the surface observer.
     if (content) observer.observe(content)
     return () => observer.disconnect()
-  }, [scrollRef, hasNewerHistory, timelineLoading, timelineLength])
+  }, [scrollRef, hasNewerHistory, timelineLoading, timelineLength, scheduleVisibleHistoryUpdate])
 
   // Panel visibility also changes bottom clearance in the current commit;
   // synchronize an existing follow intent without waiting for a resize delivery.
@@ -297,45 +330,9 @@ export function useConversationNavigation({
     lastScrollTop.current = element.scrollTop
   }, [scrollRef, panelsVisible, hasNewerHistory])
 
-  const updateVisibleHistoryEntry = useCallback((): void => {
-    const container = scrollRef.current
-    if (!container) return
-    // A clicked landmark stays authoritative through programmatic scrolls,
-    // viewport clamping and live layout changes, even for adjacent short rows.
-    if (explicitHistoryEntry.current) {
-      setVisibleHistoryEntryId(explicitHistoryEntry.current)
-      return
-    }
-    const rows = [...container.querySelectorAll<HTMLElement>('.row-user[data-entry-id]')]
-    if (rows.length === 0) {
-      setVisibleHistoryEntryId(undefined)
-      return
-    }
-    const anchor = historyAnchor(container)
-    const nearest = rows.reduce((best, row) => (
-      Math.abs(row.getBoundingClientRect().top - anchor)
-        < Math.abs(best.getBoundingClientRect().top - anchor)
-        ? row
-        : best
-    ))
-    setVisibleHistoryEntryId(nearest.dataset.entryId)
-  }, [scrollRef])
-
-  const scheduleVisibleHistoryUpdate = useCallback((): void => {
-    if (historyScrollFrame.current !== null) return
-    historyScrollFrame.current = window.requestAnimationFrame(() => {
-      historyScrollFrame.current = null
-      updateVisibleHistoryEntry()
-    })
-  }, [updateVisibleHistoryEntry])
-
   useEffect(() => {
     scheduleVisibleHistoryUpdate()
-  }, [scheduleVisibleHistoryUpdate, sessionPath, timelineLength, historyResetRevision])
-
-  useEffect(() => {
-    setVisibleHistoryEntryId(undefined)
-  }, [historyIndexSessionPath])
+  }, [scheduleVisibleHistoryUpdate, projectCwd, sessionPath, timeline, historyResetRevision, historyIndexSessionPath, panelsVisible])
 
   useLayoutEffect(() => {
     const jump = historyJump
@@ -350,6 +347,7 @@ export function useConversationNavigation({
       pendingJumpNonce.current = null
       if (!target || !container) {
         explicitHistoryEntry.current = undefined
+        scheduleVisibleHistoryUpdate()
         return
       }
       // Use the same row-top anchor as scroll tracking. Centering the whole
@@ -376,7 +374,7 @@ export function useConversationNavigation({
       }, 1_600)
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [historyJump?.nonce, historyResetRevision, scrollRef])
+  }, [historyJump?.nonce, historyResetRevision, scrollRef, scheduleVisibleHistoryUpdate])
 
   // Arm eager historical rows after scroll restoration. Lazy chat rows also
   // arm themselves when their chunk finishes mounting; otherwise Suspense can

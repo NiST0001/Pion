@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { SessionManager, type RpcClient } from '@earendil-works/pi-coding-agent'
+import type { JsonValue } from '@earendil-works/pi-ai'
 import type { IpcMain, IpcMainInvokeEvent } from 'electron'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
@@ -70,7 +71,7 @@ function appendAssistant(manager: SessionManager, text: string, calls: { id: str
   })
 }
 
-function appendResult(manager: SessionManager, toolCallId: string, toolName: string, text: string, tasks?: unknown[]) {
+function appendResult(manager: SessionManager, toolCallId: string, toolName: string, text: string, tasks?: JsonValue[]) {
   return manager.appendMessage({
     role: 'toolResult', timestamp: 3, toolCallId, toolName, isError: false,
     content: [{ type: 'text', text }], details: tasks === undefined ? undefined : { tasks }

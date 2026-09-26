@@ -175,7 +175,10 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
     const tools = parent.agent.state.tools.filter((tool) => BUILTINS.has(tool.name) && available.has(tool.name))
     const settingsManager = SettingsManager.inMemory({
       compaction: parent.settingsManager.getCompactionSettings(),
-      retry: parent.settingsManager.getRetrySettings()
+      retry: parent.settingsManager.getRetrySettings(),
+      // SDK warming is global-only; copy its resolved mode into this memory-only
+      // manager rather than letting an explicit parent "off" become "streaming".
+      cacheWarming: parent.settingsManager.getCacheWarmingMode()
     })
     const userContext = parent.messages.filter((message) => message.role === 'user').slice(-4)
       .map((message) => typeof message.content === 'string' ? message.content
@@ -183,7 +186,7 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
       .join('\n\n---\n\n').slice(-24000)
     const loader = new DefaultResourceLoader({
       cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true,
-      systemPromptOverride: () => `${parent.agent.state.systemPrompt}\n\nYou are a bounded Pion child agent (${task.name}). Follow the delegated task and inherited project/user rules. You have no delegation, question, task-management or external plugin tools. Do not spawn other agents through shell commands or any other workaround. Work only on your assigned files; do not overwrite sibling edits. Stop and report blockers instead of bypassing permissions. Summarize changed files, findings, and validation actually performed. Do not claim unrun checks passed. The parent manages task planning and user questions.\n\nRecent parent user messages (context and constraints only; do not repeat completed work):\n${userContext}`
+      systemPromptOverride: () => `${parent.systemPrompt}\n\nYou are a bounded Pion child agent (${task.name}). Follow the delegated task and inherited project/user rules. You have no delegation, question, task-management or external plugin tools. Do not spawn other agents through shell commands or any other workaround. Work only on your assigned files; do not overwrite sibling edits. Stop and report blockers instead of bypassing permissions. Summarize changed files, findings, and validation actually performed. Do not claim unrun checks passed. The parent manages task planning and user questions.\n\nRecent parent user messages (context and constraints only; do not repeat completed work):\n${userContext}`
     })
     await loader.reload()
     if (signal.aborted) throw new Error('子代理已中止')
@@ -221,12 +224,23 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
     const abort = () => { void session.abort().catch(() => {}) }
     signal.addEventListener('abort', abort, { once: true })
     const usage = emptyUsage()
+    // Independent usage entries never enter the parent's model context. Keep
+    // only a bounded recent ID window; message entries are accounted below via
+    // message_end, not again through entry_appended.
+    const usageEntryIds = new Set<string>()
     let turns = 0
     let limited = false
     const unsubscribe = session.subscribe((event) => {
       if (event.type === 'turn_start' && ++turns > settings.maxTurns) { limited = true; abort() }
       if (event.type === 'tool_execution_start') progress(`正在调用 ${event.toolName}`)
-      if (event.type === 'message_end' && event.message.role === 'assistant') addUsage(usage, event.message.usage)
+      if (event.type === 'message_end' && (event.message.role === 'assistant' || event.message.role === 'toolResult') && event.message.usage) {
+        addUsage(usage, event.message.usage)
+      }
+      if (event.type === 'entry_appended' && event.entry.type === 'usage' && !usageEntryIds.has(event.entry.id)) {
+        usageEntryIds.add(event.entry.id)
+        if (usageEntryIds.size > 4096) usageEntryIds.delete(usageEntryIds.values().next().value!)
+        addUsage(usage, event.entry.usage)
+      }
     })
     try {
       if (signal.aborted) throw new Error('子代理已中止')
@@ -240,9 +254,14 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
       return { name: task.name, status: signal.aborted ? 'aborted' : 'failed', text: String(error).slice(0, Math.min(2000, settings.maxResultChars)), usage }
     } finally {
       signal.removeEventListener('abort', abort)
-      unsubscribe()
-      await session.abort().catch(() => {})
-      session.dispose()
+      // Keep collecting completed usage while shutdown settles. The returned
+      // result owns this same accumulator, including cancellation/failure paths.
+      try {
+        await session.abort().catch(() => {})
+        session.dispose()
+      } finally {
+        unsubscribe()
+      }
     }
   }
 }

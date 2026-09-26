@@ -886,6 +886,7 @@ export class AgentBridge {
       cwd: resolve(backend.cwd),
       sessionPath: backend.sessionPath ? resolve(backend.sessionPath) : undefined,
       sessionId: state?.sessionId,
+      usageBackendId: backend.usageBackendId ??= randomUUID(),
       kind,
       state: initialState,
       createdAt: Date.now(),
@@ -920,6 +921,7 @@ export class AgentBridge {
     this.resetRunCheckpoint(backend)
     this.runStore.update(runId, (run) => {
       run.state = 'dispatching'
+      run.usageBackendId = backend.usageBackendId ??= randomUUID()
       run.dispatchedAt = undefined
       run.agentStartedAt = undefined
       run.agentEndedAt = undefined
@@ -949,6 +951,10 @@ export class AgentBridge {
 
   private trackBackendEvent(backend: BackendRecord, event: unknown, type: string | undefined): void {
     if (!type) return
+    if (type === 'entry_appended') {
+      this.runStore.recordUsageEntry({ cwd: backend.cwd, sessionPath: backend.sessionPath, backendId: backend.usageBackendId }, event)
+      return
+    }
     if (type === 'agent_start') {
       if (!backend.activeRunId) backend.activeRunId = backend.pendingRunIds.shift()
       if (!backend.activeRunId) return

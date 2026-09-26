@@ -8,13 +8,17 @@ import type {
   TokenUsage
 } from '../shared/operations'
 
+import { addTokenUsage, normalizeTokenUsage } from './agent/utils'
 import { compareMetricsRuns, isRunMetricsCandidate } from '../shared/operations'
 
 interface RunStoreFile {
   version: 1
   runs: RunOperation[]
+  usageReceipts?: { key: string; at: number }[]
+  usageReplayFloor?: number
 }
 
+export const MAX_USAGE_RECEIPTS = 2048
 const MAX_PERSISTED_RUNS = 250
 const WRITE_DEBOUNCE_MS = 300
 const ACTIVE_STATES = new Set<RunOperationState>(['dispatching', 'running', 'ending'])
@@ -47,6 +51,7 @@ function normalizeRun(value: unknown): RunOperation | null {
     cwd: resolve(run.cwd),
     sessionPath: typeof run.sessionPath === 'string' ? resolve(run.sessionPath) : undefined,
     sessionId: run.sessionId,
+    usageBackendId: typeof run.usageBackendId === 'string' ? run.usageBackendId : undefined,
     kind: run.kind ?? 'prompt',
     state,
     createdAt: run.createdAt,
@@ -84,6 +89,8 @@ export class RunStore {
   private readonly runs = new Map<string, RunOperation>()
   private readonly listeners = new Set<(run: RunOperation) => void>()
   readonly filePath: string
+  private readonly usageReceipts = new Map<string, number>()
+  private usageReplayFloor = 0
   private loaded = false
   private writeTimer: ReturnType<typeof setTimeout> | null = null
   private writeQueue: Promise<void> = Promise.resolve()
@@ -101,6 +108,13 @@ export class RunStore {
       const values = typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as RunStoreFile).runs)
         ? (parsed as RunStoreFile).runs
         : []
+      const ledger = parsed && typeof parsed === 'object' ? parsed as Partial<RunStoreFile> : {}
+      const floor = ledger.usageReplayFloor
+      this.usageReplayFloor = typeof floor === 'number' && Number.isFinite(floor) && floor >= 0 ? floor : 0
+      for (const receipt of Array.isArray(ledger.usageReceipts) ? ledger.usageReceipts : []) {
+        if (receipt && typeof receipt.key === 'string' && Number.isFinite(receipt.at)) this.usageReceipts.set(receipt.key, receipt.at)
+      }
+      this.trimUsageReceipts()
       for (const value of values) {
         const run = normalizeRun(value)
         if (!run) continue
@@ -175,6 +189,54 @@ export class RunStore {
     return cloneRun(run)
   }
 
+  /** Account SDK standalone usage, never streaming/context occupancy. The SDK JSONL
+   * remains authoritative when there is no retained dispatched run (external or
+   * trimmed history); we neither invent a run nor attach that cost to a future one.
+   */
+  recordUsageEntry(source: { cwd: string; sessionPath?: string; backendId?: string }, event: unknown): RunOperation | null {
+    if (!source.sessionPath || !source.backendId || !event || typeof event !== 'object') return null
+    const envelope = event as { type?: string; entry?: unknown }
+    if (envelope.type !== 'entry_appended' || !envelope.entry || typeof envelope.entry !== 'object') return null
+    const entry = envelope.entry as { type?: string; id?: string; kind?: string; timestamp?: string; provider?: string; model?: string; usage?: unknown }
+    if (entry.type !== 'usage' || typeof entry.id !== 'string' || !entry.id || typeof entry.timestamp !== 'string'
+      || typeof entry.kind !== 'string' || !entry.kind || typeof entry.provider !== 'string' || !entry.provider
+      || typeof entry.model !== 'string' || !entry.model) return null
+    const at = Date.parse(entry.timestamp)
+    const usage = normalizeTokenUsage(entry.usage)
+    if (!Number.isFinite(at) || at <= this.usageReplayFloor || !usage) return null
+    const sessionPath = resolve(source.sessionPath)
+    const key = JSON.stringify([sessionPath, entry.id])
+    if (this.usageReceipts.has(key)) return null
+    // Timestamp is the entry's persistence time, not delivery time. In particular
+    // an old entry must not be charged to a newer dispatched/queued prompt.
+    const target = [...this.runs.values()]
+      .filter((run) => run.cwd === resolve(source.cwd) && run.sessionPath === sessionPath
+        && run.usageBackendId === source.backendId && run.provider === entry.provider
+        // cache_warm records the server's responseModel, which may be a dated
+        // alias/fallback rather than the configured model ID. The SDK validates
+        // the warming request against its current context before emitting it.
+        && (entry.kind === 'cache_warm' || run.modelId === entry.model)
+        && run.state !== 'queued' && (run.dispatchedAt ?? run.agentStartedAt) !== undefined
+        && (run.dispatchedAt ?? run.agentStartedAt)! <= at)
+      .sort((a, b) => (b.dispatchedAt ?? b.agentStartedAt)! - (a.dispatchedAt ?? a.agentStartedAt)!)[0]
+    // Remember even out-of-window entries so later queue dispatch cannot adopt them.
+    this.usageReceipts.set(key, at)
+    this.trimUsageReceipts()
+    this.scheduleWrite()
+    return target ? this.update(target.id, (run) => { run.usage = addTokenUsage(run.usage, usage) }) : null
+  }
+
+  private trimUsageReceipts(): void {
+    if (this.usageReceipts.size <= MAX_USAGE_RECEIPTS) return
+    const sorted = [...this.usageReceipts.entries()].sort((a, b) => a[1] - b[1])
+    this.usageReplayFloor = Math.max(this.usageReplayFloor, sorted[sorted.length - MAX_USAGE_RECEIPTS - 1][1])
+    // Conservative replay policy: reject ALL entries at/below the discarded
+    // timestamp, including previously unseen late entries and equal-time ties.
+    // Unlike FIFO this never re-bills an evicted receipt; it can undercount late
+    // usage across sessions. Full billing history remains in SDK session JSONL.
+    for (const [key, at] of this.usageReceipts) if (at <= this.usageReplayFloor) this.usageReceipts.delete(key)
+  }
+
   async markInterrupted(id: string, message?: string): Promise<RunOperation | null> {
     const now = Date.now()
     const run = this.update(id, (current) => {
@@ -225,6 +287,8 @@ export class RunStore {
     const temp = `${target}.${randomUUID()}.tmp`
     const payload: RunStoreFile = {
       version: 1,
+      usageReceipts: [...this.usageReceipts].map(([key, at]) => ({ key, at })),
+      usageReplayFloor: this.usageReplayFloor,
       runs: [...this.runs.values()].sort((left, right) => left.createdAt - right.createdAt)
     }
     const serialized = `${JSON.stringify(payload, null, 2)}\n`

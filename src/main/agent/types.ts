@@ -81,6 +81,8 @@ export interface BackendRecord {
   queueRestored?: boolean
   /** Completion listeners (for example auto-verification) finish before local queue dispatch. */
   runCompletionPromise?: Promise<void>
+  /** Distinguishes late usage from a replaced backend of the same session. */
+  usageBackendId?: string
   activeRunId?: string
   pendingRunIds: string[]
   /** Pion-owned follow-ups remain removable until explicitly dispatched. */

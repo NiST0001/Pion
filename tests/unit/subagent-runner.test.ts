@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from 'vitest'
-import type { AgentSession, ModelRuntime } from '@earendil-works/pi-coding-agent'
+import { SettingsManager, type AgentSession, type AgentSessionEvent, type ModelRuntime, type SessionEntry } from '@earendil-works/pi-coding-agent'
 import { createSubagentRunner } from '../../src/main/agent/subagents'
 import { DEFAULT_SUBAGENT_SETTINGS } from '../../src/shared/subagents'
 
@@ -14,7 +14,7 @@ vi.mock('@earendil-works/pi-coding-agent', async (original) => ({
 }))
 beforeEach(() => vi.clearAllMocks())
 
-function setup(block = false) {
+function setup(block = false, cacheWarming: 'off' | 'streaming' | 'idle' = 'off') {
   const execute = vi.fn(async (_id: string, ..._args: unknown[]) => ({ content: [{ type: 'text', text: 'ok' }], details: {} }))
   const before = vi.fn(async () => block ? { block: true, reason: 'denied' } : undefined)
   const after = vi.fn(async () => undefined)
@@ -22,8 +22,9 @@ function setup(block = false) {
   const active = ['write', 'pion_subagents', 'pion_ask_user', 'plugin_tool']
   const parent = {
     model: { provider: 'fixture', id: 'fixture' }, thinkingLevel: 'off', messages: [],
-    settingsManager: { getCompactionSettings: () => ({ enabled: true }), getRetrySettings: () => ({ enabled: false }) },
-    agent: { state: { systemPrompt: 'Inherited project rules', tools: active.map((name) => ({ name, label: name, description: name, parameters: {}, execute })) }, beforeToolCall: before, afterToolCall: after },
+    systemPrompt: 'Inherited project rules',
+    settingsManager: SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: false }, cacheWarming }),
+    agent: { state: { systemPrompt: '', tools: active.map((name) => ({ name, label: name, description: name, parameters: {}, execute })) }, beforeToolCall: before, afterToolCall: after },
     getActiveToolNames: () => active,
     getAllTools: () => active.map((name) => ({ name, sourceInfo: { source: name === 'write' ? 'builtin' : 'extension' } }))
   } as unknown as AgentSession
@@ -43,7 +44,7 @@ function setup(block = false) {
     }
     return { session }
   })
-  return { run: createSubagentRunner(() => parent, () => ({} as ModelRuntime), '/project', '/agent'), execute, before, after, dispose, active }
+  return { run: createSubagentRunner(() => parent, () => ({} as ModelRuntime), '/project', '/agent'), execute, before, after, dispose, active, parent }
 }
 
 it('uses the parent model, only inherited built-ins and live permission hooks', async () => {
@@ -51,11 +52,26 @@ it('uses the parent model, only inherited built-ins and live permission hooks', 
   await h.run({ name: 'worker', task: 'edit' }, new AbortController().signal, () => {})
   expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ model: { provider: 'fixture', id: 'fixture' }, tools: ['write'] }))
   expect(mocks.loader).toHaveBeenCalledWith(expect.objectContaining({ noExtensions: true, noSkills: true, noPromptTemplates: true }))
+  const prompt = mocks.loader.mock.calls[0][0].systemPromptOverride()
+  expect(prompt).toMatch(/^Inherited project rules\n/)
+  expect(prompt).toContain('bounded Pion child agent (worker)')
+  expect(h.parent.agent.state.systemPrompt).toBe('')
   expect(h.before).toHaveBeenCalledOnce()
   expect(h.after).toHaveBeenCalledOnce()
   expect(h.execute).toHaveBeenCalledOnce()
   expect(h.execute.mock.calls[0][0]).toMatch(/^subagent-.*-call-1$/)
   expect(h.dispose).toHaveBeenCalledOnce()
+})
+
+it.each(['off', 'streaming', 'idle'] as const)('inherits the complete SDK cache-warming mode %s without changing the parent', async (mode) => {
+  const h = setup(false, mode)
+  const save = vi.spyOn(h.parent.settingsManager, 'setCacheWarmingMode')
+  await h.run({ name: 'worker', task: 'inspect' }, new AbortController().signal, () => {})
+  const childSettings = mocks.create.mock.calls[0][0].settingsManager as SettingsManager
+  expect(childSettings).not.toBe(h.parent.settingsManager)
+  expect(childSettings.getCacheWarmingMode()).toBe(mode)
+  expect(h.parent.settingsManager.getCacheWarmingMode()).toBe(mode)
+  expect(save).not.toHaveBeenCalled()
 })
 
 it('does not execute a child tool when the parent denies it', async () => {
@@ -90,6 +106,75 @@ it('honors the snapshotted turn and result-length limits', async () => {
   expect(result.text).toContain('[结果已截断]')
   expect(result.text.match(/x/g)).toHaveLength(1000)
   expect(abort).toHaveBeenCalled()
+})
+
+const unitUsage = () => ({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4, totalTokens: 10,
+  cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 } })
+const usageEntry = (id: string, kind = 'cache_warm'): SessionEntry => ({
+  type: 'usage', id, parentId: null, timestamp: '2026-09-22T00:00:00.000Z',
+  kind, provider: 'fixture', model: 'fixture', usage: unitUsage()
+})
+
+it.each(['completed', 'aborted', 'failed'] as const)('includes independent usage once and shutdown usage on %s', async (status) => {
+  const h = setup()
+  const controller = new AbortController()
+  let notify!: (event: AgentSessionEvent) => void
+  let shutdownUsageSent = false
+  const unsubscribe = vi.fn()
+  const assistant = { role: 'assistant' as const, content: [], api: 'anthropic-messages' as const,
+    provider: 'fixture', model: 'fixture', usage: unitUsage(), stopReason: 'stop' as const, timestamp: 1 }
+  const toolResult = { role: 'toolResult' as const, toolCallId: 'child-tool', toolName: 'read',
+    content: [], isError: false, timestamp: 2, usage: unitUsage() }
+  mocks.create.mockImplementationOnce(async () => ({ session: {
+    agent: {}, messages: [assistant], dispose: h.dispose,
+    subscribe: (listener: typeof notify) => { notify = listener; return unsubscribe },
+    getLastAssistantText: () => 'done',
+    abort: async () => {
+      expect(unsubscribe).not.toHaveBeenCalled()
+      if (!shutdownUsageSent) {
+        shutdownUsageSent = true
+        notify({ type: 'entry_appended', entry: usageEntry('shutdown') })
+      }
+    },
+    prompt: async () => {
+      notify({ type: 'message_end', message: assistant })
+      notify({ type: 'message_end', message: toolResult })
+      // Persisted message mirrors must not add their usage for a second time.
+      for (const message of [assistant, toolResult]) notify({ type: 'entry_appended', entry: {
+        type: 'message', id: message.role, parentId: null, timestamp: '2026-09-22T00:00:00.000Z', message
+      } })
+      notify({ type: 'entry_appended', entry: usageEntry('warm') })
+      notify({ type: 'entry_appended', entry: usageEntry('warm') })
+      notify({ type: 'entry_appended', entry: usageEntry('other', 'future_usage_kind') })
+      if (status === 'aborted') controller.abort()
+      if (status === 'failed') throw new Error('fixture failure')
+    }
+  } }))
+  const result = await h.run({ name: 'worker', task: 'inspect' }, controller.signal, () => {})
+  expect(result.status).toBe(status)
+  expect(result.usage).toEqual({ input: 5, output: 10, cacheRead: 15, cacheWrite: 20, totalTokens: 50,
+    cost: { input: 5, output: 10, cacheRead: 15, cacheWrite: 20, total: 50 } })
+  expect(h.parent.messages).toEqual([])
+  expect(unsubscribe).toHaveBeenCalledOnce()
+  expect(h.dispose).toHaveBeenCalledOnce()
+})
+
+it('bounds the independent usage-entry dedupe window', async () => {
+  const h = setup()
+  let notify!: (event: AgentSessionEvent) => void
+  mocks.create.mockImplementationOnce(async () => ({ session: {
+    agent: {}, messages: [], abort: async () => {}, dispose: h.dispose,
+    subscribe: (listener: typeof notify) => { notify = listener; return () => {} },
+    getLastAssistantText: () => 'done',
+    prompt: async () => {
+      for (let n = 0; n < 4097; n++) notify({ type: 'entry_appended', entry: usageEntry(String(n)) })
+      notify({ type: 'entry_appended', entry: usageEntry('4096') })
+      // The oldest ID is evicted, rather than growing memory without a bound.
+      notify({ type: 'entry_appended', entry: usageEntry('0') })
+    }
+  } }))
+  const result = await h.run({ name: 'worker', task: 'inspect' }, new AbortController().signal, () => {})
+  expect(result.usage?.totalTokens).toBe(4098 * 10)
 })
 
 it('namespaces child tool IDs and serializes sibling writes', async () => {

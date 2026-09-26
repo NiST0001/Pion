@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RunOperation } from '../../src/shared/operations'
-import { EMPTY_TOKEN_USAGE, RunStore } from '../../src/main/run-store'
+import { EMPTY_TOKEN_USAGE, MAX_USAGE_RECEIPTS, RunStore } from '../../src/main/run-store'
 
 const roots: string[] = []
 
@@ -27,6 +27,95 @@ function operation(overrides: Partial<RunOperation> = {}): RunOperation {
     ...overrides
   }
 }
+
+describe('RunStore standalone SDK usage', () => {
+  const source = { cwd: '/tmp/project', sessionPath: '/tmp/session.jsonl', backendId: 'backend-1' }
+  const event = (id: string, at = 200) => ({ type: 'entry_appended', entry: {
+    type: 'usage', kind: 'cache_warm', id, timestamp: new Date(at).toISOString(),
+    provider: 'provider', model: 'model', usage: { input: 2, cacheRead: 8, totalTokens: 10, cost: { total: 0.25 } }
+  } })
+  const billedRun = (overrides: Partial<RunOperation> = {}) => operation({
+    sessionPath: source.sessionPath, usageBackendId: source.backendId, provider: 'provider', modelId: 'model',
+    state: 'completed', dispatchedAt: 100, ...overrides
+  })
+
+  it('accounts active and idle entries without changing compacted context, and persists deduplication', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-usage-')); roots.push(root)
+    const file = join(root, 'runs.json')
+    const store = new RunStore(file); await store.load()
+    store.create(billedRun({ state: 'running', liveUsage: { ...EMPTY_TOKEN_USAGE, input: 77 }, contextTokens: 77, contextPressure: 0.7, contextUsagePending: true }))
+    expect(store.recordUsageEntry(source, event('active'))?.usage.costUsd).toBe(0.25)
+    store.update('run-1', (run) => { run.state = 'completed' })
+    store.create(billedRun({ id: 'queue', state: 'queued', dispatchedAt: undefined, createdAt: 300 }))
+    expect(store.recordUsageEntry(source, event('idle'))?.id).toBe('run-1')
+    expect(store.recordUsageEntry(source, event('idle'))).toBeNull()
+    expect(store.get('run-1')).toMatchObject({ usage: { costUsd: 0.5 }, liveUsage: { input: 77 }, contextTokens: 77, contextPressure: 0.7, contextUsagePending: true })
+    await store.flush()
+    const restored = new RunStore(file); await restored.load()
+    expect(restored.recordUsageEntry(source, event('active'))).toBeNull()
+    expect(restored.get('run-1')?.usage.costUsd).toBe(0.5)
+    await restored.flush()
+  })
+
+  it('uses entry time and backend/session/model identity, never a new queue or undispatched failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-usage-')); roots.push(root)
+    const store = new RunStore(join(root, 'runs.json')); await store.load()
+    store.create(billedRun())
+    store.create(billedRun({ id: 'new', dispatchedAt: 300 }))
+    store.create(billedRun({ id: 'failed-before-dispatch', state: 'failed', dispatchedAt: undefined, createdAt: 400 }))
+    store.create(billedRun({ id: 'other-backend', usageBackendId: 'backend-2', dispatchedAt: 150 }))
+    expect(store.recordUsageEntry(source, event('old', 250))?.id).toBe('run-1')
+    expect(store.recordUsageEntry(source, event('new', 350))?.id).toBe('new')
+    expect(store.recordUsageEntry({ ...source, backendId: 'backend-2' }, event('late-backend', 350))?.id).toBe('other-backend')
+    expect(store.recordUsageEntry(source, event('before', 50))).toBeNull()
+    expect(store.recordUsageEntry({ ...source, sessionPath: '/tmp/other.jsonl' }, event('other'))).toBeNull()
+    const mismatch = event('model'); mismatch.entry.model = 'different'; mismatch.entry.kind = 'other'
+    expect(store.recordUsageEntry(source, mismatch)).toBeNull()
+    const warmedAlias = event('warming-alias', 350); warmedAlias.entry.model = 'model-dated-server-alias'
+    expect(store.recordUsageEntry(source, warmedAlias)?.id).toBe('new')
+    const wrongProvider = event('provider'); wrongProvider.entry.provider = 'other-provider'
+    expect(store.recordUsageEntry(source, wrongProvider)).toBeNull()
+    await store.flush()
+  })
+
+  it.each([null, {}, [null, {}, { key: 'broken', at: 'invalid' }]])('keeps valid runs when optional usage receipts are malformed (%j)', async (usageReceipts) => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-usage-')); roots.push(root)
+    const file = join(root, 'runs.json')
+    await writeFile(file, JSON.stringify({ version: 1, runs: [billedRun()], usageReceipts, usageReplayFloor: 'invalid' }))
+    const store = new RunStore(file); await store.load()
+    expect(store.get('run-1')?.state).toBe('completed')
+    expect(store.recordUsageEntry(source, event('valid'))?.usage.costUsd).toBe(0.25)
+    await store.flush()
+  })
+
+  it('keeps no-run usage outside the window and cannot adopt it on future dispatch', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-usage-')); roots.push(root)
+    const store = new RunStore(join(root, 'runs.json')); await store.load()
+    expect(store.recordUsageEntry(source, event('external'))).toBeNull()
+    expect(store.list()).toEqual([])
+    store.create(billedRun())
+    expect(store.recordUsageEntry(source, event('external'))).toBeNull()
+    expect(store.get('run-1')?.usage.costUsd).toBe(0)
+    await store.flush()
+  })
+
+  it('persists a conservative replay floor instead of re-billing evicted FIFO receipts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-usage-')); roots.push(root)
+    const file = join(root, 'runs.json')
+    const store = new RunStore(file); await store.load(); store.create(billedRun())
+    for (let i = 0; i <= MAX_USAGE_RECEIPTS; i++) store.recordUsageEntry(source, event(`entry-${i}`, 200 + i))
+    await store.flush()
+    const disk = JSON.parse(await readFile(file, 'utf8'))
+    expect(disk.usageReceipts.length).toBeLessThanOrEqual(MAX_USAGE_RECEIPTS)
+    const restored = new RunStore(file); await restored.load()
+    expect(restored.recordUsageEntry(source, event('entry-0'))).toBeNull()
+    expect(restored.recordUsageEntry(source, event('unseen-old'))).toBeNull()
+    expect(restored.recordUsageEntry(source, event('entry-1', 201))).toBeNull()
+    expect(restored.get('run-1')?.usage.costUsd).toBe((MAX_USAGE_RECEIPTS + 1) * 0.25)
+    expect(restored.recordUsageEntry(source, event('fresh', 10000))?.usage.costUsd).toBe((MAX_USAGE_RECEIPTS + 2) * 0.25)
+    await restored.flush()
+  })
+})
 
 describe('RunStore', () => {
   it('persists updates atomically and filters by project', async () => {

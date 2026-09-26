@@ -93,7 +93,7 @@ npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 
 
 ## 环境要求
 
-- Node ≥ 22.12（本项目在 v24 上开发）
+- Node ≥ 22.19（内置 pi 的最低要求；本项目在 v24 上开发）
 - pi agent 的模型凭证沿用 `~/.pi/agent/auth.json`（子进程自动读取用户级配置，
   默认 provider/model 即 `~/.pi/agent/settings.json` 中的配置）
 - 本机 shell 若设置了 `NODE_ENV=production`，安装时需：

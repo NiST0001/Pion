@@ -30,7 +30,7 @@
 | 路径 | 用途 |
 | --- | --- |
 | src/main/agent/agent-bridge.ts | 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
-| src/main/agent/message-revert.ts | 独占写入者前提下校验完整会话与所选用户消息，用 SDK 回到实际 parent 并追加持久分支标记；保留旧树，恢复文字及图片，不操作项目文件 |
+| src/main/agent/message-revert.ts | 独占写入者前提下校验完整会话与所选用户消息，用 SDK 回到实际 parent 并追加持久分支标记；保留旧树，恢复文字及图片，不操作项目文件；兼容独立 usage、context_edit 与 retain-none 压缩记录 |
 | src/main/agent/stop-for-history.ts | 捕获 SDK 子进程并等待真实退出；超时/适配不兼容拒绝历史写入，不把 RpcClient.stop 提前返回当作退出证明 |
 | src/main/agent/backend-pool.ts | 后端保留和容量管理 |
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态 |
@@ -38,7 +38,7 @@
 | src/main/agent/task-planning.ts | 原生任务工具与扩展；AI 按目标判断继续、调整或替换跨消息计划，显式 clear 才重置，保留分支恢复与单一进行中约束 |
 | src/main/agent/wire.ts | SDK 条目映射、所选分支祖先链与模式推导、沿当前叶节点恢复最新任务快照 |
 | src/main/agent-runtime.ts、src/main/agent/runtime-host.ts | 编译后的 SDK RPC 子进程入口、私有启动参数、项目隔离/信任与会话替换时重建内置工具 |
-| src/main/agent/subagents.ts | 内置子代理开关及 SDK 委派：可用时注入复杂任务主动委派与按当前上限合并独立任务到同一并发批次的策略，不可用时不绕过工具过滤；每批读取并冻结全局限制、有界并发/取消、父级工具权限与检查点转发、兄弟写入串行化、结果与模型用量汇总 |
+| src/main/agent/subagents.ts | 内置子代理开关及 SDK 委派：可用时注入复杂任务主动委派与按当前上限合并独立任务到同一并发批次的策略，不可用时不绕过工具过滤；每批读取并冻结全局限制、有界并发/取消、父级工具权限与检查点转发、兄弟写入串行化、有效父系统提示及预热模式继承、结果与模型/预热用量汇总 |
 | src/main/theme-settings.ts | 独立用户主题文件的原子持久化、读取及所属主窗口/主帧校验 |
 | src/main/subagent-settings.ts | 子代理全局设置的校验、串行原子写入与 userData 配置路径 |
 | src/main/agent/ask-user.ts | SDK customTools 内置提问，选项/自由回答、取消和中止保护；不依赖提问插件 |
@@ -48,7 +48,7 @@
 | src/main/tool-permissions.ts | 工具权限规则、worktree 继承与执行闸门 |
 | src/main/projects.ts | 项目列表管理 |
 | src/main/app-settings.ts | 桌面应用设置与会话模型偏好 |
-| src/main/run-store.ts | 运行记录、指标与恢复持久化；统计专用查询在截取前排除队列记录，不改变默认恢复查询 |
+| src/main/run-store.ts | 运行记录、指标与恢复持久化；统计查询先排除队列；独立 SDK usage 归入匹配已派发运行，receipt 与保守重播下界持久化，不影响上下文占用 |
 | src/main/checkpoints.ts | Git 检查点与回滚 |
 | src/main/git-service.ts、git.ts、git/ | Git 工作区服务、命令与解析；numstat.ts 解析分层变更行数 |
 | src/main/verification.ts | 验证计划和自动验证 |
@@ -71,7 +71,7 @@
 | src/renderer/src/hooks/useMessageRevert.ts | 撤销确认、空草稿/附件读取门控、一次性文字/图片恢复及拒绝后的恢复重试；按逻辑选择隔离迟到结果，不持有后端或文件回滚 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
-| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
+| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别，历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
 | src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让，权限请求及会话提问面板复用底部余量定位在输入框上方；全局认证仍居中，不测量展开详情、不重挂载消息或草稿 |
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
@@ -122,7 +122,7 @@
   - `sessionTasks.test.tsx`：任务记录在历史页之外的恢复、跳转保留面板节点、请求期间实时清空、跨会话迟到结果、缓存无需重绘时恢复快照，以及复制/分叉/删除的任务作用域重置和取消保留。
   - `conversationFollow.test.tsx`：用户离开/接近/回到末尾时的新输出行为、无 scroll 事件时恢复跟随、连续手势和延迟布局；程序化定位不代表用户恢复跟随。
   - `historyPaging.test.tsx`：无 scroll 事件的边界输入、在途去重、嵌套输出区、失败重试、旧填充请求隔离，以及跳转后连续加载多页直到真实会话末尾；区分历史追加与实时追加。
-  - `conversationNavigation.test.tsx`：密集短消息定位、底部位置受限时保持明确点击目标；浮层余量变化补偿与无遮挡历史参考点；历史跳转、同会话替换、尺寸变化和程序化滚动不恢复跟随。
+  - `conversationNavigation.test.tsx`：密集短消息定位、底部位置受限时保持明确点击目标；浮层余量变化补偿与无遮挡历史参考点；同长度替换、布局变化和索引迟到刷新活动标记，不提前选择下一轮；历史跳转、同会话替换、尺寸变化和程序化滚动不恢复跟随。
   - `conversationOverlays.test.tsx`：统计条/输入区域尺寸观测、详情展开不改变余量、条件挂载与 observer 清理、草稿节点身份保持。
   - `ExtensionUiModal.test.tsx`：选项/自定义回答/取消与全局认证；会话提问使用输入区域实测底部余量，输入增高不重建问题或两处草稿，全局认证不受该偏移影响。
   - `runTelemetry.test.tsx`：较旧遥测快照或事件不得覆盖压缩后的较新用量状态；排队突增不挤掉执行统计、派发后切换、取消排队不抢占、迟到快照不复活退回队列的记录。
@@ -146,7 +146,7 @@
   - `windowEffects.test.tsx`：毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条、权限请求避让输入框与实底回退的源码契约（不替代 GPU 真机验证）。
   - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1 迁移、拖动预览与菜单操作时不重挂载内容。
 - `tests/unit/task-planning.test.ts`：跨消息任务 ID/状态/依赖保留、长计划、显式清空、当前分支生命周期恢复、单一进行中约束、模式隐藏及任务延续提示契约；不调用真实模型。
-- `tests/unit/run-store.test.ts`：运行持久化与中断恢复、统计查询在限制条数前过滤队列，默认查询保留队列；撤销空闲门控扫描完整账本，不被展示条数限制掩盖旧队列。
+- `tests/unit/run-store.test.ts`：运行持久化与中断恢复、统计查询在限制条数前过滤队列，默认查询保留队列；撤销空闲门控扫描完整账本，不被展示条数限制掩盖旧队列；独立 usage 的运行归属、模型别名、持久去重、容量边界与损坏 receipt 容错。
 - `tests/unit/agent-bridge-send-queue.test.ts`：已有排队消息时 Enter 优先直接发送并保留原有队列。
 - `tests/unit/message-revert.test.ts`、`stop-for-history.test.ts`、`agent-bridge-message-revert.test.ts`：SDK 持久分支、首条/元数据/压缩/图片、损坏或不支持内容拒绝、真实退出与超时隔离、会话/owner/队列/在途门控、退出后分支校验、重启失败保留结果及沿分支分页/索引/任务；计划扩展关闭时不重复落盘由 `plan-mode.test.ts` 覆盖。
 - `tests/renderer/messageRevertHistory.test.tsx`、`messageRevertInteraction.test.tsx`、`messageRevertNavigation.test.tsx`、`messageRevertSend.test.tsx`：逻辑会话/首次实时归属、元数据叶节点刷新、旧缓存和请求隔离、确认/取消/重复点击、草稿及附件保护、重启错误下恢复、撤销释放旧阅读范围，以及真实 Composer 到发送/排队的原文与图片透传。

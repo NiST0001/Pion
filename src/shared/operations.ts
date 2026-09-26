@@ -65,6 +65,8 @@ export interface RunOperation {
   cwd: string
   sessionPath?: string
   sessionId?: string
+  /** Unique backend incarnation that dispatched this run (not the reusable pool key). */
+  usageBackendId?: string
   kind: 'prompt' | 'follow-up' | 'recovery' | 'verification-repair'
   state: RunOperationState
   createdAt: number
