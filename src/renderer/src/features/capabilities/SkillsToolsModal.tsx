@@ -4,6 +4,7 @@ import {
   ChevronRight,
   CircleHelp,
   FileDiff,
+  Image as ImageIcon,
   ListTodo,
   Loader2,
   Sparkles,
@@ -12,6 +13,7 @@ import {
   X
 } from 'lucide-react'
 import type { AgentCapabilities, SkillInfo, ToolInfo } from '../../../../shared/types'
+import { IMAGE_GENERATION_TOOL_NAME } from '../../../../shared/image-generation'
 
 type CapabilityPage = 'skills' | 'tools'
 
@@ -53,6 +55,11 @@ const BUILTIN_TOOLS: BuiltinToolInfo[] = [
     name: 'pion_ask_user',
     title: '向用户提问',
     description: '遇到关键歧义时等待用户回答，支持选项、自定义回答与取消；普通和计划模式均可使用，无需插件。'
+  },
+  {
+    name: IMAGE_GENERATION_TOOL_NAME,
+    title: 'Codex 生图',
+    description: '生成或参考图片编辑单张 PNG，另存到当前项目的新路径并提供缩略图预览。可通过消息指定 size（如 2048x3072）和 quality（auto/low/medium/high）；referenced_image_paths 支持至多 5 张项目相对 PNG/JPEG，例如“参考 images/source.png，high 质量，另存 images/edited.png”。参考图连同文件元数据上传，需要 read + network + write 权限；编辑服务兼容性未验证，不保证服务接受请求尺寸或精确输出，暂不支持 mask。默认请求 Codex 自动（官方别名），不代表已确认实际模型版本。可指定“使用 2.5 Flare 生图”或“使用 2.5 Sunburst 生图”；两者为实验性请求型号，订阅兼容性未验证，不会自动降级。需要 Codex 登录和账号额度；计划模式不可用。'
   },
   {
     name: 'pion_subagents',
@@ -295,7 +302,9 @@ function ToolsPage({
                 ? <ListTodo size={16} />
                 : tool.name === 'pion_ask_user'
                   ? <CircleHelp size={16} />
-                  : <FileDiff size={16} />}
+                  : tool.name === IMAGE_GENERATION_TOOL_NAME
+                    ? <ImageIcon size={16} />
+                    : <FileDiff size={16} />}
             name={tool.name}
             title={tool.title}
             source={tool.name.startsWith('pion_') ? 'Pion 内置' : 'Pi 内置'}

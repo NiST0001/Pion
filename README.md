@@ -22,6 +22,7 @@
 
 ### 对话
 - 流式输出 + 思考过程折叠 + 打字指示
+- 常见模型/API 错误显示简短中文提示和处理建议，原始诊断默认折叠，历史回放保留错误
 - Markdown 渲染（GFM、代码高亮、一键复制）
 - 输入框支持将剪贴板图像直接粘贴到输入框，也可使用“@ 参考”按钮、输入 @ 或拖拽选择图像/文本/常见代码文件（图像 ≤ 8 MB、文本 ≤ 1 MB）；图像按附加顺序编号发送（`[图像 N: 文件名]`），模型可据此引用.
 - 输入 `/` 打开动态斜杠命令菜单，支持 Pi 内置 `/compact`、`/new`、`/name`、`/clone`，Pion 内置 `/plan`、`/verify`、`/agents`、`/yolo`（自动批准本会话工具权限，开启需确认、不写入权限规则），以及扩展、提示词模板和技能命令
@@ -29,6 +30,19 @@
 - 技能与工具中心：展示当前配置和已安装插件提供的技能、扩展工具及来源
 - 对话区左侧提供当前分支的完整历史导航轨：按用户消息显示位置标记，悬停预览问题与回复，点击可加载并居中定位；可在设置中限制可见条数，超出后用滚轮浏览窗口
 - 会话支持收藏；收藏区固定显示在搜索框下方，点击收藏项会同步选中项目会话
+
+### Codex 图片生成与编辑
+本节描述当前源码能力，不代表已发布或已安装程序已更新；真实订阅服务兼容性和账号权益仍需单独验证。
+
+- 内置 `pion_generate_image` 使用独立 Codex Images API 生成或参考图片编辑单张 PNG。请明确指定项目相对的新文件路径，例如“生成一艘红色小船，保存到 `images/boat.png`”；已有文件不会被覆盖，编辑也不能原地修改输入
+- 可以指定 `size`（默认 `auto`，或小写 x 的 `WxH`）和 `quality`（`auto/low/medium/high`，默认 `auto`），例如“生成海报，size 2048x3072，quality high，保存到 `images/poster.png`”。尺寸两边须为正整数且为 16 的倍数、每边 ≤ 4096、总计 ≤ 1600 万像素、长宽比 ≤ 3:1；这些只是请求，不保证后台接受 `2048x3072`、精确输出或实际质量，拒绝时不静默降低/丢弃设置
+- 编辑示例：“参考 `images/source.png`，high 质量，另存 `images/edited.png`”。可选 `referenced_image_paths` 最多 5 个项目相对 PNG/JPEG 路径，每路径 ≤ 512 字符、总计 ≤ 1600 字符；@ 是字面文件名，不接受 URL 或内嵌图片。非空引用走固定订阅 JSON `images/edits`（原文件以 data URL 上传），省略或空数组走 `images/generations`。完整输入文件及其中 metadata（可能含 EXIF/ICC/文本）都会上传，不是只上传预览，也不承诺去除隐私信息；`mask`、`input_fidelity` 的订阅契约未确认，参数前置拒绝，不把 mask 假作普通参考图或使用付费 API 代替
+- 可以在消息中指定实验性 Images 2.5 Flare / Sunburst，例如“用 2.5 Sunburst 生成一艘红色小船，保存到 `images/boat.png`”。只指定 2.5 时请求 Flare；不指定型号时仍使用官方 `gpt-image-2` 别名。2.5 订阅兼容性及账号权益未验证，拒绝时不会自动换型号；工具详情区分请求型号与“实际版本：服务未报告”，不把别名或请求 ID 当成实际生成版本
+- 需要在设置中登录 OpenAI Codex，并具备账号图片权益和额度。工具复用当前后端 SDK `ModelRuntime` 的 OAuth/刷新，不使用 API-key 或付费 API 回退；失败或中止仍可能消耗图片额度，不自动重试，也不计作聊天 token 费用。真实服务协议兼容和账号额度尚未验证，不承诺免费或服务可用
+- 无参考图需网络 + 文件修改权限，有参考图再需读取权限；每个输入均检查目录外/敏感路径风险，确认面板完整列出所有有界合法输入与输出并说明上传风险，等待期间新增的拒绝策略不能被迟到允许覆盖。保留既有检查点门控；计划模式不可用，退出计划模式不会额外启用原先隐藏的生图工具，子代理工具范围不扩大
+- 输入每张非空且 ≤ 8 MiB、合计 ≤ 16 MiB、每边 ≤ 4096、累计 ≤ 1600 万像素，在 PNG inflate 前检查累计预算。只读原生读取器要求严格 no-follow/nonblocking flags，不支持即失败；绑定真实 worktree 并复查目录、文件和 FD 快照，分块读取及 EOF 探测拒绝成长/截断。取消仅停止等待，未结束的底层读取/关闭跨实例保持单槽；关闭失败隔离本进程参考图读取，须重建后端进程，不自动重试。PNG 为有界完整性校验，JPEG 为结构检查，不是完整图片解码
+- 订阅请求 JSON 和响应均最多 24 MiB，输出原图最多 16 MiB、每边 4096 像素且最多 1600 万像素，请求期限最多 5 分钟。保存前执行有界 PNG 完整性检查，但不等同于完整色彩/ICC 语义或真实解码验证；工具详情区分请求尺寸/质量与经输出 PNG 校验的原图保存尺寸，旧历史缺失设置保持未知，不补填默认值
+- 输出原图保存在项目中，工具结果与历史预览仅携带保存路径、非敏感输出元数据及小型 PNG/JPEG 预览，不附输入原图、输入 metadata 或引用路径数组；SDK 参数历史仍保留用户 prompt 和引用路径，不能理解为从未记录。预览加载不会主动滚动对话，缩略图失败不撤销已保存的原图。输出仍以私有同目录 `wx` 暂存和 hard-link no-replace 发布，不支持安全发布时保留完整临时 PNG 并报告恢复路径，请先检查，不要再次生成。路径检查不是 OS 沙箱，也不能排除所有并发目录替换或证明硬链接来源；完整读取、保存与协议边界见[开发说明](docs/development.md#内置-codex-图片生成)
 
 ### 项目
 - 多项目管理：侧栏切换工作目录，后台池跨项目与 worktree 共享
@@ -118,6 +132,11 @@ src/
 │   │   ├── pending-requests.ts   # 权限、扩展 UI 与认证请求队列
 │   │   ├── queue-projection.ts   # Pi 原始队列与 Pion 本地队列投影
 │   │   ├── provider-auth-ui.ts   # 提供商认证交互适配
+│   │   ├── runtime-host.ts       # 所属后端 SDK 运行时与内置工具注入
+│   │   ├── image-generation.ts   # 尺寸/质量请求、参考图编辑与无覆盖保存/预览
+│   │   ├── image-inputs.ts       # 只读参考图快照、预算与跨实例真实操作背压
+│   │   ├── codex-image-transport.ts # Codex 订阅 JSON generations/edits 与 OAuth
+│   │   ├── png-validation.ts     # 有界静态 PNG 完整性检查
 │   │   ├── plan-mode.ts
 │   │   ├── task-planning.ts
 │   │   ├── wire.ts
@@ -148,6 +167,8 @@ src/
 │   ├── types.ts          # IPC 数据契约（主/预加载/渲染共享，SDK 无关）
 │   ├── pion-api.ts       # preload -> renderer 的类型化 API facade
 │   ├── operations.ts     # 运行、验证与 Git 领域类型
+│   ├── image-generation.ts # 型号/尺寸/质量/引用路径校验与请求/保存元数据
+│   ├── tool-images.ts    # 有界 PNG/JPEG 预览与原图结构/尺寸准入
 │   ├── workflows.ts      # 多 Agent 状态机投影
 │   └── ipc.ts            # IPC 频道一事实来源
 └── renderer/
@@ -158,6 +179,7 @@ src/
         │   ├── types.ts
         │   ├── reducer.ts
         │   ├── timeline.ts
+        │   ├── modelError.ts       # 模型/API 错误分类及友好提示
         │   └── sessionOrder.ts
         ├── hooks/                # renderer 状态与副作用 hooks
         │   ├── agent/            # Agent 历史、运行、会话、提供商和订阅 hooks

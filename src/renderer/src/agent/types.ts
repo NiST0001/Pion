@@ -19,8 +19,11 @@ import type {
   SessionTaskRun,
   SlashCommandInfo,
   TreeNodeLite,
+  WireEntry,
   WireEventInput
 } from '../../../shared/types'
+import type { ToolResultImage } from '../../../shared/tool-images'
+import type { GeneratedImageModelInfo, GeneratedImageSettingsInfo } from '../../../shared/image-generation'
 
 // ---------------------------------------------------------------------------
 // Timeline items
@@ -41,6 +44,17 @@ export interface ToolItem {
   writeContent?: string
   /** Generic textual output */
   outputText?: string
+  /** Bounded, validated static previews; originals remain in the project. */
+  images?: ToolResultImage[]
+  imageNotice?: string
+  /** Request alias only; neither saved metadata nor response echoes prove the engine. */
+  imageModelInfo?: GeneratedImageModelInfo
+  /** Validated request settings and saved-original metadata; never raw references. */
+  imageSettingsInfo?: GeneratedImageSettingsInfo
+  /** A final payload was projected, unlike a replayed call with no result yet. */
+  resultReceived?: boolean
+  /** Persisted/message results outrank lower-level execution notifications. */
+  resultSource?: 'execution' | 'message' | 'history'
   /** Set by live tool events; absent on history replay and paged entries. */
   live?: boolean
   /** Pion 原生任务或旧 todo 工具结果中的完整任务快照 */
@@ -51,14 +65,18 @@ export interface ToolItem {
 export type AgentTodo = SessionTask
 export type AgentTaskRun = SessionTaskRun
 
-export type TimelineItem =
+export type TimelineItem = (
   | {
       kind: 'user'
       id: number
       entryId?: string
+      /** Stable timestamp carried by the SDK user message itself. */
+      messageTimestamp?: number
       text: string
       images?: ImageContent[]
       timestamp?: string
+      /** Set by message_start; absent on history replay and paged entries. */
+      live?: boolean
       historical?: boolean
       /** Paged history navigation mounts this item statically (no waterfall). */
       noReveal?: boolean
@@ -67,18 +85,36 @@ export type TimelineItem =
       kind: 'assistant'
       id: number
       entryId?: string
+      /** Stable timestamp carried by the SDK assistant message itself. */
+      messageTimestamp?: number
       text: string
       thinking: string
       streaming: boolean
       /** Set by message_start; absent on history replay and paged entries. */
       live?: boolean
       error?: string
+      /** Identifies failures produced by automatic/manual context compaction. */
+      errorContext?: 'compaction'
       historical?: boolean
       /** Paged history navigation mounts this item statically (no waterfall). */
       noReveal?: boolean
     }
   | { kind: 'tool'; id: number; tool: ToolItem; historical?: boolean; noReveal?: boolean }
-  | { kind: 'compaction'; id: number; entryId?: string; summary: string; historical?: boolean; noReveal?: boolean }
+  | {
+      kind: 'compaction'
+      id: number
+      entryId?: string
+      /** SDK result/entry signature; never use the generic display label as identity. */
+      compactionFingerprint?: string
+      summary: string
+      live?: boolean
+      historical?: boolean
+      noReveal?: boolean
+    }
+) & {
+  /** This realtime row has been placed in a loaded persisted history page. */
+  historyReconciled?: boolean
+}
 
 // ---------------------------------------------------------------------------
 // Changes (review panel)
@@ -126,6 +162,10 @@ export interface AgentState {
   taskResultIds: string[]
   taskRestore?: { id: number; revision: number }
   timeline: TimelineItem[]
+  /** A clear selects a new transcript scope, even before the hook renders. */
+  timelineScopeRevision: number
+  /** Acknowledges a history replacement whose reducer projection may differ. */
+  timelineLoadId: number
   timelineMutation: 'replace' | 'prepend' | 'history-append' | 'append' | null
   timelineLoading: boolean
   timelineError?: string
@@ -162,12 +202,22 @@ export const initialState: AgentState = {
   taskRevision: 0,
   taskResultIds: [],
   timeline: [],
+  timelineScopeRevision: 0,
+  timelineLoadId: 0,
   timelineMutation: null,
   timelineLoading: false,
   busy: false,
   compacting: false,
   queued: { steering: 0, followUp: 0 },
   queuedMessages: { steering: [], followUp: [], nativeFollowUpCount: 0 }
+}
+
+/** Captured only for replacement reads of the same selected transcript. */
+export interface ToolStateScope {
+  revision: number
+  cwd?: string
+  sessionId?: string
+  sessionPath?: string
 }
 
 export type Action =
@@ -196,9 +246,9 @@ export type Action =
   | { type: 'beginTaskRestore'; id: number }
   | { type: 'restoreTasks'; id: number; tasks: AgentTodo[] }
   | { type: 'cachedTasks'; tasks: AgentTodo[] }
-  | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode }
-  | { type: 'prependEntries'; items: TimelineItem[] }
-  | { type: 'appendEntries'; items: TimelineItem[] }
+  | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode; preserveToolState?: ToolStateScope; loadId?: number }
+  | { type: 'prependEntries'; items: TimelineItem[]; toolResults?: WireEntry[] }
+  | { type: 'appendEntries'; items: TimelineItem[]; toolResults?: WireEntry[] }
   | { type: 'timelineLoading'; loading: boolean }
   | { type: 'timelineError'; error?: string }
   | { type: 'clearTimeline' }

@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef } from 'react'
 import type { Dispatch } from 'react'
 import type { AgentMode, HistoryLandmark, MessageRevertResult, PionApi, SessionHistoryIndex } from '../../../../shared/types'
-import type { Action, AgentState, TimelineItem } from '../../agent/types'
+import type { Action, AgentState, TimelineItem, ToolStateScope } from '../../agent/types'
 import {
   collectToolResults,
   entriesToTimeline,
   getViewportHistoryPageSize,
-  storeTimelineCache,
-  uniqueTimelineItems
+  reconcileNewerTimelineItems,
+  reconcileOlderTimelineItems,
+  storeTimelineCache
 } from '../../agent/timeline'
 import type { HistoryCursor, TimelineCacheEntry } from '../../agent/timeline'
 
@@ -55,7 +56,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   const timelineCache = useRef(new Map<string, TimelineCacheEntry>())
   const historyCursor = useRef<HistoryCursor | null>(null)
   const timelineOwnerPath = useRef<string | undefined>(undefined)
-  const expectedTimeline = useRef<{ path: string; items: TimelineItem[] } | null>(null)
+  const expectedTimeline = useRef<{ path: string; items: TimelineItem[]; loadId?: number } | null>(null)
   const currentState = useRef(state)
   currentState.current = state
   // A cleared owner must not immediately re-adopt the snapshot from before
@@ -115,6 +116,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const loadId = ++timelineLoadId.current
     ++historyIndexLoadId.current
     historyIndexInFlight.current = null
+    expectedTimeline.current = null
     const cursor = historyCursor.current
     if (cursor) historyCursor.current = { ...cursor, loadId, loading: false }
     dispatch({ type: 'beginTaskRestore', id: loadId })
@@ -136,11 +138,14 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     return Boolean(cursor && cursor.loadId === timelineLoadId.current && !cursor.newerComplete)
   }, [])
 
-  const showTimeline = useCallback((path: string, items: TimelineItem[], mode: AgentMode): void => {
+  const showTimeline = useCallback((
+    path: string, items: TimelineItem[], mode: AgentMode, preserveToolState?: ToolStateScope
+  ): void => {
+    const loadId = timelineLoadId.current
     timelineOwnerPath.current = path
-    expectedTimeline.current = { path, items }
-    dispatch({ type: 'loadEntries', items, mode })
-  }, [])
+    expectedTimeline.current = { path, items, loadId }
+    dispatch({ type: 'loadEntries', items, mode, preserveToolState, loadId })
+  }, [dispatch])
 
   const restoreCachedTimeline = useCallback((path: string, cached: TimelineCacheEntry, revision: number): boolean => {
     if (revision !== (branchRevisions.current.get(path) ?? 0)
@@ -167,7 +172,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   // parsing the complete JSONL file again.
   useEffect(() => {
     const expected = expectedTimeline.current
-    if (expected && (expected.path !== timelineOwnerPath.current || state.timeline !== expected.items)) return
+    if (expected && (expected.path !== timelineOwnerPath.current
+      || (expected.loadId === undefined ? state.timeline !== expected.items : state.timelineLoadId !== expected.loadId))) return
     if (expected) expectedTimeline.current = null
 
     const path = timelineOwnerPath.current
@@ -183,7 +189,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       mode: state.mode,
       tasks: state.tasks
     })
-  }, [state.mode, state.timeline, state.tasks, state.timelineLoading])
+  }, [state.mode, state.timeline, state.timelineLoadId, state.tasks, state.timelineLoading])
 
   /** Load only the newest history window; older windows are fetched on demand. */
   const reloadTimeline = useCallback(async (sessionPath?: string): Promise<void> => {
@@ -195,6 +201,12 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const mutation = revertInFlight.current
     if (mutation && mutation.path === path && !mutation.settled) await mutation.done
     if (loadId !== timelineLoadId.current) return
+    const selection = readSelection()
+    const preserveToolState: ToolStateScope | undefined = path && selection.ownerPath === path
+      && (!selection.sessionPath || selection.sessionPath === path)
+      ? { revision: currentState.current.timelineScopeRevision, cwd: selection.cwd,
+          sessionId: selection.sessionId, sessionPath: path }
+      : undefined
     // Capture the reducer's revision atomically, before the asynchronous read.
     dispatch({ type: 'beginTaskRestore', id: loadId })
     const cached = path ? timelineCache.current.get(path) : undefined
@@ -211,7 +223,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       if (page || loadId !== timelineLoadId.current) break
       await new Promise<void>((resolve) => window.setTimeout(resolve, 80 * (attempt + 1)))
     }
-    if (loadId !== timelineLoadId.current) return
+    if (loadId !== timelineLoadId.current || (preserveToolState && readSelection() !== selection)) return
     if (!page) {
       if (keepVisibleCache) {
         console.warn('[pion] retained timeline revalidation failed; keeping cached view:', path)
@@ -234,21 +246,28 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       && cached.leafId === page.leafId
       && cached.total === page.total
     ) {
-      const cursor: HistoryCursor | null = cached.complete && cached.newerComplete
+      // The cache captured before the RPC may precede a live final result.
+      // Do not put that stale snapshot back into the cursor/cache on a no-op
+      // revalidation, even when the leaf/count have not changed yet.
+      const latest = timelineCache.current.get(path) ?? cached
+      const refreshed = keepVisibleCache ? { ...latest, items: currentState.current.timeline } : latest
+      const cursor: HistoryCursor | null = refreshed.complete && refreshed.newerComplete
         ? null
-        : { path, ...cached, loading: false, loadId }
+        : { path, ...refreshed, loading: false, loadId }
       historyCursor.current = cursor
-      storeTimelineCache(timelineCache.current, path, cached)
+      storeTimelineCache(timelineCache.current, path, refreshed)
       // The exact snapshot is already on screen. Avoid a second replace action,
       // which would reset scroll position and look like another session load.
-      if (!keepVisibleCache) showTimeline(path, cached.items, cached.mode)
+      if (!keepVisibleCache) showTimeline(path, refreshed.items, refreshed.mode, preserveToolState)
       return
     }
 
     const toolResults = collectToolResults([...page.entries, ...page.toolResults])
     // Mount the complete newest page as one stable snapshot. Splitting out a
     // special bottom-only slice made long sessions visibly appear in phases.
-    const initialItems = entriesToTimeline(page.entries, toolResults)
+    const initialItems = entriesToTimeline(page.entries, toolResults, {
+      existingTimeline: preserveToolState ? currentState.current.timeline : undefined
+    })
     const cursor: HistoryCursor = {
       path: path ?? '',
       items: initialItems,
@@ -277,11 +296,11 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
         total: cursor.total
       })
       historyCursor.current = cursor.complete && cursor.newerComplete ? null : cursor
-      showTimeline(path, cursor.items, cursor.mode)
+      showTimeline(path, cursor.items, cursor.mode, preserveToolState)
     } else {
       dispatch({ type: 'loadEntries', items: cursor.items, mode: cursor.mode })
     }
-  }, [api, showTimeline])
+  }, [api, dispatch, readSelection, showTimeline])
 
   /** Fetch and prepend the next older history window when the user reaches the top. */
   const loadOlder = useCallback(async (options?: { viaScroll?: boolean }): Promise<void> => {
@@ -311,17 +330,24 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
         cursor.leafId = page.leafId
         cursor.total = page.total
 
-        const incomingItems = entriesToTimeline(
-          page.entries,
-          collectToolResults([...page.entries, ...page.toolResults])
-        )
+        const toolResultEntries = [...page.entries, ...page.toolResults]
+          .filter((entry) => entry.type === 'message' && entry.message?.role === 'toolResult')
+        const toolResults = collectToolResults(toolResultEntries)
+        const incomingItems = entriesToTimeline(page.entries, toolResults, {
+          existingTimeline: currentState.current.timeline
+        })
         // User-scroll paging renders statically; the initial viewport fill
         // (fillViewport) still joins the waterfall.
         if (options?.viaScroll) for (const item of incomingItems) item.noReveal = true
-        const items = uniqueTimelineItems(cursor.items, incomingItems)
-        cursor.items = [...items, ...cursor.items]
+        const reconciled = reconcileOlderTimelineItems(currentState.current.timeline, incomingItems)
+        const items = reconciled.prepended
+        cursor.items = reconciled.items
         cursor.complete = cursor.apiBefore === 0
-        if (items.length > 0) dispatch({ type: 'prependEntries', items })
+        // Pass overlap copies and bounded raw results through, too. The reducer
+        // completes existing calls against its exact event-ordered state.
+        if (incomingItems.length > 0 || toolResultEntries.length > 0) dispatch({
+          type: 'prependEntries', items: incomingItems, toolResults: toolResultEntries
+        })
         storeTimelineCache(timelineCache.current, cursor.path, {
           items: cursor.items,
           mode: cursor.mode,
@@ -342,7 +368,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     } finally {
       if (historyCursor.current === cursor) cursor.loading = false
     }
-  }, [api])
+  }, [api, dispatch])
 
   /** Fetch and append newer history after jumping into the middle of a session. */
   const loadNewer = useCallback(async (options?: { viaScroll?: boolean }): Promise<void> => {
@@ -367,14 +393,24 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
         cursor.total = page.total
         cursor.newerComplete = cursor.apiAfter >= cursor.total
 
-        const incomingItems = entriesToTimeline(
-          page.entries,
-          collectToolResults([...page.entries, ...page.toolResults])
-        )
+        const toolResultEntries = [...page.entries, ...page.toolResults]
+          .filter((entry) => entry.type === 'message' && entry.message?.role === 'toolResult')
+        const toolResults = collectToolResults(toolResultEntries)
+        const incomingItems = entriesToTimeline(page.entries, toolResults, {
+          existingTimeline: currentState.current.timeline
+        })
         if (options?.viaScroll) for (const item of incomingItems) item.noReveal = true
-        const items = uniqueTimelineItems(cursor.items, incomingItems)
-        cursor.items = [...cursor.items, ...items]
-        if (items.length > 0) dispatch({ type: 'appendEntries', items })
+        // A message_end/tool event can land after the request starts but before
+        // this page returns. Reconcile against the latest reducer snapshot, not
+        // the cursor copy that a passive effect has not necessarily refreshed.
+        const reconciled = reconcileNewerTimelineItems(currentState.current.timeline, incomingItems)
+        const items = reconciled.appended
+        cursor.items = reconciled.items
+        // The reducer performs the same reconciliation against its exact
+        // event-ordered state, closing the message_end/page-response race.
+        if (incomingItems.length > 0 || toolResultEntries.length > 0) dispatch({
+          type: 'appendEntries', items: incomingItems, toolResults: toolResultEntries
+        })
         storeTimelineCache(timelineCache.current, cursor.path, {
           items: cursor.items,
           mode: cursor.mode,
@@ -395,7 +431,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     } finally {
       if (historyCursor.current === cursor) cursor.loading = false
     }
-  }, [api])
+  }, [api, dispatch])
 
   const refreshHistoryIndex = useCallback(async (sessionPath?: string): Promise<void> => {
     if (!api) return
@@ -593,6 +629,11 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     if (!api || !index || !index.sessionPath || index.totalEntries <= 0
       || timelineOwnerPath.current !== index.sessionPath
       || (revertInFlight.current?.path === index.sessionPath && !revertInFlight.current.settled)) return
+    const selection = readSelection()
+    const preserveToolState: ToolStateScope = {
+      revision: currentState.current.timelineScopeRevision, cwd: selection.cwd,
+      sessionId: selection.sessionId, sessionPath: index.sessionPath
+    }
     const loadId = ++timelineLoadId.current
     const end = Math.min(
       index.totalEntries,
@@ -611,7 +652,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       if (page || loadId !== timelineLoadId.current) break
       await new Promise<void>((resolve) => window.setTimeout(resolve, 80 * (attempt + 1)))
     }
-    if (loadId !== timelineLoadId.current) return
+    if (loadId !== timelineLoadId.current || readSelection() !== selection) return
     if (!page) {
       dispatch({ type: 'timelineError', error: '无法加载所选历史消息。' })
       return
@@ -622,7 +663,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     }
     const items = entriesToTimeline(
       page.entries,
-      collectToolResults([...page.entries, ...page.toolResults])
+      collectToolResults([...page.entries, ...page.toolResults]),
+      { existingTimeline: currentState.current.timeline }
     )
     // Keep the in-flight assistant message pinned to the end of the jumped
     // window so the live stream keeps rendering instead of being dropped.
@@ -634,7 +676,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const windowedItems = [...items, ...liveItems]
     const cursor: HistoryCursor = {
       path: index.sessionPath,
-      items,
+      items: windowedItems,
       mode: page.mode,
       apiBefore: page.start,
       apiAfter: page.end,
@@ -659,13 +701,13 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       leafId: cursor.leafId,
       total: cursor.total
     })
-    showTimeline(index.sessionPath, windowedItems, page.mode)
+    showTimeline(index.sessionPath, windowedItems, page.mode, preserveToolState)
     dispatch({
       type: 'historyJump',
       entryId: landmark.entryId,
       nonce: ++historyJumpNonce.current
     })
-  }, [api, showTimeline])
+  }, [api, dispatch, readSelection, showTimeline])
 
   /** Undo conversation context in place; file rollback is a separate action. */
   const revertMessage = useCallback(async (entryId: string): Promise<MessageRevertResult | null> => {

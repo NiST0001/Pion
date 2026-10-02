@@ -104,6 +104,10 @@ export function toWireEntry(entry: SessionEntry): WireEntry {
     wire.message = record.message as WireMessage
   } else if (entry.type === 'compaction') {
     wire.summary = record.summary as string
+    if (typeof record.firstKeptEntryId === 'string') wire.firstKeptEntryId = record.firstKeptEntryId
+    if (typeof record.tokensBefore === 'number' && Number.isFinite(record.tokensBefore)) {
+      wire.tokensBefore = record.tokensBefore
+    }
   } else if (entry.type === 'custom') {
     if (typeof record.customType === 'string') wire.customType = record.customType
     wire.data = record.data

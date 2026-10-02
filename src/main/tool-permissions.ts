@@ -3,6 +3,11 @@ import { realpathSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import {
+  CODEX_IMAGE_MODEL_OPTIONS, CODEX_IMAGE_QUALITIES, CODEX_IMAGE_REQUEST_ALIAS, IMAGE_GENERATION_TOOL_NAME,
+  MAX_IMAGE_REFERENCES, MAX_IMAGE_REFERENCE_PATH_LENGTH, MAX_IMAGE_REFERENCE_PATHS_LENGTH,
+  MAX_IMAGE_REQUEST_DIMENSION, MAX_IMAGE_REQUEST_PIXELS
+} from '../shared/image-generation'
 import type {
   ProjectToolPermissionPolicy,
   ToolPermissionCategory,
@@ -121,6 +126,10 @@ export class ToolPermissionStore {
 
   async getPolicy(cwd: string): Promise<ProjectToolPermissionPolicy> {
     await this.load()
+    return this.currentPolicy(cwd)
+  }
+
+  private currentPolicy(cwd: string): ProjectToolPermissionPolicy {
     const normalizedCwd = canonicalCwd(cwd)
     const policyRoot = projectRootOf(cwd)
     const saved = this.data.projects[policyRoot]
@@ -166,9 +175,20 @@ export class ToolPermissionStore {
     cwd: string,
     categories: ToolPermissionCategory[]
   ): Promise<ProjectToolPermissionPolicy> {
-    const updates: Partial<ToolPermissionRules> = {}
-    for (const category of categories) updates[category] = 'allow'
-    return this.setPolicy(cwd, updates)
+    await this.load()
+    for (const category of categories) {
+      if (!CATEGORIES.includes(category)) throw new Error('无效的工具权限设置')
+    }
+    const policy = this.currentPolicy(cwd)
+    // A stale dialog is not an explicit settings change: do not replace a
+    // newly denied category (including inherited project/worktree policy).
+    if (categories.some((category) => policy.rules[category] === 'deny')) return policy
+    const rules = { ...policy.rules }
+    for (const category of categories) rules[category] = 'allow'
+    // Check and apply synchronously, before the first persistence await.
+    this.data = { version: 1, projects: { ...this.data.projects, [policy.cwd]: rules } }
+    await this.persist()
+    return this.getPolicy(policy.cwd)
   }
 
   private persist(): Promise<void> {
@@ -188,11 +208,21 @@ export class ToolPermissionStore {
 /**
  * Generated as a CLI extension so it loads before project-local resources and
  * gates built-in plus extension tools in every retained RPC backend.
+ * Exported for mocked emitted-source regression tests without starting a backend.
  */
-function toolPermissionExtensionSource(): string {
+export function toolPermissionExtensionSource(): string {
   return String.raw`import { readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, resolve, sep } from "node:path";
 
+const IMAGE_GENERATION_TOOL_NAME = ${JSON.stringify(IMAGE_GENERATION_TOOL_NAME)};
+const IMAGE_REQUEST_ALIAS = ${JSON.stringify(CODEX_IMAGE_REQUEST_ALIAS)};
+const IMAGE_MODEL_OPTIONS = ${JSON.stringify(CODEX_IMAGE_MODEL_OPTIONS)};
+const IMAGE_QUALITIES = ${JSON.stringify(CODEX_IMAGE_QUALITIES)};
+const MAX_IMAGE_REFERENCES = ${MAX_IMAGE_REFERENCES};
+const MAX_IMAGE_REFERENCE_PATH_LENGTH = ${MAX_IMAGE_REFERENCE_PATH_LENGTH};
+const MAX_IMAGE_REFERENCE_PATHS_LENGTH = ${MAX_IMAGE_REFERENCE_PATHS_LENGTH};
+const MAX_IMAGE_REQUEST_DIMENSION = ${MAX_IMAGE_REQUEST_DIMENSION};
+const MAX_IMAGE_REQUEST_PIXELS = ${MAX_IMAGE_REQUEST_PIXELS};
 const MARKER = "__PION_TOOL_PERMISSION__:";
 const CHECKPOINT_MARKER = "__PION_RUN_CHECKPOINT__";
 const CHECKPOINT_TIMEOUT = 30000;
@@ -275,8 +305,84 @@ function safeJson(value) {
   try { return clip(JSON.stringify(value, null, 2)); } catch { return clip(value); }
 }
 
-function toolPath(input, cwd) {
-  const raw = input && typeof input.path === "string" ? input.path.replace(/^@/, "") : "";
+// Self-contained, bounded equivalent of shared validateImageReferencePaths:
+// this materialized CLI extension cannot import application module paths or
+// depend on serialized functions' bundler-renamed closure bindings.
+function validateImageReferencePaths(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("invalid references");
+  const count = value.length;
+  if (!Number.isSafeInteger(count) || count < 0 || count > MAX_IMAGE_REFERENCES) throw new Error("invalid references");
+  let totalLength = 0;
+  const paths = [];
+  for (let index = 0; index < count && index < MAX_IMAGE_REFERENCES; index++) {
+    const path = value[index];
+    if (typeof path !== "string" || !path || path.length > MAX_IMAGE_REFERENCE_PATH_LENGTH
+      || path !== path.trim() || /[\\\x00-\x1f\x7f:<>"|?*]/.test(path)) throw new Error("invalid reference path");
+    totalLength += path.length;
+    if (totalLength > MAX_IMAGE_REFERENCE_PATHS_LENGTH) throw new Error("reference path budget");
+    const normalized = path.startsWith("./") ? path.slice(2) : path;
+    const parts = normalized.split("/");
+    if (parts.length > 32 || !/\.(?:png|jpe?g)$/i.test(parts.at(-1) || "") || parts.some((part) => {
+      if (!part || part === "." || part === ".." || /[. ]$/.test(part)
+        || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)) return true;
+      let bytes = 0;
+      for (const character of part) {
+        const code = character.codePointAt(0);
+        if (code >= 0xd800 && code <= 0xdfff) return true;
+        bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+      }
+      return bytes > 255;
+    })) throw new Error("unsafe reference path");
+    paths.push(parts.join("/"));
+  }
+  return paths;
+}
+
+function imageReferenceInfo(input) {
+  if (!("referenced_image_paths" in input)) return { valid: true, needsRead: false, paths: [], riskPaths: [] };
+  const value = input.referenced_image_paths;
+  let paths = [];
+  let valid = false;
+  try {
+    // Optional undefined is equivalent to omission, like execution admission.
+    paths = validateImageReferencePaths(value); valid = true;
+  } catch { /* Never serialize unknown/malformed image inputs. */ }
+  // Invalid paths may still be risky (e.g. a traversal in the second slot).
+  // Inspect only up to five bounded strings; never walk oversized arrays,
+  // arbitrary objects or their image payloads, and never read image bytes.
+  const riskPaths = [];
+  if (Array.isArray(value) && value.length <= MAX_IMAGE_REFERENCES) {
+    const count = value.length;
+    for (let index = 0; index < count && index < MAX_IMAGE_REFERENCES; index++) {
+      const path = value[index];
+      if (typeof path === "string" && path.length > 0 && path.length <= MAX_IMAGE_REFERENCE_PATH_LENGTH) riskPaths.push(path);
+    }
+  }
+  return { valid, needsRead: !valid || paths.length > 0, paths, riskPaths };
+}
+
+function imageSizeLabel(value) {
+  if (value === undefined || value === "auto") return "auto";
+  if (typeof value !== "string" || !/^[1-9]\d{0,3}x[1-9]\d{0,3}$/.test(value)) return "参数无效，执行将拒绝";
+  const [width, height] = value.split("x").map(Number);
+  return width % 16 === 0 && height % 16 === 0
+    && width <= MAX_IMAGE_REQUEST_DIMENSION && height <= MAX_IMAGE_REQUEST_DIMENSION
+    && width * height <= MAX_IMAGE_REQUEST_PIXELS && Math.max(width, height) <= 3 * Math.min(width, height)
+    ? value : "参数无效，执行将拒绝";
+}
+
+function imageQualityLabel(value) {
+  return value === undefined ? "auto" : IMAGE_QUALITIES.includes(value) ? value : "参数无效，执行将拒绝";
+}
+
+function toolPath(input, cwd, toolName) {
+  const supplied = input && typeof input.path === "string" ? input.path : "";
+  // Image destinations are literal filenames, not the read/write tools' @ references.
+  // The image tool admits at most 1024 output-path characters; do not walk a
+  // malformed huge path through canonical() or echo it in permission metadata.
+  if (toolName === IMAGE_GENERATION_TOOL_NAME && supplied.length > 1024) return undefined;
+  const raw = toolName === IMAGE_GENERATION_TOOL_NAME ? supplied : supplied.replace(/^@/, "");
   return raw ? resolve(cwd, raw) : undefined;
 }
 
@@ -298,8 +404,12 @@ function classify(event, ctx) {
   const toolName = event.toolName;
   const input = event.input && typeof event.input === "object" ? event.input : {};
   const command = SHELL_TOOLS.has(toolName) && typeof input.command === "string" ? input.command : "";
+  const references = toolName === IMAGE_GENERATION_TOOL_NAME ? imageReferenceInfo(input) : undefined;
   const categories = [];
-  if (READ_TOOLS.has(toolName)) categories.push("read");
+  if (toolName === IMAGE_GENERATION_TOOL_NAME) {
+    categories.push("network", "write");
+    if (references.needsRead) categories.push("read");
+  } else if (READ_TOOLS.has(toolName)) categories.push("read");
   else if (WRITE_TOOLS.has(toolName)) categories.push("write");
   else if (SHELL_TOOLS.has(toolName)) categories.push("shell");
   else if (NETWORK_TOOL.test(toolName)) categories.push("network");
@@ -308,19 +418,50 @@ function classify(event, ctx) {
 
   const root = canonical(ctx.cwd);
   const projectRoot = projectRootOf(ctx.cwd);
-  const path = toolPath(input, root);
+  const path = toolPath(input, root, toolName);
   const risks = [];
-  if (path) {
-    const canonicalPath = canonical(path);
-    if (!isWithin(root, canonicalPath) && !isWithin(projectRoot, canonicalPath)) risks.push("outside-workspace");
+  const paths = path ? [path] : [];
+  if (references) paths.push(...references.riskPaths.map((reference) => resolve(root, reference)));
+  for (const candidate of paths) {
+    const canonicalPath = canonical(candidate);
+    // Retain the policy's worktree boundary; the image reader separately
+    // enforces the actual current root and must not inherit this wider rule.
+    if (!isWithin(root, canonicalPath) && !isWithin(projectRoot, canonicalPath)
+      && !risks.includes("outside-workspace")) risks.push("outside-workspace");
+    if (isSensitivePath(canonicalPath) && !risks.includes("sensitive-path")) risks.push("sensitive-path");
   }
-  if (path && isSensitivePath(canonical(path))) risks.push("sensitive-path");
   if (command && DESTRUCTIVE_COMMAND.test(command)) risks.push("destructive-command");
 
   const category = categories.includes("network") ? "network" : categories[0];
   let summary;
   let detail;
-  if (command) {
+  if (toolName === IMAGE_GENERATION_TOOL_NAME) {
+    // Only describe the side effects: never serialize prompts, image data or credentials.
+    const requestedModel = input.model === undefined ? IMAGE_REQUEST_ALIAS : input.model;
+    const option = IMAGE_MODEL_OPTIONS.find((item) => item.id === requestedModel);
+    const modelLabel = option ? option.label : "不支持的请求型号";
+    const operation = references.needsRead ? "编辑图片" : "生成图片";
+    summary = clip(operation + " · " + modelLabel + " → " + (path || "未指定目标路径"), 180);
+    // Legal relative references total <=1600; the output is <=1024. Show all
+    // paths with roles, not five copies of an arbitrarily long absolute cwd.
+    // Short legacy absolute destinations remain compatible. The longest
+    // possible detail stays below the main parser's 4000-character clamp,
+    // without truncating a legal path or dropping the final reference.
+    const output = !path ? "未指定或参数无效，执行将拒绝"
+      : path.length <= 1200 ? path : input.path + "（项目相对）";
+    const referenceLines = !references.valid ? ["参考输入：参数无效，执行将拒绝"]
+      : references.paths.length ? references.paths.map((reference, index) => "参考输入 " + (index + 1) + "（读取·项目相对）：" + reference)
+      : ["输入：文字（无参考图片）"];
+    detail = "目标路径：" + output + "（输出·写入 PNG 新文件）\n" + referenceLines.join("\n")
+      + "\n请求型号：" + modelLabel + (option ? " [" + option.id + "]" : "")
+      + (option && option.experimental ? "；Codex 订阅兼容性及账号权益未验证，拒绝时不自动降级。"
+        : option ? "；官方请求别名不是实际版本报告。" : "；将由工具参数校验拒绝，不会自动改用默认型号。")
+      + "\n请求尺寸：" + imageSizeLabel(input.size) + "；请求质量：" + imageQualityLabel(input.quality)
+      + "。尺寸/质量不保证服务接受或精确输出；实际生成版本未报告。"
+      + (references.needsRead ? "\n读取并上传完整参考/原图文件（包含文件内 metadata），不是只上传预览；读取仍仅限当前项目实际目录。" : "")
+      + "\n通过网络生成并写入 PNG；使用 Codex 图片额度，会产生额外账号用量（失败或取消也可能消耗额度）。"
+      + "不自动重试或降级，无 API-key/付费 API 回退。";
+  } else if (command) {
     summary = clip(command.replace(/\s+/g, " ").trim(), 180);
     detail = clip(command);
   } else if (path) {
@@ -338,17 +479,19 @@ async function checkpointGate(event, ctx) {
   if (event.toolName === "pion_subagents" || CHECKPOINT_READ_ONLY.has(event.toolName)) return;
   if (!ctx.hasUI) return;
   try {
-    await ctx.ui.select(CHECKPOINT_MARKER, ["ready"], { timeout: CHECKPOINT_TIMEOUT, signal: event.input?.[Symbol.for("pion.subagent.abort")] });
+    await ctx.ui.select(CHECKPOINT_MARKER, ["ready"], { timeout: CHECKPOINT_TIMEOUT, signal: event.input?.[Symbol.for("pion.subagent.abort")] ?? ctx.signal });
   } catch {
     // A checkpoint failure must never block the tool call itself.
   }
 }
 
 async function gate(event, ctx) {
-  const signal = event.input?.[Symbol.for("pion.subagent.abort")];
-  if (signal?.aborted) return { block: true, reason: "子代理已中止" };
+  const subagentSignal = event.input?.[Symbol.for("pion.subagent.abort")];
+  const signal = subagentSignal ?? ctx.signal;
+  const abortReason = subagentSignal ? "子代理已中止" : "工具调用已中止";
+  if (signal?.aborted) return { block: true, reason: abortReason };
   await checkpointGate(event, ctx);
-  if (signal?.aborted) return { block: true, reason: "子代理已中止" };
+  if (signal?.aborted) return { block: true, reason: abortReason };
   if (PION_INTERNAL_TOOLS.has(event.toolName)) return undefined;
   const request = classify(event, ctx);
   const policy = readPolicy(ctx.cwd);
@@ -375,8 +518,20 @@ async function gate(event, ctx) {
   if (!forced) options.push("allow-session");
   if (canRemember) options.push("allow-project");
   options.push("deny");
-  const choice = await ctx.ui.select(MARKER + JSON.stringify(metadata), options, { timeout: TIMEOUT, signal });
-  if (signal?.aborted) return { block: true, reason: "子代理已中止" };
+  let choice;
+  try {
+    choice = await ctx.ui.select(MARKER + JSON.stringify(metadata), options, { timeout: TIMEOUT, signal });
+  } catch {
+    // Cancellation, timeout or a failed UI must never grant tool permission.
+  }
+  if (signal?.aborted) return { block: true, reason: abortReason };
+  // Settings can change while the permission dialog is pending. A late
+  // positive response must not grant/remember a category which is now denied.
+  const currentPolicy = readPolicy(ctx.cwd);
+  if (request.policyCategories.some((category) => currentPolicy[category] === "deny")) {
+    return { block: true, reason: "Pion 项目权限策略已拒绝此工具调用" };
+  }
+  if (!options.includes(choice)) return { block: true, reason: "工具调用未获用户授权" };
   if (choice === "allow-session") {
     sessionAllows.add(sessionKey);
     return undefined;

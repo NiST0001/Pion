@@ -429,20 +429,30 @@ export class AgentBridge {
       throw new Error('目录外、敏感路径和高风险操作只能单次允许')
     }
 
-    let policy: ProjectToolPermissionPolicy | null = null
-    if (resolution === 'allow-project') {
-      policy = await this.toolPermissionStore.allowProjectCategories(
-        pending.request.cwd,
-        pending.request.policyCategories
-      )
-    }
-
     const backend = this.backendPool.get(pending.backendKey)
     if (!backend) {
       this.clearToolPermissionRequest(requestId)
       throw new Error('发起请求的 Agent 会话已关闭')
     }
-    this.respondToExtensionUi(backend.client, pending.extensionRequestId, { value: resolution })
+    let policy: ProjectToolPermissionPolicy | null = null
+    let effectiveResolution = resolution
+    if (resolution === 'allow-project') {
+      policy = await this.toolPermissionStore.allowProjectCategories(
+        pending.request.cwd,
+        pending.request.policyCategories
+      )
+      if (pending.request.policyCategories.some((category) => policy?.rules[category] === 'deny')) {
+        effectiveResolution = 'deny'
+      }
+      if (this.pendingRequests.getToolPermission(requestId) !== pending) {
+        throw new Error('工具权限请求已结束')
+      }
+      if (this.backendPool.get(pending.backendKey) !== backend) {
+        this.clearToolPermissionRequest(requestId)
+        throw new Error('发起请求的 Agent 会话已关闭')
+      }
+    }
+    this.respondToExtensionUi(backend.client, pending.extensionRequestId, { value: effectiveResolution })
     this.clearToolPermissionRequest(requestId)
     return policy
   }

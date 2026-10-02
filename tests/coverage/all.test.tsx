@@ -3,10 +3,22 @@
 // A single coverage isolate avoids a Node 24 / @bcoe/v8-coverage range-tree
 // recursion bug when the same transformed module is merged across test files.
 // The normal test command still runs each source test independently.
+// Register the policy suite's Electron mock before dependent backend modules load.
+import '../unit/tool-permission-policy.test'
 import '../unit/task-history.test'
 import '../unit/plan-mode.test'
 import '../unit/task-planning.test'
 import '../unit/timeline.test'
+import '../unit/model-error.test'
+import '../unit/agent-error-state.test'
+import '../unit/codex-image-transport.test'
+import '../unit/image-generation-model.test'
+import '../unit/image-generation-request.test'
+import '../unit/image-inputs.test'
+import '../unit/image-generation.test'
+import '../unit/png-validation.test'
+import '../unit/tool-image-state.test'
+import '../unit/tool-images.test'
 import '../renderer/historyReveal.test'
 import '../renderer/screenTextReveal.test'
 import '../unit/agent-compaction-state.test'
@@ -51,6 +63,9 @@ import '../renderer/WorkflowPanel.test'
 import '../renderer/WorkbenchDialogs.test'
 import '../renderer/messageRevertHistory.test'
 import '../renderer/liveHistoryIndex.test'
+import '../renderer/historyPaging.test'
 import '../renderer/messageRevertInteraction.test'
 import '../renderer/messageRevertNavigation.test'
 import '../renderer/messageRevertSend.test'
+// Load the real tool suites before this suite registers SDK/image factory mocks.
+import '../unit/runtime-host.test'

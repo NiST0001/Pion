@@ -1,15 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 import { nativePlanModeExtensionSource } from '../../src/main/agent/plan-mode'
 import { nativeTaskExtensionSource } from '../../src/main/agent/task-planning'
+import { IMAGE_GENERATION_TOOL_NAME } from '../../src/shared/image-generation'
 
 type PlanState = { version?: number; enabled: boolean; toolsBeforePlanMode?: string[] }
 type PlanEntry = { id: string; type: 'custom'; customType: string; data: PlanState }
 type PlanContext = { sessionManager: { getBranch(): PlanEntry[] }; ui: { notify: ReturnType<typeof vi.fn> } }
-type LifecycleHandler = (event: unknown, ctx: PlanContext) => void | Promise<void>
+type LifecycleHandler = (event: unknown, ctx: PlanContext) => unknown | Promise<unknown>
 
-function runtime(saved?: PlanState) {
-  const initialTools = ['read', 'bash', 'edit', 'write', 'pion_ask_user', 'custom-tool']
-  let tools = [...initialTools]
+function runtime(saved?: PlanState, options: { activeTools?: string[]; imageAvailable?: boolean } = {}) {
+  const initialTools = ['read', 'bash', 'edit', 'write', 'pion_ask_user',
+    ...(options.imageAvailable === false ? [] : [IMAGE_GENERATION_TOOL_NAME]), 'custom-tool']
+  let tools = [...(options.activeTools ?? initialTools)]
   const branch: PlanEntry[] = saved
     ? [{ id: 'saved', type: 'custom', customType: 'plan-mode-state', data: saved }]
     : []
@@ -20,7 +22,8 @@ function runtime(saved?: PlanState) {
   })
   const pi = {
     getAllTools: () => initialTools.map((name) => ({ name,
-      sourceInfo: { source: name === 'pion_ask_user' ? 'sdk' : name === 'custom-tool' ? 'extension' : 'builtin' } })),
+      sourceInfo: { source: name === 'pion_ask_user' || name === IMAGE_GENERATION_TOOL_NAME
+        ? 'sdk' : name === 'custom-tool' ? 'extension' : 'builtin' } })),
     getActiveTools: () => [...tools],
     setActiveTools: (names: string[]) => { tools = [...names] },
     appendEntry,
@@ -33,8 +36,8 @@ function runtime(saved?: PlanState) {
   ))() as (api: typeof pi) => void
   install(pi)
   const ctx: PlanContext = { sessionManager: { getBranch: () => branch }, ui: { notify: vi.fn() } }
-  return { initialTools, branch, appendEntry, tools: () => tools,
-    event: (name: string) => handlers.get(name)!({}, ctx),
+  return { initialTools, branch, appendEntry, tools: () => tools, setTools: pi.setActiveTools,
+    event: (name: string, event: unknown = {}) => handlers.get(name)!(event, ctx),
     command: (args: string) => command.handler(args, ctx) }
 }
 
@@ -55,7 +58,7 @@ describe('Pion native plan mode', () => {
     const source = nativePlanModeExtensionSource()
 
     expect(source).toContain('toolsBeforePlanMode = pi.getActiveTools()')
-    expect(source).toContain('const restored = previous && previous.length > 0 ? previous : normalTools()')
+    expect(source).toContain('const restored = previous ?? normalTools()')
     expect(source).toContain('...restored, ...nativeAsk')
     expect(source).toContain('只有用户明确切换回构建模式并发送执行请求后')
   })
@@ -64,6 +67,72 @@ describe('Pion native plan mode', () => {
     const source = nativePlanModeExtensionSource()
     expect(source).toContain('if (name === "pion_ask_user") return tool?.sourceInfo?.source === "sdk"')
     expect(source).toContain('[...READ_ONLY_TOOL_NAMES, "pion_ask_user"]')
+  })
+
+  it.each(['command', 'restored session'] as const)('hides image generation and blocks it at execution time in a %s plan', async (entry) => {
+    const h = runtime(entry === 'restored session'
+      ? { version: 1, enabled: true, toolsBeforePlanMode: ['read', IMAGE_GENERATION_TOOL_NAME] }
+      : undefined)
+    await h.event('session_start')
+    if (entry === 'command') await h.command('start')
+    expect(h.tools()).toEqual(['read', 'pion_ask_user'])
+    const call = { toolName: IMAGE_GENERATION_TOOL_NAME, input: { prompt: 'A mock image', path: 'art/test.png' } }
+    expect(await h.event('tool_call', call)).toMatchObject({ block: true })
+    // A different extension cannot bypass the guard by reactivating the tool.
+    h.setTools(['read', IMAGE_GENERATION_TOOL_NAME])
+    expect(await h.event('tool_call', call)).toMatchObject({ block: true })
+    await h.command('exit')
+    expect(h.tools()).toContain(IMAGE_GENERATION_TOOL_NAME)
+    expect(await h.event('tool_call', call)).toBeUndefined()
+  })
+
+  it('preserves an explicit active subset on exit instead of enabling the image fallback', async () => {
+    const h = runtime(undefined, { activeTools: ['read', 'bash'] })
+    await h.event('session_start')
+    await h.command('start')
+    await h.command('exit')
+    expect(h.tools()).toEqual(['read', 'bash', 'pion_ask_user'])
+    expect(h.tools()).not.toContain(IMAGE_GENERATION_TOOL_NAME)
+  })
+
+  it('preserves an explicitly empty active set instead of enabling all normal tools on exit', async () => {
+    const h = runtime(undefined, { activeTools: [] })
+    await h.event('session_start')
+    await h.command('start')
+    await h.command('exit')
+    // Retain the existing native-question exception, but never add hidden mutating tools.
+    expect(h.tools()).toEqual(['pion_ask_user'])
+    expect(h.tools()).not.toContain(IMAGE_GENERATION_TOOL_NAME)
+  })
+
+  it.each([{ previous: [] }, { previous: ['read', 'custom-tool'] }])('preserves a persisted explicit subset $previous when leaving a restored plan', async ({ previous }) => {
+    const h = runtime({ version: 1, enabled: true, toolsBeforePlanMode: previous })
+    await h.event('session_start')
+    await h.command('exit')
+    expect(h.tools()).toEqual([...previous, 'pion_ask_user'])
+    expect(h.tools()).not.toContain(IMAGE_GENERATION_TOOL_NAME)
+  })
+
+  it('does not enable a hidden image tool on normal build session startup or navigation', async () => {
+    const h = runtime(undefined, { activeTools: ['read', 'bash'] })
+    await h.event('session_start')
+    await h.event('session_tree')
+    expect(h.tools()).toEqual(['read', 'bash'])
+    expect(h.appendEntry).not.toHaveBeenCalled()
+  })
+
+  it.each([true, false])('preserves a captured subset when navigating to a pre-plan branch (image available=%s)', async (imageAvailable) => {
+    const h = runtime(undefined, { activeTools: ['read'], imageAvailable })
+    await h.event('session_start')
+    expect(h.tools()).not.toContain(IMAGE_GENERATION_TOOL_NAME)
+    await h.command('start')
+    h.branch.length = 0
+    await h.event('session_tree')
+    expect(h.tools()).toEqual(['read', 'pion_ask_user'])
+    expect(h.tools()).not.toContain(IMAGE_GENERATION_TOOL_NAME)
+    await h.event('session_shutdown')
+    expect(h.branch).toEqual([])
+    expect(h.appendEntry).toHaveBeenCalledTimes(1)
   })
 
   it('does not reactivate the task tool while a plan session is restored', () => {

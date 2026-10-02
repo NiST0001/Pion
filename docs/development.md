@@ -55,6 +55,45 @@ npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 
 
 Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.mjs`；打包时 `out/main/**/*` 与依赖一起解出 asar，以便系统 Node 在 Windows/Linux 上读取。这里新增运行时接入需要构建、RPC 回归和打包验证；只改源码不会更新正在运行的安装版。
 
+## 内置 Codex 图片生成
+
+`pion_generate_image` 作为编译内置 SDK `customTools` 在每个会话运行时注册，入口为 `agent/image-generation.ts`。`runtime-host.ts` 捕获该 backend 自己的 `services.modelRuntime.getAuth('openai-codex', ...)`，只在 SDK 执行门控通过后的工具执行中解析 OAuth/刷新，并请求至少 5 分钟的凭据有效期；不读取另一活动会话的认证实例，不自行写 `auth.json`，也不回退到 API-key/付费 Images API。凭据不进入 renderer、工具结果或安装包。
+
+`codex-image-transport.ts` 使用独立 Codex Images API，而非聊天 Responses 工具。工具接受非空文字 `prompt`（最多 16000 字符）、显式新 PNG 输出 `path`，以及可选 `model`、`size`、`quality`、`referenced_image_paths`：
+
+- `model` 默认官方 `gpt-image-2` 请求别名；白名单仅有它及实验性的 `gpt-image-2.5-flare` / `gpt-image-2.5-sunburst`。只有用户要求 2.5 时选择实验型号；未点名变体时请求 Flare，点名 Sunburst 时请求 Sunburst，不接受泛称 `gpt-image-2.5`。
+- `size` 默认 `auto`，或正整数 `WxH`（小写 x、无前导零）；两边为 16 的倍数、每边 ≤ 4096、总计 ≤ 1600 万像素、长宽比 ≤ 3:1。`quality` 默认 `auto`，仅接受 `auto/low/medium/high`。`2048x3072` 可通过本地准入，但只是请求，不保证后台接受、精确输出尺寸或实际质量。
+- `referenced_image_paths` 省略或空数组表示文字生图，非空表示参考图编辑：至多 5 个项目相对 PNG/JPEG 路径，每路径 ≤ 512 字符、总计 ≤ 1600 字符，只规范化可选的开头 `./`，保持顺序、重复项和字面 @。使用 `/` 分隔，最多 32 层、每组件 ≤ 255 UTF-8 字节；拒绝空/穿越组件、绝对路径、URL/data URL、反斜线、控制字符、平台不安全文件名/尾缀及不支持格式，不接受内嵌图片参数。输出必须不同于所有输入，且为不存在的新文件。
+
+工具在文件预检前拒绝非法显式设置与未知字段，transport 在 OAuth/网络前独立校验并序列化私有快照；不将空格、null 或无效值修复为默认值。固定 POST 订阅端点：无引用为 `https://chatgpt.com/backend-api/codex/images/generations`；有引用为 `https://chatgpt.com/backend-api/codex/images/edits`，JSON 中使用 `images: [{ image_url: 'data:image/png;base64,…' }]`（JPEG 使用对应 MIME）。两者均发送选定 `model`、`size`、`quality` 和 `n: 1`，不使用 multipart/付费 API，不自动换型号、丢弃或降低设置、重试或切换端点来规避拒绝。只接收 JSON 中单张 `b64_json` PNG，不跟随重定向或下载提供商/外部图片 URL。`mask` / `input_fidelity` 无已确认的 Codex 订阅契约，在工具和 transport 前置拒绝；不能把 mask 当普通参考图来假称支持遮罩，也不能回退到 API-key CLI 或付费 API。
+
+官方协议证据固定到 Codex 提交 `31519549`：[Images 请求 DTO `images.rs`](https://github.com/openai/codex/blob/31519549/codex-rs/codex-api/src/images.rs)和[订阅端点 `endpoint/images.rs`](https://github.com/openai/codex/blob/31519549/codex-rs/codex-api/src/endpoint/images.rs)提供 `size` / `quality` 及 edit 的 JSON 图片引用通道依据。另一路 API-key CLI 的 mask 能力不能套用到这里的订阅请求；这两个订阅接口不构成 mask / input_fidelity 支持证明。型号证据也须区分产品上线、公开 API 和订阅协议：[OpenAI 的 Images 2.5 产品说明](https://openai.com/index/introducing-chatgpt-images-2-5/)包含 Codex，但[官方 Codex 工具源码](https://github.com/openai/codex/blob/main/codex-rs/ext/image-generation/src/tool.rs)使用的 `gpt-image-2` 是请求别名；DTO 的字符串 model 字段不构成 Flare/Sunburst 的订阅选择或权益承诺。本地 2.5 支持仅为经用户知情选择的实验性请求 ID 转发，真实账号兼容性未验证。成功响应不提供已确认的实际版本契约，也不能凭回显字段或未公开 headers 宣称实际使用 2.5。
+
+新保存结果仍使用 v2 非敏感元数据，新增必填字段为 `operation: 'generate' | 'edit'`、`requestedSize`、`requestedQuality`、`referenceCount`；`requestedModel` 记录选定请求 ID，`resolvedModel: null` 表示实际版本未知。实际保存 `width` / `height` 来自输出 PNG 校验而非请求或服务回显，renderer 将其投影为 `savedWidth` / `savedHeight`，与请求尺寸/质量及 ≤ 512 px/边的缩略图分开展示，不生成 actualQuality 测量。旧 v1 `model` 是先前硬编码的请求常量，不升级为实际模型证明；回放只读兼容，不迁移或重写历史，旧 v1/v2 缺失设置保持未知，不补填 auto、generate 或 0 张引用。每个字段独立校验，损坏字段不隐藏其他有效设置、保存路径或预览，未知值不原样回显。终态结果替换参数预览，不从旧调用参数补造最终设置；仅请求设置/保存尺寸变化时仍更新终态，同时复用相同有效图片预览。
+
+权限扩展按精确工具名分类：无参考图为 `network` + `write`，有参考图再加 `read`，任一拒绝策略均阻止执行，不视为豁免权限的内部工具；沿用既有写入检查点门控，文字生图不因 read deny 被阻止，文字生图的会话授权也不覆盖参考图读取。对输出及每个有界输入分别做真实路径风险分类，合并目录外/敏感风险，不只检查第一张，也不剥除字面 @；策略的项目/worktree 继承不放宽原生读取器的当前真实 worktree 限制。确认详情完整列出所有合法有界输入/输出路径及读取/写入角色，使用项目相对引用避免长 cwd 挤掉最后一个输入，并显示白名单型号、请求尺寸/质量、原文件与 metadata 上传及可能消耗账号额度的说明；不序列化 prompt、图片字节、凭据或任意未知/无效参数。无效引用参数按需要 read 保守分类并由执行前置拒绝，不遍历超限数组或任意图片载荷。等待确认期间对所有涉及的策略复查；新增 deny 使迟到允许失效，不执行也不记住授权，旧项目授权不能覆盖当前或继承的拒绝。取消、超时或无 UI 不代表批准。计划模式既隐藏该工具，也在执行时拦截；退出/恢复分支保留显式工具子集（包括空集，以及原有 SDK 内置提问例外），不为恢复默认生图而重新启用隐藏的写工具。子代理继续只继承父级可见的内置编码工具，不注入此 SDK 生图工具，也不扩大权限。
+
+参考输入读取与上传边界（`src/main/agent/image-inputs.ts`）：
+
+- 输入是完整原文件，PNG/JPEG 中 metadata 随字节一起上传，不剥除或承诺清除 EXIF、ICC、文本等隐私信息，调用前须说明。全部输入安全读取并校验后才进入 transport/OAuth/网络；读取失败时没有上传参考图。transport 再复制私有字节快照并校验，以免等待 OAuth 时调用方修改设置或内容。
+- 原生读取器无 mkdir、写入或不安全 open 回退，使用 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`；O_NOFOLLOW 或 O_NONBLOCK 缺失/零值，或文件系统拒绝这些 flags 时失败，不重试为 `r` 或更弱选项。只读取普通非符号链接文件；绑定输出预检捕获的 cwd、真实项目/worktree root 及身份，复查 cwd 的真实映射、root/每层父目录的真实路径与 BigInt dev/ino，路径和已打开 FD 的 dev/ino、size、mtimeNs/ctimeNs 快照在打开及读取后再次核对，拒绝已知符号链接、目录/文件替换或快照变化。
+- 每张输入非空且最多 8 MiB，合计最多 16 MiB；每边最多 4096，累计最多 1600 万像素。先检查剩余字节预算，再以最多 64 KiB 分块读取私有快照并做一字节 EOF 探测，拒绝异常读取、成长或截断，不靠 stat 大小单独判定。PNG inflate 前按剩余累计像素预算做结构准入；PNG 复用完整有界 CRC/IDAT zlib/scanline/调色板/元数据检查，JPEG 只检查有界帧/扫描结构及完整最终 EOI，不进行 entropy、色彩或 ICC 完整解码，不宣称 full decoder 验证。
+- 同运行时进程跨工具实例/同进程 backend 替换仅允许一个真实读取操作，无排队；槽保持到真实 Promise 收口，而非外层 abort race 返回。取消/超时只是停止等待，late stat/open/read/close 仍需收尾，迟到 open 返回的 FD 在 finally 中关闭；底层永久挂起则持续阻止新读取，不能称为已取消底层操作。close reject 即使发生在消费者已返回后也锁存进程级参考图读取隔离：不重试不确定 FD 的 close，不继续下一张或启动新读取，不持有 FD/缓冲到隔离状态，仅重建 backend 进程才恢复。省略/空引用不占槽、不读文件，亦不受参考读取隔离影响。
+- 这些检查不是 openat 目录遍历或 OS 沙箱，严格 final no-follow open 仍不能排除所有检查/系统调用之间的并发目录替换，也不能证明项目内硬链接内容的来源；不替代 read 权限。编辑服务错误只保留固定 HTTP 提示及精确白名单公开错误码，不把可能回显输入片段、metadata、文件名或 prompt 的任意诊断放入结果。
+
+保存与恢复边界：
+
+- `path` 必须使用 `/` 分隔、项目相对的 `.png` 新路径，最多 1024 字符、32 层、每组件最多 255 UTF-8 字节；拒绝绝对路径、目录穿越、不安全组件、已知父目录符号链接及已存在的目标（含符号链接）。运行时解析项目真实目录并检查目录身份，生成前预检、写入/发布前复查；缺少的父目录逐级创建并检查，不用递归删除来清理失败。
+- 原图写入同目录的私有随机 `.pion-image-<uuid>.png`，使用 `wx` / `0600` 独占创建，分段写入、同步、检查身份并关闭后，以原子 hard-link no-replace 发布到最终名称。SDK 文件 mutation queue 只包围实际文件事务，不占用 OAuth、网络或缩略图处理阶段；目标冲突不覆盖，亦不降级为 rename/copy。
+- 仅尝试清理可确认属于本次调用的私有未完整暂存文件或发布后的暂存别名，永远不删除最终目标。发布验证成功后清理暂存失败时，保留保存成功并报告残留相对路径。安全发布不受支持或发生冲突时，保留已完整写入的临时 PNG 并返回恢复路径；发布后位置/身份无法确认时报告最终路径与临时路径，交由用户检查。不自动重新生成或静默改路径，避免再次消耗额度。
+- 这些 Node 路径/身份检查不是 OS 沙箱，不保证杜绝所有检查与系统调用之间的并发目录替换。文件系统/平台的 hard-link 支持仍需单独验证，不能将 mock 竞态测试当作普适文件系统安全证明。
+
+请求 JSON 和响应正文均最多 24 MiB，输出原图最多 16 MiB、每边最多 4096 像素且最多 1600 万像素；工具取消作用域和 OAuth/网络请求均有最多 5 分钟期限。已开始的文件事务仍等待收尾，不能把发出取消信号误当作底层文件操作已经停止。`png-validation.ts` 在保存和缩略图解码前检查静态 PNG：chunk CRC、IHDR/顺序、完整 IDAT zlib、精确 scanline 字节数/过滤器、调色板索引及有界元数据。支持标准色彩/位深组合与 Adam7；栅格 inflate 不超过 128 MiB，文本/ICC 解压流每个最多 1 MiB、总计 4 MiB，文本/ICC 类元数据块最多 64 个。这是有界完整性校验，不是全部色彩/ICC 配置语义或真实图片解码/渲染验证。
+
+原图发布是保存提交点：缩略图失败、超时或提交后的中止都不会回滚保存成功。SDK 解码没有取消契约，缩略图超时仅停止等待；同一运行时进程最多一个实际未结束的解码任务，槽占用时后续调用跳过缩略图而继续保留原图。只有真实解码 Promise 收口才释放槽，换工具实例不绕过限制；永久挂起时该进程继续跳过预览。工具返回项目相对输出路径与非敏感输出元数据，以及可用时的一张小型 PNG/JPEG 预览，不把输出原图、输入原图、输入 metadata 或引用路径数组塞进工具结果/历史预览；可用 `read` 读取已保存路径，不应再次生成。此限制不等于清除会话输入：SDK 工具参数历史仍保留用户 prompt 和引用路径，不能宣称从未记录。`shared/tool-images.ts` 对通用工具结果仅扫描前 128 个内容项、最多保留 4 张静态 PNG/JPEG，每张最多 512 像素/边、96 KiB 解码字节（128 KiB base64）；这是 base64/结构/尺寸检查，不额外宣称预览 CRC 或真实栅格解码成功。PNG 预览拒绝 `iCCP` / `zTXt` 和压缩 `iTXt`，避免把未受解压预算约束的压缩元数据交给浏览器；原图仅在随后执行完整的有界 PNG inflate 校验时允许这些块。实时进度只投影文字，最终结果与历史回放共用校验投影；最终消息/持久结果优先于低层执行通知，预览等价与终态字段等价分开：型号、请求设置、保存尺寸、文字、状态或 diff 变化仍更新最终结果；无拒绝提示且图片内容及位置相同时，保留预览数组和组件身份而不重解码。带拒绝提示的结果（包括混合有效/被拒图片）仍保守重新投影，不能宣称这类重复结果不会再次进行 base64 解码。同会话 reload/jump 在 reducer 事件边界保留匹配工具的终态和 key，旧分页及只有结果的页面可补完已有调用而不创建孤立结果行；真实切换和分支重置不复活旧工具状态。`ToolResultImages.tsx` 按详情开关挂载/释放图片，用固定框显示加载或失败状态，图片加载事件不调用滚动或恢复跟随。
+
+使用前需要 Codex OAuth 登录、账号图片生成权益与额度，不承诺免费或服务可用。发出请求后的失败、超时或中止可能已经消耗图片额度，工具不自动重试；服务返回的图片用量不作为 chat token/费用转发或估算。相关回归源码使用模拟认证、网络和文件系统及内存 PNG/JPEG fixture；验证报告必须区分类型检查、相关模拟回归、全量测试、coverage、构建、安装、GUI 和真实 API 的实际执行范围，不能以源码或模拟测试通过宣称已发布或正在运行的安装版已更新。真实服务协议（含编辑及请求设置的接受情况）、账号权益/额度尚未验证，mock 测试不能替代真实生图或跨平台发布/GUI 验证。真实调用涉及用户凭据、参考图上传和额度，须单独获得用户授权；不以本次文档同步新增正式版本发布日志或测试数量结论。
+
 ## 运行统计与排队消息
 
 统计条优先展示 `dispatching` / `running` / `ending` 的运行，没有执行中记录时展示最近实际派发的记录。统计查询使用 `metricsOnly`：主进程和 renderer 都在限制条数之前排除 `queued` 及未派发就丢弃的记录，避免队列占满窗口或把统计切成零；默认运行/恢复查询不变。记录按实际启动或派发时间排序，排队消息只有派发后才进入统计窗口。
@@ -68,6 +107,14 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 原生任务工具的系统提示和工具提示统一使用跨消息计划策略：AI 根据当前目标与已有任务判断继续、调整或替换计划，不再要求每条用户消息先 clear。同一目标保留任务 ID、状态与依赖，可追加细化；简单问答保留计划但不自动启动无关任务。替换未完成计划前说明取舍，关键歧义先询问。任务数量与粒度按实际可执行、可验收的工作确定；未完成工作可以跨回复保留，不能仅为结束回复标记完成。此处调整模型决策提示，不新增消息到达时的自动清空逻辑，也不保证每个模型必然采用相同拆分；工具仍由显式 clear 重置，保留单一进行中、模式隐藏、权限与当前分支恢复边界。
 
 实时 `tool_execution_end`、任务结果的 `message_end` / `entry_appended` 可独立更新快照，不要求工具开始行仍在页面中。工具调用 ID 使用有界去重；恢复请求记录 revision，请求期间的新任务结果优先。错误/缺失数据与有效空列表分开处理：明确清空才清空已有任务，普通历史加载失败保留当前快照。时间线缓存另存任务状态，分页不覆盖它；真实会话切换、复制/分叉或删除活动会话重置任务作用域。按用户轮次归档的任务历史仍由 `deriveSessionTaskRuns` 单独处理。
+
+## 模型/API 错误提示
+
+`agent/modelError.ts` 在 renderer 中保守分类常见模型/API 错误，生成短中文说明和操作建议，不改写提供商诊断。HTTP 413 默认提示请求内容过大，只有明确的 token/上下文证据才提示上下文超限。`ChatMessage` 默认折叠技术详情，原文保留且不做逐字符动画；实时错误使用 polite 播报，历史回放保持静默。
+
+实时助手错误以最终 `message_end` 为准：临时错误可被成功或中止终态清除，显式错误没有诊断时仍显示失败提示，默认用户中止不显示红色错误。助手错误在历史回放中保留；压缩失败在实时会话中单独标注，不从 `agent_end` 重复追加。
+
+较新历史页在 reducer 当前事件顺序上归并，避免最终错误与分页返回竞态导致重复。已知持久化身份优先；未知终态使用 SDK 时间戳及内容一对一匹配，未结束的助手仅允许无歧义时间戳匹配。归并保留消息和工具详情的 React key，按持久化页面顺序放置匹配行，未覆盖的实时行仍保持尾部顺序，不把历史追加当作实时跟随。成功压缩按 SDK 摘要、保留边界和压缩前 token 数匹配；历史 wire 保留这些元数据，兼容 retain-none 的自指边界，不新增 IPC 频道或改变调用校验。
 
 ## pi SDK 兼容与缓存预热
 
@@ -153,6 +200,11 @@ src/
 │   │   ├── pending-requests.ts   # 权限、扩展 UI 与认证请求队列
 │   │   ├── queue-projection.ts   # Pi 原始队列与 Pion 本地队列投影
 │   │   ├── provider-auth-ui.ts   # 提供商认证交互适配
+│   │   ├── runtime-host.ts       # 所属后端 SDK 运行时与内置工具注入
+│   │   ├── image-generation.ts   # 尺寸/质量请求、参考图编辑与无覆盖保存/预览
+│   │   ├── image-inputs.ts       # 只读参考图快照、预算与跨实例真实操作背压
+│   │   ├── codex-image-transport.ts # Codex 订阅 JSON generations/edits 与 OAuth
+│   │   ├── png-validation.ts     # 有界静态 PNG 完整性检查
 │   │   ├── plan-mode.ts
 │   │   ├── task-planning.ts
 │   │   ├── wire.ts
@@ -184,6 +236,8 @@ src/
 │   ├── types.ts          # IPC 数据契约（主/预加载/渲染共享，SDK 无关）
 │   ├── pion-api.ts       # preload -> renderer 的类型化 API facade
 │   ├── operations.ts     # 运行、验证与 Git 领域类型
+│   ├── image-generation.ts # 型号/尺寸/质量/引用路径校验与请求/保存元数据
+│   ├── tool-images.ts    # 有界 PNG/JPEG 预览与原图结构/尺寸准入
 │   ├── terminal.ts       # 终端 IPC 数据契约
 │   ├── workflows.ts      # 多 Agent 状态机投影
 │   └── ipc.ts            # IPC 频道一事实来源
@@ -197,6 +251,7 @@ src/
         │   ├── types.ts
         │   ├── reducer.ts
         │   ├── timeline.ts
+        │   ├── modelError.ts       # 常见模型/API 友好文案与原始诊断保留
         │   └── sessionOrder.ts
         ├── hooks/                # renderer 状态与副作用 hooks
         │   ├── agent/            # Agent 历史、运行、会话、提供商和订阅 hooks

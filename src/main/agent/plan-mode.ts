@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { IMAGE_GENERATION_TOOL_NAME } from '../../shared/image-generation'
 
 let extensionReady = false
 
@@ -28,7 +29,7 @@ export async function ensureNativePlanModeExtension(): Promise<string> {
 export function nativePlanModeExtensionSource(): string {
   return String.raw`const STATE_ENTRY_TYPE = "plan-mode-state";
 const READ_ONLY_TOOL_NAMES = ["read", "grep", "find", "ls"];
-const DEFAULT_NORMAL_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell", "pion_task", "pion_ask_user"];
+const DEFAULT_NORMAL_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell", "pion_task", "pion_ask_user", ${JSON.stringify(IMAGE_GENERATION_TOOL_NAME)}];
 const PLAN_COMMANDS = [
   { value: "start", label: "start", description: "进入只读计划模式" },
   { value: "exit", label: "exit", description: "退出计划模式并恢复构建工具" },
@@ -82,7 +83,8 @@ export default function (pi) {
   function restoreTools() {
     const previous = toolsBeforePlanMode;
     toolsBeforePlanMode = undefined;
-    const restored = previous && previous.length > 0 ? previous : normalTools();
+    // An explicit subset (including an empty one) must not reactivate hidden tools.
+    const restored = previous ?? normalTools();
     const nativeAsk = isReadOnlyBuiltInTool("pion_ask_user") ? ["pion_ask_user"] : [];
     pi.setActiveTools([...new Set([...restored, ...nativeAsk])]);
   }
@@ -99,6 +101,7 @@ export default function (pi) {
 
   function restore(ctx) {
     const wasEnabled = enabled;
+    const capturedTools = toolsBeforePlanMode;
     let restored;
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type !== "custom" || entry.customType !== STATE_ENTRY_TYPE) continue;
@@ -112,7 +115,12 @@ export default function (pi) {
     // Capture it before enable/restoreTools can capture or clear saved tools.
     persistedState = JSON.stringify(stateSnapshot());
     if (enabled) enableTools();
-    else if (wasEnabled || toolsBeforePlanMode !== undefined) restoreTools();
+    else if (wasEnabled || toolsBeforePlanMode !== undefined) {
+      // Tree navigation without a saved marker must not replace a captured
+      // explicit subset with the default set (which includes mutating tools).
+      if (toolsBeforePlanMode === undefined) toolsBeforePlanMode = capturedTools;
+      restoreTools();
+    }
   }
 
   function setMode(nextEnabled, ctx) {

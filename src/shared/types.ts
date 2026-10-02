@@ -171,6 +171,9 @@ export interface WireEntry {
   message?: WireMessage
   /** Present when type === 'compaction' */
   summary?: string
+  /** Compaction metadata retained for exact realtime/history reconciliation. */
+  firstKeptEntryId?: string
+  tokensBefore?: number
   /** Present when type === 'custom' */
   customType?: string
   data?: unknown
@@ -266,7 +269,7 @@ export interface TreeNodeLite {
 
 /** Shape of AgentToolResult on the wire. */
 export interface ToolResultPayload {
-  content?: Array<{ type: string; text?: string }>
+  content?: Array<{ type: string; text?: string; data?: string; mimeType?: string }>
   details?: ToolDetails
   [key: string]: unknown
 }
@@ -565,8 +568,10 @@ export function messageImages(message: WireMessage | undefined | null): ImageCon
 export function messageThinking(message: WireMessage | undefined | null): string {
   if (!message || !Array.isArray(message.content)) return ''
   return message.content
-    .filter((part) => part.type === 'thinking' && typeof part.text === 'string')
-    .map((part) => part.text as string)
+    .filter((part) => part.type === 'thinking')
+    .map((part) => typeof part.thinking === 'string'
+      ? part.thinking
+      : typeof part.text === 'string' ? part.text : '')
     .join('')
 }
 

@@ -1,6 +1,7 @@
-import { memo, useLayoutEffect, useRef } from 'react'
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { GitBranch, Undo2 } from 'lucide-react'
+import { describeModelError } from '../../agent/modelError'
 import type { TimelineItem } from '../../agent/types'
 import { armHistoryRevealRow } from '../../utils/historyReveal'
 import {
@@ -25,6 +26,23 @@ interface ChatMessageProps {
   revertDisabledReason?: string
 }
 
+const ModelErrorAnnouncement = memo(function ModelErrorAnnouncement({ text }: { text: string }): ReactElement {
+  const [announcement, setAnnouncement] = useState('')
+
+  useEffect(() => {
+    // Register an empty region first; history transitions/unmount can cancel
+    // the deferred update. Only changes to the short copy trigger a new one.
+    const timeout = window.setTimeout(() => setAnnouncement(text), 0)
+    return () => window.clearTimeout(timeout)
+  }, [text])
+
+  return (
+    <div className="bubble-error-announcement" role="status" aria-live="polite" aria-atomic="true">
+      {announcement}
+    </div>
+  )
+})
+
 export const ChatMessage = memo(function ChatMessage({
   item,
   onFork,
@@ -37,23 +55,38 @@ export const ChatMessage = memo(function ChatMessage({
   // Paged history carries noReveal on the item itself; it never waterfalls.
   const revealSuppressed = item.noReveal === true
   const previousThinkingRef = useRef('')
-  const previousErrorRef = useRef('')
+  const previousErrorMessageRef = useRef('')
   const assistant = item.kind === 'assistant' ? item : undefined
   const liveOutput = Boolean(assistant?.live && !assistant.historical)
   const text = assistant?.text ?? ''
   const thinking = assistant?.thinking ?? ''
   const error = assistant?.error ?? ''
+  const errorContext = assistant?.errorContext
+  const describedError = useMemo(() => error === '' ? undefined : describeModelError(error), [error])
+  const errorMessage = describedError?.message ?? ''
   const thinkingRevealCount = liveOutput
     ? appendedCharacterCount(previousThinkingRef.current, thinking)
     : 0
-  const errorRevealCount = liveOutput
-    ? appendedCharacterCount(previousErrorRef.current, error)
-    : 0
+  // Unrelated output/detail updates must not replace the visible summary's
+  // animated text nodes.
+  const errorContent = useMemo(() => {
+    if (revealSuppressed) return errorMessage
+    if (liveOutput) {
+      return (
+        <RevealText
+          text={errorMessage}
+          mode="live"
+          revealCount={appendedCharacterCount(previousErrorMessageRef.current, errorMessage)}
+        />
+      )
+    }
+    return item.historical ? <RevealLines text={errorMessage} mode="history" /> : errorMessage
+  }, [errorMessage, item.historical, liveOutput, revealSuppressed])
 
   useLayoutEffect(() => {
     previousThinkingRef.current = thinking
-    previousErrorRef.current = error
-  }, [error, thinking])
+    previousErrorMessageRef.current = errorMessage
+  }, [errorMessage, thinking])
 
   if (item.kind === 'user') {
     const entryId = item.entryId
@@ -155,9 +188,28 @@ export const ChatMessage = memo(function ChatMessage({
             />
           </div>
         )}
-        {error && (
-          <div className="bubble-error" data-live-output="error">
-            {liveOutput ? <RevealText text={error} mode="live" revealCount={errorRevealCount} /> : item.historical && !revealSuppressed ? <RevealLines text={error} mode="history" /> : error}
+        {describedError && (
+          <div
+            className="bubble-error"
+            data-error-category={describedError.category}
+            data-live-output="error"
+          >
+            <div className="bubble-error-summary">
+              {errorContext === 'compaction' && (
+                <span className="bubble-error-context">上下文压缩失败</span>
+              )}
+              <strong className="bubble-error-title">{describedError.title}</strong>
+              <p className="bubble-error-message">{errorContent}</p>
+            </div>
+            {liveOutput && (
+              <ModelErrorAnnouncement
+                text={`${describedError.title}。${errorMessage}${errorContext === 'compaction' ? ' 上下文压缩失败。' : ''}`}
+              />
+            )}
+            <details className="bubble-error-details">
+              <summary>技术详情</summary>
+              <pre>{describedError.raw}</pre>
+            </details>
           </div>
         )}
       </div>

@@ -5,6 +5,7 @@ import {
   type CreateAgentSessionRuntimeFactory, type AgentSession, type ModelRuntime
 } from '@earendil-works/pi-coding-agent'
 import { askUserTool } from './ask-user'
+import { createImageGenerationTool } from './image-generation'
 import { createSubagentControl, createSubagentRunner } from './subagents'
 
 /** Private host arguments, not a replacement for the public pi CLI. */
@@ -34,7 +35,7 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     // Each backend belongs to one project. Cross-project switches must go
     // through AgentBridge, which checks the target project's trust first.
-    if (relative(root, resolve(cwd)) !== '') throw new Error('跨项目会话切换必须由 Pion 工作台发起')
+    if (relative(root, resolve(cwd)) !== '' || relative(root, resolve(sessionManager.getCwd())) !== '') throw new Error('跨项目会话切换必须由 Pion 工作台发起')
     let parent: AgentSession
     let models: ModelRuntime
     const subagents = createSubagentControl(createSubagentRunner(() => parent, () => models, cwd, agentDir))
@@ -58,7 +59,12 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
       model: selected?.model,
       thinkingLevel: selected?.thinkingLevel,
       scopedModels: scope.scopedModels,
-      customTools: [askUserTool, subagents.tool]
+      customTools: [askUserTool, subagents.tool, createImageGenerationTool({
+        cwd,
+        // Capture this runtime's services, not a mutable active-session/global
+        // credential store. Refresh only after SDK tool permission gates.
+        getAuth: (overrides) => services.modelRuntime.getAuth('openai-codex', overrides)
+      })]
     })
     parent = created.session
     models = services.modelRuntime

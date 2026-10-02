@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import { RunStore } from '../../src/main/run-store'
-import { RUN_CHECKPOINT_MARKER, TOOL_PERMISSION_MARKER } from '../../src/main/tool-permissions'
+import { DEFAULT_TOOL_PERMISSION_RULES, RUN_CHECKPOINT_MARKER, TOOL_PERMISSION_MARKER, ToolPermissionStore } from '../../src/main/tool-permissions'
+import { IMAGE_GENERATION_TOOL_NAME } from '../../src/shared/image-generation'
 import type { ExtensionUiRequest } from '../../src/shared/types'
 
 const roots: string[] = []
@@ -114,6 +115,31 @@ describe('AgentBridge extension UI requests', () => {
       summary: '需要修改项目文件'
     }))
     off()
+  })
+
+  it('answers a stale image project grant with deny when a requested category is now denied', async () => {
+    const value = await fixture()
+    const store = (value.bridge as unknown as { toolPermissionStore: ToolPermissionStore }).toolPermissionStore
+    const policy = {
+      cwd: value.backend.cwd as string, source: 'saved' as const,
+      rules: { ...DEFAULT_TOOL_PERMISSION_RULES, network: 'deny' as const, write: 'ask' as const }
+    }
+    const grant = vi.spyOn(store, 'allowProjectCategories').mockResolvedValue(policy)
+    value.handle({
+      type: 'extension_ui_request', id: 'pi-image-permission-denied', method: 'select',
+      title: `${TOOL_PERMISSION_MARKER}${JSON.stringify({
+        cwd: value.backend.cwd, toolName: IMAGE_GENERATION_TOOL_NAME,
+        category: 'network', policyCategories: ['network', 'write'],
+        summary: '生成图片', detail: '写入新图片并使用 Codex 图片额度', risks: [], canRemember: true
+      })}`
+    })
+    const request = value.bridge.getPendingToolPermissionRequests()[0]
+    expect(await value.bridge.resolveToolPermission(request.id, 'allow-project')).toEqual(policy)
+    expect(grant).toHaveBeenCalledWith(value.backend.cwd, ['network', 'write'])
+    expect(value.bridge.getPendingToolPermissionRequests()).toEqual([])
+    expect(JSON.parse(value.writes[0])).toEqual({
+      type: 'extension_ui_response', id: 'pi-image-permission-denied', value: 'deny'
+    })
   })
 
   it('auto-approves tool permission requests while yolo mode is enabled', async () => {
