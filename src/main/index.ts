@@ -107,8 +107,15 @@ let projectsPush = (list: ProjectMeta[]): void => {
   void list
 }
 
-function pushProjects(): void {
-  projectsPush(projects.list())
+let projectsPushRevision = 0
+
+async function pushProjects(): Promise<void> {
+  const revision = ++projectsPushRevision
+  const push = projectsPush
+  const ownerId = mainWindowId
+  const list = await projects.listGrouped()
+  if (revision !== projectsPushRevision || push !== projectsPush || ownerId !== mainWindowId) return
+  push(list)
 }
 
 function createWindow(): void {
@@ -137,7 +144,7 @@ function createWindow(): void {
     if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.Projects, list)
   }
   projectsPush = push
-  push(projects.list())
+  void pushProjects()
 
   const pushMaximized = (): void => {
     if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.WindowState, win.isMaximized())
@@ -257,16 +264,16 @@ function registerIpc(): void {
   })
 
   // projects ----------------------------------------------------------------------
-  ipcMain.handle(IPC.ProjectsList, () => projects.list())
-  ipcMain.handle(IPC.ProjectsAdd, (_event, cwd: string) => {
-    projects.touch(cwd)
-    pushProjects()
-    return projects.list()
+  ipcMain.handle(IPC.ProjectsList, () => projects.listGrouped())
+  ipcMain.handle(IPC.ProjectsAdd, async (_event, cwd: string) => {
+    await projects.touchCanonical(cwd)
+    await pushProjects()
+    return projects.listGrouped()
   })
-  ipcMain.handle(IPC.ProjectsRemove, (_event, cwd: string) => {
-    projects.remove(cwd)
-    pushProjects()
-    return projects.list()
+  ipcMain.handle(IPC.ProjectsRemove, async (_event, cwd: string) => {
+    await projects.removeCanonical(cwd)
+    await pushProjects()
+    return projects.listGrouped()
   })
 
   // misc --------------------------------------------------------------------------

@@ -85,6 +85,25 @@ export async function listBranchInfos(cwd: string): Promise<BranchInfo[]> {
   }
 }
 
+/** Project identity only; never use this to replace a backend's working directory. */
+export async function canonicalProjectCwd(cwd: string): Promise<string> {
+  try {
+    // Only fold an actual, live registered worktree, not a path-name convention
+    // or an arbitrary subdirectory. The branch-list fallback preserves cwd.
+    if (!existsSync(cwd)) return cwd
+    const branches = await listBranchInfos(cwd)
+    const main = branches.find((branch) => branch.isMain)
+    // Includes listBranchInfos' non-Git/error fallback: retain the exact record
+    // instead of normalizing a failed lookup into a different identity.
+    if (main && resolve(main.cwd) === resolve(cwd)) return cwd
+    const registered = branches.some((branch) => resolve(branch.cwd) === resolve(cwd))
+    if (registered && main && existsSync(main.cwd)) return main.cwd
+  } catch {
+    // Missing directories and unavailable Git must not erase project records.
+  }
+  return cwd
+}
+
 /** Rename the branch checked out by the requested worktree. */
 export async function renameGitBranch(cwd: string, oldBranchName: string, newBranchName: string): Promise<BranchInfo> {
   const requestedCwd = resolve(cwd)

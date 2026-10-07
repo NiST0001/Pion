@@ -53,7 +53,7 @@
 | src/main/agent/pending-requests.ts | 待处理权限与扩展 UI 请求 |
 | src/main/agent/tool-permission-request.ts | 权限请求元数据解析 |
 | src/main/tool-permissions.ts | 工具权限规则、worktree 继承与执行闸门；codemode 每次 allowOnce 费用声明及 read/write/shell/network/external 联合 deny 门控，不代表 MCP 启动门控或逐模型审批；生图无引用 network + write、有引用再加 read，逐输入/输出检查目录外及敏感风险（字面 @），完整列出有界合法路径/角色、请求设置及原文件/metadata 上传和额度副作用，不序列化 prompt/图片/凭据或任意无效参数；保留既有检查点/取消边界，等待后复查全部策略，迟到允许及旧项目授权不能覆盖 deny；策略继承不放宽读取器的真实 worktree 限制 |
-| src/main/projects.ts | 项目列表管理 |
+| src/main/projects.ts | 按 Git 主工作树登记项目；关联 worktree 仅作分支，历史重复记录只读分组；有界归属查询、串行元数据变更与显式移除关联列表记录，不移动目录或会话 |
 | src/main/app-settings.ts | 桌面应用设置与会话模型偏好 |
 | src/main/run-store.ts | 运行记录、指标与恢复持久化；统计查询先排除队列；独立 SDK usage 归入匹配已派发运行，receipt 与保守重播下界持久化，不影响上下文占用 |
 | src/main/checkpoints.ts | Git 检查点与回滚 |
@@ -186,6 +186,8 @@
 - `tests/unit/ask-user.test.ts`、`runtime-host.test.ts`：内置提问选择/自定义回答、取消/无 UI/中止、回答长度上限，以及 SDK 工具注入、启动参数、跨项目隔离与每个 backend 的 Codex OAuth 延迟解析/独立捕获；`plan-mode.test.ts` 覆盖 SDK 提问工具的计划模式白名单、生图隐藏/执行拦截及显式工具子集/空集/分支恢复。
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
 - `tests/unit/review-file-tree.test.ts`：审查树目录优先排序、嵌套计数、原文件元数据与统计保留，以及既有父目录路径处理。
+- `tests/unit/projects.test.ts`：模拟主项目/worktree 登记、历史只读分组、名称与排序保留、缺失目录/非 Git 回退、显式移除元数据及异步变更/窗口推送竞态。
+- `tests/unit/worktree-session-isolation.test.ts`：按 SDK 会话真实 header cwd 隔离工作树，拒绝目录编码碰撞及未知归属，不迁移会话文件。
 - `tests/unit/session-sidebar-sync.test.ts`：新会话首次落盘后的项目列表推送；`optimistic-session.test.ts` 覆盖占位替换和跨项目列表隔离。
   - `historyReveal.test.tsx`、`screenTextReveal.test.tsx`：渐入行为。
 - `tests/e2e/app.spec.ts`：Electron 启动、侧栏设置/插件商店悬浮栏及列表底部避让、统计计费开关、统计按压不缩放、统计条/输入框覆盖完整消息视口、多行输入与详情展开不改变视口尺寸、详情同宽、插件卸载及 Git 审查提交场景。

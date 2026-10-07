@@ -240,7 +240,7 @@ function fixture() {
   registerAgentIpc({
     ipcMain: { handle: (channel, listener) => { handlers.set(channel, listener) } },
     bridge,
-    projects: { touch: () => { throw new Error('Unexpected project mutation') } },
+    projects: { touchCanonical: async () => { throw new Error('Unexpected project mutation') } },
     pushProjects: () => { throw new Error('Unexpected project mutation') }
   })
   const frame = {}

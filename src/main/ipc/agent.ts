@@ -16,8 +16,8 @@ import type {
 interface AgentIpcDependencies {
   ipcMain: Pick<IpcMain, 'handle'>
   bridge: AgentBridge
-  projects: Pick<ProjectStore, 'touch'>
-  pushProjects: () => void
+  projects: Pick<ProjectStore, 'touchCanonical'>
+  pushProjects: () => Promise<void>
 }
 
 // Reserve asynchronous mutations from IPC entry, including the gap before a
@@ -44,8 +44,8 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   // agent lifecycle -----------------------------------------------------------
   ipcMain.handle(IPC.AgentStart, async (_event, cwd: string) => {
     const result = await bridge.start(cwd)
-    projects.touch(cwd)
-    pushProjects()
+    await projects.touchCanonical(cwd)
+    await pushProjects()
     return result
   })
   ipcMain.handle(IPC.AgentStop, () => bridge.stop())

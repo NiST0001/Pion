@@ -3475,7 +3475,10 @@ export class AgentBridge {
     if (!dir) return []
     try {
       const infos = await SessionManager.list(dir)
-      return infos.map((info) => ({
+      // SDK session-directory encoding can collide (for example a-b vs a/b).
+      // The persisted header, not the queried bucket or project group, owns a
+      // session. Never relabel another worktree's history as this directory.
+      return infos.filter((info) => typeof info.cwd === 'string' && info.cwd.length > 0 && resolve(info.cwd) === resolve(dir)).map((info) => ({
         projectCwd: resolve(dir),
         path: info.path,
         id: info.id,

@@ -49,7 +49,9 @@ export function reducer(state: AgentState, action: Action): AgentState {
         timelineLoading: dead ? false : state.timelineLoading,
         timelineError: dead ? undefined : state.timelineError,
         session: dead || ready ? null : state.session,
-        sessions: dead ? [] : state.sessions,
+        sessions: dead ? [] : action.status.cwd !== state.status.cwd
+          ? state.sessionsByProject[action.status.cwd ?? ''] ?? []
+          : state.sessions,
         tree: dead || ready ? null : state.tree,
         historyIndex: dead || ready ? null : state.historyIndex,
         historyJump: dead || ready ? null : state.historyJump,
@@ -101,7 +103,11 @@ export function reducer(state: AgentState, action: Action): AgentState {
           reconcileSessionProjection(sessions, state.sessionsByProject[cwd] ?? [])
         ])
       )
-      return { ...state, sessionsByProject }
+      return {
+        ...state,
+        sessionsByProject,
+        sessions: state.status.cwd ? sessionsByProject[state.status.cwd] ?? [] : []
+      }
     }
     case 'projectSessionsUpdate': {
       const sessions = reconcileSessionProjection(
@@ -157,11 +163,18 @@ export function reducer(state: AgentState, action: Action): AgentState {
       return { ...state, historyJump: { entryId: action.entryId, nonce: action.nonce } }
     case 'projects': {
       const projectCwds = new Set(action.projects.map((project) => project.cwd))
-      const sessionsByProject = Object.fromEntries(
-        Object.entries(state.sessionsByProject).filter(([cwd]) => projectCwds.has(cwd))
-      )
       const branchesByProject = Object.fromEntries(
         Object.entries(state.branchesByProject).filter(([cwd]) => projectCwds.has(cwd))
+      )
+      // Project identity is the primary repository; session identity remains
+      // the individual worktree cwd. Folding duplicate project rows must not
+      // discard the retained project's branch session caches.
+      const sessionCwds = new Set(projectCwds)
+      for (const branches of Object.values(branchesByProject)) {
+        for (const branch of branches) sessionCwds.add(branch.cwd)
+      }
+      const sessionsByProject = Object.fromEntries(
+        Object.entries(state.sessionsByProject).filter(([cwd]) => sessionCwds.has(cwd))
       )
       return { ...state, projects: action.projects, sessionsByProject, branchesByProject }
     }

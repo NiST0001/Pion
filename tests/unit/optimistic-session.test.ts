@@ -35,6 +35,54 @@ function state(): AgentState {
 }
 
 describe('optimistic new session projection', () => {
+  it('keeps retained branch caches when duplicate worktree project rows are grouped', () => {
+    const branchCwd = '/tmp/elsewhere/feature'
+    const branchSession = { ...existing, id: 'branch', path: '/tmp/branch.jsonl', projectCwd: branchCwd }
+    const orphanCwd = '/tmp/removed-project'
+    const before = {
+      ...state(),
+      sessionsByProject: { [cwd]: [existing], [branchCwd]: [branchSession], [orphanCwd]: [existing] },
+      branchesByProject: {
+        [cwd]: [{ cwd, name: 'main', isMain: true }, { cwd: branchCwd, name: 'feature', isMain: false }],
+        [branchCwd]: [{ cwd: branchCwd, name: 'feature', isMain: false }]
+      }
+    }
+    const grouped = reducer(before, { type: 'projects', projects: [{ cwd, name: 'Project', addedAt: 1, lastUsedAt: 1 }] })
+    expect(grouped.sessionsByProject[branchCwd]).toEqual([branchSession])
+    expect(grouped.sessionsByProject[orphanCwd]).toBeUndefined()
+    expect(grouped.branchesByProject[branchCwd]).toBeUndefined()
+    expect(grouped.branchesByProject[cwd]).toEqual(before.branchesByProject[cwd])
+  })
+  it('selects the worktree list immediately on cwd changes without reusing root sessions', () => {
+    const worktreeCwd = '/tmp/project-feature'
+    const worktree = { ...existing, projectCwd: worktreeCwd, id: 'feature', path: '/tmp/feature.jsonl' }
+    const before = { ...state(), sessionsByProject: { [cwd]: [existing], [worktreeCwd]: [worktree] } }
+    const selected = reducer(before, { type: 'status', status: { phase: 'ready', cwd: worktreeCwd } })
+    expect(selected.sessions).toEqual([worktree])
+    expect(selected.sessionsByProject[cwd]).toEqual([existing])
+    const background = reducer(selected, { type: 'projectSessionsUpdate', cwd, sessions: [existing, optimistic] })
+    expect(background.sessions).toEqual([worktree])
+    const returned = reducer(background, { type: 'status', status: { phase: 'starting', cwd } })
+    expect(returned.sessions).toEqual([existing, optimistic])
+  })
+
+  it('does not carry the previous cwd list into an unloaded worktree', () => {
+    const selected = reducer(state(), { type: 'status', status: { phase: 'ready', cwd: '/tmp/project-feature' } })
+    expect(selected.sessions).toEqual([])
+    expect(selected.sessionsByProject[cwd]).toEqual([existing])
+  })
+
+  it('projects a bulk list refresh onto only the active worktree', () => {
+    const worktreeCwd = '/tmp/project-feature'
+    const worktree = { ...existing, projectCwd: worktreeCwd, id: 'feature', path: '/tmp/feature.jsonl' }
+    const selected = reducer(state(), { type: 'status', status: { phase: 'ready', cwd: worktreeCwd } })
+    const refreshed = reducer(selected, {
+      type: 'projectSessions',
+      sessionsByProject: { [cwd]: [existing, optimistic], [worktreeCwd]: [worktree] }
+    })
+    expect(refreshed.sessions).toEqual([worktree])
+    expect(refreshed.sessionsByProject[cwd]).toEqual([existing, optimistic])
+  })
   it('publishes a background project session without replacing the active project list', () => {
     const background = { ...existing, projectCwd: '/tmp/other-project', id: 'background', path: '/tmp/background.jsonl' }
     const updated = reducer(state(), { type: 'sessions', sessions: [background] })

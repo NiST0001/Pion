@@ -43,8 +43,8 @@ function mainEvent(id = 41, iframe = false): IpcMainInvokeEvent & IpcMainEvent {
 
 function agentHarness(methods: Partial<AgentBridge> = {}) {
   const ipc = collectIpc()
-  const projects = { touch: vi.fn(() => []) }
-  const pushProjects = vi.fn()
+  const projects = { touchCanonical: vi.fn(async () => {}) }
+  const pushProjects = vi.fn(async () => {})
   const withSessionOperation = vi.fn<AgentBridge['withSessionOperation']>(async (operation) => await operation())
   const bridge = { ...methods, withSessionOperation }
   // This harness supplies only the methods exercised by each route case, not
@@ -168,7 +168,7 @@ describe('agent IPC registration', () => {
     ])].sort())
     expect(h.listeners.size).toBe(0)
     expect(h.withSessionOperation).not.toHaveBeenCalled()
-    expect(h.projects.touch).not.toHaveBeenCalled()
+    expect(h.projects.touchCanonical).not.toHaveBeenCalled()
     expect(h.pushProjects).not.toHaveBeenCalled()
   })
 
@@ -208,20 +208,45 @@ describe('agent IPC registration', () => {
     const started = new Promise<void>((resolve) => { finish = resolve })
     const bridge = { start: vi.fn(() => { order.push('start'); return started }) }
     const h = agentHarness(bridge)
-    h.projects.touch.mockImplementation(() => { order.push('touch'); return [] })
-    h.pushProjects.mockImplementation(() => { order.push('push') })
+    h.projects.touchCanonical.mockImplementation(async () => { order.push('touch') })
+    h.pushProjects.mockImplementation(async () => { order.push('push') })
     const pending = h.invoke(IPC.AgentStart, mainEvent(), cwd)
     expect(order).toEqual(['start'])
     expect(bridge.start).toHaveBeenCalledExactlyOnceWith(cwd)
     expect(bridge.start.mock.contexts[0]).toBe(h.bridge)
-    expect(h.projects.touch).not.toHaveBeenCalled()
+    expect(h.projects.touchCanonical).not.toHaveBeenCalled()
     expect(h.pushProjects).not.toHaveBeenCalled()
     finish()
     await expect(pending).resolves.toBeUndefined()
     expect(order).toEqual(['start', 'touch', 'push'])
-    expect(h.projects.touch).toHaveBeenCalledExactlyOnceWith(cwd)
-    expect(h.projects.touch.mock.contexts[0]).toBe(h.projects)
+    expect(h.projects.touchCanonical).toHaveBeenCalledExactlyOnceWith(cwd)
+    expect(h.projects.touchCanonical.mock.contexts[0]).toBe(h.projects)
     expect(h.pushProjects).toHaveBeenCalledExactlyOnceWith()
+  })
+
+  it('keeps backend cwd isolated and waits for canonical registration and push', async () => {
+    let finishTouch!: () => void
+    let finishPush!: () => void
+    const touch = new Promise<void>((resolve) => { finishTouch = resolve })
+    const push = new Promise<void>((resolve) => { finishPush = resolve })
+    const h = agentHarness({ start: vi.fn(async () => ({ cwd })) as unknown as AgentBridge['start'] })
+    h.projects.touchCanonical.mockReturnValue(touch)
+    h.pushProjects.mockReturnValue(push)
+    let settled = false
+    const pending = Promise.resolve(h.invoke(IPC.AgentStart, mainEvent(), cwd)).then(() => { settled = true })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(h.bridge.start).toHaveBeenCalledWith(cwd)
+    expect(h.projects.touchCanonical).toHaveBeenCalledWith(cwd)
+    expect(h.pushProjects).not.toHaveBeenCalled()
+    finishTouch()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(h.pushProjects).toHaveBeenCalledOnce()
+    expect(settled).toBe(false)
+    finishPush()
+    await pending
+    expect(settled).toBe(true)
   })
 
   it.each(['throw', 'reject'])('does not update projects when start fails via %s', async (kind) => {
@@ -231,7 +256,7 @@ describe('agent IPC registration', () => {
       return Promise.reject(error)
     }) })
     await expect(h.invoke(IPC.AgentStart, mainEvent(), cwd)).rejects.toBe(error)
-    expect(h.projects.touch).not.toHaveBeenCalled()
+    expect(h.projects.touchCanonical).not.toHaveBeenCalled()
     expect(h.pushProjects).not.toHaveBeenCalled()
   })
 
@@ -519,7 +544,7 @@ describe('window IPC registration', () => {
 
 it('composes the three registrars without duplicate channels', () => {
   const h = collectIpc()
-  registerAgentIpc({ ipcMain: h.ipcMain, bridge: {} as AgentBridge, projects: { touch: vi.fn() }, pushProjects: vi.fn() })
+  registerAgentIpc({ ipcMain: h.ipcMain, bridge: {} as AgentBridge, projects: { touchCanonical: vi.fn() }, pushProjects: vi.fn() })
   registerGitIpc({ ipcMain: h.ipcMain, git: {} as GitService })
   registerWindowIpc({
     ipcMain: h.ipcMain, windowFromWebContents: vi.fn(),
