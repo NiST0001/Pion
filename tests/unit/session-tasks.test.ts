@@ -22,6 +22,40 @@ function entry(id: string, parentId: string | null, message: Record<string, unkn
 }
 
 describe('session task projection', () => {
+  it('projects durable nested task entries only, deduplicates late replay and fences pending restores', () => {
+    const custom = (id: string, snapshot = raw): WireEventInput => ({
+      type: 'entry_appended', entry: { id, type: 'custom', customType: 'pion-task-state',
+        data: { native: 'pion', tasks: snapshot } }
+    })
+    let state = reducer(initialState, { type: 'beginTaskRestore', id: 1 })
+    state = reducer(state, { type: 'event', event: custom('create') })
+    expect(state.tasks).toEqual(tasks)
+    expect(state.timeline).toBe(initialState.timeline)
+    expect(state.taskRevision).toBe(1)
+    state = reducer(state, { type: 'event', event: { ...event(), parentToolCallId: 'codemode' } })
+    expect(state.taskRevision).toBe(1)
+    state = reducer(state, { type: 'event', event: custom('clear', []) })
+    state = reducer(state, { type: 'event', event: custom('create') })
+    state = reducer(state, { type: 'restoreTasks', id: 1, tasks })
+    expect(state.tasks).toEqual([])
+    expect(state.taskRevision).toBe(2)
+    expect(state.timeline).toBe(initialState.timeline)
+    for (let i = 0; i < 300; i++) state = reducer(state, { type: 'event', event: custom(`clear-${i}`, []) })
+    expect(state.taskResultIds).toHaveLength(256)
+  })
+
+  it('does not apply malformed custom states or old restore replies after a scope reset', () => {
+    let state = reducer(live(), { type: 'beginTaskRestore', id: 1 })
+    state = reducer(state, { type: 'event', event: { type: 'entry_appended', entry: {
+      id: 'bad', type: 'custom', customType: 'pion-task-state',
+      data: { native: 'pion', tasks: [{ id: 1, subject: 'Bad', status: 'unknown' }] }
+    } } })
+    expect(state.tasks).toEqual(tasks)
+    state = reducer(state, { type: 'clearTimeline' })
+    state = reducer(state, { type: 'restoreTasks', id: 1, tasks })
+    expect(state.tasks).toBeNull()
+  })
+
   it('accepts a task result without a mounted user or tool-start row', () => {
     const state = live()
     expect(state.tasks).toEqual(tasks)
@@ -105,6 +139,23 @@ it('reads tasks from the selected ancestry, including before a compaction/window
   expect(sessionTasks(entries, 'other')).toEqual([])
   expect(sessionTasks(entries, 'root')).toEqual([])
   expect(sessionTasks(entries, null)).toEqual([])
+})
+
+it('reads custom and legacy snapshots by selected ancestry, not physical file tail or current page', () => {
+  const custom = (id: string, parentId: string, snapshot: unknown): SessionEntry => ({
+    id, parentId, type: 'custom', timestamp: '', customType: 'pion-task-state',
+    data: { native: 'pion', tasks: snapshot }
+  } as SessionEntry)
+  const entries = [
+    entry('legacy', null, { role: 'toolResult', toolName: 'todo', ...result }),
+    custom('clear', 'legacy', []),
+    custom('abandoned', 'legacy', raw),
+    custom('bad', 'clear', [{ id: 1, subject: 'Malformed', status: 'unknown' }]),
+    entry('tail', 'bad', { role: 'assistant', content: [] })
+  ]
+  expect(sessionTasks(entries, 'tail')).toEqual([])
+  expect(sessionTasks(entries, 'abandoned')).toEqual(tasks)
+  expect(sessionTasks(entries, 'legacy')).toEqual(tasks)
 })
 
 it('skips malformed snapshots without looping on damaged ancestry', () => {

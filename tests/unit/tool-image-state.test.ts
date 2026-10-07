@@ -30,6 +30,49 @@ function toolRow(state: AgentState) {
 afterEach(() => vi.restoreAllMocks())
 
 describe('tool image state', () => {
+  it('does not project nested executions as orphan transcript roots or decode their images', () => {
+    const collect = vi.spyOn(toolImages, 'collectToolImages')
+    let state = event(initialState, {
+      type: 'tool_execution_start', toolCallId: 'script', toolName: 'codemode', args: { code: 'await tools.read({ path: "file" })' }
+    })
+    const parent = toolRow(state)
+    for (const input of [
+      { type: 'tool_execution_start', toolCallId: 'nested', parentToolCallId: 'script', toolName: 'read', args: { path: 'file' } },
+      { type: 'tool_execution_update', toolCallId: 'nested', parentToolCallId: 'script', toolName: 'read', partialResult: finalMessage },
+      { type: 'tool_execution_end', toolCallId: 'nested', parentToolCallId: 'script', toolName: 'read', result: finalMessage, isError: false },
+      // A missed parent/start must not make the child an independent root either.
+      { type: 'tool_execution_start', toolCallId: 'orphan', parentToolCallId: 'missing-parent', toolName: 'read', args: {} }
+    ]) state = event(state, input as WireEventInput)
+    expect(state.timeline).toEqual([parent])
+    expect(collect).not.toHaveBeenCalled()
+    state = event(state, {
+      type: 'tool_execution_end', toolCallId: 'script', toolName: 'codemode',
+      result: { content: [{ type: 'text', text: 'Script completed' }] }, isError: false
+    })
+    expect(toolRow(state)).toMatchObject({ id: parent.id, tool: { id: 'script', outputText: 'Script completed', status: 'done' } })
+  })
+
+  it.each(['codemode', 'mcp__server__image'])('keeps %s previews bounded and never projects raw result metadata', (name) => {
+    const collect = vi.spyOn(toolImages, 'collectToolImages')
+    const payload = {
+      content: [{ type: 'text', text: 'output' }, previewPart],
+      structuredContent: { data: 'raw-secret-image', metadata: 'private-input-metadata' },
+      details: { rawImage: 'raw-secret-image', metadata: 'private-input-metadata' }
+    }
+    const first = applyToolResult({ ...tool, name }, payload, false)
+    const second = applyToolResult(first, { ...payload, content: [{ type: 'text', text: 'final output' }, previewPart] }, false, 'message')
+    expect(second.images).toBe(first.images)
+    expect(collect).toHaveBeenCalledTimes(1)
+    expect(second.outputText).toBe('final output')
+    expect(JSON.stringify(second)).not.toContain('raw-secret-image')
+    expect(JSON.stringify(second)).not.toContain('private-input-metadata')
+    const rejected = applyToolResult(second, {
+      content: [{ ...previewPart, data: previewPart.data + '!'.repeat(toolImages.MAX_TOOL_IMAGE_BASE64_LENGTH) }]
+    }, false)
+    expect(rejected.images).toEqual([])
+    expect(rejected.imageNotice).toBeTruthy()
+  })
+
   it('keeps partial updates text-only and validates previews once at the final result', () => {
     const collect = vi.spyOn(toolImages, 'collectToolImages')
     const decode = vi.spyOn(globalThis, 'atob')

@@ -462,6 +462,45 @@ describe('ToolCallItem', () => {
     expect(card).not.toHaveTextContent('免费')
   })
 
+  it('shows native capabilities only from the actual builtin registration and does not claim MCP readiness', async () => {
+    vi.stubGlobal('pion', { getCapabilities: vi.fn().mockResolvedValue({ skills: [], tools: [
+      { name: 'codemode', label: 'Native code', description: 'Execute JavaScript', source: 'builtin' },
+      { name: 'tool_search', label: 'Native search', description: 'Search tools', source: 'builtin' },
+      { name: 'mcp__server__read', label: 'MCP read', description: 'Read remote resource', source: 'builtin' }
+    ] }) })
+    render(<SkillsToolsModal open onClose={vi.fn()} />)
+    await act(async () => undefined)
+    fireEvent.click(screen.getByRole('button', { name: /工具.*文件与命令/ }))
+    const code = screen.getByText('Native code').closest('article')
+    expect(code).toHaveTextContent('Pi 原生')
+    expect(code).toHaveTextContent('models 模型目录')
+    expect(code).toHaveTextContent('classifier / image')
+    expect(code).toHaveTextContent('可能产生提供商费用')
+    expect(code).toHaveTextContent('计划模式禁用')
+    expect(code).not.toHaveTextContent('已安装插件')
+    expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('全局和受信任项目')
+    expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('stdio / HTTP')
+    expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('/mcp status')
+    expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('login、logout、reconnect')
+    expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('配置不会自动迁移，插件不会自动卸载')
+    expect(screen.getByText('MCP read').closest('article')).not.toHaveTextContent(/ready|已连接/)
+    expect(code?.querySelector('button, input, select')).toBeNull()
+  })
+
+  it('does not advertise absent native capabilities or relabel same-name plugin tools as native', async () => {
+    vi.stubGlobal('pion', { getCapabilities: vi.fn().mockResolvedValue({ skills: [], tools: [
+      { name: 'codemode', label: 'Plugin code', description: 'Plugin supplied code tool', source: 'npm:example-plugin' }
+    ] }) })
+    render(<SkillsToolsModal open onClose={vi.fn()} />)
+    await act(async () => undefined)
+    fireEvent.click(screen.getByRole('button', { name: /工具.*文件与命令/ }))
+    const plugin = screen.getByText('Plugin code').closest('article')
+    expect(plugin).toHaveTextContent('example-plugin')
+    expect(plugin).not.toHaveTextContent('Pi 原生')
+    expect(screen.queryByText(/Pi 原生 MCP 使用 mcp.json/)).not.toBeInTheDocument()
+    expect(screen.queryByText('tool_search')).not.toBeInTheDocument()
+  })
+
   it('keeps paged history outside the live reveal path', () => {
     const { container } = render(<ToolCallItem tool={liveTool} historical />)
 

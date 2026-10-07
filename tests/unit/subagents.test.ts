@@ -1,10 +1,10 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import type { ExtensionAPI, ExtensionToolContext } from '@earendil-works/pi-coding-agent'
 import { createSubagentControl, type SubagentResult } from '../../src/main/agent/subagents'
 
 import { DEFAULT_SUBAGENT_SETTINGS, type SubagentSettings } from '../../src/shared/subagents'
 
-const context = {} as ExtensionContext
+const context = { tools: [], executeTool: vi.fn(async () => { throw new Error('Unexpected tool delegation') }) } as unknown as ExtensionToolContext
 afterEach(() => vi.useRealTimers())
 function setup(run: Parameters<typeof createSubagentControl>[0] = async (task) => ({ name: task.name, status: 'completed', text: 'done' }),
   getSettings: () => SubagentSettings | Promise<SubagentSettings> = () => ({ ...DEFAULT_SUBAGENT_SETTINGS })) {

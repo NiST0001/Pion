@@ -106,7 +106,9 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 原生任务工具的系统提示和工具提示统一使用跨消息计划策略：AI 根据当前目标与已有任务判断继续、调整或替换计划，不再要求每条用户消息先 clear。同一目标保留任务 ID、状态与依赖，可追加细化；简单问答保留计划但不自动启动无关任务。替换未完成计划前说明取舍，关键歧义先询问。任务数量与粒度按实际可执行、可验收的工作确定；未完成工作可以跨回复保留，不能仅为结束回复标记完成。此处调整模型决策提示，不新增消息到达时的自动清空逻辑，也不保证每个模型必然采用相同拆分；工具仍由显式 clear 重置，保留单一进行中、模式隐藏、权限与当前分支恢复边界。
 
-实时 `tool_execution_end`、任务结果的 `message_end` / `entry_appended` 可独立更新快照，不要求工具开始行仍在页面中。工具调用 ID 使用有界去重；恢复请求记录 revision，请求期间的新任务结果优先。错误/缺失数据与有效空列表分开处理：明确清空才清空已有任务，普通历史加载失败保留当前快照。时间线缓存另存任务状态，分页不覆盖它；真实会话切换、复制/分叉或删除活动会话重置任务作用域。按用户轮次归档的任务历史仍由 `deriveSessionTaskRuns` 单独处理。
+原生任务的 clear/create/update/delete 在返回前同步追加 `pion-task-state` 分支完整快照，提交失败回滚内存和 nextId，list/get 不新增提交。原生恢复、分页快照及用户轮次归档同时识别自定义提交与旧工具结果，codemode 嵌套调用即使没有独立工具消息也能持久恢复。
+
+实时自定义提交、`tool_execution_end`、任务结果的 `message_end` / `entry_appended` 可独立更新快照，不要求工具开始行仍在页面中。工具调用 ID 使用有界去重；恢复请求记录 revision，请求期间的新任务结果优先。错误/缺失数据与有效空列表分开处理：明确清空才清空已有任务，普通历史加载失败保留当前快照。时间线缓存另存任务状态，分页不覆盖它；真实会话切换、复制/分叉或删除活动会话重置任务作用域。按用户轮次归档的任务历史仍由 `deriveSessionTaskRuns` 单独处理。
 
 ## 模型/API 错误提示
 
@@ -118,7 +120,41 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 ## pi SDK 兼容与缓存预热
 
-内置 pi 升级至 0.87.1。子代理从 `AgentSession.systemPrompt` 继承有效系统提示，不读取新版已移入 transcript 的旧 `agent.state.systemPrompt` 字段。消息撤销校验支持 SDK 的独立 `usage`、`context_edit` 与不保留旧消息的压缩边界；上下文编辑只影响模型输入，不改写原始聊天记录或撤销时恢复的原文。旧进程真实退出屏障仍须保留。
+Pion 的 pi 依赖范围与锁定解析以 `package.json` / `package-lock.json` 为准，Node 最低要求仍为 22.19。升级依赖不会更新正在运行的安装版。子代理从 `AgentSession.systemPrompt` 继承有效系统提示，不读取新版已移入 transcript 的旧 `agent.state.systemPrompt` 字段。消息撤销校验支持 SDK 的独立 `usage`、`context_edit` 与不保留旧消息的压缩边界；上下文编辑只影响模型输入，不改写原始聊天记录或撤销时恢复的原文。旧进程真实退出屏障仍须保留。
+
+### SDK 与 CLI 能力边界
+
+Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP、codemode 和 tool-search factories，`runtime-host.ts` 与 `capabilities.ts` 共用此注册入口。三者沿用 `builtin` / `replaceable` 身份；旧 `pi-mcp-adapter` 注册的 `/mcp` 可以替换原生 builtin，不能双启或仅凭原生注册宣称原生 MCP 已活动。用户禁用扩展、`noExtensions` 和显式工具集合（包括空集）必须持续生效，不能只依赖启动时的 `defaultTools`。能力扫描仅加载 factory 注册，不连接 MCP 服务器、不读取认证凭据，也不是服务器可用性检查。`ExtensionToolContext.executeTool` / `tools` 是执行上下文契约，不自动新增工具。
+
+#### 原生 MCP 配置与启动边界
+
+原生 MCP 使用用户 `~/.pi/agent/mcp.json` 与项目 `.pi/mcp.json`，配置采用 canonical `mcpServers` 结构。项目配置只在用户信任项目后生效，并受用户全局服务器配置基线约束；Pion 不自动迁移凭据、删除旧插件或改写用户配置。RPC 下 `/mcp` 提供文字状态及 login、logout、reconnect 操作，不承诺 CLI 自定义 TUI 在 GUI 中可用。尚未进行真实 MCP 服务器验证，卸载旧插件前应逐项复核配置兼容性及所用服务器，不能承诺所有插件均可移除。
+
+启用的服务器会在会话启动阶段、工具调用之前后台连接：stdio 可启动子进程并继承完整环境，`!command` 可执行命令，HTTP 可触发 OAuth。工具调用权限闸门不覆盖这些启动副作用，也不是 OS 沙箱；仅隐藏/禁用工具曝光不停止既有连接，服务器配置 `enabled: false` 才停止连接。启用配置前应先审查服务器、命令及环境暴露风险。
+
+#### 原生脚本、费用与结果投影
+
+codemode 明确启用 `models: true`，允许脚本调用模型（包括分类和图片生成），可能使用付费服务。外层 codemode 每次执行必须取得 `allowOnce`，确认声明费用风险，并同时检查 `read`、`write`、`shell`、`network`、`external` 五类权限；任一 deny 阻止执行。此授权不是逐模型调用审批，不应声称每个脚本内部模型调用均单独确认，也不能将原生模型图片生成自动作为 `pion_generate_image` 失败后的回退。
+
+每个脚本最多发起 8 次模型调用，主机等待期限为 5 分钟，并传递父级中止信号。停止等待不能证明已经派发的服务请求停止；失败或取消仍可能收费。模型调用的原 SDK usage 只沿既有累计计费链路汇总，不充当父会话上下文占用，不额外重复上报。嵌套工具事件保留 `parentToolCallId` 供过滤，不另建独立的根 transcript 或重复统计。
+
+codemode、MCP 工具及 MCP resource 的图片结果在输出边界做 fail-closed 投影，最多保留 4 张静态 PNG/JPEG，每张不超过 512 像素/边、96 KiB 原始字节；超限或无效载荷返回安全提示，不解码原图。保守清除 `structuredContent` 防止无界副本进入历史，因此可能影响依赖结构化 MCP 结果的程序化脚本。任意文字/base64、脚本/store/参数仍可能进入记录，不保证全面识别或清除。SDK 可能把原图保存在 OS 临时目录而非项目中，metadata 未保证清除；这不是 Pion 内置生图的项目保存契约。
+
+计划模式重新应用白名单，并在执行时阻止 codemode、tool search 与动态 MCP，不能借嵌套执行绕过；子代理继续限定为父级可见的 SDK 内置编码工具并使用 `noExtensions`，不扩大原生扩展或模型脚本范围。
+
+RPC `prompt` / `steer` / `followUp` 的返回值表示输入接受、排队或被扩展消费，不表示模型运行完成。`handled` 不保证有 `agent_settled`：`AgentBridge` 按 backend、运行、派发 token 与事件 generation 只释放没有新事件的自身预留；扩展启动的新运行不能被迟到回复收尾。队列更新按本次派发的精确账本归属，不用相同文本清除其他消息。
+
+独立工作流 runner 在权限扩展准备与启动前注册取消闸门和总期限，在发送 prompt 前注册监听；每个副作用前及等待后检查终态，阻止取消后的构造/启动/派发。既保留快速终态，也处理无运行的 `handled`；已观察到扩展运行时仍等待 `agent_settled`。`agent_end` 不是最终完成证明，`message_end` 的文字和错误终态优先，空终态也不能回退到旧输出。取消、超时及失败清理监听、计时器和 worker，并请求停止子进程；这不替代消息撤销要求的真实退出屏障。renderer 同样以最终助手内容为准，空 text / thinking 会移除旧 streaming 草稿。
+
+会话可从首条用户消息开始持久化，不应等待助手回复才承认会话文件。分支回退仍保留独立 `usage`、`context_edit`、retain-none 压缩边界、真实退出屏障与路径隔离；`stop-for-history.ts` 对私有 `RpcClient.process` 的适配须随锁定 SDK 复核，不能把 `stop()` 返回视为实际退出。
+
+### 提供商升级注意事项
+
+OpenAI 的 “Sign in with ChatGPT” 登录通过 SDK 请求稳定安装设备 UUID。`ProviderAuthService` 按需使用 SDK `SettingsManager` 的 global-only 设置，不混入项目设置，并等待 `flush()`、检查独立错误队列；保存失败不能宣称设备 ID 已稳定。此登录接入不读取或迁移用户凭据。生图仍请求所属后端的旧 `openai-codex` OAuth，不自动切换到 `openai`，新聊天登录不能视为生图认证已兼容。
+
+Azure 的提供商 ID 从 `azure-openai-responses` 改为 `azure`。使用 Azure 的用户需要检查 `auth.json`、`models.json`、全局/项目 `settings.json` 及 Pion 会话模型偏好中的提供商引用；Pion 不自动迁移这些配置或历史。提供商 ID 与 API 类型不同，API 类型 `azure-openai-responses` 仍有效，不能全局替换该字符串。
+
+验证报告应分别列出静态检查、类型检查、相关模拟回归、全量测试、coverage、构建、安装、GUI 与真实 API 的实际执行范围；依赖锁定、源码适配或模拟测试不能替代其他范围的验证，真实认证/API 调用需要单独授权。
 
 沿用 pi 的缓存预热设置；子代理内存设置继承父级的 `off` / `streaming` / `idle`，不写用户配置。预热可能额外调用模型并产生费用：主会话按 backend 实例、项目/会话、提供商与条目时间归入最近已派发运行（预热返回的模型别名不必等于配置 ID），子代理独立 usage 随结果累计。两者只更新累计用量，不覆盖真实上下文占用。子代理使用有界的近期 ID 窗口去重；主进程 receipt 与运行账本原子持久化，淘汰后以时间下界保守拒绝旧事件，避免重复计费，但可能漏计非常迟到的首次事件。无匹配已派发运行的费用不虚构运行、不算给未来队列；完整记录保留在 SDK 会话文件，运行统计仍仅代表已加载运行，不是整个会话账单。
 
@@ -201,6 +237,7 @@ src/
 │   │   ├── queue-projection.ts   # Pi 原始队列与 Pion 本地队列投影
 │   │   ├── provider-auth-ui.ts   # 提供商认证交互适配
 │   │   ├── runtime-host.ts       # 所属后端 SDK 运行时与内置工具注入
+│   │   ├── native-extensions.ts  # MCP/codemode/tool-search factories、预算与结果投影
 │   │   ├── image-generation.ts   # 尺寸/质量请求、参考图编辑与无覆盖保存/预览
 │   │   ├── image-inputs.ts       # 只读参考图快照、预算与跨实例真实操作背压
 │   │   ├── codex-image-transport.ts # Codex 订阅 JSON generations/edits 与 OAuth

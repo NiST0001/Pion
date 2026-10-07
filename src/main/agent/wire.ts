@@ -3,7 +3,7 @@
  */
 import type { SessionEntry, SessionTreeNode } from '@earendil-works/pi-coding-agent'
 import type { AgentMode, SessionTask, TreeNodeLite, WireEntry, WireMessage } from '../../shared/types'
-import { taskSnapshotFromResult } from '../../shared/task-history'
+import { taskSnapshotFromEntry, taskSnapshotFromResult } from '../../shared/task-history'
 import { messageText, messageToolCalls } from '../../shared/types'
 
 /** Derive the current build/plan mode from Pion plan-mode-state custom entries. */
@@ -49,6 +49,8 @@ export function sessionTasks(entries: SessionEntry[], leafId: string | null): Se
     visited.add(id)
     const entry = byId.get(id)
     if (!entry) break
+    const customTasks = taskSnapshotFromEntry(entry)
+    if (customTasks !== undefined) return customTasks
     if (entry.type === 'message') {
       const message = entry.message as unknown as WireMessage
       if (message.role === 'toolResult') {

@@ -20,10 +20,12 @@ function runtime(saved?: PlanState, options: { activeTools?: string[]; imageAvai
   const appendEntry = vi.fn((customType: string, data: PlanState) => {
     branch.push({ id: `entry-${branch.length}`, type: 'custom', customType, data: structuredClone(data) })
   })
+  const registered = initialTools.map((name) => ({ name,
+    sourceInfo: { source: name === 'pion_ask_user' || name === IMAGE_GENERATION_TOOL_NAME
+      ? 'sdk' : name === 'custom-tool' ? 'extension' : 'builtin' }, exposure: 'direct',
+    annotations: { readOnlyHint: false } }))
   const pi = {
-    getAllTools: () => initialTools.map((name) => ({ name,
-      sourceInfo: { source: name === 'pion_ask_user' || name === IMAGE_GENERATION_TOOL_NAME
-        ? 'sdk' : name === 'custom-tool' ? 'extension' : 'builtin' } })),
+    getAllTools: () => registered,
     getActiveTools: () => [...tools],
     setActiveTools: (names: string[]) => { tools = [...names] },
     appendEntry,
@@ -36,7 +38,7 @@ function runtime(saved?: PlanState, options: { activeTools?: string[]; imageAvai
   ))() as (api: typeof pi) => void
   install(pi)
   const ctx: PlanContext = { sessionManager: { getBranch: () => branch }, ui: { notify: vi.fn() } }
-  return { initialTools, branch, appendEntry, tools: () => tools, setTools: pi.setActiveTools,
+  return { initialTools, registered, branch, appendEntry, tools: () => tools, setTools: pi.setActiveTools,
     event: (name: string, event: unknown = {}) => handlers.get(name)!(event, ctx),
     command: (args: string) => command.handler(args, ctx) }
 }
@@ -84,6 +86,45 @@ describe('Pion native plan mode', () => {
     await h.command('exit')
     expect(h.tools()).toContain(IMAGE_GENERATION_TOOL_NAME)
     expect(await h.event('tool_call', call)).toBeUndefined()
+  })
+
+  it.each(['codemode', 'tool_search', 'mcp__server__read', 'mcp__server__delete',
+    'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource', 'mcp', 'mcpScript'])('blocks dynamically exposed %s including nested calls despite readOnlyHint', async (name) => {
+    const h = runtime(undefined, { activeTools: ['read'] })
+    await h.event('session_start')
+    await h.command('start')
+    // Server connects / schema search activates a newly registered tool after entry.
+    h.registered.push({ name, sourceInfo: { source: 'builtin' }, exposure: 'deferred', annotations: { readOnlyHint: true } })
+    h.setTools(['read', name])
+    const prompt = await h.event('before_agent_start', { systemPrompt: 'base' })
+    expect(prompt).toMatchObject({ systemPrompt: expect.stringContaining('[PION PLAN MODE]') })
+    expect(h.tools()).toEqual(['read', 'pion_ask_user'])
+    h.setTools(['read', name]) // race with automatic server activation after prompt
+    expect(await h.event('tool_call', { toolName: name, toolCallId: 'parent/1', parentToolCallId: 'parent', input: {} })).toMatchObject({ block: true })
+    expect(h.tools()).toEqual(['read', 'pion_ask_user'])
+    await h.command('exit')
+    expect(h.tools()).toEqual(['read', 'pion_ask_user'])
+    expect(h.tools()).not.toContain(name)
+  })
+
+  it('does not restore newly loaded deferred write tools after an explicitly empty plan loadout', async () => {
+    const h = runtime(undefined, { activeTools: [] })
+    await h.command('start')
+    h.registered.push({ name: 'mcp__server__write', sourceInfo: { source: 'builtin' }, exposure: 'deferred', annotations: { readOnlyHint: true } })
+    h.setTools(['codemode', 'tool_search', 'mcp__server__write'])
+    await h.event('before_agent_start', { systemPrompt: 'base' })
+    await h.command('exit')
+    expect(h.tools()).toEqual(['pion_ask_user'])
+  })
+
+  it('does not allow a same-named plugin read tool or schema search to create an indirect plan escape', async () => {
+    const h = runtime()
+    await h.command('start')
+    h.registered.find((tool) => tool.name === 'read')!.sourceInfo.source = 'extension'
+    expect(await h.event('tool_call', { toolName: 'read', toolCallId: 'parent/2', parentToolCallId: 'parent' })).toMatchObject({ block: true })
+    expect(h.tools()).toEqual(['pion_ask_user'])
+    expect(await h.event('tool_call', { toolName: 'tool_search' })).toMatchObject({ block: true })
+    expect(await h.event('tool_call', { toolName: 'codemode' })).toMatchObject({ block: true })
   })
 
   it('preserves an explicit active subset on exit instead of enabling the image fallback', async () => {

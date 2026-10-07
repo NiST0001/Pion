@@ -16,7 +16,7 @@ const cwd = resolve('project')
 beforeEach(() => {
   vi.clearAllMocks()
   const manager = { getCwd: () => cwd, buildSessionContext: () => ({ messages: [] }) }
-  const settings = { getEnabledModels: () => [], getDefaultProvider: () => undefined, getDefaultModel: () => undefined }
+  const settings = { getEnabledModels: () => [], getDefaultProvider: () => undefined, getDefaultModel: () => undefined, getDefaultTools: () => undefined, getSettings: () => ({}), applyOverrides: vi.fn() }
   mocks.create.mockReturnValue(manager)
   mocks.open.mockReturnValue(manager)
   mocks.settings.mockReturnValue(settings)
@@ -26,8 +26,8 @@ beforeEach(() => {
     // Exercise only the injected runtime boundary, not the real image API.
     execute: async (signal: AbortSignal) => options.getAuth({ signal, minOAuthValidityMs: 300_000 })
   }))
-  mocks.services.mockResolvedValue({ settingsManager: settings, modelRuntime: { getAuth: mocks.auth }, diagnostics: [] })
-  mocks.session.mockResolvedValue({ session: {}, extensionsResult: {} })
+  mocks.services.mockResolvedValue({ settingsManager: settings, modelRuntime: { getAuth: mocks.auth }, resourceLoader: { getExtensions: () => ({ extensions: [] }) }, diagnostics: [] })
+  mocks.session.mockResolvedValue({ session: { getActiveToolNames: () => ['read', 'bash', 'edit', 'write'] }, extensionsResult: {} })
   mocks.runtime.mockImplementation(async (factory, target) => factory(target))
 })
 
@@ -44,11 +44,23 @@ it('injects a compiled SDK tool, preserves trust gating, and recreates tools for
   expect(mocks.session).toHaveBeenCalledWith(expect.objectContaining({ customTools: [expect.objectContaining({ name: 'pion_ask_user' }), expect.objectContaining({ name: 'pion_subagents' }), expect.objectContaining({ name: 'pion_generate_image' })] }))
   expect(mocks.image).toHaveBeenCalledWith({ cwd, getAuth: expect.any(Function) })
   expect(mocks.auth).not.toHaveBeenCalled()
-  expect(mocks.services).toHaveBeenCalledWith(expect.objectContaining({ resourceLoaderOptions: { additionalExtensionPaths: [resolve(cwd, 'permissions.ts')], extensionFactories: [expect.any(Function)] } }))
+  expect(mocks.services).toHaveBeenCalledWith(expect.objectContaining({ resourceLoaderOptions: { additionalExtensionPaths: [resolve(cwd, 'permissions.ts')], extensionFactories: [
+    expect.objectContaining({ name: 'codemode', builtin: true, replaceable: true }),
+    expect.objectContaining({ name: 'tool-search', builtin: true, replaceable: true }),
+    expect.objectContaining({ name: 'mcp', builtin: true, replaceable: true }),
+    expect.any(Function), expect.any(Function), expect.any(Function)
+  ] } }))
   const [factory, target] = mocks.runtime.mock.calls[0]
   await factory({ ...target, sessionStartEvent: { reason: 'new' } })
   expect(mocks.session).toHaveBeenCalledTimes(2)
   expect(mocks.image).toHaveBeenCalledTimes(2)
+  const firstFactories = mocks.services.mock.calls[0][0].resourceLoaderOptions.extensionFactories
+  const nextFactories = mocks.services.mock.calls[1][0].resourceLoaderOptions.extensionFactories
+  for (let index = 0; index < 3; index++) {
+    expect(nextFactories[index]).not.toBe(firstFactories[index])
+    expect(nextFactories[index].factory).not.toBe(firstFactories[index].factory)
+  }
+  for (const index of [3, 5]) expect(nextFactories[index]).not.toBe(firstFactories[index])
   const firstImage = mocks.session.mock.calls[0][0].customTools[2]
   const secondImage = mocks.session.mock.calls[1][0].customTools[2]
   expect(secondImage).not.toBe(firstImage)
@@ -74,6 +86,33 @@ it('captures each backend’s own model runtime and only resolves Codex OAuth wh
   await mocks.session.mock.calls[1][0].customTools[2].execute(signal)
   expect(nextAuth).toHaveBeenCalledWith('openai-codex', { signal, minOAuthValidityMs: 300_000 })
   expect(mocks.auth).toHaveBeenCalledTimes(1)
+})
+
+it('freezes raw explicit loadouts before defaults and RPC MCP lifecycle binding', async () => {
+  const settings = mocks.settings()
+  settings.getSettings = () => ({ defaultTools: ['+codemode', '+mcp__docs__*', '-mcp__docs__delete*'] })
+  settings.getDefaultTools = () => ['codemode', 'mcp__docs__*']
+  const initial = ['read', 'bash', 'edit', 'write', 'codemode']
+  const getActiveToolNames = vi.fn(() => [...initial])
+  mocks.session.mockResolvedValue({ session: { getActiveToolNames }, extensionsResult: {} })
+  await createPionRuntime(['--mode', 'rpc'], cwd)
+  expect(settings.applyOverrides).not.toHaveBeenCalled()
+  expect(getActiveToolNames).toHaveBeenCalledTimes(1)
+  const factories = mocks.services.mock.calls[0][0].resourceLoaderOptions.extensionFactories
+  const handlers = new Map<string, (event: any) => unknown>()
+  factories[3]({
+    getActiveTools: () => ['read', 'codemode', 'tool_search', 'mcp__other__get'],
+    setActiveTools: vi.fn(),
+    on: (name: string, handler: (event: any) => unknown) => { handlers.set(name, handler); return () => {} }
+  })
+  // Binding after creation sees an MCP-expanded loadout; it cannot recapture it.
+  handlers.get('session_start')!({ reason: 'startup' })
+  const call = (toolName: string) => handlers.get('tool_call')!({ toolName, input: {}, parentToolCallId: 'codemode/1' })
+  expect(call('write')).toBeUndefined()
+  expect(call('mcp__docs__get')).toBeUndefined()
+  expect(call('mcp__docs__delete_all')).toMatchObject({ block: true })
+  expect(call('mcp__other__get')).toMatchObject({ block: true })
+  expect(call('tool_search')).toMatchObject({ block: true })
 })
 
 it('rejects a stored session from another project before creating services or tools', async () => {

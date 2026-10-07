@@ -1,10 +1,10 @@
 import { expect, it, vi } from 'vitest'
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
+import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent'
 import { askUserTool } from '../../src/main/agent/ask-user'
 
 function context(hasUI = true) {
-  const ui = { select: vi.fn<ExtensionContext['ui']['select']>(), input: vi.fn<ExtensionContext['ui']['input']>() }
-  return { ui, ctx: { hasUI, ui } as unknown as ExtensionContext }
+  const ui = { select: vi.fn<ExtensionToolContext['ui']['select']>(), input: vi.fn<ExtensionToolContext['ui']['input']>() }
+  return { ui, ctx: { hasUI, ui, tools: [], executeTool: vi.fn(async () => { throw new Error('Unexpected tool delegation') }) } as unknown as ExtensionToolContext }
 }
 const question = '目标平台是什么？'
 

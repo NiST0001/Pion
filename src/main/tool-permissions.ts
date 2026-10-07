@@ -237,6 +237,19 @@ const NETWORK_TOOL = /(web|http|fetch|browser|search|crawl|url|download|upload|r
 const NETWORK_COMMAND = /(^|[;&|\s])(curl|wget|ssh|scp|sftp|rsync|telnet|nc|ncat|ftp|gh\s+api|git\s+(clone|fetch|pull|push)|npm\s+(install|publish|view)|pnpm\s+(add|install)|yarn\s+(add|install)|pip\s+install|cargo\s+install|docker\s+pull|kubectl\s+)/i;
 const DESTRUCTIVE_COMMAND = /(\brm\s+[^\n]*(?:-r|-f|--recursive|--force)|\bsudo\b|\b(?:chmod|chown)\b|\bmkfs\b|\bdd\s+[^\n]*\bof=|\b(?:shutdown|reboot|poweroff)\b|\bgit\s+(?:reset\s+--hard|clean\s+-[^\n]*f|checkout\s+--)|:\s*>\s*\/dev\/sd)/i;
 const sessionAllows = new Set();
+const OPAQUE_CATEGORIES = ["read", "write", "shell", "network", "external"];
+const MCP_RESOURCE_TOOLS = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+let getToolInfo = () => undefined;
+
+function isNativeTool(name) {
+  return getToolInfo(name)?.sourceInfo?.source === "builtin";
+}
+
+function isOpaqueTool(name) {
+  // Legacy adapter entrypoints remain gated even when native MCP replaces them.
+  // Server annotations and read/delete names are not trusted authorization.
+  return name === "codemode" || name === "mcp" || name === "mcpScript" || name.startsWith("mcp__");
+}
 
 function canonical(path) {
   const absolute = resolve(path);
@@ -405,8 +418,15 @@ function classify(event, ctx) {
   const input = event.input && typeof event.input === "object" ? event.input : {};
   const command = SHELL_TOOLS.has(toolName) && typeof input.command === "string" ? input.command : "";
   const references = toolName === IMAGE_GENERATION_TOOL_NAME ? imageReferenceInfo(input) : undefined;
+  const opaque = isOpaqueTool(toolName);
+  const nativeResource = MCP_RESOURCE_TOOLS.has(toolName) && isNativeTool(toolName);
+  const nativeSearch = toolName === "tool_search" && isNativeTool(toolName);
+  const privateInput = opaque || nativeResource || nativeSearch;
   const categories = [];
-  if (toolName === IMAGE_GENERATION_TOOL_NAME) {
+  if (opaque) categories.push(...OPAQUE_CATEGORIES);
+  else if (nativeResource) categories.push("network", "read", "external");
+  else if (nativeSearch) categories.push("read", "external");
+  else if (toolName === IMAGE_GENERATION_TOOL_NAME) {
     categories.push("network", "write");
     if (references.needsRead) categories.push("read");
   } else if (READ_TOOLS.has(toolName)) categories.push("read");
@@ -418,7 +438,7 @@ function classify(event, ctx) {
 
   const root = canonical(ctx.cwd);
   const projectRoot = projectRootOf(ctx.cwd);
-  const path = toolPath(input, root, toolName);
+  const path = privateInput ? undefined : toolPath(input, root, toolName);
   const risks = [];
   const paths = path ? [path] : [];
   if (references) paths.push(...references.riskPaths.map((reference) => resolve(root, reference)));
@@ -461,6 +481,15 @@ function classify(event, ctx) {
       + (references.needsRead ? "\n读取并上传完整参考/原图文件（包含文件内 metadata），不是只上传预览；读取仍仅限当前项目实际目录。" : "")
       + "\n通过网络生成并写入 PNG；使用 Codex 图片额度，会产生额外账号用量（失败或取消也可能消耗额度）。"
       + "不自动重试或降级，无 API-key/付费 API 回退。";
+  } else if (privateInput) {
+    summary = "运行工具 " + clip(toolName, 120);
+    detail = nativeSearch
+      ? "仅发现工具 schema 并加载声明，不执行发现的工具；实际调用仍需单独通过权限检查。"
+      : nativeResource
+        ? "通过 MCP 连接列出或读取外部资源；受 network、read 和 external 策略检查。"
+        : "可读取或修改文件、执行命令、访问网络及调用外部服务；所有 read/write/shell/network/external 策略均须允许，内部工具调用仍逐个检查并保留写入检查点。";
+    if (toolName === "codemode") detail += "\nmodels.* 可使用已配置的凭据调用付费 classifier/image 模型并上传输入，产生额外费用（失败或取消也可能计费）；模型调用没有内层工具授权。image() 和长输出可保存临时文件；已执行的真实副作用不会因脚本失败撤销。不是 Pion Codex 生图的回退。";
+    detail += "\n不显示脚本、参数或凭据；权限策略和模型 VM 不等于外部工具的 OS 沙箱。";
   } else if (command) {
     summary = clip(command.replace(/\s+/g, " ").trim(), 180);
     detail = clip(command);
@@ -477,6 +506,8 @@ function classify(event, ctx) {
 async function checkpointGate(event, ctx) {
   // Delegated tools re-enter this gate individually with the parent's context.
   if (event.toolName === "pion_subagents" || CHECKPOINT_READ_ONLY.has(event.toolName)) return;
+  // Native discovery loads schemas, not the discovered tools' side effects.
+  if (event.toolName === "tool_search" && isNativeTool(event.toolName)) return;
   if (!ctx.hasUI) return;
   try {
     await ctx.ui.select(CHECKPOINT_MARKER, ["ready"], { timeout: CHECKPOINT_TIMEOUT, signal: event.input?.[Symbol.for("pion.subagent.abort")] ?? ctx.signal });
@@ -490,19 +521,27 @@ async function gate(event, ctx) {
   const signal = subagentSignal ?? ctx.signal;
   const abortReason = subagentSignal ? "子代理已中止" : "工具调用已中止";
   if (signal?.aborted) return { block: true, reason: abortReason };
+  const internal = PION_INTERNAL_TOOLS.has(event.toolName);
+  const request = internal ? undefined : classify(event, ctx);
+  const admissionPolicy = readPolicy(ctx.cwd);
+  if (request && request.policyCategories.some((category) => admissionPolicy[category] === "deny")) {
+    return { block: true, reason: "Pion 项目权限策略已拒绝此工具调用" };
+  }
+  // Nested calls (parentToolCallId included) take exactly the same gate.
   await checkpointGate(event, ctx);
   if (signal?.aborted) return { block: true, reason: abortReason };
-  if (PION_INTERNAL_TOOLS.has(event.toolName)) return undefined;
-  const request = classify(event, ctx);
+  if (internal) return undefined;
   const policy = readPolicy(ctx.cwd);
   const decisions = request.policyCategories.map((category) => policy[category] ?? "ask");
   if (decisions.includes("deny")) {
     return { block: true, reason: "Pion 项目权限策略已拒绝此工具调用" };
   }
 
-  const forced = request.risks.length > 0;
+  // models.* has no inner tool_call event. Disclose billing on every outer
+  // codemode admission, including all-allow policies, without new risk flags.
+  const forced = request.risks.length > 0 || request.toolName === "codemode";
   const sessionKey = request.policyCategories.slice().sort().join("+") + ":" + request.risks.slice().sort().join("+");
-  if (sessionAllows.has(sessionKey)) return undefined;
+  if (!forced && sessionAllows.has(sessionKey)) return undefined;
   if (!forced && decisions.every((decision) => decision === "allow")) return undefined;
   if (!ctx.hasUI) return { block: true, reason: "工具调用需要授权，但当前没有可用界面" };
 
@@ -541,6 +580,7 @@ async function gate(event, ctx) {
 }
 
 export default function (pi) {
+  getToolInfo = (name) => pi.getAllTools().find((tool) => tool.name === name);
   pi.on("tool_call", gate);
   if (process.env.PION_TOOL_PERMISSION_TEST === "1") {
     pi.registerCommand("pion-permission-test", {

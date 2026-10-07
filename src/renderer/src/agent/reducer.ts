@@ -8,7 +8,7 @@ import type {
   WireMessage
 } from '../../../shared/types'
 import { messageImages, messageText, messageThinking } from '../../../shared/types'
-import { taskSnapshotFromResult } from '../../../shared/task-history'
+import { taskSnapshotFromEntry, taskSnapshotFromResult } from '../../../shared/task-history'
 import { orderSessions, reorderSessionsByPaths } from './sessionOrder'
 import {
   applyToolResult,
@@ -279,16 +279,23 @@ export function reducer(state: AgentState, action: Action): AgentState {
 function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
   // trusted boundary: unmodelled event types fall through to the default branch
   const event = input as WireEvent
+  // Native script child calls belong to the parent's result, not standalone
+  // transcript rows. Defensive filtering also covers cached/direct wire replay.
+  if ((event.type === 'tool_execution_start' || event.type === 'tool_execution_update' || event.type === 'tool_execution_end')
+    && typeof event.parentToolCallId === 'string' && event.parentToolCallId.length > 0) return state
   // Task state belongs to the session, not to whichever tool rows are mounted.
   // Persisted/message results also recover a missed tool_execution_start/end.
   const taskMessage = event.type === 'message_end' ? event.message
     : event.type === 'entry_appended' && event.entry?.type === 'message' ? event.entry.message : undefined
-  const tasks = event.type === 'tool_execution_end' && !event.isError
+  const customTasks = event.type === 'entry_appended' ? taskSnapshotFromEntry(event.entry) : undefined
+  const tasks = customTasks !== undefined ? customTasks : event.type === 'tool_execution_end' && !event.isError
     ? taskSnapshotFromResult(event.toolName, event.result)
     : taskMessage?.role === 'toolResult'
       ? taskSnapshotFromResult(taskMessage.toolName, taskMessage)
       : undefined
-  const resultId = event.type === 'tool_execution_end' ? event.toolCallId : taskMessage?.toolCallId
+  const resultId = customTasks !== undefined && event.type === 'entry_appended'
+    ? `entry:${event.entry?.id}`
+    : event.type === 'tool_execution_end' ? event.toolCallId : taskMessage?.toolCallId
   if (tasks !== undefined && (typeof resultId !== 'string' || !state.taskResultIds.includes(resultId))) {
     state = {
       ...state,
@@ -405,8 +412,10 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
       const error = assistantErrorText(message)
       const timeline = state.timeline.flatMap((item) => {
         if (item.kind !== 'assistant' || !item.streaming) return [item]
-        const nextText = text || item.text
-        const nextThinking = thinking || item.thinking
+        // Extensions may replace a nonempty draft with an empty final message.
+        // Empty text/thinking is authoritative too, not a missing update.
+        const nextText = text
+        const nextThinking = thinking
         // message_end is the authoritative assistant result. Do not retain a
         // provisional update error when the final message succeeds or aborts.
         const nextError = error
@@ -426,6 +435,8 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
     }
 
     case 'entry_appended': {
+      // Task-only commits must not mutate the timeline or resume scroll following.
+      if (customTasks !== undefined) return state
       const entry = event.entry
       if (!entry) return state
       if (state.timeline.some((item) => 'entryId' in item && item.entryId === entry.id)) return state

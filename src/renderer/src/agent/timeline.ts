@@ -84,6 +84,10 @@ export function parseToolArgs(name: string, args: unknown): Partial<ToolItem> {
   if (typeof a.path === 'string') out.path = a.path
   if (typeof a.command === 'string') out.command = a.command
   if (typeof a.pattern === 'string') out.command = a.pattern
+  // Native schemas use code/query, not the shell command field. Do not
+  // stringify arbitrary MCP args: they may contain image bytes or metadata.
+  if (name === 'codemode' && typeof a.code === 'string') out.command = a.code.slice(0, 200)
+  if (name === 'tool_search' && typeof a.query === 'string') out.command = a.query.slice(0, 200)
   if (name === 'write' && typeof a.content === 'string') out.writeContent = a.content
   if (name === 'edit' && Array.isArray(a.edits)) {
     // aggregate preview of the edit texts
@@ -439,6 +443,10 @@ export function entriesToTimeline(
         })
       }
       for (const call of calls) {
+        // Nested executions are not independent transcript tool calls. A
+        // defensive projection must not turn an event-like persisted part
+        // into an orphan root or replay it beside its codemode parent.
+        if (typeof (call as unknown as Record<string, unknown>).parentToolCallId === 'string') continue
         const tool: ToolItem = {
           id: call.id,
           name: call.name,

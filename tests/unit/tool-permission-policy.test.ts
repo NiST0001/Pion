@@ -79,7 +79,7 @@ describe('tool permission policy resolution', () => {
   })
 })
 
-type GateEvent = { toolName: string; toolCallId: string; input: Record<string | symbol, unknown> }
+type GateEvent = { toolName: string; toolCallId: string; parentToolCallId?: string; input: Record<string | symbol, unknown> }
 type GateResult = { block: true; reason: string } | undefined
 type DialogSelect = (title: string, choices: string[], options: {
   timeout: number; signal?: AbortSignal
@@ -119,7 +119,9 @@ function extensionRuntime(projects: Record<string, unknown>, canonicalPaths: Rec
   })
   const realpath = vi.fn((path: string) => canonicalPaths[path] ?? path)
   const handlers = new Map<string, GateHandler>()
+  const tools: { name: string; sourceInfo: { source: string }; annotations?: { readOnlyHint: boolean } }[] = []
   const pi = {
+    getAllTools: () => tools,
     on: (name: string, handler: GateHandler) => { handlers.set(name, handler) },
     registerCommand: vi.fn()
   }
@@ -153,7 +155,7 @@ function extensionRuntime(projects: Record<string, unknown>, canonicalPaths: Rec
   const ctx: GateContext = {
     cwd: PROJECT, hasUI: true, ui: { select }, sessionManager: { getSessionFile: () => SESSION }
   }
-  return { api, gate: handlers.get('tool_call')!, select, ctx, readFileSync, realpath }
+  return { api, gate: handlers.get('tool_call')!, select, ctx, readFileSync, realpath, tools }
 }
 
 function imageRuntime(updates: Partial<ToolPermissionRules> = {}, canonicalPaths: Record<string, string> = {}) {
@@ -196,6 +198,124 @@ describe('extension gate source', () => {
     expect(api.projectRootOf(worktree)).toBe(PROJECT)
     expect(api.readPolicy(worktree)).toMatchObject({ shell: 'allow', network: 'deny' })
     expect(api.DEFAULTS.shell).toBe('allow')
+  })
+})
+
+describe('native and legacy orchestration permission boundary', () => {
+  const all = ['read', 'write', 'shell', 'network', 'external'] as const
+  const allowed: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'allow', network: 'allow', external: 'allow' }
+  const call = (toolName: string): GateEvent => ({
+    toolName, toolCallId: 'codemode-parent/1', parentToolCallId: 'codemode-parent',
+    input: { code: 'PRIVATE_SCRIPT', path: 'PRIVATE_PATH', args: { secret: 'PRIVATE_ARG' }, credentials: 'PRIVATE_CREDENTIAL' }
+  })
+
+  it.each(['codemode', 'mcp', 'mcpScript', 'mcp__server__read', 'mcp__server__delete', 'mcp__unknown__anything'])('gates all five categories for %s without trusting annotations or names', (name) => {
+    const h = extensionRuntime({ [PROJECT]: allowed })
+    h.tools.push({ name, sourceInfo: { source: 'builtin' }, annotations: { readOnlyHint: true } })
+    expect(h.api.classify(call(name), h.ctx).policyCategories).toEqual(all)
+    const metadata = JSON.stringify(h.api.classify(call(name), h.ctx))
+    for (const privateValue of ['PRIVATE_SCRIPT', 'PRIVATE_PATH', 'PRIVATE_ARG', 'PRIVATE_CREDENTIAL']) expect(metadata).not.toContain(privateValue)
+  })
+
+  it.each(all)('blocks %s deny before checkpoint for outer codemode and nested MCP/legacy calls', async (category) => {
+    const h = extensionRuntime({ [PROJECT]: { ...allowed, [category]: 'deny' } })
+    for (const name of ['codemode', 'mcp__server__read', 'mcp', 'mcpScript']) {
+      expect(await h.gate(call(name), h.ctx)).toMatchObject({ block: true })
+    }
+    expect(h.select).not.toHaveBeenCalled()
+  })
+
+  it('requires fee disclosure even for all-allow codemode, without echoing script/args/credentials', async () => {
+    const h = extensionRuntime({ [PROJECT]: allowed })
+    expect(await h.gate(call('codemode'), h.ctx)).toBeUndefined()
+    expect(h.select.mock.calls[0][0]).toBe(RUN_CHECKPOINT_MARKER)
+    const metadata = JSON.parse(h.select.mock.calls[1][0].slice(TOOL_PERMISSION_MARKER.length)) as PermissionMetadata
+    expect(metadata.policyCategories).toEqual(all)
+    expect(metadata.canRemember).toBe(false)
+    expect(metadata.detail).toContain('付费 classifier/image')
+    expect(metadata.detail).toContain('模型调用没有内层工具授权')
+    expect(metadata.detail).toContain('不是 Pion Codex 生图的回退')
+    for (const secret of ['PRIVATE_SCRIPT', 'PRIVATE_ARG', 'PRIVATE_PATH', 'PRIVATE_CREDENTIAL']) expect(JSON.stringify(metadata)).not.toContain(secret)
+    expect(h.select.mock.calls[1][1]).toEqual(['allow-once', 'deny'])
+  })
+
+  it.each(all.flatMap((category) => ['codemode', 'mcp__server__read'].map((name) => ({ category, name }))))('gives a waiting $category deny priority over a late $name allow', async ({ category, name }) => {
+    const rules: ToolPermissionRules = { ...allowed, external: 'ask' }
+    const h = extensionRuntime({ [PROJECT]: rules })
+    const opened = deferred<void>()
+    const response = deferred<string | undefined>()
+    h.select.mockImplementation((title) => {
+      if (title === RUN_CHECKPOINT_MARKER) return Promise.resolve('ready')
+      opened.resolve()
+      return response.promise
+    })
+    const pending = h.gate(call(name), h.ctx)
+    await opened.promise
+    rules[category] = 'deny'
+    response.resolve(name === 'codemode' ? 'allow-once' : 'allow-session')
+    expect(await pending).toMatchObject({ block: true })
+    rules[category] = 'allow'
+    rules.external = 'ask'
+    h.select.mockImplementation(async (title) => title === RUN_CHECKPOINT_MARKER ? 'ready' : 'deny')
+    expect(await h.gate(call(name), h.ctx)).toMatchObject({ block: true })
+  })
+
+  it('does not reuse a legacy/MCP session grant to bypass outer codemode fees or nested write denies', async () => {
+    const rules: ToolPermissionRules = { ...allowed, external: 'ask' }
+    const h = extensionRuntime({ [PROJECT]: rules })
+    h.select.mockImplementation(async (title) => title === RUN_CHECKPOINT_MARKER ? 'ready' : 'allow-session')
+    expect(await h.gate(call('mcpScript'), h.ctx)).toBeUndefined()
+    expect(await h.gate(call('mcp__server__read'), h.ctx)).toBeUndefined()
+    h.select.mockImplementation(async (title) => title === RUN_CHECKPOINT_MARKER ? 'ready' : 'deny')
+    expect(await h.gate(call('codemode'), h.ctx)).toMatchObject({ block: true })
+    rules.write = 'deny'
+    expect(await h.gate({ ...call('write'), input: { path: 'src/nested.ts', content: 'PRIVATE_ARG' } }, h.ctx)).toMatchObject({ block: true })
+    expect(await h.gate(call('mcp__server__read'), h.ctx)).toMatchObject({ block: true })
+  })
+
+  it('holds a nested MCP call at the write checkpoint and rechecks a new deny before authorization', async () => {
+    const rules = { ...allowed }
+    const h = extensionRuntime({ [PROJECT]: rules })
+    const checkpoint = deferred<string | undefined>()
+    h.select.mockImplementationOnce(() => checkpoint.promise)
+    const pending = h.gate(call('mcp__server__read'), h.ctx)
+    expect(h.select.mock.calls[0][0]).toBe(RUN_CHECKPOINT_MARKER)
+    rules.write = 'deny'
+    checkpoint.resolve('ready')
+    expect(await pending).toMatchObject({ block: true })
+    expect(h.select).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'])('only gives builtin %s the resource-specific policy', (name) => {
+    const h = extensionRuntime({ [PROJECT]: allowed })
+    h.tools.push({ name, sourceInfo: { source: 'extension' }, annotations: { readOnlyHint: true } })
+    expect(h.api.classify(call(name), h.ctx).policyCategories).toEqual(['external'])
+    h.tools[0].sourceInfo.source = 'builtin'
+    expect(h.api.classify(call(name), h.ctx).policyCategories).toEqual(['network', 'read', 'external'])
+    expect(JSON.stringify(h.api.classify(call(name), h.ctx))).not.toContain('PRIVATE_ARG')
+  })
+
+  it('native discovery does not create a write checkpoint or inherit discovered tool side effects', async () => {
+    const h = extensionRuntime({ [PROJECT]: { ...allowed, write: 'deny', shell: 'deny', network: 'deny' } })
+    h.tools.push({ name: 'tool_search', sourceInfo: { source: 'builtin' } })
+    expect(await h.gate(call('tool_search'), h.ctx)).toBeUndefined()
+    expect(h.select).not.toHaveBeenCalled()
+  })
+
+  it('codemode cannot call paid models without a permission UI even when every policy allows it', async () => {
+    const h = extensionRuntime({ [PROJECT]: allowed })
+    h.ctx.hasUI = false
+    expect(await h.gate(call('codemode'), h.ctx)).toMatchObject({ block: true })
+    expect(h.select).not.toHaveBeenCalled()
+  })
+
+  it('native schema discovery does not claim write/shell/network execution and generic tools retain their scope', () => {
+    const h = extensionRuntime({ [PROJECT]: allowed })
+    h.tools.push({ name: 'tool_search', sourceInfo: { source: 'builtin' } })
+    expect(h.api.classify(call('tool_search'), h.ctx).policyCategories).toEqual(['read', 'external'])
+    expect(h.api.classify(call('tool_search'), h.ctx).detail).toContain('不执行发现的工具')
+    expect(h.api.classify(call('unrelated_plugin'), h.ctx).policyCategories).toEqual(['external'])
+    expect(h.api.classify(call('web_search'), h.ctx).policyCategories).toEqual(['network'])
   })
 })
 

@@ -33,7 +33,7 @@ function user(manager: SessionManager, content: string | ({ type: 'text'; text: 
   return manager.appendMessage({ role: 'user', content, timestamp: 1 })
 }
 
-// A real assistant entry causes the SDK to flush a newly created session.
+// SDK 1.0 persists from the first user/assistant; retain assistant fixtures for complete turns.
 function assistant(manager: SessionManager) {
   return manager.appendMessage({
     role: 'assistant', content: [{ type: 'text', text: 'reply' }], timestamp: 2,
@@ -337,12 +337,27 @@ describe('SDK-only message revert', () => {
     }
   })
 
-  it('rejects an unpersisted SDK session without creating its assigned path', () => {
-    const { manager } = createSession()
-    const target = targetFor(manager, user(manager))
+  it('rejects an unpersisted setup-only SDK session without creating its assigned path', () => {
+    const { manager } = createSession(true)
+    const target = targetFor(manager, manager.getLeafId()!)
     expect(existsSync(target.sessionPath)).toBe(false)
     for (const operation of [readMessageRevertTarget, revertSessionMessage]) expect(() => operation(target)).toThrow()
     expect(existsSync(target.sessionPath)).toBe(false)
+  })
+
+  it('reverts a persisted first user message before any assistant has been appended', () => {
+    const { manager } = createSession()
+    const selected = user(manager, 'first persisted prompt')
+    const target = targetFor(manager, selected)
+    expect(existsSync(target.sessionPath)).toBe(true)
+    const original = readFileSync(target.sessionPath, 'utf8')
+    expect(readMessageRevertTarget(target).text).toBe('first persisted prompt')
+    expect(readFileSync(target.sessionPath, 'utf8')).toBe(original)
+    const result = revertSessionMessage(target)
+    const reopened = SessionManager.open(target.sessionPath)
+    expect(reopened.getLeafId()).toBe(result.leafId)
+    expect(reopened.getEntries().some((entry) => entry.id === selected)).toBe(true)
+    expect(reopened.buildSessionContext().messages).toEqual([])
   })
 
   it.each([

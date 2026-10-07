@@ -38,7 +38,7 @@
 - 可以指定 `size`（默认 `auto`，或小写 x 的 `WxH`）和 `quality`（`auto/low/medium/high`，默认 `auto`），例如“生成海报，size 2048x3072，quality high，保存到 `images/poster.png`”。尺寸两边须为正整数且为 16 的倍数、每边 ≤ 4096、总计 ≤ 1600 万像素、长宽比 ≤ 3:1；这些只是请求，不保证后台接受 `2048x3072`、精确输出或实际质量，拒绝时不静默降低/丢弃设置
 - 编辑示例：“参考 `images/source.png`，high 质量，另存 `images/edited.png`”。可选 `referenced_image_paths` 最多 5 个项目相对 PNG/JPEG 路径，每路径 ≤ 512 字符、总计 ≤ 1600 字符；@ 是字面文件名，不接受 URL 或内嵌图片。非空引用走固定订阅 JSON `images/edits`（原文件以 data URL 上传），省略或空数组走 `images/generations`。完整输入文件及其中 metadata（可能含 EXIF/ICC/文本）都会上传，不是只上传预览，也不承诺去除隐私信息；`mask`、`input_fidelity` 的订阅契约未确认，参数前置拒绝，不把 mask 假作普通参考图或使用付费 API 代替
 - 可以在消息中指定实验性 Images 2.5 Flare / Sunburst，例如“用 2.5 Sunburst 生成一艘红色小船，保存到 `images/boat.png`”。只指定 2.5 时请求 Flare；不指定型号时仍使用官方 `gpt-image-2` 别名。2.5 订阅兼容性及账号权益未验证，拒绝时不会自动换型号；工具详情区分请求型号与“实际版本：服务未报告”，不把别名或请求 ID 当成实际生成版本
-- 需要在设置中登录 OpenAI Codex，并具备账号图片权益和额度。工具复用当前后端 SDK `ModelRuntime` 的 OAuth/刷新，不使用 API-key 或付费 API 回退；失败或中止仍可能消耗图片额度，不自动重试，也不计作聊天 token 费用。真实服务协议兼容和账号额度尚未验证，不承诺免费或服务可用
+- 需要所属后端可用的 `openai-codex` OAuth，并具备账号图片权益和额度；新版 OpenAI 的 “Sign in with ChatGPT” 聊天登录不会自动替换或迁移这项生图认证。工具复用当前后端 SDK `ModelRuntime` 的 OAuth/刷新，不使用 API-key 或付费 API 回退；失败或中止仍可能消耗图片额度，不自动重试，也不计作聊天 token 费用。真实服务协议兼容和账号额度尚未验证，不承诺免费或服务可用
 - 无参考图需网络 + 文件修改权限，有参考图再需读取权限；每个输入均检查目录外/敏感路径风险，确认面板完整列出所有有界合法输入与输出并说明上传风险，等待期间新增的拒绝策略不能被迟到允许覆盖。保留既有检查点门控；计划模式不可用，退出计划模式不会额外启用原先隐藏的生图工具，子代理工具范围不扩大
 - 输入每张非空且 ≤ 8 MiB、合计 ≤ 16 MiB、每边 ≤ 4096、累计 ≤ 1600 万像素，在 PNG inflate 前检查累计预算。只读原生读取器要求严格 no-follow/nonblocking flags，不支持即失败；绑定真实 worktree 并复查目录、文件和 FD 快照，分块读取及 EOF 探测拒绝成长/截断。取消仅停止等待，未结束的底层读取/关闭跨实例保持单槽；关闭失败隔离本进程参考图读取，须重建后端进程，不自动重试。PNG 为有界完整性校验，JPEG 为结构检查，不是完整图片解码
 - 订阅请求 JSON 和响应均最多 24 MiB，输出原图最多 16 MiB、每边 4096 像素且最多 1600 万像素，请求期限最多 5 分钟。保存前执行有界 PNG 完整性检查，但不等同于完整色彩/ICC 语义或真实解码验证；工具详情区分请求尺寸/质量与经输出 PNG 校验的原图保存尺寸，旧历史缺失设置保持未知，不补填默认值
@@ -75,6 +75,7 @@
 - 模型选择器：按 provider 分组，显示上下文窗口与推理能力标记
 - 设置中心直接读取 Pi `ModelRuntime` 完整提供商目录，支持 API 密钥、订阅 OAuth、设备代码、浏览器回调、退出与取消；凭据仍由 Pi `auth.json` 管理且不会回传 renderer
 - 自定义兼容端点入口，将模型元数据写入 `models.json`、凭据分离写入 `auth.json`
+- Azure 用户升级时请检查认证、模型、设置及会话偏好中的 provider ID：旧 `azure-openai-responses` 改为 `azure`，不自动迁移；同名 API 类型 `azure-openai-responses` 不应替换
 - 思考级别切换（off/minimal/low/medium/high…按模型支持）
 - 构建 / 计划模式和斜杠命令均通过 RPC 接入 pi，计划状态随会话恢复
 
@@ -105,6 +106,12 @@ npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 
 平台升级的进程边界、安全规则与状态机见
 [`docs/coding-agent-platform.md`](docs/coding-agent-platform.md)
 
+pi 依赖版本以 `package.json` 和锁文件为准；升级源码依赖不代表运行中的安装版已更新。Pion 已显式接入 CLI 同源的原生 MCP、codemode 与 tool search；旧 MCP 插件可替换原生 `/mcp`，不能同时启用或把注册状态当作服务器已连接。
+
+原生 MCP 使用 `~/.pi/agent/mcp.json` / 项目 `.pi/mcp.json` 的 `mcpServers` 配置，项目配置须经用户信任并受全局服务器基线约束；不会自动迁移凭据或删除插件。启用服务器可在工具确认之前启动命令、继承完整环境或触发 HTTP OAuth，工具权限不是启动沙箱；隐藏工具不停止连接，服务器 `enabled: false` 才停止。RPC `/mcp` 提供文字状态、登录/登出/重连，不提供 CLI 自定义 TUI。尚未进行真实 MCP 验证，卸载旧插件前请核对配置兼容性并逐个复核服务器。
+
+codemode 可调用模型，可能产生费用；每次执行须单次确认，任一相关权限拒绝都会阻止执行，但这不是逐模型审批。每脚本最多 8 次模型调用、主机等待最多 5 分钟；取消或失败仍可能收费，停止等待不代表请求停止，也不会自动作为内置生图失败回退。原生图片结果仅返回有界预览，SDK 原图可能位于 OS 临时目录、metadata 未保证清除；清除结构化结果可能影响程序化 MCP，任意文字/base64/脚本参数仍可能记录。能力扫描不连接服务器或读取认证凭据。完整权限、结果及验证边界见[开发说明](docs/development.md#pi-sdk-兼容与缓存预热)。
+
 ## 环境要求
 
 - Node ≥ 22.19（内置 pi 的最低要求；本项目在 v24 上开发）
@@ -133,6 +140,7 @@ src/
 │   │   ├── queue-projection.ts   # Pi 原始队列与 Pion 本地队列投影
 │   │   ├── provider-auth-ui.ts   # 提供商认证交互适配
 │   │   ├── runtime-host.ts       # 所属后端 SDK 运行时与内置工具注入
+│   │   ├── native-extensions.ts  # 原生 MCP/codemode/tool-search 与有界结果投影
 │   │   ├── image-generation.ts   # 尺寸/质量请求、参考图编辑与无覆盖保存/预览
 │   │   ├── image-inputs.ts       # 只读参考图快照、预算与跨实例真实操作背压
 │   │   ├── codex-image-transport.ts # Codex 订阅 JSON generations/edits 与 OAuth

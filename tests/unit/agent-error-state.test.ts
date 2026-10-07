@@ -11,6 +11,36 @@ function applyEvent(state: AgentState, event: WireEventInput): AgentState {
 }
 
 describe('assistant error state', () => {
+  it('drops a nonempty streamed draft when the authoritative final message is empty', () => {
+    const streaming: AgentState = { ...initialState, timeline: [{
+      kind: 'assistant', id: 1, text: 'removed draft', thinking: 'removed reasoning', streaming: true
+    }] }
+    const ended = applyEvent(streaming, { type: 'message_end', message: {
+      role: 'assistant', stopReason: 'stop', content: []
+    } })
+    expect(ended.timeline).toEqual([])
+  })
+
+  it('clears removed thinking rather than retaining a nonempty streamed draft', () => {
+    const streaming: AgentState = { ...initialState, timeline: [{
+      kind: 'assistant', id: 2, text: 'draft text', thinking: 'removed reasoning', streaming: true
+    }] }
+    const ended = applyEvent(streaming, { type: 'message_end', message: {
+      role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'final text' }]
+    } })
+    expect(ended.timeline).toEqual([expect.objectContaining({ text: 'final text', thinking: '', streaming: false })])
+  })
+
+  it('retains only the final diagnostic when an error removes the streamed contents', () => {
+    const streaming: AgentState = { ...initialState, timeline: [{
+      kind: 'assistant', id: 3, text: 'removed text', thinking: 'removed reasoning', streaming: true
+    }] }
+    const ended = applyEvent(streaming, { type: 'message_end', message: {
+      role: 'assistant', stopReason: 'error', errorMessage: 'final error', content: []
+    } })
+    expect(ended.timeline).toEqual([expect.objectContaining({ text: '', thinking: '', error: 'final error', streaming: false })])
+  })
+
   it('keeps error updates streaming and lets message_end replace the provisional diagnostic', () => {
     let state = applyEvent(initialState, {
       type: 'message_start',

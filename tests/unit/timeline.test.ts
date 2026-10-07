@@ -27,6 +27,27 @@ const imageTool: ToolItem = {
 }
 
 describe('timeline derivation', () => {
+  it('projects native argument schemas without serializing MCP image payloads', () => {
+    expect(parseToolArgs('codemode', { code: 'return await tools.read({ path: "README.md" })' })).toEqual({ command: 'return await tools.read({ path: "README.md" })' })
+    expect(parseToolArgs('tool_search', { query: 'find browser tools', limit: 5 })).toEqual({ command: 'find browser tools' })
+    expect(parseToolArgs('mcp__server__image', { data: previewPart.data, metadata: { secret: 'not-for-display' } })).toEqual({})
+  })
+
+  it('does not invent nested history rows or roots from execution-like parts', () => {
+    const entries: WireEntry[] = [{ type: 'message', id: 'script-entry', parentId: null, timestamp: '2026-01-01T00:00:00Z', message: {
+      role: 'assistant', content: [
+        { type: 'toolCall', id: 'script', name: 'codemode', arguments: { code: 'return "done"' } },
+        { type: 'toolCall', id: 'child', name: 'read', parentToolCallId: 'script', arguments: { path: 'file' } }
+      ]
+    } }, { type: 'message', id: 'child-result', parentId: 'script-entry', timestamp: '2026-01-01T00:00:01Z', message: {
+      role: 'toolResult', toolCallId: 'child', toolName: 'read', parentToolCallId: 'script', content: [previewPart]
+    } }]
+    const rows = entriesToTimeline(entries)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: 'tool', tool: { id: 'script', name: 'codemode' } })
+    expect(entriesToTimeline(entries)[0].id).toBe(rows[0].id)
+  })
+
   it('scales the initial history window to the available viewport', () => {
     const originalInnerHeight = window.innerHeight
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 420 })

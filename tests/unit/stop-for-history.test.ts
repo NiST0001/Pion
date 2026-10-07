@@ -126,7 +126,7 @@ describe('stopForHistory private SDK process adapter', () => {
   it('retains the captured child when SDK stop resolves and clears process before SIGKILL exits', async () => {
     const child = new MockChild()
     const { client, stop, adapter } = setup(child)
-    // Model pi 0.87.1's 1s escalation/null assignment, without spawning a process.
+    // Model pi 1.0.4's 1s escalation/null assignment, without spawning a process.
     stop.mockImplementation(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 1000))
       child.killed = true

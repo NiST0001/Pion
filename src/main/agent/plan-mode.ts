@@ -170,7 +170,12 @@ export default function (pi) {
   // the model from seeing mutating tools, while this gate also blocks tools
   // reactivated by another extension after Plan mode starts.
   pi.on("tool_call", async (event) => {
-    if (!enabled || isReadOnlyBuiltInTool(event.toolName)) return;
+    if (!enabled) return;
+    // MCP connections, deferred discovery and other extensions can activate
+    // tools after mode entry. Reapply declarations as well as blocking calls;
+    // indirect codemode exposure is not constrained by the active set alone.
+    pi.setActiveTools(readOnlyTools());
+    if (isReadOnlyBuiltInTool(event.toolName)) return;
     return {
       block: true,
       reason: "Pion 计划模式只允许只读资料工具（read/grep/find/ls）和内置提问，已阻止 " + event.toolName + "。请切换到构建模式后再执行。",
@@ -179,6 +184,7 @@ export default function (pi) {
 
   pi.on("before_agent_start", (event) => {
     if (!enabled) return;
+    pi.setActiveTools(readOnlyTools());
     return { systemPrompt: event.systemPrompt + "\n\n" + PLAN_PROMPT };
   });
 

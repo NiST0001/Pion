@@ -4,6 +4,7 @@ import {
   getAgentDir
 } from '@earendil-works/pi-coding-agent'
 import type { AgentCapabilities, SkillInfo } from '../../shared/types'
+import { createPionNativeExtensions } from './native-extensions'
 
 /** Load skills and extension tools using the same Pi resource pipeline as AgentBridge. */
 export async function loadAgentCapabilities(
@@ -12,7 +13,9 @@ export async function loadAgentCapabilities(
 ): Promise<AgentCapabilities> {
   const agentDir = getAgentDir()
   const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted })
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager })
+  // Discovery registers tools only: no bindExtensions/session_start, MCP configuration,
+  // credentials, transports or connection-derived service counts are read here.
+  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, extensionFactories: createPionNativeExtensions() })
   await resourceLoader.reload()
 
   const skills = new Map<string, SkillInfo>()

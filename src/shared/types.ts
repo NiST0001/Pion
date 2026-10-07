@@ -144,9 +144,9 @@ export type WireEvent =
   | { type: 'message_start'; message: WireMessage }
   | { type: 'message_end'; message: WireMessage }
   | { type: 'message_update'; usage: unknown; assistantMessageEvent: WireAssistantMessageEvent }
-  | { type: 'tool_execution_start'; toolCallId: string; toolName: string; args: unknown }
-  | { type: 'tool_execution_update'; toolCallId: string; toolName: string; partialResult: unknown }
-  | { type: 'tool_execution_end'; toolCallId: string; toolName: string; result: unknown; isError: boolean }
+  | { type: 'tool_execution_start'; toolCallId: string; parentToolCallId?: string; toolName: string; args: unknown }
+  | { type: 'tool_execution_update'; toolCallId: string; parentToolCallId?: string; toolName: string; partialResult: unknown }
+  | { type: 'tool_execution_end'; toolCallId: string; parentToolCallId?: string; toolName: string; result: unknown; isError: boolean }
   | { type: 'queue_update'; steering: string[]; followUp: string[]; nativeFollowUpCount?: number }
   | { type: 'compaction_start'; reason: string }
   | { type: 'compaction_end'; reason: string; result: unknown; aborted: boolean; willRetry: boolean; errorMessage?: string }

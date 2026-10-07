@@ -1,6 +1,7 @@
 import {
   CredentialSynchronizationError,
-  ModelRuntime
+  ModelRuntime,
+  SettingsManager
 } from '@earendil-works/pi-coding-agent'
 import type {
   ModelProviderAuthType,
@@ -12,6 +13,8 @@ export type ProviderAuthPrompt = Parameters<ProviderLoginInteraction['prompt']>[
 export type ProviderAuthEvent = Parameters<ProviderLoginInteraction['notify']>[0]
 
 type RuntimeFactory = () => Promise<ModelRuntime>
+type LoginSettings = Pick<SettingsManager, 'getOrCreateDeviceId' | 'flush' | 'drainErrors'>
+type SettingsFactory = () => LoginSettings
 
 /**
  * Thin adapter over Pi's canonical ModelRuntime provider/auth APIs.
@@ -25,7 +28,10 @@ export class ProviderAuthService {
   constructor(
     private readonly createRuntime: RuntimeFactory = () => ModelRuntime.create({
       allowModelNetwork: false
-    })
+    }),
+    private readonly createLoginSettings: SettingsFactory = () => SettingsManager.create(
+      process.cwd(), undefined, { projectTrusted: false }
+    )
   ) {}
 
   invalidate(): void {
@@ -103,14 +109,53 @@ export class ProviderAuthService {
       throw new Error(`${provider.name} 仅支持环境或系统凭据，无法在 Pion 中交互配置`)
     }
 
+    // Match Pi's interactive login: the SDK decides whether it needs a host ID.
+    // Do not load settings or generate an ID for legacy/API-key flows that never
+    // request one. Device IDs are global; project settings must not participate.
+    let settings: LoginSettings | undefined
     try {
-      await runtime.login(normalizedId, authType, interaction)
+      await runtime.login(normalizedId, authType, interaction, {
+        getDeviceId: () => {
+          settings ??= this.createLoginSettings()
+          if (settings.drainErrors().length) {
+            throw new Error('无法读取 Pi 安装设备 ID 设置，请检查全局设置后重试登录')
+          }
+          return settings.getOrCreateDeviceId()
+        }
+      })
     } catch (error) {
-      // Pi guarantees the credential mutation already committed for this error.
-      // Pion restarts every idle backend immediately afterwards, so a stale
-      // in-memory snapshot must not turn a successful login into a false failure.
+      // Pi wraps synchronization failures (including post-commit aborts) after
+      // the credential mutation. Never roll it back; discard the stale snapshot
+      // before reporting cancellation or accepting an ordinary sync failure.
       if (!(error instanceof CredentialSynchronizationError)) throw error
       this.invalidate()
+      if (interaction.signal?.aborted) {
+        // Neither the wrapped error's credential/cause nor an arbitrary abort
+        // reason is safe to expose through IPC. Cancellation is not a rollback.
+        const cancellation = new Error('登录已取消；凭据可能已保存，请刷新提供商状态确认')
+        cancellation.name = 'AbortError'
+        throw cancellation
+      }
+    } finally {
+      // SDK settings writes are queued and report errors separately from flush().
+      // Await them even if login was cancelled or credential sync failed; an
+      // unsaved ID must never be silently treated as a stable installation ID.
+      if (settings) {
+        try {
+          await settings.flush()
+          if (settings.drainErrors().length) throw new Error('Settings write failed')
+        } catch {
+          // Do not expose settings errors, wrapped causes or abort reasons that
+          // may contain the device UUID/credentials. A failed settings flush
+          // must not erase cancellation or imply a credential rollback.
+          if (interaction.signal?.aborted) {
+            const cancellation = new Error('登录已取消；无法保存 Pi 安装设备 ID，请检查全局设置写入权限；凭据可能已保存，请刷新提供商状态确认')
+            cancellation.name = 'AbortError'
+            throw cancellation
+          }
+          throw new Error('无法保存 Pi 安装设备 ID，请检查全局设置写入权限后重试登录')
+        }
+      }
     }
   }
 

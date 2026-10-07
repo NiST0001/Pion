@@ -27,7 +27,7 @@ type Result = {
 }
 type Entry =
   | { type: 'message'; message: { role: string; toolName?: string; details?: Result['details']; content?: string } }
-  | { type: 'custom'; customType: string; data: { enabled: boolean } }
+  | { type: 'custom'; customType: string; data: { enabled: boolean } | Result['details'] }
 type Event = { systemPrompt?: string; prompt?: string; systemPromptOptions?: { selectedTools: string[] } }
 type Context = { sessionManager: { getBranch(): Entry[] } }
 type Handler = (event: Event, ctx: Context) => Promise<{ systemPrompt: string } | undefined>
@@ -45,7 +45,11 @@ function runtime(initialBranch: Entry[] = [], initialTools = ['read', 'pion_task
   const handlers = new Map<string, Handler>()
   let tool!: Tool
   const setActiveTools = vi.fn((tools: string[]) => { activeTools = [...tools] })
+  const appendEntry = vi.fn((customType: string, data: Result['details']) => {
+    branch.push({ type: 'custom', customType, data: structuredClone(data) })
+  })
   const pi = {
+    appendEntry,
     registerTool: (registered: Tool) => { tool = registered },
     getActiveTools: () => [...activeTools],
     setActiveTools,
@@ -62,6 +66,7 @@ function runtime(initialBranch: Entry[] = [], initialTools = ['read', 'pion_task
   const ctx: Context = { sessionManager: { getBranch: () => branch } }
   return {
     tool,
+    appendEntry,
     setActiveTools,
     activeTools: () => [...activeTools],
     branch: () => structuredClone(branch),
@@ -83,6 +88,59 @@ function runtime(initialBranch: Entry[] = [], initialTools = ['read', 'pion_task
 }
 
 describe('Pion native task plan continuity', () => {
+  it('commits nested mutations without toolResult and restores deleted IDs and clears', async () => {
+    const h = runtime()
+    await h.tool.execute('nested-create', { action: 'create', subject: 'Nested task' })
+    await h.tool.execute('nested-delete', { action: 'delete', id: 1 })
+    expect(h.appendEntry).toHaveBeenCalledTimes(2)
+    expect(h.branch().every((entry) => entry.type === 'custom')).toBe(true)
+    const restarted = runtime(h.branch())
+    await restarted.event('session_start')
+    expect(await restarted.inspect()).toMatchObject({ nextId: 2, tasks: [{ id: 1, status: 'deleted' }] })
+    const continued = await restarted.tool.execute('nested-create-2', { action: 'create', subject: 'Continue' })
+    expect(continued.details.tasks[1].id).toBe(2)
+    await restarted.tool.execute('nested-update', { action: 'update', id: 2, status: 'completed' })
+    await restarted.tool.execute('nested-clear', { action: 'clear' })
+    const cleared = runtime(restarted.branch())
+    await cleared.event('session_tree')
+    expect(await cleared.inspect()).toMatchObject({ tasks: [], nextId: 1 })
+    await cleared.tool.execute('get-missing', { action: 'get', id: 1 }).catch(() => undefined)
+    expect(cleared.appendEntry).not.toHaveBeenCalled()
+  })
+
+  it.each(['clear', 'create', 'update', 'delete'] as const)('rolls back %s and nextId when durable append fails', async (action) => {
+    const h = runtime()
+    await h.tool.execute('create', { action: 'create', subject: 'Before' })
+    const before = await h.inspect()
+    const branch = h.branch()
+    h.appendEntry.mockImplementationOnce(() => { throw new Error('append failed') })
+    await expect(h.tool.execute('failed', { action, id: 1, subject: 'After', status: 'completed' })).rejects.toThrow('append failed')
+    expect(await h.inspect()).toEqual(before)
+    expect(h.branch()).toEqual(branch)
+    await h.tool.execute('read', { action: 'get', id: 1 })
+    expect(h.appendEntry).toHaveBeenCalledTimes(2)
+    await h.event('session_compact')
+    expect(await h.inspect()).toEqual(before)
+  })
+
+  it('restores legacy and custom snapshots in branch order while ignoring malformed later entries', async () => {
+    const h = runtime()
+    await h.call({ action: 'create', subject: 'Legacy ancestor' })
+    const legacy = h.branch().filter((entry) => entry.type === 'message')
+    const restored = runtime(legacy)
+    await restored.event('session_tree')
+    expect((await restored.inspect()).tasks[0].subject).toBe('Legacy ancestor')
+    await restored.tool.execute('clear', { action: 'clear' })
+    const branch = restored.branch()
+    branch.push({ type: 'custom', customType: 'pion-task-state', data: {
+      action: 'update', native: 'pion', nextId: 2,
+      tasks: [{ id: 1, subject: 'Invalid', status: 'unknown' as Task['status'], blockedBy: [] }]
+    } })
+    restored.selectBranch(branch)
+    await restored.event('session_tree')
+    expect(await restored.inspect()).toMatchObject({ tasks: [], nextId: 1 })
+  })
+
   it('keeps IDs, status, dependencies and nextId across follow-ups and simple conversation', async () => {
     const h = runtime()
     await h.event('session_start')

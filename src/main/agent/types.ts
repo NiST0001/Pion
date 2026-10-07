@@ -83,6 +83,16 @@ export interface BackendRecord {
   runCompletionPromise?: Promise<void>
   /** Distinguishes late usage from a replaced backend of the same session. */
   usageBackendId?: string
+  /** Backend-private start proofs; bounded, never evicted/reused or sent through IPC. */
+  nativeToolReceipts?: Map<string, {
+    runId: string
+    backendId: string
+    parentId?: string
+    rootId: string
+    name: string
+    state: 'running' | 'ended'
+    usageConsumed: boolean
+  }>
   activeRunId?: string
   pendingRunIds: string[]
   /** Pion-owned follow-ups remain removable until explicitly dispatched. */

@@ -115,7 +115,7 @@ function entryShape(entry: Record<string, unknown>, prior: Map<string, Record<st
     case 'thinking_level_change':
       return nonemptyString(entry.thinkingLevel)
     case 'compaction':
-      // SDK 0.87.1 uses the compaction's own ID for retain-none, not a missing ancestor.
+      // SDK 1.0.4 retains the compaction's own ID for retain-none, not a missing ancestor.
       return typeof entry.summary === 'string'
         && typeof entry.tokensBefore === 'number' && Number.isFinite(entry.tokensBefore) && entry.tokensBefore >= 0
         && nonemptyString(entry.firstKeptEntryId)

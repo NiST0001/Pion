@@ -1,6 +1,6 @@
 import { dirname, relative, resolve, sep } from 'node:path'
 import { afterEach, expect, expectTypeOf, it, vi } from 'vitest'
-import { resizeImage, type ExtensionContext, type withFileMutationQueue } from '@earendil-works/pi-coding-agent'
+import { resizeImage, type ExtensionToolContext, type withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { createImageGenerationTool, type ImageGenerationFileHandle, type ImageGenerationFileSystem, type ImageGenerationParameters, type ImageGenerationToolOptions } from '../../src/main/agent/image-generation'
 import { MAX_IMAGE_PROMPT_LENGTH, type CodexImageGenerator } from '../../src/main/agent/codex-image-transport'
 import { CODEX_IMAGE_MODEL_OPTIONS, CODEX_IMAGE_REQUEST_ALIAS, CODEX_IMAGE_QUALITIES, type CodexImageRequestModel, type CodexImageRequestQuality } from '../../src/shared/image-generation'
@@ -12,7 +12,8 @@ const png = makeStaticPng()
 const image = () => ({ bytes: new Uint8Array(png), width: 1, height: 1 })
 const preview = () => ({ data: png.toString('base64'), mimeType: 'image/png', width: 1, height: 1, originalWidth: 1, originalHeight: 1, wasResized: false })
 const cwd = resolve('/pion-image-project')
-const context = { cwd: resolve('/unrelated-project') } as ExtensionContext
+const context = { cwd: resolve('/unrelated-project'), tools: [],
+  executeTool: vi.fn(async () => { throw new Error('Unexpected tool delegation') }) } as unknown as ExtensionToolContext
 const parameters = { prompt: 'A red boat', path: 'images/boat.png' }
 function deferred<T>() {
   let resolve!: (value: T) => void

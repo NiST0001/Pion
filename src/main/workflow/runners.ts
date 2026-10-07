@@ -41,78 +41,195 @@ function respondToUi(client: RpcClient, id: string, value: string): void {
 
 /** Isolated Pi runner. Explicit CLI flags disable discovered extensions, skills and project resources. */
 export class PiWorkflowWorkerRunner implements WorkflowWorkerRunner {
-  private readonly clients = new Map<string, RpcClient>()
+  private readonly clients = new Map<string, { cancel: () => void; stop: () => Promise<void> }>()
 
   constructor(private readonly permissionExtensionPath: () => Promise<string>) {}
 
   async run(input: WorkflowWorkerInput, onProgress: (message: string) => void): Promise<WorkflowWorkerResult> {
     if (this.clients.size >= MAX_ACTIVE_WORKERS) throw new Error('多 Agent 并发上限为 2，请等待当前 worker 完成')
-    const extensionPath = await this.permissionExtensionPath()
-    const client = new RpcClient({
-      cliPath: piCliPath(),
-      cwd: input.cwd,
-      args: [
-        '--no-approve',
-        '--no-extensions',
-        '--no-skills',
-        '--extension', extensionPath,
-        '--tools', workerTools(input.role)
-      ],
-      env: {
-        PION_TOOL_PERMISSION_CONFIG: input.permissionConfigPath,
-        PION_WORKFLOW_ID: input.workflowId,
-        PION_WORKFLOW_ROLE: input.role
-      }
-    })
-    this.clients.set(input.id, client)
+    const deadline = Date.now() + WORKER_TIMEOUT_MS
+    let client: RpcClient | undefined
+    let operationError: Error | undefined
+    let rejectFailure!: (error: Error) => void
+    const failure = new Promise<never>((_resolve, reject) => { rejectFailure = reject })
+    void failure.catch(() => undefined)
+    const fail = (error: Error): void => {
+      if (operationError) return
+      operationError = error
+      rejectFailure(error)
+    }
+    const timeoutError = (): Error => new Error(`Timeout waiting for Agent completion. Stderr: ${client?.getStderr() ?? ''}`)
+    const check = (): void => {
+      if (!operationError && Date.now() >= deadline) fail(timeoutError())
+      if (operationError) throw operationError
+    }
+    const wait = async <T>(effect: () => Promise<T>): Promise<T> => {
+      // A rejected race alone does not stop evaluation of its side-effect operands.
+      check()
+      const result = await Promise.race([effect(), failure])
+      check()
+      return result
+    }
+    let stopped: Promise<void> | undefined
+    let startInvoked = false
+    const stop = (): Promise<void> => {
+      const target = client
+      // A preparation-stage cancellation must not cache a no-client stop.
+      if (!target) return Promise.resolve()
+      // SDK start spawns synchronously, before its initialization await. Do not
+      // wait for start's promise here: it can remain pending indefinitely.
+      return stopped ??= Promise.resolve().then(() => target.stop())
+    }
+    const operation = {
+      cancel: () => {
+        const error = new Error('Agent 已取消')
+        error.name = 'AbortError'
+        fail(error)
+        // Abort is best effort; never let a pending abort delay stop.
+        if (client && startInvoked) void client.abort().catch(() => undefined)
+      },
+      stop
+    }
+    // Preparation counts toward both concurrency and the operation deadline.
+    this.clients.set(input.id, operation)
+    const timer = setTimeout(() => fail(timeoutError()), Math.max(0, deadline - Date.now()))
     let output = ''
     let stopReason = ''
-    const unsubscribe = client.onEvent((event) => {
-      const value = event as unknown as {
-        type?: string
-        id?: string
-        method?: string
-        title?: string
-        toolName?: string
-        messages?: Array<{ role?: string; stopReason?: string; content?: unknown }>
-      }
-      if (value.type === 'extension_ui_request' && value.method === 'select' && value.id) {
-        onProgress('已拒绝超出 worker 权限信封的工具请求')
-        respondToUi(client, value.id, 'deny')
-      }
-      if (value.type === 'tool_execution_start' && value.toolName) {
-        onProgress(`运行工具：${value.toolName}`)
-      }
-      if (value.type === 'agent_end') {
-        const assistant = [...(value.messages ?? [])].reverse().find((message) => message.role === 'assistant')
-        output = assistantText(assistant)
-        stopReason = assistant?.stopReason ?? ''
-      }
-    })
-
+    let errorMessage = ''
+    let sawFinalMessage = false
+    let dispatched = false
+    let disposition: Awaited<ReturnType<RpcClient['prompt']>> | undefined
+    let active = false
+    let settled = false
+    let complete!: () => void
+    const completion = new Promise<void>((resolve) => { complete = resolve })
+    const finishIfReady = (): void => {
+      // A handled input may still have started independent extension work.
+      if (dispatched && !active && (settled || disposition === 'handled')) complete()
+    }
+    const record = (message: { content?: unknown; stopReason?: string; errorMessage?: string }): void => {
+      output = assistantText(message)
+      stopReason = message.stopReason ?? ''
+      errorMessage = message.errorMessage ?? ''
+    }
+    let primaryFailure: unknown
+    let failed = false
+    let unsubscribe = (): void => {}
     try {
-      await client.start()
-      await client.getState()
+      const extensionPath = await wait(() => this.permissionExtensionPath())
+      check()
+      client = new RpcClient({
+        cliPath: piCliPath(),
+        cwd: input.cwd,
+        args: [
+          '--no-approve',
+          '--no-extensions',
+          '--no-skills',
+          '--extension', extensionPath,
+          '--tools', workerTools(input.role)
+        ],
+        env: {
+          PION_TOOL_PERMISSION_CONFIG: input.permissionConfigPath,
+          PION_WORKFLOW_ID: input.workflowId,
+          PION_WORKFLOW_ROLE: input.role
+        }
+      })
+      const currentClient = client
+      check()
+      unsubscribe = currentClient.onEvent((event) => {
+        try { check() } catch { return }
+        const value = event as unknown as {
+          type?: string
+          id?: string
+          method?: string
+          title?: string
+          toolName?: string
+          message?: { role?: string; stopReason?: string; errorMessage?: string; content?: unknown }
+          messages?: Array<{ role?: string; stopReason?: string; errorMessage?: string; content?: unknown }>
+        }
+        if (value.type === 'extension_ui_request' && value.method === 'select' && value.id) {
+          onProgress('已拒绝超出 worker 权限信封的工具请求')
+          // Progress callbacks can synchronously cancel this operation.
+          try { check() } catch { return }
+          respondToUi(currentClient, value.id, 'deny')
+        }
+        if (value.type === 'tool_execution_start' && value.toolName) {
+          onProgress(`运行工具：${value.toolName}`)
+          try { check() } catch { return }
+        }
+        if (value.type === 'agent_start' || value.type === 'run_started') {
+          active = true
+          settled = false
+          sawFinalMessage = false
+        }
+        if (value.type === 'message_end' && value.message?.role === 'assistant') {
+          sawFinalMessage = true
+          record(value.message)
+        }
+        if (value.type === 'agent_end' && !sawFinalMessage) {
+          const assistant = [...(value.messages ?? [])].reverse().find((message) => message.role === 'assistant')
+          if (assistant) record(assistant)
+        }
+        if (value.type === 'agent_settled') {
+          active = false
+          settled = true
+          finishIfReady()
+        }
+      })
+      await wait(() => {
+        startInvoked = true
+        return currentClient.start()
+      })
+      await wait(() => currentClient.getState())
+      check()
       onProgress('Agent 已启动')
-      await client.prompt(input.prompt)
-      await client.waitForIdle(WORKER_TIMEOUT_MS)
-      const state = await client.getState().catch(() => null)
+      await wait(() => currentClient.prompt(input.prompt).then((result) => {
+        check()
+        disposition = result
+        dispatched = true
+        finishIfReady()
+        return completion
+      }))
+      const state = await wait(() => currentClient.getState().catch(() => null))
+      check()
       if (!output && state?.sessionFile) onProgress('Agent 已结束，正在保存会话')
-      if (stopReason === 'error') throw new Error(client.getStderr() || 'Agent 返回错误')
-      if (stopReason === 'aborted') throw new Error('Agent 已取消')
+      check()
+      if (stopReason === 'error') {
+        throw new Error([errorMessage || output || 'Agent 返回错误', currentClient.getStderr()].filter(Boolean).join('\n'))
+      }
+      // A provider's ordinary aborted final message is not a worker failure.
+      if (stopReason === 'aborted' && !output) output = 'Agent 已取消'
       return { output: output || 'Agent 已完成，但没有返回文本输出。', sessionPath: state?.sessionFile }
+    } catch (error) {
+      failed = true
+      primaryFailure = error
+      throw error
     } finally {
-      unsubscribe()
-      this.clients.delete(input.id)
-      await client.stop().catch(() => undefined)
+      clearTimeout(timer)
+      try {
+        unsubscribe()
+      } finally {
+        if (this.clients.get(input.id) === operation) this.clients.delete(input.id)
+        try {
+          // RPC stop completion is not proof that the OS process has exited.
+          await stop()
+        } catch (cleanupError) {
+          const diagnostic = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+          const primary = primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure)
+          throw Object.assign(new Error([
+            ...(failed ? [primary] : []),
+            `Agent 收尾未确认：RPC stop 失败：${diagnostic}`
+          ].join('\n')), { cause: failed ? primaryFailure : cleanupError, cleanupError })
+        }
+      }
     }
   }
 
   async cancel(workerId: string): Promise<void> {
-    const client = this.clients.get(workerId)
-    if (!client) return
-    await client.abort().catch(() => undefined)
-    await client.stop().catch(() => undefined)
+    const worker = this.clients.get(workerId)
+    if (!worker) return
+    worker.cancel()
+    await worker.stop()
   }
 }
 

@@ -259,6 +259,15 @@ function SkillsPage({
   )
 }
 
+const NATIVE_TOOL_NOTES: Record<string, string> = {
+  codemode: '原生 JavaScript 工具编排，可查询 models 模型目录并调用 classifier / image 能力，可能产生提供商费用；不保证图片免费或自动保存到项目。外层使用保守权限确认，计划模式禁用。Pion 的 Codex 生图仍使用独立订阅接口，另存项目新 PNG。',
+  tool_search: '原生延迟工具检索；使用 query 搜索、limit 限制结果数。发现工具不代表服务器已连接，也不代替执行权限。'
+}
+
+function isNativeTool(tool: ToolInfo): boolean {
+  return tool.source === 'builtin'
+}
+
 function ToolsPage({
   tools,
   loading,
@@ -268,26 +277,34 @@ function ToolsPage({
   loading: boolean
   error: string
 }): ReactElement {
+  const nativeTools = tools.filter(isNativeTool)
+  const pluginTools = tools.filter((tool) => !isNativeTool(tool))
   return (
     <section className="capabilities-page" data-page="tools">
       <div className="capabilities-page-heading">
         <div className="capabilities-page-kicker">TOOLS</div>
         <h3>工具</h3>
-        <p>工具是 agent 在当前工作区中可以直接调用的文件、终端和已安装插件能力。</p>
+        <p>工具目录区分 Pion 内置、Pi 原生能力与插件；列出工具不代表 MCP 服务器已连接或当前模式允许执行。</p>
       </div>
 
       <div className="capabilities-toolbar">
         <span className="capabilities-count">
-          {loading ? '正在读取…' : `${BUILTIN_TOOLS.length + tools.length} 项可用`}
+          {loading ? '正在读取…' : `${BUILTIN_TOOLS.length + tools.length} 项工具`}
         </span>
-        <span className="capabilities-source">Pi 内置工具 · 已安装插件</span>
+        <span className="capabilities-source">Pion 内置 · Pi 原生 · 已安装插件</span>
       </div>
 
-      {error && <div className="capabilities-error">读取插件工具失败：{error}</div>}
+      {error && <div className="capabilities-error">读取工具失败：{error}</div>}
       {loading && (
         <div className="capabilities-loading-note">
           <Loader2 size={14} className="spin" />
-          <span>正在读取插件工具…</span>
+          <span>正在读取工具…</span>
+        </div>
+      )}
+
+      {nativeTools.length > 0 && (
+        <div className="capabilities-loading-note">
+          <span>Pi 原生 MCP 使用 mcp.json，读取全局和受信任项目配置，支持 stdio / HTTP；工具可为 deferred（检索后调用）、direct（直接暴露）或 hidden（隐藏）。目录不报告连接状态，请通过 /mcp status 查看；RPC 文本命令支持 login、logout、reconnect，不提供自定义 TUI 管理界面。旧插件若注册 mcp 会替代原生 MCP，不应同时启用；配置不会自动迁移，插件不会自动卸载。</span>
         </div>
       )}
 
@@ -311,7 +328,18 @@ function ToolsPage({
             description={tool.description}
           />
         ))}
-        {tools.map((tool) => (
+        {nativeTools.map((tool) => (
+          <CapabilityCard
+            key={`native:${tool.name}`}
+            kind="tool"
+            icon={<Wrench size={16} />}
+            name={tool.name}
+            title={tool.label || tool.name}
+            source="Pi 原生"
+            description={[tool.description, NATIVE_TOOL_NOTES[tool.name]].filter(Boolean).join(' ') || '运行时已注册的原生工具；连接与可执行状态以会话为准。'}
+          />
+        ))}
+        {pluginTools.map((tool) => (
           <CapabilityCard
             key={`plugin:${tool.source ?? 'unknown'}:${tool.name}`}
             kind="tool"

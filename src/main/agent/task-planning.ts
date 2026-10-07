@@ -73,26 +73,43 @@ function snapshot() {
   return tasks.map((task) => ({ ...task, blockedBy: [...(task.blockedBy || [])] }));
 }
 
+function restoredSnapshot(details) {
+  if (!details || !Array.isArray(details.tasks)) return undefined;
+  for (const task of details.tasks) {
+    if (!task || (typeof task.id !== "number" && typeof task.id !== "string")
+      || (typeof task.id === "number" && !Number.isFinite(task.id))
+      || typeof task.subject !== "string"
+      || (task.status !== undefined && !STATUSES.includes(task.status))
+      || (task.description !== undefined && typeof task.description !== "string")
+      || (task.activeForm !== undefined && typeof task.activeForm !== "string")
+      || (task.blockedBy !== undefined && (!Array.isArray(task.blockedBy) || !task.blockedBy.every(Number.isFinite)))) return undefined;
+  }
+  const restored = details.tasks.map((task) => ({
+    id: task.id, subject: task.subject, description: task.description,
+    activeForm: task.activeForm, status: task.status || "pending",
+    blockedBy: [...(task.blockedBy || [])],
+  }));
+  const minimumId = restored.reduce((max, task) => Math.max(max, Number(task.id) || 0), 0) + 1;
+  if (details.nextId !== undefined && (!Number.isSafeInteger(details.nextId) || details.nextId < minimumId)) return undefined;
+  return { tasks: restored, nextId: details.nextId === undefined ? minimumId : details.nextId };
+}
+
 function restore(ctx) {
   tasks = [];
   nextId = 1;
   for (const entry of ctx.sessionManager.getBranch()) {
-    if (entry.type !== "message") continue;
-    const message = entry.message;
-    if (message.role !== "toolResult" || message.toolName !== TOOL_NAME) continue;
-    const details = message.details;
-    if (!details || !Array.isArray(details.tasks)) continue;
-    tasks = details.tasks.map((task) => ({
-      id: task.id,
-      subject: String(task.subject || ""),
-      description: typeof task.description === "string" ? task.description : undefined,
-      activeForm: typeof task.activeForm === "string" ? task.activeForm : undefined,
-      status: STATUSES.includes(task.status) ? task.status : "pending",
-      blockedBy: Array.isArray(task.blockedBy) ? task.blockedBy.filter(Number.isFinite) : [],
-    }));
-    nextId = Number.isFinite(details.nextId)
-      ? details.nextId
-      : tasks.reduce((max, task) => Math.max(max, Number(task.id) || 0), 0) + 1;
+    let details;
+    if (entry.type === "custom" && entry.customType === "pion-task-state" && entry.data?.native === "pion") {
+      details = entry.data;
+    } else if (entry.type === "message") {
+      const message = entry.message;
+      if (message.role !== "toolResult" || ![TOOL_NAME, "todo"].includes(message.toolName) || message.isError) continue;
+      details = message.details;
+    }
+    const restored = restoredSnapshot(details);
+    if (!restored) continue;
+    tasks = restored.tasks;
+    nextId = restored.nextId;
   }
 }
 
@@ -136,11 +153,27 @@ export default function (pi) {
     ],
     parameters: Params,
     async execute(_toolCallId, params) {
+      // appendEntry uses this runtime's current session branch. Mutations commit
+      // before returning, even when invoked inside a script with no toolResult.
+      const before = { tasks: snapshot(), nextId };
+      const finish = (action, text) => {
+        const result = response(action, text);
+        if (["clear", "create", "update", "delete"].includes(action)) {
+          try {
+            pi.appendEntry("pion-task-state", result.details);
+          } catch (error) {
+            tasks = before.tasks;
+            nextId = before.nextId;
+            throw error;
+          }
+        }
+        return result;
+      };
       if (params.action === "clear") {
         const count = tasks.length;
         tasks = [];
         nextId = 1;
-        return response("clear", "Cleared " + count + " Pion task(s)");
+        return finish("clear", "Cleared " + count + " Pion task(s)");
       }
 
       if (params.action === "create") {
@@ -157,7 +190,7 @@ export default function (pi) {
           blockedBy: Array.isArray(params.blockedBy) ? [...new Set(params.blockedBy)] : [],
         };
         tasks.push(task);
-        return response("create", "Created Pion task #" + task.id + ": " + task.subject);
+        return finish("create", "Created Pion task #" + task.id + ": " + task.subject);
       }
 
       if (params.action === "update") {
@@ -177,13 +210,13 @@ export default function (pi) {
         if (blockedBy.includes(task.id)) throw new Error("A Pion task cannot block itself");
         updated.blockedBy = blockedBy;
         Object.assign(task, updated);
-        return response("update", "Updated Pion task #" + task.id + " to " + task.status);
+        return finish("update", "Updated Pion task #" + task.id + " to " + task.status);
       }
 
       if (params.action === "delete") {
         const task = requireId(params);
         task.status = "deleted";
-        return response("delete", "Deleted Pion task #" + task.id);
+        return finish("delete", "Deleted Pion task #" + task.id);
       }
 
       if (params.action === "get") {

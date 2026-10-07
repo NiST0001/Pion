@@ -1,6 +1,7 @@
 import type { SessionTask, SessionTaskRun } from './types'
 
 export const PION_TASK_TOOL_NAME = 'pion_task'
+export const PION_TASK_STATE_TYPE = 'pion-task-state'
 export const LEGACY_TASK_TOOL_NAME = 'todo'
 
 export function isTaskToolName(name: unknown): name is string {
@@ -27,6 +28,11 @@ export function normalizeSessionTasks(raw: unknown): SessionTask[] | undefined {
     if ((typeof record.id !== 'number' && typeof record.id !== 'string') || typeof record.subject !== 'string') {
       return undefined
     }
+    if (record.status !== undefined && !['pending', 'in_progress', 'completed', 'deleted'].includes(record.status as string)) return undefined
+    if (typeof record.id === 'number' && !Number.isFinite(record.id)) return undefined
+    if (record.description !== undefined && typeof record.description !== 'string') return undefined
+    if (record.activeForm !== undefined && typeof record.activeForm !== 'string') return undefined
+    if (record.blockedBy !== undefined && (!Array.isArray(record.blockedBy) || !record.blockedBy.every(Number.isFinite))) return undefined
     const status = record.status === 'in_progress' || record.status === 'completed' || record.status === 'deleted'
       ? record.status
       : 'pending'
@@ -48,7 +54,22 @@ export function taskSnapshotFromResult(toolName: unknown, result: unknown): Sess
   if (record.isError) return undefined
   const details = record.details
   if (!details || typeof details !== 'object') return undefined
-  return normalizeSessionTasks((details as Record<string, unknown>).tasks)
+  const snapshot = details as Record<string, unknown>
+  const tasks = normalizeSessionTasks(snapshot.tasks)
+  if (tasks === undefined) return undefined
+  const minimumId = tasks.reduce((max, task) => Math.max(max, Number(task.id) || 0), 0) + 1
+  if (snapshot.nextId !== undefined && (!Number.isSafeInteger(snapshot.nextId) || (snapshot.nextId as number) < minimumId)) return undefined
+  return tasks
+}
+
+/** Custom entries are authoritative full snapshots, independent of tool messages. */
+export function taskSnapshotFromEntry(entry: unknown): SessionTask[] | undefined {
+  if (!entry || typeof entry !== 'object') return undefined
+  const record = entry as Record<string, unknown>
+  if (record.type !== 'custom' || record.customType !== PION_TASK_STATE_TYPE) return undefined
+  const data = record.data
+  if (!data || typeof data !== 'object' || (data as Record<string, unknown>).native !== 'pion') return undefined
+  return taskSnapshotFromResult(PION_TASK_TOOL_NAME, { details: data })
 }
 
 function taskKey(task: SessionTask): string {
@@ -72,8 +93,8 @@ function snapshotMap(tasks: SessionTask[]): Map<string, SessionTask> {
  *
  * Legacy sessions may keep a session-wide todo list, so each new snapshot is
  * compared with the preceding one and only new/changed tasks are attributed
- * to the current message. New Pion sessions clear todo at each complex turn;
- * an empty snapshot starts a fresh id generation after the reset.
+ * to the current message. Plans may continue across messages; only an explicit
+ * empty snapshot starts a fresh id generation after a reset.
  */
 export function deriveSessionTaskRuns(events: SessionTaskHistoryEvent[]): SessionTaskRun[] {
   interface MutableRun {

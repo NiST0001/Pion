@@ -2,10 +2,25 @@ import { describe, expect, it } from 'vitest'
 import {
   deriveSessionTaskRuns,
   isTaskToolName,
-  normalizeSessionTasks
+  normalizeSessionTasks,
+  taskSnapshotFromEntry
 } from '../../src/shared/task-history'
 
 describe('task history normalization', () => {
+  it('validates custom snapshots with the result validator, without interpreting unrelated entries as clear', () => {
+    const entry = { type: 'custom', customType: 'pion-task-state', data: {
+      native: 'pion', action: 'create', nextId: 2, tasks: [{ id: 1, subject: 'Native', status: 'pending' }]
+    } }
+    expect(taskSnapshotFromEntry(entry)).toEqual([{ id: 1, title: 'Native', status: 'pending' }])
+    expect(taskSnapshotFromEntry({ ...entry, data: { native: 'pion', tasks: [], nextId: 1 } })).toEqual([])
+    for (const invalid of [
+      {}, { ...entry, customType: 'other' }, { ...entry, data: { native: 'other', tasks: [] } },
+      { ...entry, data: { ...entry.data, nextId: 1 } },
+      { ...entry, data: { ...entry.data, tasks: [{ id: 1, subject: 'Bad', status: 'unknown' }] } },
+      { ...entry, data: { ...entry.data, tasks: null } }
+    ]) expect(taskSnapshotFromEntry(invalid)).toBeUndefined()
+  })
+
   it('accepts native and legacy task snapshots', () => {
     expect(isTaskToolName('pion_task')).toBe(true)
     expect(isTaskToolName('todo')).toBe(true)

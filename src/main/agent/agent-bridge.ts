@@ -50,7 +50,8 @@ import { messageText } from '../../shared/types'
 import {
   deriveSessionTaskRuns,
   isTaskToolName,
-  normalizeSessionTasks
+  normalizeSessionTasks,
+  taskSnapshotFromEntry
 } from '../../shared/task-history'
 import type { SessionTaskHistoryEvent } from '../../shared/task-history'
 import { createWorktreeBranch, listBranchInfos, renameGitBranch } from '../git'
@@ -170,6 +171,114 @@ export class AgentBridge {
   private providerAuthOperation: ProviderAuthOperation | null = null
   private newSessionInFlight: Promise<void> | null = null
   private sessionSelectionGeneration = 0
+  /** Event generations are backend-local: RPC responses have no run/event correlation ID. */
+  private dispatchLifecycles?: WeakMap<BackendRecord, { generation: number; token?: symbol }>
+  private steeringMarkers?: WeakMap<BackendRecord, Array<{ token: symbol; message: string }>>
+
+  private dispatchLifecycle(backend: BackendRecord): { generation: number; token?: symbol } {
+    this.dispatchLifecycles ??= new WeakMap()
+    let lifecycle = this.dispatchLifecycles.get(backend)
+    if (!lifecycle) {
+      lifecycle = { generation: 0 }
+      this.dispatchLifecycles.set(backend, lifecycle)
+    }
+    return lifecycle
+  }
+
+  private backendStillOwned(backend: BackendRecord): boolean {
+    return !this.stopping && !backend.historyMutation && !backend.historyStopFailed
+      && this.backendPool.get(backend.key) === backend
+  }
+
+  private reserveDispatch(backend: BackendRecord): { owns: () => boolean; ownsReservation: () => boolean } {
+    const lifecycle = this.dispatchLifecycle(backend)
+    const generation = lifecycle.generation
+    const client = backend.client
+    // Queuing/steering while a prompt is reserved must not steal that prompt's
+    // event-free recovery lease. Competing idle state reads still invalidate it.
+    const token = backend.busy && lifecycle.token ? lifecycle.token : Symbol('dispatch lease')
+    lifecycle.token = token
+    const ownsReservation = (): boolean => this.backendStillOwned(backend)
+      && backend.client === client && lifecycle.token === token
+    return { ownsReservation, owns: () => ownsReservation() && lifecycle.generation === generation }
+  }
+
+  private recoverPromptFailure(
+    backend: BackendRecord, lease: { owns: () => boolean }, run: RunOperation | undefined, error: unknown
+  ): void {
+    if (!lease.owns() || (run && (backend.activeRunId !== run.id
+      || this.runStore.get(run.id)?.state !== 'dispatching'))) return
+    backend.activeRunId = undefined
+    backend.busy = false
+    if (run) this.runStore.update(run.id, (current) => {
+      if (current.state !== 'dispatching') return
+      current.state = 'failed'
+      current.settledAt = Date.now()
+      current.error = error instanceof Error ? error.message : String(error)
+    })
+  }
+
+  private assertDispatchLease(lease: { owns: () => boolean }): void {
+    if (!lease.owns()) throw new Error('Agent 运行状态已改变，请重试')
+  }
+
+  /** Acceptance is not completion. Only an event-free handled dispatch owns the busy reservation. */
+  private async dispatchPrompt(
+    backend: BackendRecord, runId: string, message: string, images?: ImageContent[],
+    lease = this.reserveDispatch(backend)
+  ): Promise<void> {
+    this.assertDispatchLease(lease)
+    const lifecycle = this.dispatchLifecycle(backend)
+    const generation = lifecycle.generation
+    const token = lifecycle.token
+    const client = backend.client
+    // Never let agent_start adopt an unrelated, still-local queued message.
+    backend.pendingRunIds = backend.pendingRunIds.filter((id) => id !== runId)
+    backend.activeRunId = runId
+    // Rejections are recovered only by the caller's original lease; an event
+    // or replacement may already own the backend by the time this rejects.
+    const disposition = await client.prompt(message, images)
+    if (!this.backendStillOwned(backend) || backend.client !== client) return
+    this.runStore.update(runId, (run) => {
+      run.dispatchedAt ??= Date.now()
+      if (disposition === 'handled' && (run.state === 'dispatching' || run.state === 'running')) {
+        run.state = 'discarded'
+        run.settledAt = Date.now()
+        run.stopReason = 'input-handled'
+      }
+    })
+    if (disposition !== 'handled') return
+    // A fast settled run is already terminal. An extension may have started
+    // independent work before replying handled; detach this input's ledger,
+    // but leave that event-owned phase, busy flag and queue gate untouched.
+    if (backend.activeRunId !== runId) return
+    backend.activeRunId = undefined
+    if (lifecycle.token !== token || lifecycle.generation !== generation) return
+    lifecycle.token = undefined
+    backend.busy = false
+    backend.localQueueDispatching = false
+    this.pushQueueSnapshot(backend)
+    this.pushRunningSessionPaths()
+    this.dispatchNextLocalFollowUp(backend)
+  }
+
+  private async dispatchSteering(
+    backend: BackendRecord, message: string, images: ImageContent[], marker: symbol, runId?: string
+  ): Promise<void> {
+    const client = backend.client
+    const disposition = await client.steer(message, images)
+    if (disposition !== 'handled' || !this.backendStillOwned(backend) || backend.client !== client) return
+    if (runId) {
+      backend.companionRunIds = backend.companionRunIds?.filter((id) => id !== runId)
+      this.runStore.update(runId, (run) => {
+        if (run.state !== 'running' && run.state !== 'dispatching') return
+        run.state = 'discarded'
+        run.settledAt = Date.now()
+        run.stopReason = 'input-handled'
+      })
+    }
+    this.unmarkDirectSteering(backend, message, marker)
+  }
   private messageRevertInFlight = false
   private sessionOperationsInFlight = 0
   private historyRevision = 0
@@ -915,8 +1024,8 @@ export class AgentBridge {
     })
     if (initialState === 'dispatching') {
       backend.runCompletionPromise = undefined
-      // RpcClient.prompt resolves once the request is written, before
-      // agent_start arrives. Reserve the backend during that dispatch gap so
+      // RpcClient.prompt resolves on acceptance, which may precede
+      // agent_start. Reserve the backend during that dispatch gap so
       // a second Enter cannot start a concurrent prompt.
       backend.busy = true
     }
@@ -959,14 +1068,58 @@ export class AgentBridge {
     }
   }
 
+  private trackNestedToolUsage(backend: BackendRecord, event: unknown, type: string, parentId: string): void {
+    if (this.backendPool.get(backend.key) !== backend) return
+    const tool = event as { toolCallId?: unknown; toolName?: unknown; result?: { usage?: unknown } }
+    if (typeof tool.toolCallId !== 'string' || !tool.toolCallId
+      || typeof tool.toolName !== 'string') return
+    const receipts = backend.nativeToolReceipts
+    if (!receipts) return
+    if (type === 'tool_execution_start') {
+      if (receipts.has(tool.toolCallId) || receipts.size >= 512) return
+      const parent = receipts.get(parentId)
+      const root = parent && receipts.get(parent.rootId)
+      if (!parent || !root || parent.state !== 'running' || root.state !== 'running') return
+      const source = this.runStore.get(parent.runId)
+      if (!backend.usageBackendId || parent.backendId !== backend.usageBackendId
+        || root.backendId !== backend.usageBackendId || source?.usageBackendId !== backend.usageBackendId) return
+      receipts.set(tool.toolCallId, { runId: parent.runId, backendId: parent.backendId, parentId,
+        rootId: parent.rootId, name: tool.toolName, state: 'running', usageConsumed: false })
+      return
+    }
+    if (type !== 'tool_execution_end') return
+    const receipt = receipts.get(tool.toolCallId)
+    if (!receipt || receipt.parentId !== parentId || receipt.name !== tool.toolName
+      || receipt.state === 'ended' || receipt.usageConsumed) return
+    receipt.state = 'ended'
+    receipt.usageConsumed = true
+    const source = this.runStore.get(receipt.runId)
+    if (!backend.usageBackendId || receipt.backendId !== backend.usageBackendId
+      || source?.usageBackendId !== backend.usageBackendId) return
+    // SDK 1.0.4 codemode only aggregates models.* usage, not executeTool's
+    // child sessions. Only known independent child/codemode usage is charged.
+    // This finite run window is neither context occupancy nor a full bill.
+    if (receipt.name !== 'pion_subagents' && receipt.name !== 'codemode') return
+    const usage = normalizeTokenUsage(tool.result?.usage)
+    if (usage) this.runStore.update(receipt.runId, (run) => {
+      if (run.usageBackendId === backend.usageBackendId) run.usage = addTokenUsage(run.usage, usage)
+    })
+  }
+
   private trackBackendEvent(backend: BackendRecord, event: unknown, type: string | undefined): void {
     if (!type) return
+    const parentToolCallId = (event as { parentToolCallId?: unknown }).parentToolCallId
+    if (typeof parentToolCallId === 'string' && parentToolCallId.length > 0) {
+      this.trackNestedToolUsage(backend, event, type, parentToolCallId)
+      return
+    }
     if (type === 'entry_appended') {
       this.runStore.recordUsageEntry({ cwd: backend.cwd, sessionPath: backend.sessionPath, backendId: backend.usageBackendId }, event)
       return
     }
     if (type === 'agent_start') {
-      if (!backend.activeRunId) backend.activeRunId = backend.pendingRunIds.shift()
+      // Local queued messages are not dispatched by Pi. dispatchPrompt reserves
+      // the precise ledger ID before writing the RPC command.
       if (!backend.activeRunId) return
       this.runStore.update(backend.activeRunId, (run) => {
         run.state = 'running'
@@ -979,7 +1132,19 @@ export class AgentBridge {
 
     // Manual compaction can happen after the run has settled. Invalidate the
     // displayed session's latest usage, never another project's latest run.
-    const runId = backend.activeRunId ?? (type === 'compaction_end' && backend.sessionPath
+    // A root final belongs only to its captured start, even after settlement.
+    // Timing rows are a prunable display window, not proof of once-only billing.
+    const finalTool = type === 'tool_execution_end'
+      ? event as { toolCallId?: unknown; toolName?: unknown }
+      : undefined
+    const finalReceipt = typeof finalTool?.toolCallId === 'string'
+      ? backend.nativeToolReceipts?.get(finalTool.toolCallId)
+      : undefined
+    if (finalTool && (this.backendPool.get(backend.key) !== backend || !finalReceipt
+      || finalReceipt.parentId || finalReceipt.name !== finalTool.toolName
+      || finalReceipt.state !== 'running' || finalReceipt.usageConsumed
+      || finalReceipt.backendId !== backend.usageBackendId)) return
+    const runId = finalTool ? finalReceipt?.runId : backend.activeRunId ?? (type === 'compaction_end' && backend.sessionPath
       ? this.runStore.list({ sessionPath: backend.sessionPath, cwd: backend.cwd, limit: 1 })[0]?.id
       : undefined)
     if (!runId) return
@@ -1022,8 +1187,20 @@ export class AgentBridge {
 
     if (type === 'tool_execution_start') {
       const tool = event as { toolCallId?: unknown; toolName?: unknown }
-      if (typeof tool.toolCallId !== 'string' || typeof tool.toolName !== 'string') return
+      if (typeof tool.toolCallId !== 'string' || !tool.toolCallId || typeof tool.toolName !== 'string'
+        || this.backendPool.get(backend.key) !== backend) return
+      // Retain completed receipts too: replay/late input cannot attach a known
+      // call to a newer run. Saturation fails closed rather than evicting receipts.
+      const receipts = backend.nativeToolReceipts ??= new Map()
+      const previous = receipts.get(tool.toolCallId)
+      if (previous && (previous.runId !== runId || previous.backendId !== backend.usageBackendId
+        || previous.name !== tool.toolName || previous.parentId || previous.state === 'ended')) return
       this.runStore.update(runId, (run) => {
+        if (tool.toolCallId && !receipts.has(tool.toolCallId as string) && receipts.size < 512
+          && backend.usageBackendId && run.usageBackendId === backend.usageBackendId) {
+          receipts.set(tool.toolCallId as string, { runId, backendId: backend.usageBackendId, rootId: tool.toolCallId as string,
+            name: tool.toolName as string, state: 'running', usageConsumed: false })
+        }
         const existing = run.tools.find((candidate) => candidate.toolCallId === tool.toolCallId)
         if (existing) {
           existing.name = tool.toolName as string
@@ -1047,7 +1224,14 @@ export class AgentBridge {
     if (type === 'tool_execution_end') {
       const tool = event as { toolCallId?: unknown; toolName?: unknown; isError?: unknown; result?: { usage?: unknown } }
       if (typeof tool.toolCallId !== 'string') return
+      // Missing/pruned source runs must never be reconstructed or reassigned.
+      if (!finalReceipt) return
+      finalReceipt.state = 'ended'
+      finalReceipt.usageConsumed = true
+      if (!backend.usageBackendId
+        || this.runStore.get(runId)?.usageBackendId !== finalReceipt.backendId) return
       this.runStore.update(runId, (run) => {
+        if (run.usageBackendId !== finalReceipt.backendId) return
         let timing = run.tools.find((candidate) => candidate.toolCallId === tool.toolCallId)
         if (!timing) {
           timing = {
@@ -1057,9 +1241,12 @@ export class AgentBridge {
             startedAt: now
           }
           run.tools.push(timing)
+          if (run.tools.length > 80) run.tools.splice(0, run.tools.length - 80)
         }
-        // Child usage is cumulative billing, never the parent's context size.
-        if (tool.toolName === 'pion_subagents' && timing.endedAt === undefined) {
+        // Codemode's SDK final usage aggregates its models.* calls; subagents
+        // reports child usage. Charged failures count too, not progress/nested rows.
+        // This finite run window is not the complete SDK session usage ledger.
+        if (tool.toolName === 'pion_subagents' || tool.toolName === 'codemode') {
           const usage = normalizeTokenUsage(tool.result?.usage)
           if (usage) run.usage = addTokenUsage(run.usage, usage)
         }
@@ -1236,9 +1423,11 @@ export class AgentBridge {
 
     const backend = await this.ensureActiveBackend()
     if (resolve(backend.cwd) !== resolve(source.cwd)) throw new Error('待恢复运行不属于当前工作区')
+    const lease = this.reserveDispatch(backend)
     const state = await backend.client.getState()
+    this.assertDispatchLease(lease)
     this.assertHistoryAvailable()
-    if (state.isStreaming || backend.busy || backend.compacting) {
+    if (state.isStreaming || state.isCompacting || backend.busy || backend.compacting) {
       throw new Error('当前会话仍在运行，请完成或中止后再恢复')
     }
 
@@ -1246,7 +1435,8 @@ export class AgentBridge {
     let run: RunOperation | undefined
     try {
       this.resetRunCheckpoint(backend)
-      await this.applyDesiredMode(backend)
+      await this.applyDesiredMode(backend, lease)
+      this.assertDispatchLease(lease)
       const interrupted = source.state === 'interrupted'
       const message = interrupted
         ? [
@@ -1266,10 +1456,7 @@ export class AgentBridge {
       this.runStore.update(run.id, (current) => {
         current.recoveredFromRunId = source.id
       })
-      await backend.client.prompt(message, source.prompt.images)
-      this.runStore.update(run.id, (current) => {
-        current.dispatchedAt ??= Date.now()
-      })
+      await this.dispatchPrompt(backend, run.id, message, source.prompt.images, lease)
       this.runStore.update(source.id, (current) => {
         current.state = 'discarded'
         current.settledAt ??= Date.now()
@@ -1278,16 +1465,7 @@ export class AgentBridge {
       await this.syncBackendSession(backend)
       return this.runStore.get(run.id) ?? run
     } catch (error) {
-      if (run && backend.activeRunId === run.id) backend.activeRunId = undefined
-      backend.busy = false
-      backend.compacting = false
-      if (run) {
-        this.runStore.update(run.id, (current) => {
-          current.state = 'failed'
-          current.settledAt = Date.now()
-          current.error = error instanceof Error ? error.message : String(error)
-        })
-      }
+      this.recoverPromptFailure(backend, lease, run, error)
       throw error
     }
   }
@@ -1465,6 +1643,18 @@ export class AgentBridge {
       ))
     )
     backend.directSteering = projection.directSteering
+    // Queue events can consume a marker before its RPC response arrives.
+    // Preserve newest same-text markers, so a late handled response cannot
+    // remove a newer insertion after the original was consumed.
+    const counts = new Map<string, number>()
+    for (const text of projection.directSteering) counts.set(text, (counts.get(text) ?? 0) + 1)
+    const retained = [...(this.steeringMarkers?.get(backend) ?? [])].reverse().filter((marker) => {
+      const count = counts.get(marker.message) ?? 0
+      if (count === 0) return false
+      counts.set(marker.message, count - 1)
+      return true
+    }).reverse()
+    this.steeringMarkers?.set(backend, retained)
     return {
       ...projection.queue,
       nativeFollowUpCount: projection.queue.nativeFollowUpCount ?? 0
@@ -1479,7 +1669,12 @@ export class AgentBridge {
     })
   }
 
-  private markDirectSteering(backend: BackendRecord, message: string): void {
+  private markDirectSteering(backend: BackendRecord, message: string): symbol {
+    const token = Symbol('steering insertion')
+    this.steeringMarkers ??= new WeakMap()
+    const markers = this.steeringMarkers.get(backend) ?? []
+    markers.push({ token, message })
+    this.steeringMarkers.set(backend, markers)
     backend.directSteering ??= []
     backend.directSteering.push(message)
     const raw = backend.rawQueue ?? { steering: [], followUp: [] }
@@ -1488,9 +1683,14 @@ export class AgentBridge {
       followUp: [...raw.followUp]
     }
     this.pushQueueSnapshot(backend)
+    return token
   }
 
-  private unmarkDirectSteering(backend: BackendRecord, message: string): void {
+  private unmarkDirectSteering(backend: BackendRecord, message: string, token: symbol): void {
+    const markers = this.steeringMarkers?.get(backend)
+    const markerIndex = markers?.findIndex((marker) => marker.token === token) ?? -1
+    if (markerIndex < 0 || !this.backendStillOwned(backend)) return
+    markers?.splice(markerIndex, 1)
     const directIndex = backend.directSteering?.lastIndexOf(message) ?? -1
     if (directIndex >= 0) backend.directSteering?.splice(directIndex, 1)
     const raw = backend.rawQueue
@@ -1514,9 +1714,9 @@ export class AgentBridge {
 
   private dispatchNextLocalFollowUp(backend: BackendRecord): void {
     if (
-      this.stopping
+      !this.backendStillOwned(backend)
       || this.messageRevertInFlight
-      || backend.historyStopFailed
+      || backend.compacting
       || backend.busy
       || backend.localQueueDispatchPromise
       || backend.localQueueDispatching
@@ -1524,6 +1724,8 @@ export class AgentBridge {
       || backend.runCompletionPromise
       || (backend.localFollowUps?.length ?? 0) === 0
     ) return
+    const lease = this.reserveDispatch(backend)
+    let invoked = false
     backend.localQueueDispatching = true
     backend.busy = true
     const promise = (async (): Promise<void> => {
@@ -1536,9 +1738,9 @@ export class AgentBridge {
       }
       this.pushQueueSnapshot(backend)
       const state = await backend.client.getState().catch(() => null)
-      if (!state || state.isStreaming || state.isCompacting) {
-        localFollowUps.unshift(item)
-        if (!state) {
+      if (!lease.owns() || backend.compacting || !state || state.isStreaming || state.isCompacting) {
+        if (!localFollowUps.some((queued) => queued.runId === item.runId)) localFollowUps.unshift(item)
+        if (!state && lease.owns()) {
           backend.busy = false
           // A failed state read must not spin the dispatcher indefinitely.
           backend.localQueueBlocked = true
@@ -1549,13 +1751,25 @@ export class AgentBridge {
       }
       this.pushQueueSnapshot(backend)
       try {
+        await this.applyDesiredMode(backend, lease)
+        this.assertDispatchLease(lease)
         await this.prepareQueuedRunForDispatch(backend, item.runId)
-        await this.applyDesiredMode(backend)
-        await backend.client.prompt(item.text, item.images)
-        this.runStore.update(item.runId, (run) => {
-          run.dispatchedAt ??= Date.now()
-        })
+        this.assertDispatchLease(lease)
+        invoked = true
+        await this.dispatchPrompt(backend, item.runId, item.text, item.images, lease)
       } catch (error) {
+        if (invoked && (!lease.owns() || backend.activeRunId !== item.runId)) return
+        if (!invoked && !lease.owns()) {
+          if (!localFollowUps.some((queued) => queued.runId === item.runId)) localFollowUps.unshift(item)
+          this.runStore.update(item.runId, (run) => {
+            // Preparation can yield before prompt is invoked. No event was
+            // allowed to adopt this still-local item, so undo only its ledger.
+            if (run.state === 'dispatching') run.state = 'queued'
+          })
+          this.pushQueueSnapshot(backend)
+          return
+        }
+        backend.activeRunId = undefined
         backend.busy = false
         // prompt() rejected before agent_start, so this item was not
         // delivered and can be retried safely. Keep it visible instead of
@@ -1577,9 +1791,12 @@ export class AgentBridge {
         }
       }
     })().finally(() => {
+      if (backend.localQueueDispatchPromise !== promise || !this.backendStillOwned(backend)) return
       backend.localQueueDispatchPromise = undefined
+      backend.localQueueDispatching = false
       if (
-        !backend.localQueueDispatching
+        this.backendStillOwned(backend)
+        && !backend.localQueueDispatching
         && !backend.localQueueBlocked
         && !backend.runCompletionPromise
         && !backend.busy
@@ -1596,15 +1813,18 @@ export class AgentBridge {
     const localFollowUps = backend.localFollowUps ?? []
     const item = localFollowUps[index]
     if (!item) throw new Error('排队消息已被发送或移除')
+    const lease = this.reserveDispatch(backend)
     localFollowUps.splice(index, 1)
     this.pushQueueSnapshot(backend)
 
     const state = await backend.client.getState().catch(() => null)
     if (
-      !state
+      !lease.owns()
+      || !state
       || state.isCompacting
       || backend.compacting
       || backend.runCompletionPromise
+      || backend.localQueueDispatchPromise
       || (backend.busy && !state.isStreaming)
     ) {
       localFollowUps.splice(index, 0, item)
@@ -1621,10 +1841,12 @@ export class AgentBridge {
         run.dispatchedAt ??= Date.now()
         run.agentStartedAt ??= Date.now()
       })
-      this.markDirectSteering(backend, item.text)
+      const marker = this.markDirectSteering(backend, item.text)
       try {
-        await backend.client.steer(item.text, item.images)
+        await this.dispatchSteering(backend, item.text, item.images, marker, item.runId)
       } catch (error) {
+        if (!lease.owns() || !backend.companionRunIds?.includes(item.runId)
+          || !this.steeringMarkers?.get(backend)?.some((entry) => entry.token === marker)) throw error
         backend.companionRunIds = backend.companionRunIds.filter((id) => id !== item.runId)
         localFollowUps.splice(index, 0, item)
         const nextQueuedRunId = localFollowUps[index + 1]?.runId
@@ -1636,7 +1858,7 @@ export class AgentBridge {
           0,
           item.runId
         )
-        this.unmarkDirectSteering(backend, item.text)
+        this.unmarkDirectSteering(backend, item.text, marker)
         this.runStore.update(item.runId, (run) => {
           run.state = 'queued'
           run.error = undefined
@@ -1654,22 +1876,29 @@ export class AgentBridge {
     backend.pendingRunIds = [item.runId, ...backend.pendingRunIds.filter((id) => id !== item.runId)]
     backend.localQueueDispatching = true
     backend.busy = true
+    let invoked = false
     try {
+      await this.applyDesiredMode(backend, lease)
+      this.assertDispatchLease(lease)
       await this.prepareQueuedRunForDispatch(backend, item.runId)
-      await this.applyDesiredMode(backend)
-      await backend.client.prompt(item.text, item.images)
-      this.runStore.update(item.runId, (run) => {
-        run.dispatchedAt ??= Date.now()
-      })
+      this.assertDispatchLease(lease)
+      invoked = true
+      await this.dispatchPrompt(backend, item.runId, item.text, item.images, lease)
     } catch (error) {
-      backend.busy = false
-      backend.localQueueDispatching = false
-      backend.pendingRunIds = backend.pendingRunIds.filter((id) => id !== item.runId)
-      localFollowUps.splice(index, 0, item)
-      backend.localQueueBlocked = localFollowUps.length > 0
+      if (invoked && (!lease.owns() || backend.activeRunId !== item.runId)) throw error
+      if (!invoked && lease.ownsReservation()) backend.localQueueDispatching = false
+      if (lease.owns()) {
+        backend.activeRunId = undefined
+        backend.busy = false
+        backend.localQueueDispatching = false
+        backend.localQueueBlocked = true
+      }
+      if (!localFollowUps.some((queued) => queued.runId === item.runId)) localFollowUps.splice(index, 0, item)
+      backend.pendingRunIds = [item.runId, ...backend.pendingRunIds.filter((id) => id !== item.runId)]
       this.runStore.update(item.runId, (run) => {
-        run.state = 'failed'
-        run.settledAt = Date.now()
+        if (run.state !== 'dispatching' && run.state !== 'queued') return
+        run.state = 'queued'
+        run.dispatchedAt = undefined
         run.error = error instanceof Error ? error.message : String(error)
       })
       this.pushQueueSnapshot(backend)
@@ -1731,6 +1960,17 @@ export class AgentBridge {
       if (this.stopping || backend.historyMutation || backend.historyStopFailed
         || this.backendPool.get(backend.key) !== backend) return
       const type = (event as { type?: string }).type
+      // Nested billing has private receipts, never independent renderer rows
+      // or root lifecycle events. SDK codemode usage covers models.*, not children.
+      const parentToolCallId = (event as { parentToolCallId?: unknown }).parentToolCallId
+      if (typeof parentToolCallId === 'string' && parentToolCallId.length > 0) {
+        this.trackBackendEvent(backend, event, type)
+        return
+      }
+      if (type === 'agent_start' || type === 'agent_settled'
+        || type === 'compaction_start' || type === 'compaction_end') {
+        this.dispatchLifecycle(backend).generation += 1
+      }
       if (type === 'extension_ui_request' && this.handleExtensionUiRequest(backend, event)) return
 
       if (type === 'tool_execution_end' && (event as { toolName?: string }).toolName === 'pion_subagents') {
@@ -2061,16 +2301,19 @@ export class AgentBridge {
   /** Prompt when idle, steer when mid-run. Starts only this session's backend. */
   async send(message: string, images: ImageContent[] = []): Promise<void> {
     const backend = await this.ensureActiveBackend()
+    const lease = this.reserveDispatch(backend)
     const state = await backend.client.getState().catch(() => null)
+    this.assertDispatchLease(lease)
     this.assertHistoryAvailable()
     if (state?.isStreaming && !state.isCompacting && !backend.compacting) {
       // Enter uses Pi's steering path, but it is an immediate insertion rather
       // than a user follow-up. Keep it out of the visible queue card.
-      this.markDirectSteering(backend, message)
+      const marker = this.markDirectSteering(backend, message)
+      const client = backend.client
       try {
-        await backend.client.steer(message, images)
+        await this.dispatchSteering(backend, message, images, marker)
       } catch (error) {
-        this.unmarkDirectSteering(backend, message)
+        if (backend.client === client) this.unmarkDirectSteering(backend, message, marker)
         throw error
       }
     } else if (
@@ -2092,23 +2335,12 @@ export class AgentBridge {
       let run: RunOperation | undefined
       try {
         this.resetRunCheckpoint(backend)
-        await this.applyDesiredMode(backend)
+        await this.applyDesiredMode(backend, lease)
+        this.assertDispatchLease(lease)
         run = this.createRun(backend, state, message, images, 'prompt', 'dispatching')
-        await backend.client.prompt(message, images)
-        this.runStore.update(run.id, (current) => {
-          current.dispatchedAt ??= Date.now()
-        })
+        await this.dispatchPrompt(backend, run.id, message, images, lease)
       } catch (error) {
-        if (run && backend.activeRunId === run.id) backend.activeRunId = undefined
-        backend.busy = false
-        backend.compacting = false
-        if (run) {
-          this.runStore.update(run.id, (current) => {
-            current.state = 'failed'
-            current.settledAt = Date.now()
-            current.error = error instanceof Error ? error.message : String(error)
-          })
-        }
+        this.recoverPromptFailure(backend, lease, run, error)
         throw error
       }
     }
@@ -2121,7 +2353,9 @@ export class AgentBridge {
   /** Queue a follow-up while running; starts this session's backend if needed. */
   async queue(message: string, images: ImageContent[] = []): Promise<void> {
     const backend = await this.ensureActiveBackend()
+    const lease = this.reserveDispatch(backend)
     const state = await backend.client.getState().catch(() => null)
+    this.assertDispatchLease(lease)
     this.assertHistoryAvailable()
     if (
       state?.isStreaming
@@ -2129,6 +2363,8 @@ export class AgentBridge {
       || backend.busy
       || backend.compacting
       || backend.localQueueDispatching
+      || backend.localQueueDispatchPromise
+      || backend.runCompletionPromise
       || (backend.localFollowUps?.length ?? 0) > 0
     ) {
       const run = this.createRun(backend, state, message, images, 'follow-up', 'queued')
@@ -2145,23 +2381,12 @@ export class AgentBridge {
       let run: RunOperation | undefined
       try {
         this.resetRunCheckpoint(backend)
-        await this.applyDesiredMode(backend)
+        await this.applyDesiredMode(backend, lease)
+        this.assertDispatchLease(lease)
         run = this.createRun(backend, state, message, images, 'follow-up', 'dispatching')
-        await backend.client.prompt(message, images)
-        this.runStore.update(run.id, (current) => {
-          current.dispatchedAt ??= Date.now()
-        })
+        await this.dispatchPrompt(backend, run.id, message, images, lease)
       } catch (error) {
-        if (run && backend.activeRunId === run.id) backend.activeRunId = undefined
-        backend.busy = false
-        backend.compacting = false
-        if (run) {
-          this.runStore.update(run.id, (current) => {
-            current.state = 'failed'
-            current.settledAt = Date.now()
-            current.error = error instanceof Error ? error.message : String(error)
-          })
-        }
+        this.recoverPromptFailure(backend, lease, run, error)
         throw error
       }
     }
@@ -2191,8 +2416,9 @@ export class AgentBridge {
     } else {
       await backend.startPromise
     }
+    const lease = this.reserveDispatch(backend)
     const state = await backend.client.getState()
-    if (this.messageRevertInFlight || backend.historyStopFailed
+    if (!lease.owns() || this.messageRevertInFlight || backend.historyStopFailed
       || state.isStreaming || state.isCompacting || backend.busy || backend.compacting) return null
     // Reserve the backend while preparing the checkpoint and sending the
     // repair prompt; verification callbacks may otherwise race each other.
@@ -2200,33 +2426,24 @@ export class AgentBridge {
     let run: RunOperation | undefined
     try {
       this.resetRunCheckpoint(backend)
-      await this.applyDesiredMode(backend)
+      await this.applyDesiredMode(backend, lease)
+      this.assertDispatchLease(lease)
       run = this.createRun(backend, state, message, [], 'verification-repair', 'dispatching')
-      await backend.client.prompt(message)
-      this.runStore.update(run.id, (current) => {
-        current.dispatchedAt ??= Date.now()
-      })
+      await this.dispatchPrompt(backend, run.id, message, [], lease)
       await this.syncBackendSession(backend)
       return this.runStore.get(run.id) ?? run
     } catch (error) {
-      if (run && backend.activeRunId === run.id) backend.activeRunId = undefined
-      backend.busy = false
-      backend.compacting = false
-      if (run) {
-        this.runStore.update(run.id, (current) => {
-          current.state = 'failed'
-          current.settledAt = Date.now()
-          current.error = error instanceof Error ? error.message : String(error)
-        })
-      }
+      this.recoverPromptFailure(backend, lease, run, error)
       throw error
     }
   }
 
-  private async applyDesiredMode(backend: BackendRecord): Promise<void> {
+  private async applyDesiredMode(backend: BackendRecord, lease = this.reserveDispatch(backend)): Promise<void> {
+    this.assertDispatchLease(lease)
     const desired = this.desiredModes.get(backend.key) ?? 'build'
     if (backend.modePrimed === desired) return
     await backend.client.prompt(desired === 'plan' ? '/plan start' : '/plan exit')
+    this.assertDispatchLease(lease)
     backend.modePrimed = desired
   }
 
@@ -2741,6 +2958,11 @@ export class AgentBridge {
     const events: SessionTaskHistoryEvent[] = []
 
     for (const entry of manager.getBranch()) {
+      const customTasks = taskSnapshotFromEntry(entry)
+      if (customTasks !== undefined) {
+        events.push({ kind: 'snapshot', tasks: customTasks })
+        continue
+      }
       if (entry.type !== 'message') continue
       if (entry.message.role === 'user') {
         events.push({
@@ -2857,12 +3079,17 @@ export class AgentBridge {
     backend.subagentsModePending = true
     try {
       await backend.startPromise
-      const [state, commands] = await Promise.all([backend.client.getState(), backend.client.getCommands()])
+      const client = backend.client
+      const generation = this.dispatchLifecycle(backend).generation
+      const [state, commands] = await Promise.all([client.getState(), client.getCommands()])
+      if (!this.backendStillOwned(backend) || backend.client !== client
+        || this.dispatchLifecycle(backend).generation !== generation) throw new Error('会话运行状态已改变，请重试')
       if (this.activeKey !== backend.key || state.sessionId !== sessionId) throw new Error('会话已切换，请重试')
       if (enabled && (backend.busy || backend.compacting || state.isStreaming || state.isCompacting)) throw new Error('请等待当前执行完成后开启子代理')
       if (enabled && this.desiredModes.get(backend.key) === 'plan') throw new Error('计划模式不启用编码子代理')
       if (!commands.some((command) => command.name === 'pion-subagents')) throw new Error('当前运行时不支持内置子代理')
-      await backend.client.prompt(enabled ? '/pion-subagents on' : '/pion-subagents off')
+      await client.prompt(enabled ? '/pion-subagents on' : '/pion-subagents off')
+      if (!this.backendStillOwned(backend) || backend.client !== client) return
       backend.subagentsEnabled = enabled
       if (!enabled) this.clearSubagentPermissions(backend)
       if (this.activeKey === backend.key) await this.pushSessionInfo()
@@ -2882,7 +3109,9 @@ export class AgentBridge {
     }
     if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
     await backend.startPromise
+    const lease = this.reserveDispatch(backend)
     const currentState = await backend.client.getState().catch(() => null)
+    this.assertDispatchLease(lease)
     this.assertHistoryAvailable()
     if (
       backend.busy
@@ -2898,15 +3127,21 @@ export class AgentBridge {
     backend.busy = true
     try {
       const commands = await backend.client.getCommands()
+      this.assertDispatchLease(lease)
       if (!commands.some((command) => command.name === 'plan')) {
         throw new Error('Pion 计划模式未加载')
       }
       await backend.client.prompt(mode === 'plan' ? '/plan start' : '/plan exit')
+      this.assertDispatchLease(lease)
       this.desiredModes.set(key, mode)
       backend.modePrimed = mode
     } finally {
-      backend.busy = false
-      if (!backend.compacting && !backend.localQueueDispatching && !backend.localQueueBlocked && !backend.runCompletionPromise && (backend.localFollowUps?.length ?? 0) > 0) {
+      // A command can launch independent extension work. Its events own busy,
+      // even if the command's own disposition is handled.
+      if (lease.owns()) {
+        backend.busy = false
+      }
+      if (this.backendStillOwned(backend) && !backend.busy && !backend.compacting && !backend.localQueueDispatching && !backend.localQueueBlocked && !backend.runCompletionPromise && (backend.localFollowUps?.length ?? 0) > 0) {
         this.dispatchNextLocalFollowUp(backend)
       }
     }

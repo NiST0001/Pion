@@ -5,6 +5,7 @@ import {
   type CreateAgentSessionRuntimeFactory, type AgentSession, type ModelRuntime
 } from '@earendil-works/pi-coding-agent'
 import { askUserTool } from './ask-user'
+import { applyPionNativeToolDefaults, createPionNativeExtensions, createPionNativeLoadoutBoundary } from './native-extensions'
 import { createImageGenerationTool } from './image-generation'
 import { createSubagentControl, createSubagentRunner } from './subagents'
 
@@ -40,11 +41,14 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
     let models: ModelRuntime
     const subagents = createSubagentControl(createSubagentRunner(() => parent, () => models, cwd, agentDir))
     const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: options.approved })
+    // Capture raw modifiers before Pion supplies extras; do not read credentials.
+    const loadout = createPionNativeLoadoutBoundary(settingsManager.getSettings().defaultTools)
     const services = await createAgentSessionServices({
       cwd, agentDir, settingsManager,
       modelRuntimeSignal: AbortSignal.timeout(15_000),
-      resourceLoaderOptions: { additionalExtensionPaths: options.extensions, extensionFactories: [subagents.extension] }
+      resourceLoaderOptions: { additionalExtensionPaths: options.extensions, extensionFactories: [...createPionNativeExtensions(), loadout.capture, subagents.extension, loadout.declarations] }
     })
+    applyPionNativeToolDefaults(settingsManager, services.resourceLoader)
     const patterns = settingsManager.getEnabledModels()
     const scope = patterns?.length
       ? await resolveModelScopeWithDiagnostics(patterns, services.modelRuntime, { signal: AbortSignal.timeout(15_000) })
@@ -66,6 +70,9 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
         getAuth: (overrides) => services.modelRuntime.getAuth('openai-codex', overrides)
       })]
     })
+    // createAgentSessionFromServices does not bind lifecycle hooks. Freeze the
+    // SDK initial subset before RPC session_start can auto-activate MCP helpers.
+    loadout.initialize(created.session.getActiveToolNames())
     parent = created.session
     models = services.modelRuntime
     return { ...created, services, diagnostics: [...services.diagnostics, ...scope.diagnostics] }

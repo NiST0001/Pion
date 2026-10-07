@@ -67,6 +67,28 @@ it('does not let a history reply rewind a live clear received while loading', as
   expect(h.result.current.history.timelineCache.current.get(path)?.tasks).toEqual([])
 })
 
+it('keeps a nested durable clear authoritative over a late history snapshot without replacing live rows', async () => {
+  let resolve!: (value: SessionEntriesPage) => void
+  const h = setup(vi.fn().mockImplementation(() => new Promise<SessionEntriesPage>((done) => { resolve = done })))
+  let pending!: Promise<void>
+  act(() => { pending = h.result.current.history.reloadTimeline(path) })
+  const timeline = h.result.current.state.timeline
+  act(() => h.result.current.dispatch({ type: 'event', event: {
+    type: 'entry_appended', entry: { id: 'nested-clear', type: 'custom', customType: 'pion-task-state',
+      data: { native: 'pion', action: 'clear', tasks: [], nextId: 1 } }
+  } }))
+  expect(h.result.current.state.timeline).toBe(timeline)
+  expect(h.result.current.state.taskRevision).toBe(1)
+  await act(async () => { resolve(page()); await pending })
+  expect(h.result.current.state.tasks).toEqual([])
+  expect(h.result.current.history.timelineCache.current.get(path)?.tasks).toEqual([])
+  act(() => h.result.current.dispatch({ type: 'event', event: {
+    type: 'entry_appended', entry: { id: 'nested-clear', type: 'custom', customType: 'pion-task-state',
+      data: { native: 'pion', action: 'clear', tasks: [], nextId: 1 } }
+  } }))
+  expect(h.result.current.state.taskRevision).toBe(1)
+})
+
 it('ignores an old session read after a new selection begins', async () => {
   let resolve!: (value: SessionEntriesPage) => void
   const get = vi.fn().mockImplementationOnce(() => new Promise<SessionEntriesPage>((done) => { resolve = done }))
