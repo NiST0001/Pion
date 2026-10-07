@@ -14,7 +14,7 @@
 | src/shared/ipc.ts | 请求与事件频道 |
 | src/shared/pion-api.ts | PionApi 接口 |
 | src/shared/types.ts | 共享类型入口；历史分页响应另带所选分支的最新任务快照及压缩边界元数据 |
-| src/shared/task-history.ts | 原生自定义任务快照/旧版工具结果校验、按用户轮次归档；区分有效空快照与错误/缺失结果 |
+| src/shared/task-history.ts | 原生自定义任务快照/旧版工具结果校验；新原生目标按 planId 跨轮归档，旧记录保持用户轮次投影；共享未完成状态判定，区分有效空快照与错误/缺失结果 |
 | src/shared/image-generation.ts | 生图工具身份、官方请求别名与实验 2.5 Flare/Sunburst 白名单；size/quality 与有界引用路径准入（字面 @）；v2 必需请求操作/尺寸/质量/引用数及实际 PNG 保存元数据，实际版本未知；只读 v1/v2 投影不补造旧设置默认值 |
 | src/shared/tool-images.ts | 跨进程工具预览的严格有界 base64、静态 PNG/JPEG 结构/尺寸、PNG 压缩文本/ICC 拒绝、稳定位置及提示；结构辅助函数也为输入/输出原图提供像素准入，允许压缩 PNG metadata 的调用方须另外执行有界 inflate 完整性校验；不等同于真实解码 |
 | src/shared/operations.ts | 运行/恢复数据契约，以及主进程与 renderer 共用的统计候选筛选、执行状态判定和排序 |
@@ -37,7 +37,7 @@
 | src/main/agent/backend-pool.ts | 后端保留和容量管理 |
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态 |
 | src/main/agent/queue-projection.ts | 本地队列与原生队列投影 |
-| src/main/agent/task-planning.ts | 原生任务工具与扩展；AI 按目标延续计划，显式 clear 才重置；变更同步提交分支自定义完整快照、失败回滚内存，嵌套调用也能恢复，保留单一进行中约束 |
+| src/main/agent/task-planning.ts | 原生任务工具与扩展；未完成目标跨消息延续，全部完成快照持久归档并可读，之后 create 建立新目标身份/编号；同目标先重开旧任务再追加，显式 clear 重置当前计划；分支完整快照提交失败回滚内存，嵌套可恢复，保留单一进行中约束 |
 | src/main/agent/wire.ts | SDK 条目映射、所选分支祖先链与模式推导、沿当前叶节点恢复最新任务快照；保留压缩边界及 token 数供实时/历史归并 |
 | src/main/agent-runtime.ts、src/main/agent/runtime-host.ts、src/main/agent/runtime-lifecycle.ts | 编译后的 SDK RPC 子进程入口、私有启动参数、项目隔离/信任与会话替换时重建内置工具；启动失败/返回先等待 owner 清理再退出；生图工具捕获所属 backend 的 SDK ModelRuntime，执行获准后才解析 Codex OAuth/刷新 |
 | src/main/agent/native-extensions.ts | CLI 同源 MCP/codemode/tool-search 的 builtin/replaceable factories，运行时与能力扫描共用；原生默认工具仅未显式选择时临时添加，尊重禁用/替换/noExtensions；显式工具集合以初始 SDK 集合和正负匹配规则持续限制直接及嵌套执行，迟到发现不扩大边界；codemode models:true、每脚本模型调用预算与主机期限/父中止、原 SDK usage 保留，有界图片结果 fail-closed 投影并清除 structuredContent，不承诺任意文字/base64 脱敏或请求实际停止 |
@@ -97,7 +97,7 @@
 - `chat/`：ChatTimeline（含稳定的滚动占位容器）、ChatMessage、Markdown、ToolCallItem、Composer；ChatMessage 将模型/API 错误显示为可操作的短提示，原始诊断默认折叠且历史回放不注册实时播报；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
 - `chat/ToolCallItem.tsx`：按需工具详情；生图分别展示请求型号/实际版本未知、请求操作/size/quality/引用数、输出 PNG 原图保存尺寸与缩略图上限，不把请求尺寸或质量当实际输出承诺，不补造旧历史设置，也不展示输入原图或引用路径数组。
 - `chat/ToolResultImages.tsx`：ToolCallItem 的有界静态 PNG/JPEG 输出结果预览；按详情展开/收起挂载和释放，以工具 ID/内容位置维持图片身份，固定框显示加载/失败状态；不读取原图/提供商 URL，不参与字符渐入，加载事件不滚动消息区。
-- `session/`：HistoryNavigator 跳转条、SessionList 会话行、QueuedMessagesCard、TaskPanel、TaskHistoryPanel；`ComposerSupportPanels.tsx` 保持任务/排队面板的网格槽位稳定，支持平滑让位。
+- `session/`：HistoryNavigator 跳转条、SessionList 会话行、QueuedMessagesCard、TaskPanel、TaskHistoryPanel；`TaskPanel` 全部完成后隐藏但混合计划保留完成行；`ComposerSupportPanels.tsx` 共用状态判定，保持任务/排队面板的网格槽位及相邻草稿身份稳定。
 - `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
 - `operations/`：RunMetricsStrip、权限确认、验证、运行恢复和工作流面板。RunMetricsStrip 保留在会话顶部，详情在统计条下方同宽悬浮展开，不占消息区高度；任务/排队面板仍在输入框上方。
 - `review/`：Git 改动列表、差异与审查界面。`ReviewPanel.tsx` 保留审查编排、提交草稿与冲突编辑；`ReviewFileTree.tsx` 管理各分组独立折叠、选中父目录展开与文件行渲染，`reviewFileTreeModel.ts` 提供纯树构建、排序、目录计数与父路径计算。文件树在状态码旁显示绿色新增/红色删减行数，直接使用快照的工作区合计（已暂存 + 未暂存，包含未跟踪文件），不额外加载 diff；缺失统计不伪造零值。ModifiedFilesCard 使用同一工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 与工具正文共用可见性观察器，按小段延迟创建动画字符，保留渐入并在结束后回收节点，实时文字仅动画新增后缀；DiffView 对长差异分页，工具内使用有界滚动区，保留全部差异的翻页访问。
@@ -168,7 +168,7 @@
   - `WorkbenchDialogs.test.tsx`：首次按需 lazy 加载、关闭/重开及兄弟弹窗切换时的组件身份、草稿与独立挂起隔离，受控确认、操作页/修复回调透传，以及真实设置弹窗原有打开重置和在途操作保留；下游 mocks 在用例内注册并清理。
   - `windowEffects.test.tsx`：毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条、权限请求避让输入框与实底回退的源码契约（不替代 GPU 真机验证）。
   - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1 迁移、拖动预览与菜单操作时不重挂载内容。
-- `tests/unit/task-planning.test.ts`：跨消息任务 ID/状态/依赖保留、长计划、显式清空、当前分支生命周期恢复、单一进行中约束、模式隐藏及任务延续提示契约；不调用真实模型。
+- `tests/unit/task-planning.test.ts`：跨消息任务 ID/状态/依赖保留、完成快照可读归档、新目标身份/编号、同目标重开、失败回滚、长计划、显式清空、分支恢复、单一进行中、模式隐藏及延续提示契约；不调用真实模型。
 - `tests/unit/run-store.test.ts`：运行持久化与中断恢复、统计查询在限制条数前过滤队列，默认查询保留队列；撤销空闲门控扫描完整账本，不被展示条数限制掩盖旧队列；独立 usage 的运行归属、模型别名、持久去重、容量边界与损坏 receipt 容错。
 - `tests/unit/agent-bridge-send-queue.test.ts`：已有排队消息时 Enter 优先直接发送并保留原有队列；handled 派发无事件收尾、扩展新运行/迟到响应隔离与队列精确归属。
 - `tests/unit/workflow-runner.test.ts`：模拟 RPC 快速终态、无运行 handled、扩展独立运行、输入接受不等于完成、message_end 文字/错误优先及空终态、权限准备/启动挂起期限与取消闸门、迟到结果/派发失败清理及 stop 失败保留诊断，不调用真实模型。

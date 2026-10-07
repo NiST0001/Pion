@@ -49,9 +49,8 @@ import type {
 import { messageText } from '../../shared/types'
 import {
   deriveSessionTaskRuns,
-  isTaskToolName,
-  normalizeSessionTasks,
-  taskSnapshotFromEntry
+  taskHistorySnapshotFromEntry,
+  taskHistorySnapshotFromResult
 } from '../../shared/task-history'
 import type { SessionTaskHistoryEvent } from '../../shared/task-history'
 import { createWorktreeBranch, listBranchInfos, renameGitBranch } from '../git'
@@ -2958,9 +2957,9 @@ export class AgentBridge {
     const events: SessionTaskHistoryEvent[] = []
 
     for (const entry of manager.getBranch()) {
-      const customTasks = taskSnapshotFromEntry(entry)
-      if (customTasks !== undefined) {
-        events.push({ kind: 'snapshot', tasks: customTasks })
+      const customSnapshot = taskHistorySnapshotFromEntry(entry)
+      if (customSnapshot !== undefined) {
+        events.push({ kind: 'snapshot', ...customSnapshot })
         continue
       }
       if (entry.type !== 'message') continue
@@ -2975,13 +2974,9 @@ export class AgentBridge {
         continue
       }
       if (entry.message.role !== 'toolResult') continue
-      const message = entry.message as unknown as {
-        toolName?: unknown
-        details?: { tasks?: unknown }
-      }
-      if (!isTaskToolName(message.toolName)) continue
-      const tasks = normalizeSessionTasks(message.details?.tasks)
-      if (tasks) events.push({ kind: 'snapshot', tasks })
+      const message = entry.message as unknown as { toolName?: unknown }
+      const snapshot = taskHistorySnapshotFromResult(message.toolName, message)
+      if (snapshot !== undefined) events.push({ kind: 'snapshot', ...snapshot })
     }
 
     return deriveSessionTaskRuns(events)

@@ -39,16 +39,37 @@ it('hydrates tasks outside the newest history window and retains them in the sep
   expect(h.result.current.history.timelineCache.current.get(path)?.tasks).toEqual(tasks)
 })
 
+it('keeps completed history snapshots readable without resurrecting the panel on reload or plan exit', async () => {
+  const finished: SessionTask[] = [{ id: 1, title: 'Archived goal', status: 'completed' }]
+  const h = setup(vi.fn().mockResolvedValue(page(finished)))
+  await act(async () => { await h.result.current.history.reloadTimeline(path) })
+  const content = () => <TaskPanel sessionKey={path}
+    agentTodos={h.result.current.state.mode === 'plan' ? null : h.result.current.state.tasks} />
+  const panel = render(content())
+  expect(panel.container).toBeEmptyDOMElement()
+  expect(h.result.current.state.tasks).toEqual(finished)
+  expect(h.result.current.history.timelineCache.current.get(path)?.tasks).toEqual(finished)
+  act(() => h.result.current.dispatch({ type: 'mode', mode: 'plan' }))
+  panel.rerender(content())
+  act(() => h.result.current.dispatch({ type: 'mode', mode: 'build' }))
+  panel.rerender(content())
+  expect(panel.container).toBeEmptyDOMElement()
+  await act(async () => { await h.result.current.history.reloadTimeline(path) })
+  panel.rerender(content())
+  expect(panel.container).toBeEmptyDOMElement()
+  expect(h.result.current.state.tasks).toEqual(finished)
+})
+
 it('does not lose the panel projection when jumping to a task-free history window', async () => {
   const h = setup()
   await act(async () => { await h.result.current.history.reloadTimeline(path) })
   const panel = render(<TaskPanel sessionKey={path} agentTodos={h.result.current.state.tasks} />)
-  const header = screen.getByRole('button', { name: '展开本轮任务' })
+  const header = screen.getByRole('button', { name: '展开目标任务' })
   const landmark = { entryId: 'tail', entryIndex: 20, ordinal: 1, snippet: '历史消息', timestamp: '' }
   act(() => h.result.current.dispatch({ type: 'historyIndex', index: { sessionPath: path, totalEntries: 100, landmarks: [landmark] } }))
   await act(async () => { await h.result.current.history.jumpToHistoryLandmark(landmark) })
   panel.rerender(<TaskPanel sessionKey={path} agentTodos={h.result.current.state.tasks} />)
-  expect(screen.getByRole('button', { name: '展开本轮任务' })).toBe(header)
+  expect(screen.getByRole('button', { name: '展开目标任务' })).toBe(header)
   expect(h.result.current.state.tasks).toEqual(tasks)
   expect(h.result.current.history.timelineCache.current.get(path)?.tasks).toEqual(tasks)
 })

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Type } from 'typebox'
+import { randomUUID } from 'node:crypto'
 import { nativeTaskExtensionSource } from '../../src/main/agent/task-planning'
 
 type Task = {
@@ -23,7 +24,10 @@ type Params = {
 }
 type Result = {
   content: { type: string; text: string }[]
-  details: { action: string; tasks: Task[]; nextId: number; native: string }
+  details: {
+    action: string; tasks: Task[]; nextId: number; native: string
+    planId?: string; planStart?: boolean; completed?: boolean
+  }
 }
 type Entry =
   | { type: 'message'; message: { role: string; toolName?: string; details?: Result['details']; content?: string } }
@@ -57,10 +61,10 @@ function runtime(initialBranch: Entry[] = [], initialTools = ['read', 'pion_task
   }
   // Materialize only the bundled extension, injecting real TypeBox schemas;
   // no SDK process, global mocks, or unscoped hooks leak into coverage aggregation.
-  const install = new Function('Type', 'StringEnum', nativeTaskExtensionSource()
+  const install = new Function('Type', 'StringEnum', 'randomUUID', nativeTaskExtensionSource()
     .replace(/^import .*;\n/gm, '')
     .replace('export default function (pi)', 'return function (pi)'))(
-    Type, (values: string[]) => Type.Union(values.map((value) => Type.Literal(value)))
+    Type, (values: string[]) => Type.Union(values.map((value) => Type.Literal(value))), randomUUID
   ) as (api: typeof pi) => void
   install(pi)
   const ctx: Context = { sessionManager: { getBranch: () => branch } }
@@ -144,9 +148,10 @@ describe('Pion native task plan continuity', () => {
   it('keeps IDs, status, dependencies and nextId across follow-ups and simple conversation', async () => {
     const h = runtime()
     await h.event('session_start')
-    await h.call({ action: 'create', subject: 'Inspect', status: 'completed' })
+    await h.call({ action: 'create', subject: 'Inspect' })
     await h.call({ action: 'create', subject: 'Implement', status: 'in_progress', blockedBy: [1] })
     await h.call({ action: 'create', subject: 'Verify', blockedBy: [2] })
+    await h.call({ action: 'update', id: 1, status: 'completed' })
     const saved = await h.inspect()
     const branch = h.branch()
     for (const prompt of ['Continue the plan', 'What does the second step mean?', 'Thanks', 'Add a migration step']) {
@@ -163,6 +168,192 @@ describe('Pion native task plan continuity', () => {
     ])
     expect(continued.tasks[2].blockedBy).toEqual([2, 1])
     expect(continued.nextId).toBe(4)
+  })
+
+  it('archives only a nonempty fully completed plan, leaving list/get and its durable snapshot intact', async () => {
+    const h = runtime()
+    expect(await h.inspect()).toMatchObject({ completed: false })
+    const initial = await h.call({ action: 'create', subject: 'Implement', status: 'in_progress' })
+    await h.call({ action: 'create', subject: 'Verify', blockedBy: [1] })
+    await h.call({ action: 'create', subject: 'Dropped scope' })
+    await h.call({ action: 'delete', id: 3 })
+    const partial = await h.call({ action: 'update', id: 1, status: 'completed' })
+    expect(partial).toMatchObject({ completed: false, planId: initial.planId, nextId: 4 })
+    const branch = h.branch()
+    await h.before('Waiting for test authorization')
+    expect(await h.inspect()).toEqual({ ...partial, action: 'list' })
+    expect(h.branch()).toEqual(branch)
+    const final = await h.call({ action: 'update', id: 2, status: 'completed' })
+    expect(final).toMatchObject({ completed: true, planId: initial.planId, nextId: 4 })
+    expect(final.tasks).toHaveLength(3)
+    expect((await h.tool.execute('get-completed', { action: 'get', id: 2 })).content[0].text).toContain('[completed]')
+    const saved = h.branch()
+    await h.before('Thanks')
+    expect(h.branch()).toEqual(saved)
+    const repeated = await h.call({ action: 'update', id: 2, status: 'completed' })
+    expect(repeated).toEqual(final)
+    expect(repeated.planStart).toBeUndefined()
+    const restarted = runtime(h.branch())
+    await restarted.event('session_start')
+    expect(await restarted.inspect()).toEqual({ ...final, action: 'list' })
+  })
+
+  it('starts a fresh identified goal lazily and records the transition in one snapshot', async () => {
+    const h = runtime()
+    const old = await h.call({ action: 'create', subject: 'Old goal', status: 'completed' })
+    const saved = h.branch()
+    const newGoal = await h.tool.execute('new-goal', { action: 'create', subject: 'New goal' })
+    expect(newGoal.details).toMatchObject({ planStart: true, completed: false, nextId: 2 })
+    expect(newGoal.details.planId).not.toBe(old.planId)
+    expect(newGoal.details.tasks).toEqual([expect.objectContaining({ id: 1, subject: 'New goal' })])
+    expect(h.appendEntry).toHaveBeenCalledTimes(2)
+    expect(h.branch().slice(saved.length)).toEqual([{
+      type: 'custom', customType: 'pion-task-state', data: newGoal.details
+    }])
+    const next = await h.call({ action: 'create', subject: 'Dependent work', blockedBy: [1] })
+    expect(next).toMatchObject({ planId: newGoal.details.planId, nextId: 3 })
+    expect(next.planStart).toBeUndefined()
+    expect(next.tasks[1]).toMatchObject({ id: 2, blockedBy: [1] })
+    await h.call({ action: 'clear' })
+    const replacement = await h.call({ action: 'create', subject: 'Explicit replacement' })
+    expect(replacement.tasks[0].id).toBe(1)
+    expect(replacement.planId).not.toBe(newGoal.details.planId)
+    expect(replacement.planId).not.toBe(old.planId)
+  })
+
+  it('reopens a completed goal before appending same-goal work without losing IDs or dependencies', async () => {
+    const h = runtime()
+    await h.call({ action: 'create', subject: 'Implement' })
+    await h.call({ action: 'create', subject: 'Verify', blockedBy: [1] })
+    await h.call({ action: 'update', id: 1, status: 'completed' })
+    const completed = await h.call({ action: 'update', id: 2, status: 'completed' })
+    const reopened = await h.call({ action: 'update', id: 2, status: 'pending' })
+    expect(reopened).toMatchObject({ completed: false, planId: completed.planId, nextId: 3 })
+    const extra = await h.call({ action: 'create', subject: 'Regression follow-up', blockedBy: [2] })
+    expect(extra.tasks.map((task) => task.id)).toEqual([1, 2, 3])
+    expect(extra.tasks[1].blockedBy).toEqual([1])
+    expect(extra.tasks[2].blockedBy).toEqual([2])
+    expect(extra.planId).toBe(completed.planId)
+    expect(extra.planStart).toBeUndefined()
+    const injected = await h.before('Same-goal correction')
+    expect(injected?.systemPrompt).toContain('first update an existing task back to pending/in_progress')
+  })
+
+  it('does not treat deleted-only or unfinished plans as completed goals', async () => {
+    const h = runtime()
+    const first = await h.call({ action: 'create', subject: 'Removed task' })
+    const deleted = await h.call({ action: 'delete', id: 1 })
+    expect(deleted.completed).toBe(false)
+    const continued = await h.call({ action: 'create', subject: 'Waiting for approval' })
+    expect(continued).toMatchObject({ completed: false, planId: first.planId, nextId: 3 })
+    expect(continued.tasks.map((task) => task.id)).toEqual([1, 2])
+    expect(continued.planStart).toBeUndefined()
+    await h.call({ action: 'create', subject: 'Working', status: 'in_progress' })
+    await h.call({ action: 'update', id: 2, status: 'completed' })
+    expect((await h.inspect()).completed).toBe(false)
+  })
+
+  it('rolls back lazy replacement, completion and reopening together with plan identity on append failure', async () => {
+    const h = runtime()
+    await h.call({ action: 'create', subject: 'Goal' })
+    for (const status of ['completed', 'pending'] as const) {
+      if (status === 'pending') await h.call({ action: 'update', id: 1, status: 'completed' })
+      const saved = await h.inspect()
+      const branch = h.branch()
+      h.appendEntry.mockImplementationOnce(() => { throw new Error('append failed') })
+      await expect(h.call({ action: 'update', id: 1, status })).rejects.toThrow('append failed')
+      expect(await h.inspect()).toEqual(saved)
+      expect(h.branch()).toEqual(branch)
+    }
+    const completed = await h.inspect()
+    const branch = h.branch()
+    h.appendEntry.mockImplementationOnce(() => { throw new Error('append failed') })
+    await expect(h.call({ action: 'create', subject: 'Next goal' })).rejects.toThrow('append failed')
+    expect(await h.inspect()).toEqual(completed)
+    expect(h.branch()).toEqual(branch)
+    await h.event('session_compact')
+    expect(await h.inspect()).toEqual(completed)
+    const next = await h.call({ action: 'create', subject: 'Next goal' })
+    expect(next.planId).not.toBe(completed.planId)
+    expect(next.tasks[0].id).toBe(1)
+  })
+
+  it.each(['session_start', 'session_tree', 'session_compact'])(
+    '%s restores completed/reopened/replacement identity along the selected branch', async (event) => {
+      const h = runtime()
+      const old = await h.call({ action: 'create', subject: 'Old goal', status: 'completed' })
+      const completedBranch = h.branch()
+      await h.call({ action: 'update', id: 1, status: 'pending' })
+      const reopenedBranch = h.branch()
+      await h.call({ action: 'update', id: 1, status: 'completed' })
+      const next = await h.call({ action: 'create', subject: 'New goal' })
+      const replacementBranch = h.branch()
+      for (const [branch, expected] of [
+        [completedBranch, { completed: true, planId: old.planId, subject: 'Old goal' }],
+        [reopenedBranch, { completed: false, planId: old.planId, subject: 'Old goal' }],
+        [replacementBranch, { completed: false, planId: next.planId, subject: 'New goal' }]
+      ] as const) {
+        h.selectBranch(branch)
+        await h.event(event)
+        expect(await h.inspect()).toMatchObject({
+          completed: expected.completed, planId: expected.planId,
+          tasks: [{ id: 1, subject: expected.subject }]
+        })
+      }
+      h.selectBranch([])
+      await h.event(event)
+      expect(await h.inspect()).toMatchObject({ tasks: [], completed: false })
+      expect((await h.inspect()).planId).toBeUndefined()
+    }
+  )
+
+  it.each([
+    { planId: '' }, { planId: 7 }, { planId: 'not-a-uuid' },
+    { planId: '11111111-1111-4111-8111-111111111111', completed: 'yes' },
+    { planId: '11111111-1111-4111-8111-111111111111', planStart: 'yes' }
+  ])('keeps valid restored tasks when optional identity metadata is invalid: %j', async (metadata) => {
+    const details = { action: 'update', native: 'pion', nextId: 2,
+      tasks: [{ id: 1, subject: 'Preserve unfinished work', status: 'pending', blockedBy: [] }], ...metadata }
+    const h = runtime([{ type: 'custom', customType: 'pion-task-state', data: details as Result['details'] }])
+    await h.event('session_start')
+    const restored = await h.inspect()
+    expect(restored.tasks).toHaveLength(1)
+    expect(restored.tasks[0].subject).toBe('Preserve unfinished work')
+    expect(restored.planId).toBeUndefined()
+    const changed = await h.call({ action: 'update', id: 1, status: 'in_progress' })
+    expect(changed.planId).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(changed.completed).toBe(false)
+  })
+
+  it('does not adopt an extra native plan ID from an old todo result', async () => {
+    const details: Result['details'] = { action: 'list', native: 'pion', nextId: 2,
+      tasks: [{ id: 1, subject: 'Legacy work', status: 'pending', blockedBy: [] }],
+      planId: '11111111-1111-4111-8111-111111111111' }
+    const h = runtime([{ type: 'message', message: { role: 'toolResult', toolName: 'todo', details } }])
+    await h.event('session_start')
+    expect(await h.inspect()).toMatchObject({ tasks: [{ id: 1, subject: 'Legacy work' }] })
+    expect((await h.inspect()).planId).toBeUndefined()
+  })
+
+  it('restores legacy snapshots without invented plan identity and preserves missing-status pending work', async () => {
+    const legacy = {
+      action: 'list', native: 'pion', nextId: 3,
+      tasks: [
+        { id: 1, subject: 'Finished', status: 'completed', blockedBy: [] },
+        { id: 2, subject: 'Unknown legacy status', blockedBy: [1] }
+      ]
+    } as Result['details']
+    const h = runtime([{ type: 'custom', customType: 'pion-task-state', data: legacy }])
+    await h.event('session_start')
+    expect(await h.inspect()).toMatchObject({ completed: false, nextId: 3 })
+    expect((await h.inspect()).planId).toBeUndefined()
+    const saved = h.branch()
+    await h.before('Thanks')
+    expect(h.branch()).toEqual(saved)
+    const continued = await h.call({ action: 'create', subject: 'Continue legacy', blockedBy: [2] })
+    expect(continued.tasks.map((task) => task.id)).toEqual([1, 2, 3])
+    expect(continued.planId).toEqual(expect.any(String))
+    expect(continued.planStart).toBeUndefined()
   })
 
   it('supports a long plan with more than twelve tasks and dependency adjustments', async () => {
@@ -213,7 +404,7 @@ describe('Pion native task plan continuity', () => {
   it.each(['session_start', 'session_tree', 'session_compact'])(
     '%s restores only the selected branch snapshot, including explicit empty snapshots', async (event) => {
       const original = runtime()
-      await original.call({ action: 'create', subject: 'Shared step', status: 'completed' })
+      await original.call({ action: 'create', subject: 'Shared step' })
       const ancestor = original.branch()
       await original.call({ action: 'create', subject: 'Selected branch step', status: 'in_progress', blockedBy: [1] })
       const selected = original.branch()

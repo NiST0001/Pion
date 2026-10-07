@@ -21,6 +21,7 @@ import { deriveLatestRunChanges } from './agent/timeline'
 import { deriveWorkingStatus } from './agent/workingStatus'
 import type { FileChange } from './agent/types'
 import { DEFAULT_SUBAGENTS_ENABLED } from '../../shared/subagents'
+import { hasIncompleteTasks } from '../../shared/task-history'
 import type {
   BranchInfo,
   GitDiffScope,
@@ -286,7 +287,7 @@ export function App(): ReactElement {
     historyResetRevision: state.historyResetRevision,
     panelsVisible: state.queuedMessages.steering.length > 0
       || state.queuedMessages.followUp.length > 0
-      || (state.mode !== 'plan' && agentTodos.length > 0),
+      || (state.mode !== 'plan' && hasIncompleteTasks(agentTodos)),
     loadOlder: actions.loadOlder,
     loadNewer: actions.loadNewer,
     hasNewerHistory: actions.hasNewerHistory
@@ -627,7 +628,7 @@ export function App(): ReactElement {
     return deriveLatestRunChanges(state.timeline)
   }, [gitWorkspace.snapshot, state.timeline])
   const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
-  const hasTaskPanel = state.mode !== 'plan' && agentTodos.length > 0
+  const hasTaskPanel = state.mode !== 'plan' && hasIncompleteTasks(agentTodos)
   const queuedMessages = state.queuedMessages
   const hasQueuedMessages = queuedMessages.steering.length > 0 || queuedMessages.followUp.length > 0
   const agentActivity = state.busy || state.compacting
@@ -955,7 +956,7 @@ export function App(): ReactElement {
           </div>
 
           <div className="composer-dock">
-            <ComposerSupportPanels hasTasks={hasTaskPanel} hasQueue={hasQueuedMessages}
+            <ComposerSupportPanels hasTasks={hasTaskPanel} agentTodos={agentTodos} hasQueue={hasQueuedMessages}
               task={<TaskPanel
                   key={taskSessionKey}
                   sessionKey={taskSessionKey}

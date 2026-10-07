@@ -66,6 +66,77 @@ it('archives nested task commits in their user turn without inventing duplicate 
   expect(history[0]).toMatchObject({ entryId: 'user', prompt: 'Make a plan', tasks: [{ id: 1, title: 'Nested plan', status: 'completed' }] })
 })
 
+it('archives explicit goal identities across turns alongside legacy plans, using only the selected branch', async () => {
+  const planA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const planB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const task = (subject: string, status: string, id = 1) => ({ id, subject, status })
+  const user = (id: string, content: string) => ({ type: 'message', id, timestamp: '2026-01-01', message: { role: 'user', content } })
+  const commit = (id: string, details: Record<string, unknown>) => ({ type: 'custom', id, customType: 'pion-task-state', data: { native: 'pion', ...details } })
+  const tool = (id: string, details: Record<string, unknown>, toolName = 'pion_task') => ({
+    type: 'message', id, message: { role: 'toolResult', toolName, details }
+  })
+  const first = { planId: planA, planStart: true, completed: false, tasks: [task('First goal', 'pending')], nextId: 2 }
+  const complete = { planId: planA, completed: true, tasks: [task('First goal', 'completed')], nextId: 2 }
+  const second = { planId: planB, planStart: true, completed: false,
+    tasks: [task('Second goal', 'completed'), task('Await permission', 'pending', 2)], nextId: 3 }
+  const branch = Object.freeze([
+    user('legacy-user', 'Legacy goal'),
+    tool('legacy-result', { tasks: [task('Legacy goal', 'completed')] }, 'todo'),
+    user('first-user', 'First native goal'), commit('first-commit', first), tool('first-result', first),
+    user('question', 'An unrelated question'),
+    user('finish-user', 'Finish first goal'), commit('complete-commit', complete), tool('complete-result', complete),
+    user('reopen-user', 'Correction to first goal'),
+    commit('reopen-commit', { ...complete, completed: false, tasks: [task('First goal', 'in_progress')] }),
+    commit('recomplete', complete),
+    // A second goal can begin in this same user turn, with task #1 again.
+    commit('new-goal', second), tool('new-goal-result', second),
+    commit('clear', { tasks: [], nextId: 1, completed: false }),
+    tool('failed-clear', { tasks: [] }, 'other'),
+    user('final-question', 'Question without new tasks')
+  ])
+  const original = JSON.stringify(branch)
+  const getBranch = vi.fn(() => branch)
+  const appendEntry = vi.fn()
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), {
+    resolveListedSession: vi.fn(async () => ({ sessionPath: '/project/selected.jsonl' })),
+    openCurrentSessionManager: vi.fn(async () => ({ getBranch, appendEntry }))
+  }) as AgentBridge
+  const history = await bridge.getSessionTaskHistory('/project/selected.jsonl')
+  expect(history).toHaveLength(3)
+  expect(history[0]).toMatchObject({ entryId: 'legacy-user', ordinal: 1, tasks: [{ id: 1, title: 'Legacy goal', status: 'completed' }] })
+  expect(history[1]).toMatchObject({ entryId: 'first-user', ordinal: 2, prompt: 'First native goal', tasks: [{ id: 1, title: 'First goal', status: 'completed' }] })
+  expect(history[2]).toMatchObject({ entryId: 'reopen-user', ordinal: 5, tasks: [
+    { id: 1, title: 'Second goal', status: 'completed' }, { id: 2, title: 'Await permission', status: 'pending' }
+  ] })
+  expect(new Set(history.map((run) => run.key)).size).toBe(3)
+  expect(getBranch).toHaveBeenCalledTimes(1)
+  expect(appendEntry).not.toHaveBeenCalled()
+  expect(JSON.stringify(branch)).toBe(original)
+})
+
+it('uses the same task snapshot validation for custom and final tool messages', async () => {
+  const branch = [
+    { type: 'message', id: 'user', message: { role: 'user', content: 'Legacy fallback' } },
+    { type: 'custom', customType: 'pion-task-state', data: {
+      native: 'pion', planId: 'invalid', completed: 'false', tasks: [{ id: 1, subject: 'Keep', status: 'pending' }]
+    } },
+    { type: 'message', message: { role: 'toolResult', toolName: 'pion_task', isError: true, details: { tasks: [] } } },
+    { type: 'message', message: { role: 'toolResult', toolName: 'pion_task', details: {
+      tasks: [{ id: 1, subject: 'Keep', status: 'completed' }], nextId: 1
+    } } },
+    { type: 'message', message: { role: 'toolResult', toolName: 'todo', details: {
+      tasks: [{ id: 1, subject: 'Keep', status: 'completed' }], nextId: 2
+    } } }
+  ]
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), {
+    resolveListedSession: vi.fn(async () => ({ sessionPath: '/project/session.jsonl' })),
+    openCurrentSessionManager: vi.fn(async () => ({ getBranch: () => branch }))
+  }) as AgentBridge
+  const history = await bridge.getSessionTaskHistory('/project/session.jsonl')
+  expect(history).toHaveLength(1)
+  expect(history[0]).toMatchObject({ key: 'user', tasks: [{ id: 1, title: 'Keep', status: 'completed' }] })
+})
+
 it('mirrors direct command state events into their own backend', () => {
   const h = setup()
   applyBackendEvent(h.backend, { type: 'entry_appended', entry: { type: 'custom', customType: 'pion-subagents-state', data: { enabled: true } } }, new Map())

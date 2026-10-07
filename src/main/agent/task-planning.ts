@@ -36,6 +36,7 @@ export async function ensureNativeTaskExtension(): Promise<string> {
 export function nativeTaskExtensionSource(): string {
   return String.raw`import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { randomUUID } from "node:crypto";
 
 const TOOL_NAME = "pion_task";
 const ACTIONS = ["clear", "create", "update", "delete", "list", "get"];
@@ -50,7 +51,9 @@ const POLICY = [
   "- Choose task count and granularity from the actual work: independently executable, verifiable steps with dependencies where useful.",
   "- Mark a task in_progress before working on it and completed only after its completion criteria are met. Keep exactly one task in_progress while working; pause it to pending before switching tasks.",
   "- A plan may span multiple user messages. Preserve unfinished tasks and report progress, blockers, and next steps honestly; do not mark work completed or clear it merely to end a response. Task state is not authorization to bypass tool permissions or user approval.",
-  "- Pion archives snapshots from the transcript; archived history does not replace the active plan needed to continue the same goal."
+  "- When every non-deleted task is completed (and at least one exists), Pion archives/hides the completed plan but keeps it readable through list/get. Do not clear it merely to finish a reply.",
+  "- After a completed plan, create starts a new goal with fresh task IDs. For corrections or more work on the SAME goal, first update an existing task back to pending/in_progress, then append tasks; preserve its plan identity and dependencies. Do not mark the last task completed until all known goal work is accounted for.",
+  "- Pending work, including waiting for authorization, survives replies and new messages. Ordinary questions neither resume unrelated work nor reset a plan."
 ].join("\n");
 
 const Params = Type.Object({
@@ -68,12 +71,18 @@ const Params = Type.Object({
 
 let tasks = [];
 let nextId = 1;
+let planId;
+
+function completedPlan() {
+  const active = tasks.filter((task) => task.status !== "deleted");
+  return active.length > 0 && active.every((task) => task.status === "completed");
+}
 
 function snapshot() {
   return tasks.map((task) => ({ ...task, blockedBy: [...(task.blockedBy || [])] }));
 }
 
-function restoredSnapshot(details) {
+function restoredSnapshot(details, nativePlan) {
   if (!details || !Array.isArray(details.tasks)) return undefined;
   for (const task of details.tasks) {
     if (!task || (typeof task.id !== "number" && typeof task.id !== "string")
@@ -91,25 +100,37 @@ function restoredSnapshot(details) {
   }));
   const minimumId = restored.reduce((max, task) => Math.max(max, Number(task.id) || 0), 0) + 1;
   if (details.nextId !== undefined && (!Number.isSafeInteger(details.nextId) || details.nextId < minimumId)) return undefined;
-  return { tasks: restored, nextId: details.nextId === undefined ? minimumId : details.nextId };
+  // Optional identity must agree with history projection. Invalid metadata
+  // cannot discard otherwise valid tasks or give a legacy todo a native ID.
+  const restoredPlanId = nativePlan && typeof details.planId === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(details.planId)
+    && (details.planStart === undefined || typeof details.planStart === "boolean")
+    && (details.completed === undefined || typeof details.completed === "boolean")
+    ? details.planId : undefined;
+  return { tasks: restored, nextId: details.nextId === undefined ? minimumId : details.nextId, planId: restoredPlanId };
 }
 
 function restore(ctx) {
   tasks = [];
   nextId = 1;
+  planId = undefined;
   for (const entry of ctx.sessionManager.getBranch()) {
     let details;
+    let nativePlan = false;
     if (entry.type === "custom" && entry.customType === "pion-task-state" && entry.data?.native === "pion") {
       details = entry.data;
+      nativePlan = true;
     } else if (entry.type === "message") {
       const message = entry.message;
       if (message.role !== "toolResult" || ![TOOL_NAME, "todo"].includes(message.toolName) || message.isError) continue;
       details = message.details;
+      nativePlan = message.toolName === TOOL_NAME;
     }
-    const restored = restoredSnapshot(details);
+    const restored = restoredSnapshot(details, nativePlan);
     if (!restored) continue;
     tasks = restored.tasks;
     nextId = restored.nextId;
+    planId = restored.planId;
   }
 }
 
@@ -128,7 +149,7 @@ function assertSingleActive(id) {
 function response(action, text) {
   return {
     content: [{ type: "text", text }],
-    details: { action, tasks: snapshot(), nextId, native: "pion" },
+    details: { action, tasks: snapshot(), nextId, native: "pion", completed: completedPlan(), ...(planId ? { planId } : {}) },
   };
 }
 
@@ -149,21 +170,25 @@ export default function (pi) {
     promptGuidelines: [
       "Use pion_task when the work benefits from a tracked plan; choose independently verifiable tasks based on the actual work.",
       "Inspect existing tasks when needed. Continue or revise the same goal across user messages; clear only for a deliberate plan replacement or requested reset, not on every message.",
-      "Keep exactly one task in_progress while working. Complete only finished work; preserve unfinished tasks and explain blockers or pauses without bypassing user approval."
+      "Keep exactly one task in_progress while working. Complete only finished work; preserve unfinished tasks and explain blockers or pauses without bypassing user approval.",
+      "All completed tasks are archived/hidden but remain readable. create after full completion starts a new goal; for same-goal follow-ups first reopen an existing task with update, then append tasks."
     ],
     parameters: Params,
     async execute(_toolCallId, params) {
       // appendEntry uses this runtime's current session branch. Mutations commit
       // before returning, even when invoked inside a script with no toolResult.
-      const before = { tasks: snapshot(), nextId };
-      const finish = (action, text) => {
+      const before = { tasks: snapshot(), nextId, planId };
+      const finish = (action, text, planStart = false) => {
+        if (tasks.length && !planId) planId = randomUUID();
         const result = response(action, text);
+        if (planStart) result.details.planStart = true;
         if (["clear", "create", "update", "delete"].includes(action)) {
           try {
             pi.appendEntry("pion-task-state", result.details);
           } catch (error) {
             tasks = before.tasks;
             nextId = before.nextId;
+            planId = before.planId;
             throw error;
           }
         }
@@ -173,6 +198,7 @@ export default function (pi) {
         const count = tasks.length;
         tasks = [];
         nextId = 1;
+        planId = undefined;
         return finish("clear", "Cleared " + count + " Pion task(s)");
       }
 
@@ -181,6 +207,12 @@ export default function (pi) {
         if (!subject) throw new Error("pion_task create requires subject");
         const status = params.status || "pending";
         if (status === "in_progress") assertSingleActive(-1);
+        const planStart = tasks.length === 0 || completedPlan();
+        if (planStart) {
+          tasks = [];
+          nextId = 1;
+          planId = randomUUID();
+        }
         const task = {
           id: nextId++,
           subject,
@@ -190,7 +222,7 @@ export default function (pi) {
           blockedBy: Array.isArray(params.blockedBy) ? [...new Set(params.blockedBy)] : [],
         };
         tasks.push(task);
-        return finish("create", "Created Pion task #" + task.id + ": " + task.subject);
+        return finish("create", "Created Pion task #" + task.id + ": " + task.subject, planStart);
       }
 
       if (params.action === "update") {

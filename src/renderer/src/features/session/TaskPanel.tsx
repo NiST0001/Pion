@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import { Check, CircleDashed, ListTodo, Loader2 } from 'lucide-react'
 import type { AgentTodo } from '../../agent/types'
+import { hasIncompleteTasks } from '../../../../shared/task-history'
 
 const TASK_PANEL_STATE_PREFIX = 'pion:session-task-panel-state:'
 
@@ -30,8 +31,8 @@ function saveExpanded(sessionKey: string, expanded: boolean): void {
   }
 }
 
-/** The current planned turn, docked above the composer. Completed rows remain
-    visible until the next turn starts creating its own task plan. */
+/** The current goal, docked above the composer. Keep completed rows in mixed
+ * plans, but hide the panel once every remaining task is completed. */
 export function TaskPanel({
   sessionKey,
   agentTodos,
@@ -42,13 +43,11 @@ export function TaskPanel({
   agentBusy?: boolean
 }): ReactElement | null {
   const [expanded, setExpanded] = useState(() => loadExpanded(sessionKey))
-  const todos = agentTodos ?? []
+  const todos = (agentTodos ?? []).filter((todo) => todo.status !== 'deleted')
   const completedCount = todos.filter((todo) => todo.status === 'completed').length
-  const caption = completedCount === todos.length
-    ? '本轮已完成'
-    : completedCount > 0
-      ? `${completedCount}/${todos.length} 已完成`
-      : '当前对话'
+  const caption = completedCount > 0
+    ? `${completedCount}/${todos.length} 已完成`
+    : '当前目标'
   const expandedHeight = Math.min(265, Math.max(102, 52 + todos.length * 30))
   const panelStyle = {
     '--task-panel-expanded-height': `${expandedHeight}px`
@@ -58,7 +57,7 @@ export function TaskPanel({
     saveExpanded(sessionKey, expanded)
   }, [sessionKey, expanded])
 
-  if (todos.length === 0) return null
+  if (!hasIncompleteTasks(todos)) return null
 
   return (
     <section
@@ -70,21 +69,21 @@ export function TaskPanel({
         <button
           type="button"
           className="task-panel-head"
-          aria-label={expanded ? '收起本轮任务' : '展开本轮任务'}
+          aria-label={expanded ? '收起目标任务' : '展开目标任务'}
           aria-expanded={expanded}
           aria-controls="task-target-list"
           onClick={() => setExpanded((value) => !value)}
         >
           <span className="task-panel-summary">
             <ListTodo size={15} />
-            <span className="task-panel-title">本轮任务</span>
+            <span className="task-panel-title">目标任务</span>
             <span className="task-panel-count">{todos.length} 项</span>
           </span>
           <span className="task-panel-caption">{caption}</span>
         </button>
 
         <div className="task-panel-list-shell">
-          <div id="task-target-list" className="task-panel-list" role="list" aria-label="本轮 AI 任务列表">
+          <div id="task-target-list" className="task-panel-list" role="list" aria-label="当前目标 AI 任务列表">
             {todos.map((task, index) => (
               <div
                 key={task.id}
