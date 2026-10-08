@@ -19,6 +19,7 @@ interface UseAgentRunActionsOptions {
   timelineOwnerPath: MutableRefObject<string | undefined>
   expectedTimeline: MutableRefObject<{ path: string; items: AgentState['timeline'] } | null>
   reloadTimeline: (sessionPath?: string) => Promise<void>
+  clearTimeline?: (sessionPath?: string) => void
 }
 
 export function useAgentRunActions({
@@ -32,8 +33,15 @@ export function useAgentRunActions({
   historyIndexInFlight,
   historyCursor,
   timelineOwnerPath,
-  expectedTimeline
+  expectedTimeline,
+  clearTimeline: clearTimelineOption
 }: UseAgentRunActionsOptions) {
+  // Standalone action harnesses have no history scope; production always
+  // supplies the history owner's synchronous clear boundary.
+  const clearTimeline = useCallback((sessionPath?: string): void => {
+    if (clearTimelineOption) clearTimelineOption(sessionPath)
+    else dispatch({ type: 'clearTimeline', sessionPath })
+  }, [clearTimelineOption, dispatch])
   const send = useCallback(
     async (message: string, images: ImageContent[] = []): Promise<void> => {
       // Composer normalizes ordinary drafts; restored text must reach IPC verbatim.
@@ -137,10 +145,10 @@ export function useAgentRunActions({
     // Clear the visible conversation before backend startup. The new backend
     // can take a moment to initialize, and the previous session must not stay
     // on screen while that happens.
-    dispatch({ type: 'clearTimeline' })
+    clearTimeline()
     await api.newSession()
     await refreshModels()
-  }, [api, dispatch, expectedTimeline, historyCursor, historyIndexInFlight, historyIndexLoadId, refreshModels, timelineLoadId, timelineOwnerPath])
+  }, [api, clearTimeline, dispatch, expectedTimeline, historyCursor, historyIndexInFlight, historyIndexLoadId, refreshModels, timelineLoadId, timelineOwnerPath])
 
   return {
     send,

@@ -167,6 +167,8 @@ export interface AgentState {
   liveSessionBackendId?: string
   liveSessionRevision?: number
   liveSessionTurnIds?: number[]
+  /** First display-bearing snapshot after selecting an existing transcript may reveal history. */
+  historyRevealRestorePending?: boolean
   /** A clear selects a new transcript scope, even before the hook renders. */
   timelineScopeRevision: number
   /** Acknowledges a history replacement whose reducer projection may differ. */
@@ -251,7 +253,7 @@ export type Action =
   | { type: 'beginTaskRestore'; id: number }
   | { type: 'restoreTasks'; id: number; tasks: AgentTodo[] }
   | { type: 'cachedTasks'; tasks: AgentTodo[] }
-  | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode; preserveToolState?: ToolStateScope; loadId?: number; cachedBackendId?: string }
+  | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode; preserveToolState?: ToolStateScope; loadId?: number; cachedBackendId?: string; replayHistory?: boolean }
   | { type: 'prependEntries'; items: TimelineItem[]; toolResults?: WireEntry[] }
   | { type: 'appendEntries'; items: TimelineItem[]; toolResults?: WireEntry[] }
   | { type: 'timelineLoading'; loading: boolean }

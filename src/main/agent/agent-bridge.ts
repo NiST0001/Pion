@@ -78,6 +78,7 @@ import { parseToolPermissionMetadata } from './tool-permission-request'
 import { ensureNativeTaskExtension } from './task-planning'
 import { ensureNativePlanModeExtension } from './plan-mode'
 import { BackendPool } from './backend-pool'
+import { SessionListCache } from './session-list-cache'
 import { revertSessionMessage } from './message-revert'
 import { stopForHistory } from './stop-for-history'
 import { applyBackendEvent } from './backend-events'
@@ -158,6 +159,7 @@ export class AgentBridge {
   /** Sessions whose tool-permission prompts are auto-approved (yolo mode). */
   private readonly yoloSessions = new Set<string>()
   private readonly sessionManagers = new Map<string, SessionManager>()
+  private sessionListCache?: SessionListCache
   private readonly sessionManagerSignatures = new Map<string, string>()
   private readonly sessionCompletedListeners = new Set<SessionCompletedListener>()
   private readonly toolPermissionRequestedListeners = new Set<ToolPermissionRequestedListener>()
@@ -174,6 +176,9 @@ export class AgentBridge {
   /** Event generations are backend-local: RPC responses have no run/event correlation ID. */
   private dispatchLifecycles?: WeakMap<BackendRecord, { generation: number; token?: symbol }>
   private steeringMarkers?: WeakMap<BackendRecord, Array<{ token: symbol; message: string }>>
+  /** UI deadlines stop waiting, not the underlying RPC; retain its slot until settlement. */
+  private sessionInfoQueries?: WeakMap<BackendRecord, Promise<SessionInfo | null>>
+  private sessionInfoSnapshots?: WeakMap<BackendRecord, { revision: number; sessionPath?: string; info: SessionInfo }>
 
   private dispatchLifecycle(backend: BackendRecord): { generation: number; token?: symbol } {
     this.dispatchLifecycles ??= new WeakMap()
@@ -1588,6 +1593,8 @@ export class AgentBridge {
     await writeFile(targetPath, lines.join('\n'), 'utf8')
     this.assertSessionNotQuarantined(source)
     if (targetPath !== source) await unlink(source).catch(() => undefined)
+    this.sessionListCache?.invalidate(fromCwd)
+    this.sessionListCache?.invalidate(target)
     this.sessionManagers.delete(source)
     this.sessionManagers.delete(targetPath)
     this.sessionManagerSignatures.delete(source)
@@ -2055,12 +2062,20 @@ export class AgentBridge {
         }
       }
       if (runningStateChanged) this.pushRunningSessionPaths()
+      // Completion means the JSONL is persisted; queue/token events do not.
+      // Soft persistence dirtiness allows one reread of an earlier empty scan
+      // without starving discovery during continuous background completions.
+      if (type === 'message_end') this.sessionListCache?.invalidate(backend.cwd, { soft: true })
+      // Name changes are hard mutations: an old scan must not restore old names.
+      if (type === 'session_info_changed') this.sessionListCache?.invalidate(backend.cwd)
       if (type === 'agent_start' || type === 'message_start' || type === 'agent_settled'
         || (type === 'message_end' && (!backend.sidebarPublishedSessionPath || backend.sidebarPublishedSessionPath !== backend.sessionPath))) {
         // Keep persisted history fresh even when this backend finishes while a
         // different project or session is selected. A first prompt can also
         // create the session file needed by the sidebar running indicator.
-        void this.syncBackendSession(backend)
+        void this.syncBackendSession(backend).catch((error) => {
+          console.warn('[pion] session publication failed:', error)
+        })
       }
       if (this.activeKey !== backend.key) return
       if (type === 'agent_start') this.setActiveBackendStatus()
@@ -2073,7 +2088,7 @@ export class AgentBridge {
       }
       if (typeof type === 'string' && STATE_REFRESH_EVENTS.has(type)) {
         void this.pushSessionInfo()
-        void this.refreshSidebarSessions()
+        void this.refreshSidebarSessions(false)
       }
     })
   }
@@ -2127,7 +2142,7 @@ export class AgentBridge {
         console.log('[pion] agent subprocess running, session:', sessionPath ?? key)
         if (this.activeKey === key) this.setActiveBackendStatus()
         void this.pushSessionInfo()
-        void this.refreshSidebarSessions()
+        void this.refreshSidebarSessions(false)
       })
       .catch((error: unknown) => {
         backend.phase = 'error'
@@ -2234,8 +2249,8 @@ export class AgentBridge {
     const normalizedPath = resolve(sessionPath)
     backend.sessionPath = normalizedPath
     this.updateRunSession(backend, normalizedPath, state.sessionId)
-    this.sessionManagers.delete(normalizedPath)
-    this.sessionManagerSignatures.delete(normalizedPath)
+    // Parsed history is refreshed by its file signature or explicit history mutations,
+    // not by every lifecycle get_state response for the same persisted path.
     this.backendKeysBySessionPath.set(normalizedPath, backend.key)
     if (this.activeKey === backend.key) this.activeSessionPath = normalizedPath
     this.pushRunningSessionPaths()
@@ -2244,7 +2259,9 @@ export class AgentBridge {
       const sessions = await this.listSessions(backend.cwd)
       // Pi can allocate a path before it writes the JSONL. Retry on subsequent
       // message events until listSessions actually sees the persisted session.
-      if (backend.sessionPath === normalizedPath && sessions.some((session) => resolve(session.path) === normalizedPath)) {
+      if (revision === this.historyRevision && this.backendPool.get(backend.key) === backend
+        && !backend.historyMutation && !backend.historyStopFailed
+        && backend.sessionPath === normalizedPath && sessions.some((session) => resolve(session.path) === normalizedPath)) {
         backend.sidebarPublishedSessionPath = normalizedPath
         this.win?.webContents.send(SESSIONS_CHANNEL, sessions)
       }
@@ -2576,6 +2593,7 @@ export class AgentBridge {
       ? manager.createBranchedSession(entry.parentId)
       : this.createEmptyChildSession(manager, currentPath)
     if (!path) throw new Error('无法创建分支会话')
+    this.sessionListCache?.invalidate(manager.getCwd())
     return { path: resolve(path), text }
   }
 
@@ -2818,6 +2836,8 @@ export class AgentBridge {
 
     this.assertSessionNotQuarantined(target)
     await unlink(target)
+    const ownerCwd = this.sessionManagers.get(target)?.getCwd()
+    if (ownerCwd) this.sessionListCache?.invalidate(ownerCwd)
     const wasUnread = this.unreadSessionPaths.delete(target)
     if (wasUnread) this.pushUnreadSessions()
     await this.sessionModelPreferences?.deleteSessionModel(target)
@@ -2843,6 +2863,7 @@ export class AgentBridge {
     if (!leafId) return { cancelled: true }
     const path = manager.createBranchedSession(leafId)
     if (!path) return { cancelled: true }
+    this.sessionListCache?.invalidate(manager.getCwd())
     await this.rememberTranscriptModel(path)
     this.activateLogicalSession(path, manager.getCwd())
     await this.pushSessionInfo()
@@ -3425,6 +3446,7 @@ export class AgentBridge {
     const target = await this.resolveListedSession(sessionPath)
     const backendKey = this.backendKeysBySessionPath.get(target) ?? target
     const backend = this.backendPool.get(backendKey)
+    const ownerCwd = this.sessionManagers.get(target)?.getCwd() ?? backend?.cwd
     this.assertHistoryAvailable()
     if (backend) {
       if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
@@ -3440,6 +3462,7 @@ export class AgentBridge {
       this.sessionManagerSignatures.delete(target)
     }
 
+    if (ownerCwd) this.sessionListCache?.invalidate(ownerCwd)
     if (this.activeSessionPath === target) await this.pushSessionInfo()
     void this.refreshSidebarSessions()
   }
@@ -3475,8 +3498,9 @@ export class AgentBridge {
   async listSessions(cwd?: string): Promise<SessionMeta[]> {
     const dir = cwd ?? this.status.cwd
     if (!dir) return []
-    try {
-      const infos = await SessionManager.list(dir)
+    this.sessionListCache ??= new SessionListCache(async (directory) => {
+      const infos = await SessionManager.list(directory)
+      const dir = directory
       // SDK session-directory encoding can collide (for example a-b vs a/b).
       // The persisted header, not the queried bucket or project group, owns a
       // session. Never relabel another worktree's history as this directory.
@@ -3490,9 +3514,8 @@ export class AgentBridge {
         preview: (info.firstMessage ?? '').slice(0, 120),
         messageCount: info.messageCount
       }))
-    } catch {
-      return []
-    }
+    })
+    return this.sessionListCache.list(dir)
   }
 
   // ---------------------------------------------------------------- state
@@ -3522,50 +3545,95 @@ export class AgentBridge {
     const backend = this.getActiveBackend()
     try {
       if (backend?.phase === 'running') return await this.toSessionInfo(backend)
-      // A persisted session can be described directly from JSONL while its
-      // colder RPC backend is still loading extensions and models.
-      if (!this.activeSessionPath) {
-        if (!backend) return null
-        await backend.startPromise
-        return this.toSessionInfo(backend)
-      }
-      const manager = this.openSessionManager(this.activeSessionPath)
-      const context = manager.buildSessionContext()
-      const preference = this.sessionModelPreferences?.getSessionModel(this.activeSessionPath)
-      const model = context.messages.length === 0
-        ? preference ?? context.model
-        : context.model ?? preference
-      return {
-        provider: model?.provider,
-        model: model?.modelId,
-        modelId: model?.modelId,
-        thinkingLevel: context.thinkingLevel,
-        isStreaming: false,
-        isCompacting: false,
-        sessionFile: manager.getSessionFile(),
-        sessionId: manager.getSessionId(),
-        sessionName: manager.getSessionName(),
-        messageCount: context.messages.length,
-        pendingMessageCount: 0
-      }
+      // Do not wait for extension/model initialization to describe persisted history.
+      // A fresh session without a real SDK id has no snapshot yet.
+      if (!this.activeSessionPath) return null
+      const info = await this.readPersistedSessionInfo(this.activeSessionPath)
+      return backend ? this.overlayBackendSessionInfo(backend, info) : info
     } catch {
       return null
     }
   }
 
+  private async readPersistedSessionInfo(sessionPath: string): Promise<SessionInfo> {
+    const manager = await this.openCurrentSessionManager(sessionPath)
+    const context = manager.buildSessionContext()
+    const preference = this.sessionModelPreferences?.getSessionModel(sessionPath)
+    const model = context.messages.length === 0
+      ? preference ?? context.model
+      : context.model ?? preference
+    return {
+      provider: model?.provider,
+      model: model?.modelId,
+      modelId: model?.modelId,
+      thinkingLevel: context.thinkingLevel,
+      isStreaming: false,
+      isCompacting: false,
+      sessionFile: manager.getSessionFile(),
+      sessionId: manager.getSessionId(),
+      sessionName: manager.getSessionName(),
+      messageCount: context.messages.length,
+      pendingMessageCount: 0
+    }
+  }
+
+  private overlayBackendSessionInfo(backend: BackendRecord, info: SessionInfo): SessionInfo {
+    return {
+      ...info,
+      isStreaming: backend.busy,
+      isCompacting: backend.compacting,
+      liveState: backend.liveState?.snapshot(backend.cwd, backend.sessionPath)
+    }
+  }
+
   private async toSessionInfo(backend: BackendRecord): Promise<SessionInfo | null> {
+    this.sessionInfoQueries ??= new WeakMap()
+    this.sessionInfoSnapshots ??= new WeakMap()
+    let query = this.sessionInfoQueries.get(backend)
+    if (!query) {
+      query = this.querySessionInfo(backend)
+      this.sessionInfoQueries.set(backend, query)
+      const release = () => {
+        if (this.sessionInfoQueries?.get(backend) === query) this.sessionInfoQueries?.delete(backend)
+      }
+      // No timer can release this slot: getState still has its own SDK deadline.
+      void query.then(release, release)
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 2_000) })
+    let info: SessionInfo | null
+    try {
+      info = await Promise.race([query, timeout])
+    } catch {
+      info = null
+    } finally {
+      clearTimeout(timer)
+    }
+    if (info) return { ...info }
+    if (this.backendPool.get(backend.key) !== backend) return null
+    const cached = this.sessionInfoSnapshots.get(backend)
+    if (cached && cached.revision === this.historyRevision && cached.sessionPath === backend.sessionPath) {
+      return this.overlayBackendSessionInfo(backend, cached.info)
+    }
+    if (!backend.sessionPath) return null
+    return this.overlayBackendSessionInfo(backend, await this.readPersistedSessionInfo(backend.sessionPath))
+  }
+
+  private async querySessionInfo(backend: BackendRecord): Promise<SessionInfo | null> {
     const revision = this.historyRevision
-    const generation = this.sessionSelectionGeneration
+    const sessionPath = backend.sessionPath
     const lifecycle = this.dispatchLifecycle(backend).generation
     const busy = backend.busy
     const compacting = backend.compacting
     const state = await backend.client.getState()
-    if (this.backendPool.get(backend.key) !== backend || this.getActiveBackend() !== backend
-      || revision !== this.historyRevision || generation !== this.sessionSelectionGeneration) return null
-    const model = state.model as { provider?: string; id?: string; name?: string } | undefined
+    // Late results may warm this backend's cache, but never publish STATE.
+    // The caller separately fences active selection and history revisions.
+    if (this.backendPool.get(backend.key) !== backend
+      || revision !== this.historyRevision || sessionPath !== backend.sessionPath) return null
+    const model = state.model
     const lifecycleChanged = lifecycle !== this.dispatchLifecycle(backend).generation
       || busy !== backend.busy || compacting !== backend.compacting
-    return {
+    const info: SessionInfo = {
       provider: model?.provider,
       model: model?.name ?? model?.id,
       modelId: model?.id,
@@ -3582,6 +3650,8 @@ export class AgentBridge {
       pendingMessageCount: state.pendingMessageCount,
       liveState: backend.liveState?.snapshot(backend.cwd, backend.sessionPath)
     }
+    this.sessionInfoSnapshots?.set(backend, { revision, sessionPath, info })
+    return info
   }
 
   private async pushSessionInfo(): Promise<void> {
@@ -3597,11 +3667,17 @@ export class AgentBridge {
     this.win?.webContents.send(STATE_CHANNEL, info)
   }
 
-  private async refreshSidebarSessions(): Promise<void> {
+  private async refreshSidebarSessions(invalidate = true): Promise<void> {
     const cwd = this.status.cwd
-    const sessions = await this.listSessions(cwd)
-    if (this.status.cwd !== cwd) return
-    this.win?.webContents.send(SESSIONS_CHANNEL, sessions)
+    if (invalidate && cwd) this.sessionListCache?.invalidate(cwd)
+    try {
+      const sessions = await this.listSessions(cwd)
+      if (this.status.cwd !== cwd) return
+      this.win?.webContents.send(SESSIONS_CHANNEL, sessions)
+    } catch (error) {
+      // Retain the renderer's last known rows; a failed scan is not zero sessions.
+      console.warn('[pion] sidebar session refresh failed:', error)
+    }
   }
 
   /** Push state + session list + branch tree to the renderer. */

@@ -12,6 +12,7 @@ interface UseAgentSessionActionsOptions {
   timelineOwnerPath: MutableRefObject<string | undefined>
   historyCursor: MutableRefObject<HistoryCursor | null>
   reloadTimeline: (sessionPath?: string) => Promise<void>
+  clearTimeline: (sessionPath?: string) => void
 }
 
 export function useAgentSessionActions({
@@ -20,6 +21,7 @@ export function useAgentSessionActions({
   timelineCache,
   timelineOwnerPath,
   historyCursor,
+  clearTimeline,
   reloadTimeline
 }: UseAgentSessionActionsOptions) {
   const reorderSessions = useCallback((cwd: string, paths: string[]): void => {
@@ -43,11 +45,11 @@ export function useAgentSessionActions({
       }
       const result = await api.deleteSession(sessionPath)
       if (result.activeSessionChanged) {
-        dispatch({ type: 'clearTimeline' })
+        clearTimeline()
         await reloadTimeline()
       }
     },
-    [api, dispatch, historyCursor, reloadTimeline, timelineCache, timelineOwnerPath]
+    [api, clearTimeline, historyCursor, reloadTimeline, timelineCache, timelineOwnerPath]
   )
 
   const copySession = useCallback(
@@ -55,13 +57,13 @@ export function useAgentSessionActions({
       if (!api) return
       const result = await api.copySession(sessionPath)
       if (!result.cancelled) {
-        dispatch({ type: 'clearTimeline' })
+        clearTimeline()
         timelineOwnerPath.current = undefined
         historyCursor.current = null
         await reloadTimeline()
       }
     },
-    [api, dispatch, historyCursor, reloadTimeline, timelineOwnerPath]
+    [api, clearTimeline, historyCursor, reloadTimeline, timelineOwnerPath]
   )
 
   const getSessionForkMessages = useCallback(
@@ -77,13 +79,13 @@ export function useAgentSessionActions({
       if (!api) return ''
       const result = await api.forkSession(sessionPath, entryId)
       if (result.cancelled) return ''
-      dispatch({ type: 'clearTimeline' })
+      clearTimeline()
       timelineOwnerPath.current = undefined
       historyCursor.current = null
       await reloadTimeline()
       return result.text
     },
-    [api, dispatch, historyCursor, reloadTimeline, timelineOwnerPath]
+    [api, clearTimeline, historyCursor, reloadTimeline, timelineOwnerPath]
   )
 
   return {

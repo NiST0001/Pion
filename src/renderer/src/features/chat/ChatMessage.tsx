@@ -58,13 +58,16 @@ export const ChatMessage = memo(function ChatMessage({
   const previousErrorMessageRef = useRef('')
   const assistant = item.kind === 'assistant' ? item : undefined
   const liveOutput = Boolean(assistant?.live && !assistant.historical)
+  // Display restoration must stay silent, but a restored running row can
+  // continue suffix-only text/thinking animation after its history bubble fade.
+  const liveStreamingReveal = Boolean(liveOutput || (assistant?.live && assistant.streaming))
   const text = assistant?.text ?? ''
   const thinking = assistant?.thinking ?? ''
   const error = assistant?.error ?? ''
   const errorContext = assistant?.errorContext
   const describedError = useMemo(() => error === '' ? undefined : describeModelError(error), [error])
   const errorMessage = describedError?.message ?? ''
-  const thinkingRevealCount = liveOutput
+  const thinkingRevealCount = liveStreamingReveal
     ? appendedCharacterCount(previousThinkingRef.current, thinking)
     : 0
   // Unrelated output/detail updates must not replace the visible summary's
@@ -173,7 +176,7 @@ export const ChatMessage = memo(function ChatMessage({
             }}
           >
             <summary>思考过程</summary>
-            <pre>{liveOutput ? (
+            <pre>{liveStreamingReveal ? (
               <RevealText text={thinking} mode="live" revealCount={thinkingRevealCount} />
             ) : item.historical && !revealSuppressed ? (
               <RevealLines text={thinking} mode="history" />
@@ -184,7 +187,7 @@ export const ChatMessage = memo(function ChatMessage({
           <div data-live-output="assistant-text">
             <Markdown
               text={text}
-              revealMode={revealSuppressed ? undefined : liveOutput ? 'live' : item.historical ? 'history' : undefined}
+              revealMode={revealSuppressed ? undefined : liveStreamingReveal ? 'live' : item.historical ? 'history' : undefined}
             />
           </div>
         )}

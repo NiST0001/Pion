@@ -31,10 +31,11 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| src/main/agent/agent-bridge.ts | 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
+| src/main/agent/agent-bridge.ts | 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；运行中状态有界等待及后端私有快照/在途缓存，历史 manager 依文件签名更新而非事件无条件重读；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
 | src/main/agent/message-revert.ts | 独占写入者前提下校验完整会话与所选用户消息，用 SDK 回到实际 parent 并追加持久分支标记；保留旧树，恢复文字及图片，不操作项目文件；兼容独立 usage、context_edit 与 retain-none 压缩记录 |
 | src/main/agent/stop-for-history.ts | 捕获 SDK 子进程并等待真实退出；超时/适配不兼容拒绝历史写入，不把 RpcClient.stop 提前返回当作退出证明 |
 | src/main/agent/live-session-state.ts | 后端私有当前轮显示快照：后台 root 输出持续归并、独立实例/revision 和有界行数/字节；字段级截断、最终空消息权威、静态安全预览；选回时随 SessionInfo 恢复，不重放请求或计费 |
+| src/main/agent/session-list-cache.ts | exact cwd 的轻量会话列表缓存、在途扫描合并及并发界限；落盘软失效避免持续输出饿死扫描，显式变更硬失效防止旧行复活；不缓存 SDK 全量消息文本 |
 | src/main/agent/backend-pool.ts | 后端保留和容量管理 |
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态 |
 | src/main/agent/queue-projection.ts | 本地队列与原生队列投影 |
@@ -78,9 +79,9 @@
 | src/renderer/src/agent/modelError.ts | 对常见模型/API 额度、认证、限流、上下文、服务及网络错误做保守分类，生成简短中文提示并原样保留技术详情 |
 | src/renderer/src/agent/sessionFavorites.ts、sessionOrder.ts | 收藏与排序 |
 | src/renderer/src/hooks/useAgent.ts | Agent hooks 汇总、启动及模型刷新 |
-| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换/撤销、跳转窗口、任务恢复、事件驱动的索引/叶节点更新；首次实时会话建立逻辑归属并封存缓存，切换前同步保存未落盘输出，缓存带后端身份；同作用域历史替换保留实时尾部，拒绝复活已失效运行；撤销隔离旧请求与缓存，区分后端暂时无状态和真实选择；游标区分页末与会话末尾 |
+| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换/撤销、跳转窗口、任务恢复、事件驱动的索引/叶节点更新；首次实时会话建立逻辑归属并封存缓存，切换前同步保存未落盘输出，缓存带后端身份；缓存回访清除分页渐显抑制标记，首次后台快照显示恢复历史渐显，普通刷新/分页不重播；同作用域历史替换保留实时尾部，拒绝复活已失效运行；撤销隔离旧请求与缓存，区分后端暂时无状态和真实选择；游标区分页末与会话末尾；历史读取等待有界、按 loadId/选择/scope 收口，所有清空入口同步登记作用域，过期后不追加请求，失败空壳不伪装成功缓存 |
 | src/renderer/src/hooks/useMessageRevert.ts | 撤销确认、空草稿/附件读取门控、一次性文字/图片恢复及拒绝后的恢复重试；按逻辑选择隔离迟到结果，不持有后端或文件回滚 |
-| src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步 |
+| src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步；分支/会话列表有界并发逐 cwd 发布，慢/失败项不阻挡已完成项，实时推送优先于迟到初次查询 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
 | src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别；真实会话末尾选最后已挂载用户轮次，加载占位/分页末尾除外；历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
 | src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让，权限请求及会话提问面板复用底部余量定位在输入框上方；全局认证仍居中，不测量展开详情、不重挂载消息或草稿 |
@@ -123,7 +124,7 @@
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。
 - `styles/motion.css`：通用动效、详情网格高度过渡、工具箭头旋转及减少动态效果适配。
 - `utils/screenTextReveal.tsx`、`utils/historyReveal.ts`：文字渐入调度与历史行启用；静态前缀保留为文本节点，扫描跳过已启用字符的重复几何测量。
-- `styles/themes/division.css`：“信号橙”的中性炭灰/明亮橙色调色板，内部 division-dark ID 保持兼容及静态战术线条；保持文字对比、状态语义、胶囊控件、原生透明与强制色回退。`styles/settings/themes.css` 提供各主题选择卡片缩略样式。
+- `styles/themes/division.css`：“信号橙”的中性炭灰/鲜明红橙调色板，内部 division-dark ID 保持兼容及静态战术线条；侧栏以中性灰底区分选中，不混成棕色；该主题普通界面统一隐藏边框和阴影描边，但保留尺寸、键盘焦点与系统强制色回退；保持文字对比、状态语义、胶囊控件、原生透明与强制色回退。`styles/settings/themes.css` 提供各主题选择卡片缩略样式。
 - `utils/theme.ts`：主题即时应用、用户配置恢复、旧 localStorage 迁移和异步保存；`utils/metricsSettings.ts`：统计显示偏好。
 
 上面 styles/、utils/ 简写均相对于 `src/renderer/src/`。
@@ -132,6 +133,7 @@
 
 以下为测试源码职责，实际验证范围以对应执行记录为准，不把文件清单当成全部通过的证明。
 
+- `tests/unit/session-list-cache.test.ts`：列表在途去重、并发/容量、软/硬失效、持续输出和迟到扫描防护；`worktree-session-isolation.test.ts` 补充 manager 签名复用，`agent-bridge-send-queue.test.ts` 补充状态等待期限及私有缓存回归。
 - `tests/unit/live-session-state.test.ts`：后台当前轮快照、字段级截断/预算、最终空消息及工具终态、安全图片预览与生图元数据、实例身份及序列化界限；bridge 的后台切回及迟到状态竞态覆盖于 `agent-bridge-send-queue.test.ts`。
 - `tests/unit/`：后端策略、队列、运行记录、迁移和 reducer 等逻辑测试；`agent-compaction-state.test.ts` 覆盖压缩生命周期、迟到快照与会话切换重置；`compaction-context-usage.test.ts` 覆盖手动/自动压缩后的用量作废、失败保留和新响应用量更新；`model-error.test.ts` 与 `agent-error-state.test.ts` 覆盖模型/API 错误分类、实时最终消息收口、默认中止过滤、压缩失败及普通/retain-none 压缩的 wire 归并。
 - `tests/unit/session-tasks.test.ts`：缺少工具开始行仍接收任务、重复结果去重、空快照/错误区分、分页及异步恢复保护、分支祖先链和独立缓存。

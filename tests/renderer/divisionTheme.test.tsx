@@ -34,13 +34,49 @@ describe('Signal Orange theme stylesheet contracts (not GUI rendering)', () => {
       const channels = variables[`--${name}`].slice(1).match(/../g)!
       expect(new Set(channels).size, name).toBe(1)
     }
-    expect(variables['--accent']).toBe('#ff9419')
-    expect(variables['--accent-strong']).toBe('#ffad42')
-    expect(luminance(variables['--accent'])).toBeGreaterThan(luminance('#ff8b24'))
+    expect(variables['--accent']).toBe('#ff7a1a')
+    expect(variables['--accent-strong']).toBe('#ff8e3b')
+    // Move toward red-orange rather than making yellow lighter.
+    const hue = (hex: string): number => {
+      const [r, g, b] = hex.slice(1).match(/../g)!.map((v) => parseInt(v, 16))
+      return 60 * (g - b) / (r - b)
+    }
+    expect(hue(variables['--accent'])).toBeLessThan(hue('#ff9419'))
+    expect(variables['--selected-bg']).toBe('#363636')
+    expect(variables['--selected-bg-strong']).toBe('#404040')
     expect(variables['--selected-border']).toBe(variables['--accent'])
     expect(variables['--surface-tint']).toBe('rgba(255, 255, 255, 0.035)')
     const swatch = preview.slice(preview.indexOf('.theme-card-preview.division-dark'))
     for (const name of ['--bg', '--bg-elev', '--accent', '--fg-faint']) expect(swatch).toContain(variables[name])
+  })
+
+  it('keeps every selected sidebar level neutral and borderless rather than brown', () => {
+    const rule = css.match(/\/\* Selection uses[\s\S]*?\*\/\s*([^{}]+)\{([^}]+)\}/)!
+    expect(rule[1]).toContain('.project-folder.active > .project-folder-head')
+    expect(rule[1]).toContain('.project-branch-head.active')
+    expect(rule[1]).toContain('.project-branch-sessions .side-session.active')
+    expect(rule[2]).toContain('background: var(--selected-bg)')
+    expect(rule[2]).toContain('box-shadow: none')
+    expect(rule[2]).not.toMatch(/rgba\(|opacity\s*:|color\s*:|padding\s*:|border-width\s*:/)
+    expect(contrast(variables['--fg'], variables['--selected-bg'])).toBeGreaterThanOrEqual(4.5)
+    const fallbacks = css.slice(css.indexOf('@media (forced-colors: active)'))
+    expect(fallbacks).toContain('.project-branch-sessions .side-session.active')
+  })
+
+  it('removes painted borders and shadow rings only in this theme without changing metrics or keyboard accessibility', () => {
+    const normal = css.slice(css.indexOf('@media not all and (forced-colors: active)'), css.indexOf('@media (forced-colors: active)'))
+    expect(normal).toContain(":root[data-theme='division-dark'] *,")
+    expect(normal).toContain(":root[data-theme='division-dark'] *::before,")
+    expect(normal).toContain(":root[data-theme='division-dark'] *::after")
+    expect(normal).toContain('border-color: transparent !important')
+    expect(normal).toContain('border-image: none !important')
+    expect(normal).toContain('box-shadow: none !important')
+    expect(normal).toContain(':not(:focus-visible)')
+    expect(normal).toContain(':focus-visible')
+    expect(normal).toContain('outline: 2px solid var(--accent-strong) !important')
+    expect(normal).not.toMatch(/border\s*:|border-width\s*:|padding\s*:|margin\s*:|display\s*:|outline\s*:\s*(?:none|0)/)
+    const forcedColors = css.slice(css.indexOf('@media (forced-colors: active)'))
+    expect(forcedColors).not.toContain('border-color: transparent')
   })
 
   it('provides its full semantic palette after inherited typography and before native fallbacks', () => {
@@ -76,7 +112,7 @@ describe('Signal Orange theme stylesheet contracts (not GUI rendering)', () => {
     expect(variables['--accent-soft']).toMatch(/^rgba\(/)
     const declarations = css.replace(/\/\*[\s\S]*?\*\//g, '')
     expect(declarations).not.toMatch(/(?:opacity|filter|font-family|text-shadow|animation|forced-color-adjust)\s*:/)
-    expect(declarations).not.toMatch(/url\(|::before|::after/)
+    expect(declarations).not.toMatch(/url\(|content\s*:|backdrop-filter\s*:/)
     expect(css).toContain("[data-native-surface='true']")
     expect(css).toContain('@media (forced-colors: active)')
     expect(css).toContain('background-image: none')

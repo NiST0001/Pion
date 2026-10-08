@@ -12,15 +12,15 @@
   --fg: #f2f2f2;
   --fg-dim: #cccccc;
   --fg-faint: #ababab;
-  --accent: #ff9419;
-  --accent-rgb: 255, 148, 25;
-  --accent-strong: #ffad42;
-  --accent-soft: rgba(255, 148, 25, 0.18);
+  --accent: #ff7a1a;
+  --accent-rgb: 255, 122, 26;
+  --accent-strong: #ff8e3b;
+  --accent-soft: rgba(255, 122, 26, 0.18);
   --on-accent: #1c1c1c;
   --user-bubble: #303030;
-  --selected-bg: rgba(255, 148, 25, 0.16);
-  --selected-bg-strong: rgba(255, 148, 25, 0.24);
-  --selected-border: #ff9419;
+  --selected-bg: #363636;
+  --selected-bg-strong: #404040;
+  --selected-border: #ff7a1a;
   --danger: #ff8585;
   --danger-rgb: 255, 133, 133;
   --ok: #8bce9b;
@@ -58,7 +58,7 @@
 }
 
 :root[data-theme='division-dark'] .dock-header {
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow: none;
 }
 
 :root[data-theme='division-dark'] :is(.dock-grip, .side-section-title,
@@ -75,9 +75,13 @@
   border-radius: 5px;
 }
 
+/* Selection uses a neutral surface without decorative frames or edge bars.
+   Orange stays on primary actions and icons, not a brown blended text surface. */
 :root[data-theme='division-dark'] .project-folder.active > .project-folder-head,
-:root[data-theme='division-dark'] .project-branch-head.active {
-  box-shadow: inset 2px 0 0 var(--accent);
+:root[data-theme='division-dark'] .project-branch-head.active,
+:root[data-theme='division-dark'] .project-branch-sessions .side-session.active {
+  background: var(--selected-bg);
+  box-shadow: none;
 }
 
 :root[data-theme='division-dark'] .theme-choice.active {
@@ -90,13 +94,36 @@
   color: var(--accent-strong);
 }
 
+/* Preserve border widths/box metrics, but suppress painted borders and
+   shadow-based rings throughout this theme, including native-surface styles.
+   Keyboard focus remains visible; system high-contrast colors retain control. */
+@media not all and (forced-colors: active) {
+  :root[data-theme='division-dark'] *,
+  :root[data-theme='division-dark'] *::before,
+  :root[data-theme='division-dark'] *::after {
+    border-color: transparent !important;
+    border-image: none !important;
+    box-shadow: none !important;
+  }
+
+  :root[data-theme='division-dark'] :not(:focus-visible) {
+    outline-color: transparent !important;
+  }
+
+  :root[data-theme='division-dark'] :focus-visible {
+    outline: 2px solid var(--accent-strong) !important;
+    outline-offset: 2px;
+  }
+}
+
 @media (forced-colors: active) {
   :root[data-theme='division-dark']:not([data-native-surface='true']) .titlebar {
     background-image: none;
   }
   :root[data-theme='division-dark'] .dock-header,
   :root[data-theme='division-dark'] .project-folder.active > .project-folder-head,
-  :root[data-theme='division-dark'] .project-branch-head.active {
+  :root[data-theme='division-dark'] .project-branch-head.active,
+  :root[data-theme='division-dark'] .project-branch-sessions .side-session.active {
     box-shadow: none;
   }
   :root[data-theme='division-dark'] .theme-choice.active {

@@ -25,7 +25,8 @@ function setup(getEntriesPage = vi.fn().mockResolvedValue(page()), extra: Partia
     const history = useAgentHistory({ api, state, dispatch })
     const sessions = useAgentSessionActions({ api, dispatch,
       timelineCache: history.timelineCache, timelineOwnerPath: history.timelineOwnerPath,
-      historyCursor: history.historyCursor, reloadTimeline: history.reloadTimeline })
+      historyCursor: history.historyCursor, clearTimeline: history.clearTimeline,
+      reloadTimeline: history.reloadTimeline })
     return { state, dispatch, history, sessions }
   })
   return { ...hook, getEntriesPage }
@@ -140,6 +141,33 @@ it.each(['copy', 'fork', 'delete'] as const)('resets the task scope when %s chan
   })
   expect(h.result.current.state.tasks).toEqual([])
   expect(h.result.current.history.timelineOwnerPath.current).toBe('/other/session.jsonl')
+})
+
+it.each(['copy', 'fork', 'delete'] as const)('settles same-batch %s clearing and deferred history success or failure', async (operation) => {
+  for (const succeeds of [true, false]) {
+    let resolve!: (value: SessionEntriesPage | null) => void
+    const get = vi.fn().mockResolvedValue(page())
+    const h = setup(get, {
+      copySession: vi.fn().mockResolvedValue({ cancelled: false }),
+      forkSession: vi.fn().mockResolvedValue({ cancelled: false, text: 'original' }),
+      deleteSession: vi.fn().mockResolvedValue({ activeSessionChanged: true }),
+      getState: vi.fn().mockResolvedValue({ sessionFile: '/new.jsonl' })
+    })
+    await act(async () => { await h.result.current.history.reloadTimeline(path) })
+    get.mockImplementationOnce(() => new Promise((done) => { resolve = done }))
+      .mockResolvedValue(null)
+    let pending!: Promise<unknown>
+    await act(async () => {
+      pending = operation === 'copy' ? h.result.current.sessions.copySession(path)
+        : operation === 'fork' ? h.result.current.sessions.forkSession(path, 'user')
+          : h.result.current.sessions.deleteSession(path)
+    })
+    expect(h.result.current.state.timelineLoading).toBe(true)
+    await act(async () => { resolve(succeeds ? page([]) : null); await pending })
+    expect(h.result.current.state.timelineLoading).toBe(false)
+    expect(Boolean(h.result.current.state.timelineError)).toBe(!succeeds)
+    h.unmount()
+  }
 })
 
 it('does not clear the task panel when copying a session is cancelled', async () => {

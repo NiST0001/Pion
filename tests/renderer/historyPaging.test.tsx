@@ -6,6 +6,7 @@ import type { SessionEntriesPage, WireEntry, WireMessage } from '../../src/share
 import { useHistoryPaging } from '../../src/renderer/src/hooks/useHistoryPaging'
 import { useConversationNavigation } from '../../src/renderer/src/hooks/useConversationNavigation'
 import { useAgentHistory } from '../../src/renderer/src/hooks/agent/useAgentHistory'
+import { useAgentSubscriptions } from '../../src/renderer/src/hooks/agent/useAgentSubscriptions'
 import { reducer } from '../../src/renderer/src/agent/reducer'
 import { initialState, type Action, type TimelineItem } from '../../src/renderer/src/agent/types'
 import { ToolCallItem } from '../../src/renderer/src/features/chat/ToolCallItem'
@@ -48,7 +49,7 @@ function ToolHistoryRows({ items }: { items: TimelineItem[] }) {
     : <div key={item.id}>{item.kind === 'compaction' ? item.summary : item.text}</div>)}</div>
 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers() })
 
 function scroller(initialHeight = 1000) {
   const element = document.createElement('div')
@@ -738,6 +739,108 @@ it('marks history-page append separately from live append in the reducer', () =>
   expect(state.timelineMutation).toBe('history-append')
 })
 
+it('rearms cached scroll-page rows only on a real A → B → A selection without mutating the old cache', async () => {
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    queueMicrotask(() => callback(0)); return 1
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+  const a = '/reveal-cache-a', b = '/reveal-cache-b'
+  const tool = { id: 'cached-read', name: 'read', status: 'done' as const, isError: false, outputText: 'cached result' }
+  const rows: TimelineItem[] = [
+    { kind: 'user', id: 890, text: 'cached question', historical: true, noReveal: true },
+    { kind: 'assistant', id: 891, text: 'cached answer', thinking: '', streaming: false, historical: true, noReveal: true },
+    { kind: 'tool', id: 892, tool, historical: true, noReveal: true }
+  ]
+  const session = (path: string) => ({ sessionId: path, sessionFile: path,
+    isStreaming: false, isCompacting: false }) as NonNullable<typeof initialState.session>
+  const empty: SessionEntriesPage = { entries: [], toolResults: [], start: 0,
+    end: 0, total: 0, leafId: null, mode: 'build' }
+  let dispatch!: Dispatch<Action>
+  const api = {
+    onEvent: vi.fn(() => () => undefined),
+    getEntriesPage: vi.fn().mockResolvedValue(empty),
+    getHistoryIndex: vi.fn().mockResolvedValue(null),
+    switchSession: vi.fn(async (path: string) => {
+      dispatch({ type: 'session', session: session(path) }); return { cancelled: false }
+    })
+  }
+  const h = renderHook(() => {
+    const [state, nextDispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' }, session: session(a), timeline: rows })
+    dispatch = nextDispatch
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  const originalCache = h.result.current.timelineCache.current.get(a)!
+  expect(originalCache.items).toBe(rows)
+  // Revalidating the currently selected page is not another selection: its
+  // scroll-inserted rows still opt out of reveal and keep their exact identity.
+  await act(async () => { await h.result.current.reloadTimeline(a) })
+  expect(h.result.current.state.timeline).toBe(rows)
+  expect(rows.every((row) => row.noReveal === true)).toBe(true)
+  await act(async () => { await h.result.current.switchSession(b) })
+  await act(async () => { await h.result.current.switchSession(a) })
+  const restored = h.result.current.state.timeline
+  expect(restored.map((row) => ({ id: row.id, historical: row.historical, noReveal: row.noReveal })))
+    .toEqual(rows.map((row) => ({ id: row.id, historical: true, noReveal: false })))
+  expect(restored[0]).not.toBe(rows[0])
+  expect(findTool(restored, tool.id).tool).toBe(tool)
+  expect(originalCache.items).toBe(rows)
+  expect(rows.every((row) => row.noReveal === true)).toBe(true)
+  // Same-scope cache revalidation must not clone/rearm the mounted transcript.
+  await act(async () => { await h.result.current.reloadTimeline(a) })
+  expect(h.result.current.state.timeline).toBe(restored)
+})
+
+it('keeps cached reveal markers when the selected live STATE arrives before the cached restore', async () => {
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    queueMicrotask(() => callback(0)); return 1
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+  const a = '/early-state-a', b = '/early-state-b', cwd = '/project'
+  const pending = deferred<SessionEntriesPage>()
+  const cachedRow: TimelineItem = { kind: 'assistant', id: 895, text: 'cached final',
+    thinking: '', streaming: false, live: true, messageTimestamp: 100, historical: true, noReveal: true }
+  const api = {
+    onEvent: vi.fn(() => () => undefined),
+    switchSession: vi.fn().mockResolvedValue({ cancelled: false }),
+    getEntriesPage: vi.fn().mockReturnValue(pending.promise),
+    getHistoryIndex: vi.fn().mockResolvedValue(null)
+  }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd }, runningSessionPaths: [a],
+      session: { sessionId: b, sessionFile: b } as NonNullable<typeof initialState.session> })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state, dispatch }
+  })
+  h.result.current.timelineCache.current.set(a, { cwd, items: [cachedRow], mode: 'build',
+    apiBefore: 0, apiAfter: 0, toolResults: [], complete: true, newerComplete: true,
+    leafId: null, total: 0, liveSessionBackendId: 'early-backend' })
+  let switching!: Promise<unknown>
+  act(() => {
+    switching = h.result.current.switchSession(a)
+    h.result.current.dispatch({ type: 'session', session: {
+      sessionId: a, sessionFile: a, messageCount: 1, isStreaming: false, liveState: {
+        backendId: 'early-backend', revision: 1, cwd, sessionPath: a, events: [
+          { type: 'message_start', message: { role: 'assistant', timestamp: 100, content: [] } },
+          { type: 'message_end', message: { role: 'assistant', timestamp: 100,
+            content: [{ type: 'text', text: 'fresh final' }] } }
+        ]
+      }
+    } as NonNullable<typeof initialState.session> })
+  })
+  await act(async () => {
+    for (let tick = 0; tick < 12; tick++) await Promise.resolve()
+  })
+  expect(h.result.current.state.timeline).toHaveLength(1)
+  expect(h.result.current.state.timeline[0]).toMatchObject({ text: 'fresh final', historical: true, noReveal: false })
+  expect(cachedRow).toMatchObject({ text: 'cached final', historical: true, noReveal: true })
+  await act(async () => {
+    pending.resolve({ entries: [], toolResults: [], start: 0, end: 0, total: 0, leafId: null, mode: 'build' })
+    await switching
+  })
+  expect(h.result.current.state.timeline[0]).toMatchObject({ text: 'fresh final', historical: true, noReveal: false })
+})
+
 it('seeds a fresh running session cache and keeps its draft on the first A → B → A revisit with empty JSONL pages', async () => {
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
     queueMicrotask(() => callback(0))
@@ -824,7 +927,11 @@ it.each(['more output', 'first token', 'empty final'] as const)('restores backgr
   })
   if (mode === 'empty final') expect(h.result.current.state.timeline).toEqual([])
   else {
-    expect(h.result.current.state.timeline[0]).toMatchObject({ text: 'background output', streaming: true })
+    // A STATE snapshot may arrive after the cached mount but before its page.
+    // Both cached and newly materialized background rows need history reveal;
+    // subsequent real tokens remain live suffix updates, not snapshot replay.
+    expect(h.result.current.state.timeline[0]).toMatchObject({ text: 'background output', streaming: true, historical: true })
+    expect(h.result.current.state.timeline.every((row) => row.historical && !row.noReveal)).toBe(true)
     expect(findTool(h.result.current.state.timeline, 'background-tool').tool).toMatchObject({ status: 'done', outputText: 'background result' })
   }
   await act(async () => { pending.resolve(empty); await switching })
@@ -895,6 +1002,152 @@ it.each(['final output', ''])('does not let a late empty disk page rewind the au
     id: 902, text: finalText, streaming: false
   })] : [])
   expect(h.result.current.timelineCache.current.get(path)?.items).toEqual(h.result.current.state.timeline)
+})
+
+it.each(['reload', 'jump'] as const)('releases a never-resolving %s read and ignores its late page', async (operation) => {
+  vi.useFakeTimers()
+  const path = '/timeout.jsonl'
+  const pending = deferred<SessionEntriesPage>()
+  const api = { getEntriesPage: vi.fn(() => pending.promise), onEvent: vi.fn(() => () => undefined),
+    getHistoryIndex: vi.fn().mockResolvedValue(null) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' },
+      historyIndex: { sessionPath: path, totalEntries: 1, landmarks: [] } as never })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  h.result.current.timelineOwnerPath.current = path
+  let loading!: Promise<void>
+  act(() => {
+    loading = operation === 'reload' ? h.result.current.reloadTimeline(path)
+      : h.result.current.jumpToHistoryLandmark({ entryId: 'target', entryIndex: 0 } as never)
+  })
+  expect(h.result.current.state.timelineLoading).toBe(true)
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_000); await loading })
+  expect(api.getEntriesPage).toHaveBeenCalledTimes(1)
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.result.current.state.timelineError).toBeTruthy()
+  await act(async () => {
+    pending.resolve({ entries: [{ type: 'message', id: 'late', parentId: null, timestamp: '',
+      message: { role: 'user', content: 'must not mount' } }], toolResults: [], start: 0, end: 1,
+      total: 1, leafId: 'late', mode: 'build' })
+  })
+  expect(h.result.current.state.timeline).toEqual([])
+})
+
+it('releases a discarded selection response and leaves the next load retryable', async () => {
+  const first = deferred<SessionEntriesPage>(), second = deferred<SessionEntriesPage>()
+  const path = '/reader.jsonl'
+  const api = { getEntriesPage: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise),
+    onEvent: vi.fn(() => () => undefined), getHistoryIndex: vi.fn().mockResolvedValue(null) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' },
+      session: { sessionId: 'original', sessionFile: path } as never })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state, dispatch }
+  })
+  h.result.current.timelineOwnerPath.current = path
+  let one!: Promise<void>, two!: Promise<void>
+  act(() => { one = h.result.current.reloadTimeline(path) })
+  await act(async () => { h.result.current.dispatch({ type: 'session', session: {
+    sessionId: 'replacement', sessionFile: path
+  } as never }) })
+  const page: SessionEntriesPage = { entries: [], toolResults: [], start: 0, end: 0,
+    total: 0, leafId: null, mode: 'build' }
+  await act(async () => { first.resolve(page); await one })
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  act(() => { two = h.result.current.reloadTimeline(path) })
+  expect(h.result.current.state.timelineLoading).toBe(true)
+  await act(async () => { second.resolve(page); await two })
+  expect(h.result.current.state.timelineLoading).toBe(false)
+})
+
+it('does not let an older A read clear the newest foreground loading shell after A → B → A', async () => {
+  const oldA = deferred<SessionEntriesPage>(), b = deferred<SessionEntriesPage>(), newA = deferred<SessionEntriesPage>()
+  const api = { getEntriesPage: vi.fn().mockReturnValueOnce(oldA.promise)
+    .mockReturnValueOnce(b.promise).mockReturnValueOnce(newA.promise),
+    onEvent: vi.fn(() => () => undefined), getHistoryIndex: vi.fn().mockResolvedValue(null) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState, status: { phase: 'running', cwd: '/project' } })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  let first!: Promise<void>, second!: Promise<void>, third!: Promise<void>
+  act(() => { h.result.current.timelineOwnerPath.current = '/a'; first = h.result.current.reloadTimeline('/a') })
+  act(() => { h.result.current.timelineOwnerPath.current = '/b'; second = h.result.current.reloadTimeline('/b') })
+  act(() => { h.result.current.timelineOwnerPath.current = '/a'; third = h.result.current.reloadTimeline('/a') })
+  const page: SessionEntriesPage = { entries: [], toolResults: [], start: 0, end: 0,
+    total: 0, leafId: null, mode: 'build' }
+  await act(async () => { oldA.resolve(page); b.resolve(page); await Promise.all([first, second]) })
+  expect(h.result.current.state.timelineLoading).toBe(true)
+  await act(async () => { newA.resolve(page); await third })
+  expect(h.result.current.state.timelineLoading).toBe(false)
+})
+
+it('reports a stalled switch without treating its still-pending backend mutation as cancelled', async () => {
+  vi.useFakeTimers()
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    queueMicrotask(() => callback(0)); return 1
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+  const pending = deferred<{ cancelled: boolean }>()
+  const api = { switchSession: vi.fn(() => pending.promise), getEntriesPage: vi.fn(),
+    getHistoryIndex: vi.fn().mockResolvedValue(null) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, initialState)
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  let switching!: Promise<{ cancelled: boolean }>, settled = false
+  act(() => { switching = h.result.current.switchSession('/pending'); void switching.then(() => { settled = true }) })
+  await act(async () => { await vi.advanceTimersByTimeAsync(16_000) })
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.result.current.state.timelineError).toContain('尚未停止')
+  expect(settled).toBe(false)
+  expect(api.switchSession).toHaveBeenCalledTimes(1)
+  expect(api.getEntriesPage).not.toHaveBeenCalled()
+  await act(async () => { pending.resolve({ cancelled: true }); await switching })
+})
+
+it.each(['reject', 'throw'] as const)('settles foreground loading after a history IPC %s', async (failure) => {
+  vi.useFakeTimers()
+  const api = { getEntriesPage: vi.fn(() => {
+    if (failure === 'throw') throw new Error('sync IPC failure')
+    return Promise.reject(new Error('async IPC failure'))
+  }) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, initialState)
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  let loading!: Promise<void>
+  act(() => { loading = h.result.current.reloadTimeline('/failed') })
+  await act(async () => { await vi.advanceTimersByTimeAsync(1_000); await loading })
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.result.current.state.timelineError).toBeTruthy()
+})
+
+it('publishes a ready worktree list without waiting for slow or rejected sidebar reads', async () => {
+  vi.useFakeTimers()
+  const pending = deferred<never>()
+  const dispatch = vi.fn()
+  const subscribe = () => () => undefined
+  const api = { onStatus: subscribe, onRunCheckpoint: subscribe, onState: subscribe, onSessions: subscribe,
+    onUnreadSessions: subscribe, onRunningSessionPaths: subscribe, onTree: subscribe,
+    onProjects: subscribe, onEvent: subscribe, getRunningSessionPaths: vi.fn().mockResolvedValue([]),
+    getUnreadSessionPaths: vi.fn().mockResolvedValue([]),
+    listBranches: vi.fn((cwd: string) => cwd === '/slow' ? pending.promise : Promise.reject(new Error('no git'))),
+    listSessions: vi.fn((cwd: string) => cwd === '/slow' ? pending.promise
+      : Promise.resolve([{ id: 'ready', path: '/ready/session', projectCwd: cwd }])) }
+  const projects = [{ cwd: '/slow' }, { cwd: '/ready' }] as never
+  const options = { api: api as never, dispatch, projects, branchesByProject: {}, sessionsByProject: {},
+    optimisticSessionTimers: { current: new Map<string, number>() } }
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+  const h = renderHook(() => useAgentSubscriptions(options))
+  await act(async () => { await Promise.resolve() })
+  expect(dispatch).toHaveBeenCalledWith({ type: 'projectSessionsUpdate', cwd: '/ready',
+    sessions: [{ id: 'ready', path: '/ready/session', projectCwd: '/ready' }] })
+  expect(dispatch.mock.calls.some(([action]) => action.type === 'projectSessions')).toBe(false)
+  await act(async () => { await vi.advanceTimersByTimeAsync(16_000) })
+  expect(warn).toHaveBeenCalled()
+  h.unmount()
 })
 
 it('accepts the first history response when the selected SDK identity and file arrive late', async () => {
@@ -1028,6 +1281,85 @@ it('keeps identical snapshot image previews and their mounted disclosure DOM wit
   expect(screen.getByRole('button', { name: '收起生图工具详情' })).toBe(head)
   expect(screen.getByRole('img')).toBe(image)
   expect(image.parentElement).toHaveAttribute('data-image-state', 'loaded')
+})
+
+it.each(['older', 'newer', 'index'] as const)('rejects late %s reads after an external session identity change', async (operation) => {
+  const a = '/external-a.jsonl', b = '/external-b.jsonl'
+  const pendingPage = deferred<SessionEntriesPage>()
+  const pendingIndex = deferred<{ sessionPath: string; totalEntries: number; landmarks: [] }>()
+  const api = { getEntriesPage: vi.fn(() => pendingPage.promise),
+    getHistoryIndex: vi.fn(() => pendingIndex.promise), onEvent: vi.fn(() => () => undefined) }
+  const oldIndex = { sessionPath: a, totalEntries: 3, landmarks: [] }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' },
+      session: { sessionId: 'a', sessionFile: a } as never,
+      historyIndex: oldIndex,
+      timeline: [{ kind: 'user', id: 1, text: 'existing' }] as TimelineItem[] })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state, dispatch }
+  })
+  h.result.current.historyCursor.current = { path: a, items: h.result.current.state.timeline,
+    mode: 'build', apiBefore: 1, apiAfter: 2, total: 3, toolResults: [], complete: false,
+    newerComplete: false, leafId: 'old', loading: false, loadId: h.result.current.timelineLoadId.current }
+  let read!: Promise<void>
+  act(() => { read = operation === 'index' ? h.result.current.refreshHistoryIndex(a)
+    : operation === 'older' ? h.result.current.loadOlder() : h.result.current.loadNewer() })
+  act(() => h.result.current.dispatch({ type: 'session', session: { sessionId: 'b', sessionFile: b } as never }))
+  await act(async () => {
+    pendingPage.resolve({ entries: [{ type: 'message', id: 'wrong', parentId: null, timestamp: '',
+      message: { role: 'user', content: 'wrong session page' } }], toolResults: [], start: 0, end: 3,
+      total: 3, leafId: 'wrong', mode: 'build' })
+    pendingIndex.resolve({ sessionPath: a, totalEntries: 999, landmarks: [] })
+    await read
+  })
+  expect(h.result.current.state.timeline).toEqual([{ kind: 'user', id: 1, text: 'existing' }])
+  expect(h.result.current.state.historyIndex).toBe(oldIndex)
+})
+
+it('does not seed failed empty history as a successful cache and reports failure again on revisit', async () => {
+  vi.useFakeTimers()
+  const path = '/cold-failure.jsonl'
+  const api = { getEntriesPage: vi.fn().mockResolvedValue(null),
+    getHistoryIndex: vi.fn().mockResolvedValue(null), onEvent: vi.fn(() => () => undefined) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' },
+      session: { sessionId: 'cold', sessionFile: path } as never })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  for (let visit = 0; visit < 2; visit++) {
+    let read!: Promise<void>
+    act(() => { read = h.result.current.reloadTimeline(path) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); await read })
+    expect(h.result.current.state.timelineLoading).toBe(false)
+    expect(h.result.current.state.timelineError).toBeTruthy()
+    expect(h.result.current.timelineCache.current.has(path)).toBe(false)
+  }
+})
+
+it('keeps newly selected live output when its first history read fails', async () => {
+  vi.useFakeTimers()
+  const path = '/live-failure.jsonl'
+  const api = { getEntriesPage: vi.fn().mockResolvedValue(null),
+    getHistoryIndex: vi.fn().mockResolvedValue(null), onEvent: vi.fn(() => () => undefined) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' },
+      session: { sessionId: 'live', sessionFile: path } as never })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state, dispatch }
+  })
+  let read!: Promise<void>
+  act(() => { read = h.result.current.reloadTimeline(path) })
+  act(() => h.result.current.dispatch({ type: 'session', session: {
+    sessionId: 'live', sessionFile: path, messageCount: 0, isStreaming: true,
+    liveState: { backendId: 'live-backend', revision: 1, cwd: '/project', sessionPath: path,
+      events: [{ type: 'message_start', message: { role: 'assistant', timestamp: 100, content: [] } },
+        { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'still streaming' } }] }
+  } as never }))
+  await act(async () => { await vi.advanceTimersByTimeAsync(1_000); await read })
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.result.current.state.timeline.some((item) => item.kind === 'assistant' && item.streaming)).toBe(true)
+  expect(h.result.current.timelineCache.current.get(path)?.items.length).toBeGreaterThan(0)
 })
 
 it('replaces a pinned live row before appending its ordered persisted page', () => {

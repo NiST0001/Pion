@@ -563,6 +563,20 @@ describe('ChatMessage', () => {
     expect(container.querySelector('.caret')).not.toBeInTheDocument()
   })
 
+  it('keeps the restored running bubble fade while animating only new thinking and staying silent', () => {
+    const item = { kind: 'assistant' as const, id: 35, text: '恢复的输出', thinking: '原思考',
+      live: true, historical: true, noReveal: false, streaming: true, error: '恢复的错误' }
+    const { container, rerender } = render(<ChatMessage item={item} canFork={false} />)
+    const bubble = container.querySelector('.bubble-assistant')
+    expect(bubble).toHaveClass('screen-text-reveal-line-history')
+    expect(container.querySelector('.bubble-error [aria-live]')).not.toBeInTheDocument()
+    rerender(<ChatMessage item={{ ...item, text: '恢复的输出新增', thinking: '原思考新增' }} canFork={false} />)
+    expect(container.querySelector('.bubble-assistant')).toBe(bubble)
+    expect(container.querySelector('.thinking pre')).toHaveTextContent('原思考新增')
+    expect(container.querySelectorAll('.thinking .screen-text-reveal-live')).toHaveLength(2)
+    expect(container.querySelector('.bubble-error [aria-live]')).not.toBeInTheDocument()
+  })
+
   it('arms a historical row after the lazy message component mounts', () => {
     const { container } = render(
       <div className="chat-scroll">

@@ -167,11 +167,11 @@
 
 .division-dark .theme-card-top {
   background: #242424;
-  border-color: #ff9419;
+  border-color: #ff7a1a;
 }
 
 .division-dark .theme-card-top i {
-  background: #ff9419;
+  background: #ff7a1a;
   border-radius: 0;
 }
 
@@ -181,7 +181,7 @@
 }
 
 .division-dark .theme-card-pill {
-  background: #ff9419;
+  background: #ff7a1a;
   border-radius: 1px;
 }
 

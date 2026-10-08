@@ -231,11 +231,28 @@ export function reducer(state: AgentState, action: Action): AgentState {
         && (scope.sessionPath === undefined || scope.sessionPath === state.liveSessionOwnerPath
           || !state.session?.sessionFile || scope.sessionPath === state.session.sessionFile)
       if (scope && !preserve) return state
+      // A selected backend can hydrate before the cache paints. Its current
+      // message is authoritative; do not append an older cached final with the
+      // same unique identity merely because their text differs. Ambiguous SDK
+      // timestamps remain distinct. This preference is cache restoration only.
+      const incoming = action.replayHistory ? action.items.map((item) => {
+        const candidates = state.timeline.filter((row) => sameLiveIdentity(row, item))
+        const cachedCopies = action.items.filter((row) => sameLiveIdentity(row, item))
+        return candidates.length === 1 && cachedCopies.length === 1
+          ? { ...candidates[0], historical: item.historical, noReveal: item.noReveal } : item
+      }) : action.items
+      const merged = preserve ? preserveTimelineToolState(state.timeline, incoming,
+        state.status.phase !== 'stopped' && state.status.phase !== 'error'
+      ) : incoming
+      // Only the explicit selection cache restore overrides retained reveal
+      // flags. Ordinary revalidation/paging must not replay mounted history.
+      const timeline = action.replayHistory ? merged.map((item) => {
+        const cached = action.items.find((row) => row.id === item.id || sameLiveIdentity(row, item))
+        return cached ? { ...item, historical: true, noReveal: false } : item
+      }) : merged
       const loaded: AgentState = {
         ...state,
-        timeline: preserve ? preserveTimelineToolState(state.timeline, action.items,
-          state.status.phase !== 'stopped' && state.status.phase !== 'error'
-        ) : action.items,
+        timeline,
         liveSessionBackendId: state.liveSessionBackendId ?? (preserve ? action.cachedBackendId : undefined),
         timelineLoadId: action.loadId ?? state.timelineLoadId,
         mode: action.mode ?? state.mode,
@@ -299,6 +316,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
         timeline: [],
         liveSessionOwnerPath: action.sessionPath,
         liveSessionScopeSelected: true,
+        historyRevealRestorePending: Boolean(action.sessionPath),
         liveSessionBackendId: undefined,
         liveSessionRevision: undefined,
         liveSessionTurnIds: undefined,
@@ -458,8 +476,12 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState): AgentStat
       }
     } else existing = existing.filter((item) => !matched.includes(item) && item !== fallback)
   }
+  // A metadata-only STATE must not spend the selection reveal boundary.
+  // The event revision can also arrive before STATE; that is not a restore.
+  const revealHistory = Boolean(state.historyRevealRestorePending)
   const matched = new Set<number>()
-  const incoming = replay.timeline.map((item) => {
+  const incoming = replay.timeline.map((source) => {
+    const item = revealHistory ? { ...source, historical: true, noReveal: false } : source
     const candidates = existing.filter((row) => !matched.has(row.id) && sameLiveIdentity(row, item))
     const active = candidates.filter((row) => (row.kind === 'assistant' && row.streaming)
       || state.liveSessionTurnIds?.includes(row.id))
@@ -474,9 +496,13 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState): AgentStat
     matched.add(current.id)
     if (current.historyReconciled && ((current.kind === 'assistant' && item.kind === 'assistant'
       && !current.streaming && item.streaming)
-      || (current.kind === 'tool' && item.kind === 'tool' && current.tool.resultReceived && !item.tool.resultReceived))) return current
-    const replacement = { ...item, id: current.id, historical: current.historical,
-      noReveal: current.noReveal, historyReconciled: current.historyReconciled }
+      || (current.kind === 'tool' && item.kind === 'tool' && current.tool.resultReceived && !item.tool.resultReceived))) {
+      return revealHistory ? { ...current, historical: true, noReveal: false } : current
+    }
+    const replacement = { ...item, id: current.id,
+      historical: revealHistory ? true : current.historical,
+      noReveal: revealHistory ? false : current.noReveal,
+      historyReconciled: current.historyReconciled }
     if ((replacement.kind === 'assistant' || replacement.kind === 'user')
       && (current.kind === 'assistant' || current.kind === 'user')) {
       replacement.entryId ??= current.entryId
@@ -490,7 +516,8 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState): AgentStat
       if (fields.has('error') && (replacement.error?.length ?? 0) < (current.error?.length ?? 0)) replacement.error = current.error
       if (replacement.text === current.text && replacement.thinking === current.thinking
         && replacement.streaming === current.streaming && replacement.error === current.error
-        && replacement.entryId === current.entryId) return current
+        && replacement.entryId === current.entryId
+        && replacement.historical === current.historical && replacement.noReveal === current.noReveal) return current
     }
     if (replacement.kind === 'user' && current.kind === 'user') {
       if (fields.has('text') && replacement.text.length < current.text.length) replacement.text = current.text
@@ -532,6 +559,8 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState): AgentStat
     liveSessionBackendId: live.backendId,
     liveSessionRevision: live.revision,
     liveSessionTurnIds: incoming.map((row) => row.id).slice(-256),
+    historyRevealRestorePending: revealHistory && (incoming.length > 0 || tombstones.length > 0)
+      ? false : state.historyRevealRestorePending,
     timelineMutation: 'append'
   }
 }

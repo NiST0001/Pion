@@ -24,6 +24,7 @@ export function useAgent() {
   const optimisticSessionTimers = useRef(new Map<string, number>())
   const {
     selectionRef,
+    clearTimeline,
     invalidateSelection,
     revertMessage,
     timelineLoadId,
@@ -80,11 +81,11 @@ export function useAgent() {
       expectedTimeline.current = null
       dispatch({ type: 'historyIndex', index: null })
       dispatch({ type: 'status', status: { phase: 'starting', cwd } })
-      dispatch({ type: 'clearTimeline' })
+      clearTimeline()
       await api.startAgent(cwd)
       await Promise.all([reloadTimeline(), refreshModels()])
     },
-    [api, invalidateSelection, reloadTimeline, refreshModels]
+    [api, clearTimeline, invalidateSelection, reloadTimeline, refreshModels]
   )
 
   const bootstrap = useCallback(async () => {
@@ -140,6 +141,7 @@ export function useAgent() {
     timelineCache,
     timelineOwnerPath,
     expectedTimeline,
+    clearTimeline,
     reloadTimeline
   })
   const {
@@ -155,6 +157,7 @@ export function useAgent() {
     timelineCache,
     timelineOwnerPath,
     historyCursor,
+    clearTimeline,
     reloadTimeline
   })
   const {

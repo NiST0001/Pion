@@ -38,6 +38,61 @@ describe('scoped live-session display snapshots', () => {
     expect(again.timeline).toBe(state.timeline)
   })
 
+  it('reveals background rows only at the first selection restore boundary', () => {
+    const selected = reducer(seed, { type: 'clearTimeline', sessionPath: path })
+    const restored = snapshot(selected, 4, [start, delta('background'), {
+      type: 'tool_execution_start', toolCallId: 'background-read', toolName: 'read', args: { path: 'a.ts' }
+    }])
+    expect(restored.timeline).toHaveLength(2)
+    for (const row of restored.timeline) expect(row).toMatchObject({ historical: true, noReveal: false })
+    expect(restored.historyRevealRestorePending).toBe(false)
+    const assistantId = restored.timeline[0].id
+    const refreshed = snapshot(restored, 5, [start, delta('background plus suffix'), {
+      type: 'tool_execution_start', toolCallId: 'background-read', toolName: 'read', args: { path: 'a.ts' }
+    }, { type: 'tool_execution_start', toolCallId: 'later-read', toolName: 'read', args: { path: 'b.ts' } }])
+    expect(refreshed.timeline[0]).toMatchObject({ id: assistantId, historical: true, noReveal: false })
+    expect(refreshed.timeline[2].historical).not.toBe(true)
+    expect(refreshed.timeline[2].noReveal).not.toBe(true)
+  })
+
+  it('keeps the boundary across metadata-only STATE and an earlier forwarded revision', () => {
+    let selected = reducer(seed, { type: 'clearTimeline', sessionPath: path })
+    selected = snapshot(selected, 1, [])
+    expect(selected.historyRevealRestorePending).toBe(true)
+    selected = applyEvent(selected, { ...start,
+      _pionLive: { backendId: 'backend-a', revision: 2, cwd, sessionPath: path } })
+    const id = selected.timeline[0].id
+    const restored = snapshot(selected, 3, [start, delta('accepted background')])
+    expect(restored.timeline[0]).toMatchObject({ id, historical: true, noReveal: false })
+    expect(restored.historyRevealRestorePending).toBe(false)
+  })
+
+  it('explicit cache restore overrides retained flags without changing row identity', () => {
+    let selected = reducer(seed, { type: 'clearTimeline', sessionPath: path })
+    selected = snapshot(selected, 3, [start, delta('background')])
+    selected = { ...selected, timeline: selected.timeline.map((row) => ({ ...row, noReveal: true })) }
+    const restored = reducer(selected, { type: 'loadEntries', replayHistory: true,
+      items: selected.timeline, preserveToolState: { revision: selected.timelineScopeRevision, cwd, sessionPath: path } })
+    expect(restored.timeline[0]).toMatchObject({ id: selected.timeline[0].id, historical: true, noReveal: false })
+    const ordinary = reducer(selected, { type: 'loadEntries', items: selected.timeline,
+      preserveToolState: { revision: selected.timelineScopeRevision, cwd, sessionPath: path } })
+    expect(ordinary.timeline[0].noReveal).toBe(true)
+    const revalidated = snapshot(restored, 4, [start, delta('background')])
+    expect(revalidated.timeline[0]).toBe(restored.timeline[0])
+    const continued = applyEvent(revalidated, delta(' live suffix'))
+    expect(continued.timeline[0]).toMatchObject({ id: restored.timeline[0].id, text: 'background live suffix', live: true, streaming: true })
+  })
+
+  it('does not arm a fresh empty session or change paged reveal flags', () => {
+    const fresh = reducer(seed, { type: 'clearTimeline' })
+    expect(fresh.historyRevealRestorePending).toBe(false)
+    expect(snapshot(fresh, 2, [start, delta('new output')]).timeline[0].historical).not.toBe(true)
+    const paged = reducer(fresh, { type: 'prependEntries', items: [
+      { kind: 'user', id: -20, entryId: 'older', text: 'older page', historical: true, noReveal: true }
+    ] })
+    expect(paged.timeline[0]).toMatchObject({ historical: true, noReveal: true })
+  })
+
   it('hydrates a first token whose assistant did not exist when the session was left', () => {
     const state = snapshot(seed, 4, [start, delta('first background token')])
     expect(state.timeline[1]).toMatchObject({ text: 'first background token' })

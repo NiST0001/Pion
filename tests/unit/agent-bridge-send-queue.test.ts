@@ -7,6 +7,7 @@ import type { BackendRecord } from '../../src/main/agent/types'
 import type { RunOperation } from '../../src/shared/operations'
 import type { SessionInfo } from '../../src/shared/types'
 import { RunStore } from '../../src/main/run-store'
+import { SessionListCache } from '../../src/main/agent/session-list-cache'
 
 type Disposition = 'started' | 'queued' | 'handled'
 interface BridgeHarness {
@@ -24,6 +25,7 @@ interface BridgeHarness {
 }
 const roots: string[] = []
 afterEach(async () => {
+  vi.useRealTimers()
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
@@ -81,6 +83,142 @@ async function dispatchGap() {
 }
 
 describe('AgentBridge live session state', () => {
+  it('bounds UI waiting to two seconds, shares the real pending RPC, and overlays latest live flags', async () => {
+    const h = await harness()
+    await h.bridge.getSessionInfo() // last successful SDK state
+    const pending = deferred<typeof h.state>()
+    h.getState.mockReturnValue(pending.promise)
+    vi.useFakeTimers()
+    const first = h.bridge.getSessionInfo()
+    const second = h.bridge.getSessionInfo()
+    h.emit('agent_start')
+    h.emit('compaction_start', { reason: 'manual' })
+    h.emit('message_start', { message: { role: 'assistant', timestamp: 1, content: [] } })
+    h.emit('message_update', { assistantMessageEvent: { type: 'text_delta', delta: 'latest' } })
+    await vi.advanceTimersByTimeAsync(2_000)
+    const [a, b] = await Promise.all([first, second])
+    expect(a).toMatchObject({ sessionId: 'session-1', messageCount: 1, isStreaming: true, isCompacting: true })
+    expect(JSON.stringify(b?.liveState?.events)).toContain('latest')
+    expect(h.getState).toHaveBeenCalledTimes(2)
+    const retry = h.bridge.getSessionInfo()
+    await vi.advanceTimersByTimeAsync(2_000)
+    await retry
+    expect(h.getState).toHaveBeenCalledTimes(2) // timeout is not RPC cancellation
+    expect(h.backend.modePrimed).toBe('build')
+  })
+
+  it('warms a late successful snapshot without emitting STATE or mixing a new selection', async () => {
+    const h = await harness()
+    const pending = deferred<typeof h.state>()
+    h.getState.mockReturnValueOnce(pending.promise)
+    vi.useFakeTimers()
+    const loading = h.bridge.getSessionInfo()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(await loading).toBeNull() // fresh path/id unknown; no fabricated identity
+    h.bridge.activeKey = 'other-project'
+    h.bridge.sessionSelectionGeneration++
+    pending.resolve({ ...h.state, messageCount: 9 })
+    await dispatchGap()
+    expect(h.wireSend).not.toHaveBeenCalled()
+    h.bridge.activeKey = h.backend.key
+    h.bridge.sessionSelectionGeneration++
+    h.getState.mockReturnValue(new Promise(() => undefined))
+    h.backend.busy = true
+    const restored = h.bridge.getSessionInfo()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(await restored).toMatchObject({ sessionId: 'session-1', messageCount: 9, isStreaming: true })
+  })
+
+  it('describes persisted history when a hot RPC hangs without inventing counts or model', async () => {
+    const h = await harness()
+    h.backend.sessionPath = join(h.backend.cwd, 'persisted.jsonl')
+    h.backend.busy = true
+    h.getState.mockReturnValue(new Promise(() => undefined))
+    const currentManager = vi.fn(async () => ({
+      buildSessionContext: () => ({ messages: [{ role: 'user' }, { role: 'assistant' }], thinkingLevel: 'off' }),
+      getSessionFile: () => h.backend.sessionPath, getSessionId: () => 'persisted-id', getSessionName: () => 'saved'
+    }))
+    Object.assign(h.bridge, { openCurrentSessionManager: currentManager })
+    vi.useFakeTimers()
+    const loading = h.bridge.getSessionInfo()
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(await loading).toMatchObject({ sessionId: 'persisted-id', messageCount: 2, isStreaming: true })
+    expect(currentManager).toHaveBeenCalledWith(h.backend.sessionPath)
+    expect(h.backend.modePrimed).toBe('build')
+  })
+
+  it.each([false, true])('does not wait for SDK initialization or fake state for a cold session (persisted=%s)', async (persisted) => {
+    const h = await harness()
+    h.backend.phase = 'starting'
+    h.backend.startPromise = new Promise(() => undefined)
+    h.backend.busy = true
+    const path = join(h.backend.cwd, 'cold.jsonl')
+    const currentManager = vi.fn(async () => ({
+      buildSessionContext: () => ({ messages: [], thinkingLevel: 'off' }),
+      getSessionFile: () => path, getSessionId: () => 'cold-id', getSessionName: () => undefined
+    }))
+    Object.assign(h.bridge, { activeSessionPath: persisted ? path : null, openCurrentSessionManager: currentManager })
+    if (persisted) expect(await h.bridge.getSessionInfo()).toMatchObject({ sessionId: 'cold-id', messageCount: 0, isStreaming: true })
+    else expect(await h.bridge.getSessionInfo()).toBeNull()
+    expect(h.backend.busy).toBe(true)
+    expect(h.getState).not.toHaveBeenCalled()
+    expect(currentManager).toHaveBeenCalledTimes(persisted ? 1 : 0)
+  })
+
+  it('rejects a timed-out old-project result instead of applying its cache to the new selection', async () => {
+    const h = await harness()
+    await h.bridge.getSessionInfo()
+    h.getState.mockReturnValue(new Promise(() => undefined))
+    vi.useFakeTimers()
+    const loading = h.bridge.getSessionInfo()
+    h.bridge.activeKey = 'new-project'
+    h.bridge.sessionSelectionGeneration++
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(await loading).toBeNull()
+  })
+
+  it('invalidates persisted sidebar summaries on message completion, not token or queue activity', async () => {
+    const h = await harness()
+    const invalidate = vi.fn()
+    Object.assign(h.bridge, { sessionListCache: { invalidate } })
+    h.emit('message_start', { message: { role: 'assistant', timestamp: 1, content: [] } })
+    h.emit('message_update', { assistantMessageEvent: { type: 'text_delta', delta: 'stream' } })
+    h.emit('queue_updated', { steering: [], followUp: [] })
+    expect(invalidate).not.toHaveBeenCalled()
+    h.emit('message_end', { message: { role: 'assistant', timestamp: 1, content: [{ type: 'text', text: 'done' }] } })
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith(h.backend.cwd, { soft: true })
+    h.emit('session_info_changed', { name: 'renamed' })
+    expect(invalidate).toHaveBeenLastCalledWith(h.backend.cwd)
+    expect((h.bridge as unknown as { syncBackendSession: ReturnType<typeof vi.fn> }).syncBackendSession).toHaveBeenCalledWith(h.backend)
+  })
+
+  it('publishes a first persisted session after a pre-file empty scan is softly dirtied', async () => {
+    const h = await harness()
+    const path = join(h.backend.cwd, 'first.jsonl')
+    Object.assign(h.state, { sessionFile: path })
+    const pending = deferred<import('../../src/shared/types').SessionMeta[]>()
+    const persisted = { path, id: 'session-1', timestamp: '', mtime: 1, preview: 'first', messageCount: 1 }
+    const load = vi.fn().mockImplementationOnce(() => pending.promise).mockResolvedValue([persisted])
+    const cache = new SessionListCache(load)
+    const prototype = AgentBridge.prototype as unknown as { syncBackendSession(backend: BackendRecord): Promise<void> }
+    Object.assign(h.bridge, {
+      sessionListCache: cache,
+      backendKeysBySessionPath: new Map(),
+      updateRunSession: vi.fn(), restoreQueuedRuns: vi.fn(),
+      listSessions: (cwd: string) => cache.list(cwd),
+      syncBackendSession: prototype.syncBackendSession
+    })
+    h.emit('message_start', { message: { role: 'user', timestamp: 1, content: [] } })
+    await dispatchGap()
+    expect(load).toHaveBeenCalledTimes(1)
+    h.emit('message_end', { message: { role: 'user', timestamp: 1, content: [] } })
+    pending.resolve([])
+    await dispatchGap()
+    expect(load).toHaveBeenCalledTimes(2)
+    expect(h.backend.sidebarPublishedSessionPath).toBe(path)
+    expect(h.wireSend.mock.calls.some((call) => Array.isArray(call[1]) && call[1][0]?.path === path)).toBe(true)
+  })
+
   it('records background output without forwarding ordinary events and returns a complete selected snapshot', async () => {
     const h = await harness()
     h.bridge.activeKey = 'other'
