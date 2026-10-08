@@ -24,7 +24,7 @@ const branch: BranchInfo = {
 describe('Sidebar selection typography', () => {
   it('uses the selected foreground token for names without requiring selection', () => {
     const style = document.createElement('style')
-    style.textContent = readFileSync(new URL('../../src/renderer/src/styles/refinements/final.css', import.meta.url), 'utf8')
+    style.textContent = readFileSync('src/renderer/src/styles/refinements/final.css', 'utf8')
     document.head.appendChild(style)
     try {
       const rules = Array.from(style.sheet!.cssRules).filter((rule): rule is CSSStyleRule => 'selectorText' in rule)

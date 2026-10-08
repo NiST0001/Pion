@@ -30,6 +30,51 @@ it.each([null, 'terracotta-dark'])('restores durable theme with missing or stale
   expect(api.setTheme).not.toHaveBeenCalled()
 })
 
+it('registers division-dark alongside the original themes without changing the default', async () => {
+  const { THEME_IDS, DEFAULT_THEME, isThemeId } = await import('../../src/shared/theme')
+  const { THEMES, currentTheme } = await import('../../src/renderer/src/utils/theme')
+  expect(THEME_IDS).toEqual(['terracotta-dark', 'terracotta-light', 'plain-dark', 'plain-light', 'division-dark'])
+  expect(THEMES.map(({ id }) => id)).toEqual(THEME_IDS)
+  expect(THEMES.find(({ id }) => id === 'division-dark')).toEqual({
+    id: 'division-dark', name: '全境封锁', description: '深炭灰与信号橙，战术终端风格'
+  })
+  expect(DEFAULT_THEME).toBe('terracotta-dark')
+  expect(currentTheme()).toBe(DEFAULT_THEME)
+  expect(isThemeId('division-dark')).toBe(true)
+  expect(isThemeId('division-unknown')).toBe(false)
+})
+
+it('saves and restores division-dark as a dark theme across renderer instances', async () => {
+  const api = bridge()
+  const theme = await import('../../src/renderer/src/utils/theme')
+  await theme.saveTheme('division-dark')
+  expect(theme.currentTheme()).toBe('division-dark')
+  expect(document.documentElement.dataset.theme).toBe('division-dark')
+  expect(document.documentElement.style.colorScheme).toBe('dark')
+  expect(localStorage.getItem('pion:theme')).toBe('division-dark')
+  expect(api.setTheme).toHaveBeenCalledExactlyOnceWith('division-dark')
+
+  vi.resetModules()
+  localStorage.setItem('pion:theme', 'plain-light')
+  api.getTheme.mockResolvedValue('division-dark')
+  const restored = await import('../../src/renderer/src/utils/theme')
+  await restored.loadTheme()
+  expect(restored.currentTheme()).toBe('division-dark')
+  expect(document.documentElement.dataset.theme).toBe('division-dark')
+  expect(document.documentElement.style.colorScheme).toBe('dark')
+  expect(localStorage.getItem('pion:theme')).toBe('division-dark')
+  expect(api.setTheme).toHaveBeenCalledTimes(1)
+})
+
+it('ignores unknown cached theme IDs without persisting a fallback', async () => {
+  const api = bridge()
+  localStorage.setItem('pion:theme', 'division-unknown')
+  const theme = await import('../../src/renderer/src/utils/theme')
+  await theme.loadTheme()
+  expect(theme.currentTheme()).toBe('terracotta-dark')
+  expect(api.setTheme).not.toHaveBeenCalled()
+})
+
 it('migrates a valid legacy preference, but does not persist a fallback default', async () => {
   const api = bridge()
   const theme = await import('../../src/renderer/src/utils/theme')
@@ -64,17 +109,18 @@ it('applies immediately and persists even if Chromium storage is unwritable', as
   expect(theme.currentTheme()).toBe('plain-light')
 })
 
-it('does not let delayed restoration overwrite a newer user choice', async () => {
+it.each(['plain-light', 'division-dark'] as const)('does not let delayed restoration overwrite a newer user choice (%s)', async (selected) => {
   const api = bridge()
   let resolve!: (value: ThemeId) => void
   api.getTheme.mockImplementation(() => new Promise<ThemeId | null>((done) => { resolve = done }))
   const theme = await import('../../src/renderer/src/utils/theme')
   const loading = theme.loadTheme()
-  await theme.saveTheme('plain-light')
+  await theme.saveTheme(selected)
   resolve('terracotta-dark')
   await loading
-  expect(theme.currentTheme()).toBe('plain-light')
-  expect(localStorage.getItem('pion:theme')).toBe('plain-light')
+  expect(theme.currentTheme()).toBe(selected)
+  expect(document.documentElement.dataset.theme).toBe(selected)
+  expect(localStorage.getItem('pion:theme')).toBe(selected)
 })
 
 it('reports failed saves and lets later selections retry in order', async () => {

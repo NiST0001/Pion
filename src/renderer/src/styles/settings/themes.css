@@ -1,4 +1,4 @@
-/* 陶土主题卡片 ------------------------------------------------------------- */
+/* 主题选择卡片 ------------------------------------------------------------- */
 
 .theme-grid {
   display: grid;
@@ -153,6 +153,40 @@
 
 .plain-light .theme-card-pill {
   background: #202020;
+}
+
+/* The tactical swatch stays visible from every theme, without external art. */
+.theme-card-preview.division-dark {
+  background: #14181c;
+  border-color: #46535f;
+  border-radius: 3px;
+  background-image: linear-gradient(rgba(188, 200, 209, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(188, 200, 209, 0.05) 1px, transparent 1px);
+  background-size: 12px 12px;
+}
+
+.division-dark .theme-card-top {
+  background: #1b2127;
+  border-color: #ff8b24;
+}
+
+.division-dark .theme-card-top i {
+  background: #ff8b24;
+  border-radius: 0;
+}
+
+.division-dark .theme-card-line {
+  background: #9aaab7;
+  border-radius: 0;
+}
+
+.division-dark .theme-card-pill {
+  background: #ff8b24;
+  border-radius: 1px;
+}
+
+@media (forced-colors: active) {
+  .theme-card-preview.division-dark { background-image: none; }
 }
 
 .theme-choice-copy {

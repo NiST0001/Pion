@@ -1,0 +1,105 @@
+/* Division-inspired tactical palette: charcoal, signal orange and cool white.
+   Cosmetic only: no fabricated telemetry, external assets or scanning effects. */
+:root[data-theme='division-dark'] {
+  color-scheme: dark;
+  --bg: #14181c;
+  --bg-elev: #1b2127;
+  --bg-input: #222a31;
+  --bg-hover: #2b353e;
+  --bg-active: #333f49;
+  --border: #46535f;
+  --border-soft: #303b45;
+  --fg: #edf2f5;
+  --fg-dim: #bcc8d1;
+  --fg-faint: #9aaab7;
+  --accent: #ff8b24;
+  --accent-rgb: 255, 139, 36;
+  --accent-strong: #ffa64d;
+  --accent-soft: rgba(255, 139, 36, 0.12);
+  --on-accent: #14181c;
+  --user-bubble: #27313a;
+  --selected-bg: rgba(255, 139, 36, 0.10);
+  --selected-bg-strong: rgba(255, 139, 36, 0.17);
+  --selected-border: #bb783d;
+  --danger: #ff8585;
+  --danger-rgb: 255, 133, 133;
+  --ok: #8bce9b;
+  --ok-rgb: 139, 206, 155;
+  --warn: #f4cb78;
+  --purple: #c7b5ef;
+  --cyan: #86cfe3;
+  --code-bg: transparent;
+  --code-fg: #dce6ee;
+  --surface-tint: rgba(191, 214, 231, 0.035);
+  --backdrop: rgba(6, 10, 14, 0.72);
+  --code-overlay: rgba(0, 0, 0, 0.24);
+  --shadow-pop: 0 16px 44px rgba(0, 0, 0, 0.46);
+  --composer-shadow: 0 5px 22px rgba(0, 0, 0, 0.28);
+  --radius: 6px;
+  --radius-sm: 4px;
+}
+
+/* Small instruments, not a grid over the reading surface. Native materials own
+   their backgrounds; never reuse their ::before backplate for decoration. */
+:root[data-theme='division-dark']:not([data-native-surface='true']) .titlebar {
+  background-image: repeating-linear-gradient(90deg,
+    transparent 0 23px, rgba(188, 200, 209, 0.13) 23px 24px);
+  background-size: auto 3px;
+  background-position: left bottom;
+  background-repeat: repeat-x;
+}
+
+:root[data-theme='division-dark'] .brand-mark {
+  color: var(--accent);
+}
+
+:root[data-theme='division-dark'] .brand-name {
+  letter-spacing: 0.1em;
+}
+
+:root[data-theme='division-dark'] .dock-header {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+:root[data-theme='division-dark'] :is(.dock-grip, .side-section-title,
+  .settings-section-title, .modal-kicker, .settings-page-kicker) {
+  color: var(--fg-dim);
+  letter-spacing: 0.06em;
+}
+
+/* Squared panels without changing metrics, clipping menus or modifying the
+   capsule-shaped composer controls (including the subagents toggle). */
+:root[data-theme='division-dark'] :is(.dock-workspace > [data-dock-panel],
+  .project-folder-head, .project-branch-head, .project-branch-sessions .side-session,
+  .review-file-item, .theme-choice, .task-panel-card, .modal, .operations-modal) {
+  border-radius: 5px;
+}
+
+:root[data-theme='division-dark'] .project-folder.active > .project-folder-head,
+:root[data-theme='division-dark'] .project-branch-head.active {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+:root[data-theme='division-dark'] .theme-choice.active {
+  border-color: var(--accent);
+}
+
+/* These are informational marks, not overrides of red/green outcome colors.
+   All sidebar names still use the same --fg selected or unselected. */
+:root[data-theme='division-dark'] .task-panel-summary > svg {
+  color: var(--accent-strong);
+}
+
+@media (forced-colors: active) {
+  :root[data-theme='division-dark']:not([data-native-surface='true']) .titlebar {
+    background-image: none;
+  }
+  :root[data-theme='division-dark'] .dock-header,
+  :root[data-theme='division-dark'] .project-folder.active > .project-folder-head,
+  :root[data-theme='division-dark'] .project-branch-head.active {
+    box-shadow: none;
+  }
+  :root[data-theme='division-dark'] .theme-choice.active {
+    border-color: Highlight;
+  }
+}

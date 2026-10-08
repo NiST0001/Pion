@@ -95,7 +95,7 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-it('keeps four immediately applied themes without a redundant live-preview section', () => {
+it('keeps five immediately applied themes without a redundant live-preview section', () => {
   const root = document.documentElement
   const priorTheme = root.dataset.theme
   const priorScheme = root.style.colorScheme
@@ -106,7 +106,7 @@ it('keeps four immediately applied themes without a redundant live-preview secti
     expect(screen.queryByText('实时预览')).not.toBeInTheDocument()
     expect(screen.queryByText(/陶土主题会统一调整/)).not.toBeInTheDocument()
     expect(screen.getByRole('switch', { name: '毛玻璃' })).toBeInTheDocument()
-    expect(document.querySelectorAll('.theme-choice')).toHaveLength(4)
+    expect(document.querySelectorAll('.theme-choice')).toHaveLength(5)
     fireEvent.click(screen.getByRole('button', { name: /陶土浅色/ }))
     expect(root.dataset.theme).toBe('terracotta-light')
     expect(localStorage.getItem('pion:theme')).toBe('terracotta-light')
@@ -255,6 +255,36 @@ describe('SettingsModal page state and callbacks', () => {
     expect(getStderr).toHaveBeenCalledTimes(2)
   })
 
+  it('selects the Division theme and keeps all original themes selectable and persistable', async () => {
+    const setTheme = vi.fn<PionApi['setTheme']>().mockImplementation(async (theme) => theme)
+    window.pion = { setTheme } as unknown as PionApi
+    applyTheme('terracotta-dark')
+    renderSettings(settingsActions())
+    goToSettingsPage(/^外观/)
+    expect(screen.getByRole('button', { name: /陶土深色/ })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: /全境封锁/ })).toHaveAttribute('aria-pressed', 'false')
+    expect(setTheme).not.toHaveBeenCalled()
+
+    const options = [
+      { name: /全境封锁/, id: 'division-dark', scheme: 'dark' },
+      { name: /陶土浅色/, id: 'terracotta-light', scheme: 'light' },
+      { name: /^深色/, id: 'plain-dark', scheme: 'dark' },
+      { name: /^浅色/, id: 'plain-light', scheme: 'light' },
+      { name: /陶土深色/, id: 'terracotta-dark', scheme: 'dark' }
+    ] as const
+    for (const [index, option] of options.entries()) {
+      const button = screen.getByRole('button', { name: option.name })
+      fireEvent.click(button)
+      expect(button).toHaveAttribute('aria-pressed', 'true')
+      expect(document.querySelectorAll('.theme-choice[aria-pressed="true"]')).toHaveLength(1)
+      expect(document.documentElement.dataset.theme).toBe(option.id)
+      expect(document.documentElement.style.colorScheme).toBe(option.scheme)
+      expect(localStorage.getItem('pion:theme')).toBe(option.id)
+      await waitFor(() => expect(setTheme).toHaveBeenCalledTimes(index + 1))
+      expect(setTheme).toHaveBeenLastCalledWith(option.id)
+    }
+  })
+
   it('retains a theme-save error across pages and lets selecting the theme again retry without reverting the appearance', async () => {
     const saved = deferred<ThemeId>()
     finishPendingThemeSave = () => saved.resolve('terracotta-light')
@@ -283,7 +313,10 @@ describe('SettingsModal page state and callbacks', () => {
     expect(localStorage.getItem('pion:theme')).toBe('terracotta-light')
   })
 
-  it('ignores an older theme-save failure after choosing a newer theme on a revisited appearance page', async () => {
+  it.each([
+    { name: /^深色/, id: 'plain-dark' },
+    { name: /全境封锁/, id: 'division-dark' }
+  ] as const)('ignores an older theme-save failure after choosing $id on a revisited appearance page', async (selected) => {
     const oldSave = deferred<ThemeId>()
     finishPendingThemeSave = () => oldSave.resolve('terracotta-light')
     const setTheme = vi.fn<PionApi['setTheme']>().mockReturnValueOnce(oldSave.promise).mockImplementation(async (theme) => theme)
@@ -295,19 +328,19 @@ describe('SettingsModal page state and callbacks', () => {
 
     goToSettingsPage(/^诊断/)
     goToSettingsPage(/^外观/)
-    fireEvent.click(screen.getByRole('button', { name: /^深色/ }))
-    expect(screen.getByRole('button', { name: /^深色/ })).toHaveAttribute('aria-pressed', 'true')
-    expect(document.documentElement.dataset.theme).toBe('plain-dark')
+    fireEvent.click(screen.getByRole('button', { name: selected.name }))
+    expect(screen.getByRole('button', { name: selected.name })).toHaveAttribute('aria-pressed', 'true')
+    expect(document.documentElement.dataset.theme).toBe(selected.id)
     await act(async () => { oldSave.reject(new Error('stale write failed')) })
-    await waitFor(() => expect(setTheme.mock.calls).toEqual([['terracotta-light'], ['plain-dark']]))
+    await waitFor(() => expect(setTheme.mock.calls).toEqual([['terracotta-light'], [selected.id]]))
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 
     goToSettingsPage(/^关于 Pion/)
     goToSettingsPage(/^外观/)
-    expect(screen.getByRole('button', { name: /^深色/ })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: selected.name })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
-    expect(document.documentElement.dataset.theme).toBe('plain-dark')
-    expect(localStorage.getItem('pion:theme')).toBe('plain-dark')
+    expect(document.documentElement.dataset.theme).toBe(selected.id)
+    expect(localStorage.getItem('pion:theme')).toBe(selected.id)
   })
 
   it('forwards project-trust and tool-policy decisions independently and respects updated busy and error props', () => {

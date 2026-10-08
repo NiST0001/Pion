@@ -1,5 +1,5 @@
-/* Pion styles entry point. Visual refinements resolve the palette cascade;
-   motion.css is last so interaction timing stays consistent across themes. */
+/* Pion styles entry point. Theme palettes follow visual refinements;
+   shared motion, dock and native-surface fallbacks follow theme decoration. */
 @import './styles/base.css';
 @import './styles/hljs.css';
 @import './styles/titlebar.css';
@@ -32,6 +32,7 @@
 @import './styles/refinements/layout.css';
 @import './styles/refinements/final.css';
 @import './styles/typography.css';
+@import './styles/themes/division.css';
 @import './styles/motion.css';
 @import './styles/dock.css';
 @import './styles/terminal.css';

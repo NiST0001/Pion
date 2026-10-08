@@ -34,6 +34,21 @@ it('restores the last theme in a new store and rejects invalid values without ov
   expect(await store.get()).toBe('terracotta-light')
 })
 
+it('persists division-dark across store instances without allowing unknown IDs to replace it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pion-theme-division-'))
+  roots.push(root)
+  const path = join(root, 'pion-theme.json')
+  const store = new ThemeSettingsStore(() => path)
+  await store.set('terracotta-dark')
+  await expect(store.set('division-dark')).resolves.toBe('division-dark')
+  const restored = new ThemeSettingsStore(() => path)
+  expect(await restored.get()).toBe('division-dark')
+  expect(() => restored.set('division-unknown')).toThrow('主题参数无效')
+  expect(JSON.parse(await readFile(path, 'utf8'))).toBe('division-dark')
+  await writeFile(path, JSON.stringify('division-unknown'))
+  await expect(new ThemeSettingsStore(() => path).get()).rejects.toThrow('主题配置无效')
+})
+
 it('limits installer sync deletion to generated directories, not the application root', async () => {
   // Source contract only; do not run installation from a unit test.
   const script = await readFile('scripts/install-local.sh', 'utf8')
