@@ -7,7 +7,7 @@ import { consumedInside, useHistoryPaging } from './useHistoryPaging'
 const noNewerHistory = () => false
 // Only tolerate pixel rounding here; the 96px pagination prefetch zone is NOT
 // an instruction to resume following the live conversation.
-const atScrollEnd = (element: HTMLElement) => element.scrollHeight - element.scrollTop - element.clientHeight <= 2
+const atScrollEnd = (element: HTMLElement) => element.scrollHeight - element.scrollTop - element.clientHeight <= 1
 
 interface UseConversationNavigationOptions {
   scrollRef: RefObject<HTMLDivElement | null>
@@ -114,6 +114,19 @@ export function useConversationNavigation({
       return
     }
     const rows = [...container.querySelectorAll<HTMLElement>('.row-user[data-entry-id]')]
+    const content = container.querySelector<HTMLElement>('.timeline')
+    const hasBlankTail = reservedHeight.current > 0
+      && (!content || reservedHeight.current > content.offsetHeight + 1)
+    // Short final turns may never reach the shared reading/jump reference
+    // point, especially with floating composer clearance. At the genuine
+    // session end the last MOUNTED user row owns the turn, not the last entry
+    // in the whole-session index (which may describe an unloaded page).
+    // A loading/min-height placeholder or a paged window's end is not that end.
+    if (rows.length > 0 && atScrollEnd(container) && !hasNewerHistory()
+      && !loadingRef.current && !hasBlankTail) {
+      setVisibleHistoryEntryId(rows[rows.length - 1].dataset.entryId)
+      return
+    }
     const anchor = historyAnchor(container)
     // A user's turn lasts until the next user row reaches the reference point.
     // Nearest row-top distance selects a future turn while a long message or
@@ -124,7 +137,7 @@ export function useConversationNavigation({
       active = row
     }
     setVisibleHistoryEntryId(active?.dataset.entryId)
-  }, [scrollRef])
+  }, [scrollRef, hasNewerHistory])
 
   const scheduleVisibleHistoryUpdate = useCallback((): void => {
     if (historyScrollFrame.current !== null) return
@@ -332,7 +345,7 @@ export function useConversationNavigation({
 
   useEffect(() => {
     scheduleVisibleHistoryUpdate()
-  }, [scheduleVisibleHistoryUpdate, projectCwd, sessionPath, timeline, historyResetRevision, historyIndexSessionPath, panelsVisible])
+  }, [scheduleVisibleHistoryUpdate, projectCwd, sessionPath, timeline, timelineLoading, historyResetRevision, historyIndexSessionPath, panelsVisible])
 
   useLayoutEffect(() => {
     const jump = historyJump
@@ -417,7 +430,10 @@ export function useConversationNavigation({
       reserveSpace(element, loadingRef.current && !hasContentRef.current)
     }
     const resumeAtEnd = () => {
-      if (!loadingRef.current && hasContentRef.current && !hasNewerHistory() && atScrollEnd(element)) followEnd(element)
+      if (!loadingRef.current && hasContentRef.current && !hasNewerHistory() && atScrollEnd(element)) {
+        followEnd(element)
+        scheduleVisibleHistoryUpdate()
+      }
     }
     const wheel = (event: WheelEvent) => {
       if (event.ctrlKey || event.deltaY === 0 || consumedInside(event, element, event.deltaY > 0 ? 'newer' : 'older')) return
@@ -455,6 +471,7 @@ export function useConversationNavigation({
         element.scrollTop = element.scrollHeight
         lastScrollTop.current = element.scrollTop
         nearBottomRef.current = !hasNewerHistory()
+        scheduleVisibleHistoryUpdate()
       }
     }
     element.addEventListener('wheel', wheel, { passive: true })
@@ -471,7 +488,7 @@ export function useConversationNavigation({
       element.removeEventListener('pointerdown', resume)
       element.removeEventListener('keydown', key)
     }
-  }, [scrollRef, reserveSpace, hasNewerHistory, followEnd, historyResetRevision])
+  }, [scrollRef, reserveSpace, hasNewerHistory, followEnd, historyResetRevision, scheduleVisibleHistoryUpdate])
 
   const handleTimelineScroll = useCallback((): void => {
     const element = scrollRef.current

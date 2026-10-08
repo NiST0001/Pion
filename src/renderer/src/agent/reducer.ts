@@ -2,6 +2,7 @@
  * Agent 状态迁移：reducer 与实时事件（WireEvent -> 状态）归约。
  */
 import type {
+  LiveSessionState,
   ToolResultPayload,
   WireEvent,
   WireEventInput,
@@ -39,16 +40,23 @@ export function reducer(state: AgentState, action: Action): AgentState {
   switch (action.type) {
     case 'status': {
       const dead = action.status.phase === 'stopped' || action.status.phase === 'error'
-      const ready = action.status.phase === 'ready'
+      // Re-selecting a retained backend publishes its descriptor again; that
+      // ready notification is not a backend reset after live hydration.
+      const ready = action.status.phase === 'ready' && !(state.liveSessionBackendId
+        && state.status.phase === 'running' && action.status.cwd === state.status.cwd)
       return {
         ...state,
-        status: action.status,
+        status: action.status.phase === 'ready' && !ready ? state.status : action.status,
         busy: dead || ready ? false : state.busy,
         compacting: dead || ready ? false : state.compacting,
         compactionEventState: dead || ready ? undefined : state.compactionEventState,
+        timeline: dead || ready ? dropStreamingTails(state.timeline) : state.timeline,
+        liveSessionTurnIds: dead || ready ? undefined : state.liveSessionTurnIds,
         timelineLoading: dead ? false : state.timelineLoading,
         timelineError: dead ? undefined : state.timelineError,
         session: dead || ready ? null : state.session,
+        liveSessionBackendId: dead || ready ? undefined : state.liveSessionBackendId,
+        liveSessionRevision: dead || ready ? undefined : state.liveSessionRevision,
         sessions: dead ? [] : action.status.cwd !== state.status.cwd
           ? state.sessionsByProject[action.status.cwd ?? ''] ?? []
           : state.sessions,
@@ -71,12 +79,19 @@ export function reducer(state: AgentState, action: Action): AgentState {
       const sameSession = Boolean(incoming && (!state.session
         || (incoming.sessionFile && incoming.sessionFile === state.session.sessionFile)
         || (incoming.sessionId && incoming.sessionId === state.session.sessionId)))
-      const compactionEventState = sameSession ? state.compactionEventState : undefined
-      const compacting = compactionEventState ?? incoming?.isCompacting ?? false
+      const live = incoming?.liveState
+      const accepted = live && liveScopeMatches(state, live, incoming?.sessionFile)
+      if (live && !accepted) return state
+      const stale = accepted && state.liveSessionBackendId === live.backendId
+        && live.revision <= (state.liveSessionRevision ?? -1)
+      const projected = accepted && !stale ? applyLiveSnapshot(state, live) : state
+      const sameBackend = !live || !state.liveSessionBackendId || state.liveSessionBackendId === live.backendId
+      const compactionEventState = sameSession && sameBackend ? state.compactionEventState : undefined
+      const compacting = stale ? state.compacting : compactionEventState ?? incoming?.isCompacting ?? false
       return {
-        ...state,
+        ...projected,
         session: incoming,
-        busy: Boolean(incoming?.isStreaming || compacting),
+        busy: stale ? state.busy : Boolean(incoming?.isStreaming || compacting),
         compacting,
         compactionEventState,
         yolo: incoming?.yolo ?? false
@@ -213,10 +228,15 @@ export function reducer(state: AgentState, action: Action): AgentState {
       const preserve = scope && scope.revision === state.timelineScopeRevision
         && (scope.cwd === undefined || state.status.cwd === undefined || scope.cwd === state.status.cwd)
         && (scope.sessionId === undefined || !state.session?.sessionId || scope.sessionId === state.session.sessionId)
-        && (scope.sessionPath === undefined || !state.session?.sessionFile || scope.sessionPath === state.session.sessionFile)
-      return {
+        && (scope.sessionPath === undefined || scope.sessionPath === state.liveSessionOwnerPath
+          || !state.session?.sessionFile || scope.sessionPath === state.session.sessionFile)
+      if (scope && !preserve) return state
+      const loaded: AgentState = {
         ...state,
-        timeline: preserve ? preserveTimelineToolState(state.timeline, action.items) : action.items,
+        timeline: preserve ? preserveTimelineToolState(state.timeline, action.items,
+          state.status.phase !== 'stopped' && state.status.phase !== 'error'
+        ) : action.items,
+        liveSessionBackendId: state.liveSessionBackendId ?? (preserve ? action.cachedBackendId : undefined),
         timelineLoadId: action.loadId ?? state.timelineLoadId,
         mode: action.mode ?? state.mode,
         timelineMutation: 'replace',
@@ -227,6 +247,13 @@ export function reducer(state: AgentState, action: Action): AgentState {
         busy: state.busy,
         compacting: state.compacting
       }
+      // A cache/page dispatched after hydration may contain a pre-final draft.
+      // Replay the accepted projection at this event boundary, including its
+      // empty-final tombstones, rather than resurrecting cached partial text.
+      const live = state.session?.liveState
+      return preserve && live && live.backendId === state.liveSessionBackendId
+        && live.revision === state.liveSessionRevision
+        ? { ...applyLiveSnapshot(loaded, live), timelineMutation: 'replace' } : loaded
     }
     case 'prependEntries': {
       const timeline = reconcileOlderTimelineItems(
@@ -270,6 +297,11 @@ export function reducer(state: AgentState, action: Action): AgentState {
         taskResultIds: [],
         taskRestore: undefined,
         timeline: [],
+        liveSessionOwnerPath: action.sessionPath,
+        liveSessionScopeSelected: true,
+        liveSessionBackendId: undefined,
+        liveSessionRevision: undefined,
+        liveSessionTurnIds: undefined,
         timelineScopeRevision: state.timelineScopeRevision + 1,
         mode: 'build',
         yolo: false,
@@ -283,13 +315,228 @@ export function reducer(state: AgentState, action: Action): AgentState {
         queuedMessages: { steering: [], followUp: [], nativeFollowUpCount: 0 }
       }
     case 'event': {
-      const next = reduceEvent(state, action.event)
+      const live = action.event._pionLive
+      if (live && (!liveScopeMatches(state, live)
+        || (live.backendId === state.liveSessionBackendId && live.revision <= (state.liveSessionRevision ?? -1)))) return state
+      const base = live ? {
+        ...state,
+        timeline: state.liveSessionBackendId && state.liveSessionBackendId !== live.backendId
+          ? dropStreamingTails(state.timeline) : state.timeline,
+        liveSessionOwnerPath: live.sessionPath ?? state.liveSessionOwnerPath,
+        liveSessionBackendId: live.backendId,
+        liveSessionRevision: live.revision
+      } : state
+      let next = reduceEvent(base, action.event)
+      if (live) {
+        const turnIds = action.event.type === 'agent_start' || state.liveSessionBackendId !== live.backendId
+          ? [] : state.liveSessionTurnIds ?? []
+        if (next.timeline !== base.timeline || action.event.type === 'agent_start' || state.liveSessionBackendId !== live.backendId) {
+          const previousIds = new Set(base.timeline.map((row) => row.id))
+          const nextIds = new Set(next.timeline.map((row) => row.id))
+          next = { ...next, liveSessionTurnIds: [...turnIds.filter((id) => nextIds.has(id)),
+            ...next.timeline.filter((row) => !previousIds.has(row.id)).map((row) => row.id)].slice(-256) }
+        }
+      }
       return next.timeline === state.timeline ? next : { ...next, timelineMutation: 'append' }
     }
   }
 }
 
-function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
+/** Unknown SDK IDs are allowed within the selected cwd, never across workspaces. */
+function liveScopeMatches(
+  state: AgentState, live: Omit<LiveSessionState, 'events' | 'truncated'>, path?: string
+): boolean {
+  if (state.status.cwd !== live.cwd) return false
+  const selected = state.liveSessionScopeSelected ? state.liveSessionOwnerPath : state.session?.sessionFile
+  if (selected && live.sessionPath && selected !== live.sessionPath) return false
+  return !path || !live.sessionPath || path === live.sessionPath
+}
+
+function dropStreamingTails(items: TimelineItem[]): TimelineItem[] {
+  return items.filter((item) => !(item.kind === 'assistant' && item.streaming)
+    && !(item.kind === 'tool' && item.tool.live && item.tool.status === 'running'))
+}
+
+function sameLiveIdentity(a: TimelineItem, b: TimelineItem): boolean {
+  if (a.kind !== b.kind) return false
+  if (a.kind === 'tool' && b.kind === 'tool') return a.tool.id === b.tool.id
+  if ('entryId' in a && 'entryId' in b && a.entryId && b.entryId) return a.entryId === b.entryId
+  if ((a.kind === 'assistant' || a.kind === 'user') && (b.kind === 'assistant' || b.kind === 'user')) {
+    return a.messageTimestamp !== undefined && a.messageTimestamp === b.messageTimestamp
+  }
+  return false
+}
+
+/** Replay display data only: no lifecycle, task projection or other side effects. */
+function applyLiveSnapshot(state: AgentState, live: LiveSessionState): AgentState {
+  let replay = { ...state, timeline: [] as TimelineItem[] }
+  const tombstones: { item: TimelineItem; fields: Set<string> }[] = []
+  const truncatedFields = new Map<number, Set<string>>()
+  const readFields = (payload: unknown): Set<string> => {
+    const value = payload && typeof payload === 'object'
+      ? (payload as Record<string, unknown>)._pionLiveTruncatedFields : undefined
+    return new Set(Array.isArray(value) ? value.filter((field) =>
+      typeof field === 'string' && ['text', 'thinking', 'error', 'diff', 'outputText'].includes(field)) : [])
+  }
+  const currentTools = new Map(state.timeline.flatMap((row) => row.kind === 'tool' ? [[row.tool.id, row] as const] : []))
+  const finalTools = new Map<string, { payload: ToolResultPayload; isError: boolean }>()
+  for (const input of live.events) {
+    const event = input as WireEvent
+    if (event.type === 'message_end' && event.message.role === 'toolResult' && typeof event.message.toolCallId === 'string') {
+      finalTools.set(event.message.toolCallId, { payload: event.message as ToolResultPayload, isError: Boolean(event.message.isError) })
+    } else if (event.type === 'tool_execution_end' && !finalTools.has(event.toolCallId)) {
+      finalTools.set(event.toolCallId, { payload: event.result as ToolResultPayload, isError: event.isError })
+    }
+  }
+  for (const event of live.events) {
+    if (!['message_start', 'message_update', 'message_end', 'entry_appended',
+      'tool_execution_start', 'tool_execution_update', 'tool_execution_end'].includes(event.type)) continue
+    if (event.type === 'entry_appended' && (event as WireEvent & { type: 'entry_appended' }).entry?.type !== 'message') continue
+    const before = replay.timeline
+    replay = reduceEvent(replay, event, true)
+    const wire = event as WireEvent
+    const payload = wire.type === 'message_start' || wire.type === 'message_end' ? wire.message
+      : wire.type === 'message_update' ? (wire.assistantMessageEvent as unknown as Record<string, unknown>)?.error
+        ?? (wire.assistantMessageEvent as unknown as Record<string, unknown>)?.message
+        ?? wire.assistantMessageEvent
+      : wire.type === 'tool_execution_end' ? wire.result
+      : wire.type === 'tool_execution_update' ? wire.partialResult : undefined
+    const fields = readFields(payload)
+    const target = wire.type === 'message_start' ? replay.timeline.at(-1)
+      : wire.type === 'message_end' && wire.message.role === 'toolResult'
+        ? replay.timeline.find((row) => row.kind === 'tool' && row.tool.id === wire.message.toolCallId)
+      : wire.type === 'tool_execution_end' || wire.type === 'tool_execution_update'
+        ? replay.timeline.find((row) => row.kind === 'tool' && row.tool.id === wire.toolCallId)
+      : wire.type === 'message_end' || wire.type === 'message_update'
+        ? before.filter((row) => row.kind === 'assistant' && row.streaming).at(-1) : undefined
+    if (target && payload) {
+      if (wire.type === 'message_update') {
+        const previous = truncatedFields.get(target.id) ?? new Set<string>()
+        for (const field of fields) previous.add(field)
+        truncatedFields.set(target.id, previous)
+      } else truncatedFields.set(target.id, fields)
+    }
+    if (event.type === 'tool_execution_start') {
+      // Seed an identical final before replaying it, preserving the validated
+      // preview objects rather than decoding the same image a second time.
+      replay.timeline = replay.timeline.map((row) => {
+        if (row.kind !== 'tool' || row.tool.id !== event.toolCallId) return row
+        const current = currentTools.get(row.tool.id)
+        const final = finalTools.get(row.tool.id)
+        const payload = final?.payload
+        const isError = final?.isError ?? false
+        if (current?.kind !== 'tool' || !payload) return row
+        return toolResultMatches(current.tool, payload, isError)
+          ? { ...row, tool: current.tool }
+          : { ...row, tool: { ...row.tool, images: current.tool.images, imageNotice: current.tool.imageNotice } }
+      })
+    }
+    if (event.type === 'message_end') {
+      for (const item of before) {
+        if (item.kind === 'assistant' && item.streaming && !replay.timeline.some((row) => row.id === item.id)) tombstones.push({ item, fields })
+      }
+    }
+  }
+  let existing = state.liveSessionBackendId && state.liveSessionBackendId !== live.backendId
+    ? dropStreamingTails(state.timeline) : state.timeline
+  // A timestampless empty final may only remove the current unpersisted draft,
+  // not completed/history rows. Prefer the last streaming row in that turn.
+  for (const { item: tombstone, fields } of tombstones) {
+    const candidates = existing.filter((item) => sameLiveIdentity(item, tombstone)
+      && item.kind === 'assistant' && (item.streaming || state.liveSessionTurnIds?.includes(item.id)))
+    const matched = candidates.length === 1 ? candidates : []
+    const fallback = tombstone.kind === 'assistant'
+      ? existing.filter((item) => item.kind === 'assistant' && item.streaming && !item.entryId
+        && (tombstone.messageTimestamp === undefined || item.messageTimestamp === undefined)).at(-1) : undefined
+    if (fields.has('text') || fields.has('thinking') || fields.has('error')) {
+      const current = matched[0] ?? fallback
+      if (current?.kind === 'assistant') {
+        replay.timeline.push({ ...current, text: fields.has('text') ? current.text : '',
+          thinking: fields.has('thinking') ? current.thinking : '',
+          error: fields.has('error') ? current.error : undefined, streaming: false })
+        truncatedFields.set(current.id, fields)
+      }
+    } else existing = existing.filter((item) => !matched.includes(item) && item !== fallback)
+  }
+  const matched = new Set<number>()
+  const incoming = replay.timeline.map((item) => {
+    const candidates = existing.filter((row) => !matched.has(row.id) && sameLiveIdentity(row, item))
+    const active = candidates.filter((row) => (row.kind === 'assistant' && row.streaming)
+      || state.liveSessionTurnIds?.includes(row.id))
+    const identified = active.length === 1 ? active[0] : candidates.length === 1 ? candidates[0] : undefined
+    const current = identified
+      ?? ((item.kind === 'assistant' || item.kind === 'user') && item.messageTimestamp === undefined
+        ? existing.find((row) => row.kind === item.kind && !matched.has(row.id) && state.liveSessionTurnIds?.includes(row.id)) : undefined)
+      ?? (item.kind === 'assistant'
+        ? existing.filter((row) => row.kind === 'assistant' && row.streaming && !row.entryId && !matched.has(row.id)
+          && (item.messageTimestamp === undefined || row.messageTimestamp === undefined)).at(-1) : undefined)
+    if (!current) return item
+    matched.add(current.id)
+    if (current.historyReconciled && ((current.kind === 'assistant' && item.kind === 'assistant'
+      && !current.streaming && item.streaming)
+      || (current.kind === 'tool' && item.kind === 'tool' && current.tool.resultReceived && !item.tool.resultReceived))) return current
+    const replacement = { ...item, id: current.id, historical: current.historical,
+      noReveal: current.noReveal, historyReconciled: current.historyReconciled }
+    if ((replacement.kind === 'assistant' || replacement.kind === 'user')
+      && (current.kind === 'assistant' || current.kind === 'user')) {
+      replacement.entryId ??= current.entryId
+      replacement.messageTimestamp ??= current.messageTimestamp
+    }
+    // Only explicit per-field budget loss can protect cached longer output.
+    const fields = truncatedFields.get(item.id) ?? new Set<string>()
+    if (replacement.kind === 'assistant' && current.kind === 'assistant') {
+      if (fields.has('text') && replacement.text.length < current.text.length) replacement.text = current.text
+      if (fields.has('thinking') && replacement.thinking.length < current.thinking.length) replacement.thinking = current.thinking
+      if (fields.has('error') && (replacement.error?.length ?? 0) < (current.error?.length ?? 0)) replacement.error = current.error
+      if (replacement.text === current.text && replacement.thinking === current.thinking
+        && replacement.streaming === current.streaming && replacement.error === current.error
+        && replacement.entryId === current.entryId) return current
+    }
+    if (replacement.kind === 'user' && current.kind === 'user') {
+      if (fields.has('text') && replacement.text.length < current.text.length) replacement.text = current.text
+      if (current.images?.length && !replacement.images?.length) replacement.images = current.images
+    }
+    if (replacement.kind === 'tool' && current.kind === 'tool') {
+      // The display snapshot excludes result details/argument image metadata.
+      // Missing projection metadata is not evidence that a final removed it.
+      replacement.tool = { ...replacement.tool,
+        diff: replacement.tool.diff ?? current.tool.diff,
+        todos: replacement.tool.todos ?? current.tool.todos,
+        imageModelInfo: replacement.tool.imageModelInfo ?? current.tool.imageModelInfo,
+        imageSettingsInfo: replacement.tool.imageSettingsInfo ?? current.tool.imageSettingsInfo }
+      for (const key of ['outputText', 'diff'] as const) {
+        const previous = current.tool[key]
+        if (fields.has(key) && previous !== undefined && (replacement.tool[key]?.length ?? 0) < previous.length) replacement.tool[key] = previous
+      }
+      for (const key of ['command', 'writeContent', 'path'] as const) {
+        replacement.tool[key] ??= current.tool[key]
+      }
+    }
+    return replacement
+  })
+  const replacements = new Map(incoming.filter((row) => matched.has(row.id)).map((row) => [row.id, row]))
+  const retained = existing.map((row) => replacements.get(row.id) ?? row)
+  const added = incoming.filter((row) => !matched.has(row.id))
+  const reconciled = reconcileNewerTimelineItems(retained, added).items
+  // Snapshot rows have no persisted page positions: keep all already mounted
+  // rows in place, and append only genuinely new turn rows in replay order.
+  const retainedOrder = new Map(retained.map((row, index) => [row.id, index]))
+  const newOrder = new Map(added.map((row, index) => [row.id, retained.length + index]))
+  const timeline = [...reconciled].sort((a, b) =>
+    (retainedOrder.get(a.id) ?? newOrder.get(a.id) ?? Infinity)
+    - (retainedOrder.get(b.id) ?? newOrder.get(b.id) ?? Infinity))
+  return {
+    ...state,
+    timeline,
+    liveSessionOwnerPath: live.sessionPath ?? state.liveSessionOwnerPath,
+    liveSessionBackendId: live.backendId,
+    liveSessionRevision: live.revision,
+    liveSessionTurnIds: incoming.map((row) => row.id).slice(-256),
+    timelineMutation: 'append'
+  }
+}
+
+function reduceEvent(state: AgentState, input: WireEventInput, replay = false): AgentState {
   // trusted boundary: unmodelled event types fall through to the default branch
   const event = input as WireEvent
   // Native script child calls belong to the parent's result, not standalone
@@ -309,7 +556,7 @@ function reduceEvent(state: AgentState, input: WireEventInput): AgentState {
   const resultId = customTasks !== undefined && event.type === 'entry_appended'
     ? `entry:${event.entry?.id}`
     : event.type === 'tool_execution_end' ? event.toolCallId : taskMessage?.toolCallId
-  if (tasks !== undefined && (typeof resultId !== 'string' || !state.taskResultIds.includes(resultId))) {
+  if (!replay && tasks !== undefined && (typeof resultId !== 'string' || !state.taskResultIds.includes(resultId))) {
     state = {
       ...state,
       tasks,

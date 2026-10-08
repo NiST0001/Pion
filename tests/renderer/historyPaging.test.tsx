@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
-import { useReducer } from 'react'
+import { useReducer, type Dispatch } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { SessionEntriesPage, WireEntry, WireMessage } from '../../src/shared/types'
 import { useHistoryPaging } from '../../src/renderer/src/hooks/useHistoryPaging'
@@ -716,9 +716,318 @@ it.each(['reload', 'jump'] as const)('keeps a delayed %s snapshot and reused cal
   expect(h.result.current.expectedTimeline.current).toBeNull()
 })
 
+it('rejects a replacement captured before a queued selection clear but accepts the new selected scope', () => {
+  const oldPath = '/queued-old.jsonl', newPath = '/queued-new.jsonl'
+  const oldRow: TimelineItem = { kind: 'assistant', id: 880, text: 'old draft', thinking: '', streaming: true }
+  const newRow: TimelineItem = { kind: 'user', id: 881, text: 'new conversation' }
+  const oldState = { ...initialState, timeline: [oldRow],
+    session: { sessionId: 'old-id', sessionFile: oldPath } as NonNullable<typeof initialState.session> }
+  const cleared = reducer(oldState, { type: 'clearTimeline', sessionPath: newPath })
+  const stale = reducer(cleared, { type: 'loadEntries', items: [oldRow],
+    preserveToolState: { revision: oldState.timelineScopeRevision, sessionPath: oldPath } })
+  expect(stale).toBe(cleared)
+  // The old SDK snapshot can remain visible during startup; the queued clear
+  // is the selected transcript boundary, not that stale session metadata.
+  const loaded = reducer(cleared, { type: 'loadEntries', items: [newRow],
+    preserveToolState: { revision: cleared.timelineScopeRevision, sessionPath: newPath } })
+  expect(loaded.timeline).toEqual([newRow])
+})
+
 it('marks history-page append separately from live append in the reducer', () => {
   const state = reducer(initialState, { type: 'appendEntries', items: [{ kind: 'user', id: 1, text: 'page' }] })
   expect(state.timelineMutation).toBe('history-append')
+})
+
+it('seeds a fresh running session cache and keeps its draft on the first A → B → A revisit with empty JSONL pages', async () => {
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    queueMicrotask(() => callback(0))
+    return 1
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+  const a = '/fresh-running-a.jsonl', b = '/fresh-running-b.jsonl'
+  const draft: TimelineItem = { kind: 'assistant', id: 901, live: true,
+    messageTimestamp: 100, text: 'first token', thinking: '', streaming: true }
+  const session = (path: string) => ({ sessionId: path, sessionFile: path,
+    isStreaming: path === a, isCompacting: false }) as NonNullable<typeof initialState.session>
+  let dispatch!: Dispatch<Action>
+  const empty: SessionEntriesPage = { entries: [], toolResults: [], start: 0,
+    end: 0, total: 0, leafId: null, mode: 'build' }
+  const api = {
+    getEntriesPage: vi.fn().mockResolvedValue(empty),
+    getHistoryIndex: vi.fn(async (path: string) => ({ sessionPath: path, totalEntries: 0, landmarks: [] })),
+    onEvent: vi.fn(() => () => undefined),
+    switchSession: vi.fn(async (path: string) => {
+      dispatch({ type: 'session', session: session(path) })
+      return { cancelled: false }
+    })
+  }
+  const h = renderHook(() => {
+    const [state, nextDispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' }, session: session(a),
+      busy: true, runningSessionPaths: [a], timeline: [draft] })
+    dispatch = nextDispatch
+    return { ...useAgentHistory({ api: api as never, state, dispatch: nextDispatch }), state }
+  })
+  expect(h.result.current.timelineCache.current.get(a)?.items).toEqual([draft])
+  await act(async () => { await h.result.current.switchSession(b) })
+  expect(h.result.current.state.timeline).toEqual([])
+  await act(async () => { await h.result.current.switchSession(a) })
+  expect(h.result.current.state.timeline).toEqual([expect.objectContaining({
+    id: draft.id, text: 'first token', streaming: true
+  })])
+  expect(h.result.current.state.busy).toBe(true)
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  await act(async () => dispatch({ type: 'event', event: { type: 'message_update',
+    assistantMessageEvent: { type: 'text_delta', delta: ' resumed' } } }))
+  expect(h.result.current.state.timeline[0]).toMatchObject({ id: draft.id, text: 'first token resumed' })
+})
+
+it.each(['more output', 'first token', 'empty final'] as const)('restores background %s on the first A → B → A switch before a delayed history page', async (mode) => {
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    queueMicrotask(() => callback(0)); return 1
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+  const a = '/background-a', b = '/background-b', cwd = '/project'
+  const pending = deferred<SessionEntriesPage>()
+  const empty: SessionEntriesPage = { entries: [], toolResults: [], start: 0, end: 0, total: 0, leafId: null, mode: 'build' }
+  let dispatch!: Dispatch<Action>
+  const session = (path: string, restore = false) => ({
+    sessionId: path, sessionFile: path, messageCount: 0, isStreaming: path === a && mode !== 'empty final',
+    ...(path === a && restore ? { liveState: { backendId: 'backend-a', revision: 8, cwd, sessionPath: a, events: [
+      { type: 'message_start' as const, message: { role: 'assistant', timestamp: 100, content: [] } },
+      { type: 'message_update' as const, usage: null, assistantMessageEvent: { type: 'text_delta', delta: 'background output' } },
+      ...(mode === 'empty final' ? [{ type: 'message_end' as const, message: { role: 'assistant', timestamp: 100, content: [] } }] : [
+        { type: 'tool_execution_start' as const, toolCallId: 'background-tool', toolName: 'read', args: { path: 'file.ts' } },
+        { type: 'tool_execution_end' as const, toolCallId: 'background-tool', toolName: 'read', result: { content: [{ type: 'text', text: 'background result' }] }, isError: false }
+      ])
+    ] } } : {})
+  })
+  const api = { onEvent: vi.fn(() => () => undefined), getHistoryIndex: vi.fn().mockResolvedValue(null),
+    getEntriesPage: vi.fn((_before, _size, path) => path === a ? pending.promise : Promise.resolve(empty)),
+    switchSession: vi.fn(async (path: string) => {
+      dispatch({ type: 'session', session: session(path, true) }); return { cancelled: false }
+    }) }
+  const h = renderHook(() => {
+    const [state, nextDispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd }, session: session(a), busy: true, runningSessionPaths: [a],
+      timeline: mode === 'first token' ? [] : [{ kind: 'assistant' as const, id: 990, live: true,
+        messageTimestamp: 100, text: 'before leaving', thinking: '', streaming: true }] })
+    dispatch = nextDispatch
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  await act(async () => { await h.result.current.switchSession(b) })
+  let switching!: Promise<unknown>
+  await act(async () => {
+    switching = h.result.current.switchSession(a)
+    // Allow the cached paint, switch RPC and newest-page request to begin.
+    for (let tick = 0; tick < 12; tick++) await Promise.resolve()
+  })
+  if (mode === 'empty final') expect(h.result.current.state.timeline).toEqual([])
+  else {
+    expect(h.result.current.state.timeline[0]).toMatchObject({ text: 'background output', streaming: true })
+    expect(findTool(h.result.current.state.timeline, 'background-tool').tool).toMatchObject({ status: 'done', outputText: 'background result' })
+  }
+  await act(async () => { pending.resolve(empty); await switching })
+  if (mode === 'empty final') expect(h.result.current.state.timeline).toEqual([])
+  else expect(h.result.current.state.timeline[0]).toMatchObject({ text: 'background output', streaming: true })
+})
+
+it('does not resurrect a pre-final cached draft mounted after background completion', async () => {
+  const path = '/empty-before-cache.jsonl', cwd = '/project'
+  const pending = deferred<SessionEntriesPage>()
+  const draft: TimelineItem = { kind: 'assistant', id: 906, live: true, messageTimestamp: 100,
+    text: 'pre-final cache', thinking: '', streaming: true }
+  const api = { getEntriesPage: vi.fn(() => pending.promise), onEvent: vi.fn(() => () => undefined),
+    getHistoryIndex: vi.fn().mockResolvedValue(null) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState, status: { phase: 'running', cwd },
+      session: { sessionId: 'empty', sessionFile: path, messageCount: 0, isStreaming: true },
+      timeline: [draft], busy: true })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state, dispatch }
+  })
+  let loading!: Promise<void>
+  act(() => { loading = h.result.current.reloadTimeline(path) })
+  await act(async () => {
+    h.result.current.dispatch({ type: 'session', session: {
+      sessionId: 'empty', sessionFile: path, messageCount: 0, isStreaming: false,
+      liveState: { backendId: 'empty-backend', revision: 8, cwd, sessionPath: path, truncated: true, events: [
+        { type: 'message_start', message: { role: 'assistant', timestamp: 100, content: [] } },
+        { type: 'message_end', message: { role: 'assistant', timestamp: 100, content: [] } }
+      ] }
+    } })
+  })
+  expect(h.result.current.state.timeline).toEqual([])
+  act(() => h.result.current.dispatch({ type: 'loadEntries', items: [draft], preserveToolState: {
+    revision: h.result.current.state.timelineScopeRevision, cwd, sessionPath: path } }))
+  expect(h.result.current.state.timeline).toEqual([])
+  await act(async () => {
+    pending.resolve({ entries: [], toolResults: [], start: 0, end: 0, total: 0, leafId: null, mode: 'build' })
+    await loading
+  })
+  expect(h.result.current.state.timeline).toEqual([])
+  expect(h.result.current.timelineCache.current.get(path)?.items).toEqual([])
+})
+
+it.each(['final output', ''])('does not let a late empty disk page rewind the authoritative final %j', async (finalText) => {
+  const path = '/live-reload.jsonl'
+  const pending = deferred<SessionEntriesPage>()
+  const api = { getEntriesPage: vi.fn(() => pending.promise), onEvent: vi.fn(() => () => undefined),
+    getHistoryIndex: vi.fn().mockResolvedValue(null) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' },
+      session: { sessionId: 'live', sessionFile: path, isStreaming: true } as NonNullable<typeof initialState.session>,
+      busy: true, timeline: [{ kind: 'assistant', id: 902, live: true,
+        messageTimestamp: 100, text: 'provisional', thinking: '', streaming: true }] })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state, dispatch }
+  })
+  let loading!: Promise<void>
+  act(() => { loading = h.result.current.reloadTimeline(path) })
+  await act(async () => {
+    // Queue final and response together: preservation must happen in reducer
+    // order, not from the hook's earlier pre-final cache snapshot.
+    h.result.current.dispatch({ type: 'event', event: { type: 'message_end',
+      message: { role: 'assistant', timestamp: 100, content: [{ type: 'text', text: finalText }] } } })
+    pending.resolve({ entries: [], toolResults: [], start: 0, end: 0, total: 0, leafId: 'changed', mode: 'build' })
+    await loading
+  })
+  expect(h.result.current.state.timeline).toEqual(finalText ? [expect.objectContaining({
+    id: 902, text: finalText, streaming: false
+  })] : [])
+  expect(h.result.current.timelineCache.current.get(path)?.items).toEqual(h.result.current.state.timeline)
+})
+
+it('accepts the first history response when the selected SDK identity and file arrive late', async () => {
+  const path = '/late-sdk-file.jsonl'
+  const pending = deferred<SessionEntriesPage>()
+  const api = { getEntriesPage: vi.fn(() => pending.promise), onEvent: vi.fn(() => () => undefined),
+    getHistoryIndex: vi.fn().mockResolvedValue(null) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' },
+      timeline: [{ kind: 'assistant', id: 903, live: true, text: 'visible', thinking: '', streaming: true }] })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state, dispatch }
+  })
+  h.result.current.timelineOwnerPath.current = path
+  let loading!: Promise<void>
+  act(() => { loading = h.result.current.reloadTimeline(path) })
+  await act(async () => h.result.current.dispatch({ type: 'session', session: {
+    sessionId: 'late-id', sessionFile: path, isStreaming: true
+  } as NonNullable<typeof initialState.session> }))
+  await act(async () => {
+    pending.resolve({ entries: [], toolResults: [], start: 0, end: 0, total: 0, leafId: null, mode: 'build' })
+    await loading
+  })
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.result.current.state.timeline).toEqual([expect.objectContaining({ id: 903, text: 'visible', streaming: true })])
+})
+
+it.each(['stopped backend', 'other cwd'])('does not restore cached partial output for %s', async (reason) => {
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    queueMicrotask(() => callback(0))
+    return 1
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+  const path = '/obsolete-live.jsonl'
+  const api = { switchSession: vi.fn().mockResolvedValue({ cancelled: false }),
+    getEntriesPage: vi.fn().mockResolvedValue({ entries: [], toolResults: [], start: 0, end: 0,
+      total: 0, leafId: null, mode: 'build' }), getHistoryIndex: vi.fn().mockResolvedValue(null) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' }, runningSessionPaths: reason === 'other cwd' ? [path] : [] })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  h.result.current.timelineCache.current.set(path, {
+    cwd: reason === 'other cwd' ? '/different-worktree' : '/project',
+    items: [{ kind: 'assistant', id: 904, text: 'obsolete', thinking: '', streaming: true, live: true }],
+    mode: 'build', apiBefore: 0, apiAfter: 0, toolResults: [], complete: true,
+    newerComplete: true, leafId: null, total: 0
+  })
+  await act(async () => { await h.result.current.switchSession(path) })
+  expect(h.result.current.state.timeline).toEqual([])
+  expect(h.result.current.state.busy).toBe(false)
+})
+
+it('drops a cached streaming tail when the selected backend is recreated before empty history revalidation', async () => {
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    queueMicrotask(() => callback(0)); return 1
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+  const path = '/recreated-backend.jsonl', cwd = '/project'
+  let dispatch!: Dispatch<Action>
+  const api = { onEvent: vi.fn(() => () => undefined), getHistoryIndex: vi.fn().mockResolvedValue(null),
+    getEntriesPage: vi.fn().mockResolvedValue({ entries: [], toolResults: [], start: 0, end: 0,
+      total: 0, leafId: null, mode: 'build' }),
+    switchSession: vi.fn(async () => {
+      dispatch({ type: 'session', session: { sessionId: 'reopened', sessionFile: path,
+        messageCount: 0, isStreaming: false, liveState: { backendId: 'replacement-backend', revision: 1,
+          cwd, sessionPath: path, events: [] } } })
+      return { cancelled: false }
+    }) }
+  const h = renderHook(() => {
+    const [state, nextDispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd }, runningSessionPaths: [path] })
+    dispatch = nextDispatch
+    return { ...useAgentHistory({ api: api as never, state, dispatch: nextDispatch }), state }
+  })
+  h.result.current.timelineCache.current.set(path, { cwd, liveSessionBackendId: 'old-backend',
+    items: [{ kind: 'assistant', id: 905, text: 'obsolete backend draft', thinking: '', streaming: true, live: true }],
+    mode: 'build', apiBefore: 0, apiAfter: 0, toolResults: [], complete: true,
+    newerComplete: true, leafId: null, total: 0 })
+  await act(async () => { await h.result.current.switchSession(path) })
+  expect(h.result.current.state.timeline).toEqual([])
+  expect(h.result.current.state.liveSessionBackendId).toBe('replacement-backend')
+  expect(h.result.current.state.busy).toBe(false)
+})
+
+it('keeps short final authority through same-leaf cache replay despite unrelated budget loss', () => {
+  const cwd = '/project', path = '/short-final.jsonl'
+  const draft: TimelineItem = { kind: 'assistant', id: 950, live: true, messageTimestamp: 100,
+    text: 'long cached draft', thinking: 'long cached reasoning', streaming: true }
+  const seed = { ...initialState, status: { phase: 'running' as const, cwd }, timeline: [draft], busy: true }
+  const ended = reducer(seed, { type: 'session', session: {
+    sessionId: 'short', sessionFile: path, messageCount: 0, isStreaming: false,
+    liveState: { backendId: 'short-backend', revision: 8, cwd, sessionPath: path, truncated: true, events: [
+      { type: 'message_start', message: { role: 'assistant', timestamp: 100, content: [] } },
+      { type: 'message_end', message: { role: 'assistant', timestamp: 100, content: [
+        { type: 'text', text: 'final' }, { type: 'thinking', thinking: 'brief' }
+      ] } }
+    ] }
+  } })
+  const restored = reducer(ended, { type: 'loadEntries', items: [draft], preserveToolState: {
+    revision: ended.timelineScopeRevision, cwd, sessionPath: path } })
+  expect(restored.timeline[0]).toMatchObject({ id: draft.id, text: 'final', thinking: 'brief', streaming: false })
+})
+
+it('keeps identical snapshot image previews and their mounted disclosure DOM without reprojecting', () => {
+  const toolCallId = 'snapshot-image', path = '/snapshot-image-session', cwd = '/project'
+  const result = imageResultEntry(toolCallId, 'saved image').message!
+  const completed = applyToolResult({ id: toolCallId, name: IMAGE_GENERATION_TOOL_NAME,
+    status: 'running', isError: false, live: true }, result, false, 'message')
+  const row: TimelineItem = { kind: 'tool', id: 1990, noReveal: true, tool: completed }
+  const state = { ...initialState, status: { phase: 'running' as const, cwd }, timeline: [row],
+    liveSessionBackendId: 'backend-image', liveSessionRevision: 3 }
+  const view = render(<ToolHistoryRows items={state.timeline} />)
+  fireEvent.click(screen.getByRole('button', { name: '展开生图工具详情' }))
+  const head = screen.getByRole('button', { name: '收起生图工具详情' })
+  const image = screen.getByRole('img')
+  fireEvent.load(image)
+  const project = vi.spyOn(toolImages, 'collectToolImages')
+  const next = reducer(state, { type: 'session', session: {
+    sessionId: path, sessionFile: path, messageCount: 1, isStreaming: true,
+    liveState: { backendId: 'backend-image', revision: 5, cwd, sessionPath: path, events: [
+      { type: 'tool_execution_start', toolCallId, toolName: IMAGE_GENERATION_TOOL_NAME, args: { path: 'images/output.png' } },
+      { type: 'tool_execution_end', toolCallId, toolName: IMAGE_GENERATION_TOOL_NAME, result, isError: false },
+      { type: 'message_end', message: result }
+    ] }
+  } })
+  expect(project).not.toHaveBeenCalled()
+  expect(findTool(next.timeline, toolCallId).id).toBe(row.id)
+  expect(findTool(next.timeline, toolCallId).tool.images).toBe(completed.images)
+  view.rerender(<ToolHistoryRows items={next.timeline} />)
+  expect(screen.getByRole('button', { name: '收起生图工具详情' })).toBe(head)
+  expect(screen.getByRole('img')).toBe(image)
+  expect(image.parentElement).toHaveAttribute('data-image-state', 'loaded')
 })
 
 it('replaces a pinned live row before appending its ordered persisted page', () => {

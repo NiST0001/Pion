@@ -76,7 +76,17 @@ export interface RunCheckpointStatus {
   error?: string
 }
 
+export interface LiveSessionState {
+  backendId: string
+  revision: number
+  cwd: string
+  sessionPath?: string
+  events: WireEventInput[]
+  truncated?: boolean
+}
+
 export interface SessionInfo {
+  liveState?: LiveSessionState
   provider?: string
   model?: string
   modelId?: string
@@ -156,7 +166,9 @@ export type WireEvent =
 
 /** pi emits more event types than modelled here; unmodelled ones flow through
  *  this widened type and are ignored by the reducer's default branch. */
-export type WireEventInput = WireEvent | ({ type: string } & Record<string, unknown>)
+export type WireEventInput = (WireEvent | ({ type: string } & Record<string, unknown>)) & {
+  _pionLive?: Omit<LiveSessionState, 'events' | 'truncated'>
+}
 
 // ---------------------------------------------------------------------------
 // Session entries (wire format of pi's SessionEntry, used for replay)

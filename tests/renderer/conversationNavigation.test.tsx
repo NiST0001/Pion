@@ -25,7 +25,18 @@ function markerFixture() {
   })
   const element = document.createElement('div')
   document.body.append(element)
-  Object.defineProperties(element, { scrollHeight: { value: 3000 }, clientHeight: { value: 400, configurable: true } })
+  let scrollTop = 0
+  Object.defineProperties(element, {
+    scrollHeight: { value: 3000 },
+    clientHeight: { value: 400, configurable: true },
+    // jsdom has no layout engine: model the browser's scroll-range clamping
+    // without suppressing or hiding writes from the existing follow behavior.
+    scrollTop: {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => { scrollTop = Math.max(0, Math.min(element.scrollHeight - element.clientHeight, value)) }
+    }
+  })
   const content = document.createElement('div')
   content.className = 'timeline'
   element.append(content)
@@ -52,6 +63,113 @@ function markerFixture() {
 }
 
 describe('conversation navigation', () => {
+  it('marks the last mounted short turn at the session end without moving or resuming follow', () => {
+    const f = markerFixture()
+    f.positions[0] = 2750
+    f.positions[1] = 2770
+    const last = document.createElement('div')
+    last.className = 'row-user'
+    last.dataset.entryId = 'entry-2'
+    last.getBoundingClientRect = () => ({ top: 2790 - f.element.scrollTop } as DOMRect)
+    f.rows[1].parentElement!.append(last)
+    f.element.style.setProperty('--conversation-bottom-clearance', '140px')
+    const timeline: TimelineItem[] = [
+      { kind: 'user', id: 1, entryId: 'entry-0', text: 'first' },
+      { kind: 'assistant', id: 2, text: 'long answer', thinking: '', streaming: false },
+      { kind: 'tool', id: 3, tool: { id: 'tool', name: 'read', status: 'done', isError: false, outputText: 'long output' } },
+      { kind: 'user', id: 4, entryId: 'entry-1', text: 'next' },
+      { kind: 'user', id: 5, entryId: 'entry-2', text: 'latest' }
+    ]
+    // Refresh geometry without a scroll handler: the fixture's earlier wheel
+    // gesture is still live, so forward scrolling would legitimately follow.
+    f.element.scrollTop = 2600
+    const scrollWrite = vi.spyOn(f.element, 'scrollTop', 'set')
+    f.rerender({ ...f.options, timeline, panelsVisible: true })
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-2')
+    expect(f.element.scrollTop).toBe(2600)
+    f.resize()
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-2')
+    f.rerender({ ...f.options, timeline: [...timeline], historyIndexSessionPath: '/a' })
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-2')
+    expect(f.element.scrollTop).toBe(2600) // read-only refresh did not restore follow
+    expect(scrollWrite).not.toHaveBeenCalled()
+    expect(f.options.loadOlder).not.toHaveBeenCalled()
+    expect(f.options.loadNewer).not.toHaveBeenCalled()
+  })
+
+  it.each([0, 1, 2, 80])('uses only one pixel of bottom rounding, not the prefetch zone (%s px)', (distance) => {
+    const f = markerFixture()
+    f.positions[0] = 2400
+    f.positions[1] = 2900
+    f.element.scrollTop = 2600 - distance
+    const scrollWrite = vi.spyOn(f.element, 'scrollTop', 'set')
+    f.resize()
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe(distance <= 1 ? 'entry-1' : 'entry-0')
+    expect(f.element.scrollTop).toBe(2600 - distance)
+    expect(scrollWrite).not.toHaveBeenCalled()
+    expect(f.options.loadOlder).not.toHaveBeenCalled()
+    expect(f.options.loadNewer).not.toHaveBeenCalled()
+  })
+
+  it.each(['newer page', 'loading', 'blank tail'] as const)('does not mistake %s for the session end', (state) => {
+    const f = markerFixture()
+    f.positions[0] = 2400
+    f.positions[1] = 2900
+    if (state === 'blank tail') {
+      const surface = document.createElement('div')
+      f.element.prepend(surface)
+      surface.append(f.rows[0].parentElement!)
+      surface.getBoundingClientRect = () => ({ height: 3000 } as DOMRect)
+      Object.defineProperty(f.rows[0].parentElement!, 'offsetHeight', { value: 2200 })
+      f.result.current.scrollSurfaceRef.current = surface
+      f.element.dispatchEvent(new WheelEvent('wheel', { deltaY: -20 }))
+    }
+    f.element.scrollTop = 2600
+    f.rerender({ ...f.options, timelineLoading: state === 'loading', hasNewerHistory: () => state === 'newer page' })
+    act(() => f.result.current.handleTimelineScroll())
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-0')
+    expect(f.element.scrollTop).toBe(2600)
+    expect(f.options.loadNewer).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the mounted tail after same-length replacement and completed loading', () => {
+    const f = markerFixture()
+    f.positions[0] = 2400
+    f.positions[1] = 2900
+    f.element.scrollTop = 2600
+    f.rerender({ ...f.options, timelineLoading: true })
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-0')
+    f.rows[1].dataset.entryId = 'replacement-tail'
+    f.rerender({ ...f.options, timeline: [{ kind: 'user', id: 8, text: 'replacement tail' }], historyIndexSessionPath: '/a' })
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('replacement-tail')
+    expect(f.element.scrollTop).toBe(2600)
+  })
+
+  it('keeps a bottom-clamped explicit earlier turn until outward input releases it even without scroll', () => {
+    const f = markerFixture()
+    f.positions[0] = 2900
+    f.positions[1] = 2920
+    f.rerender({ ...f.options, historyJump: { entryId: 'entry-0', nonce: 1 } })
+    f.flush()
+    f.flush()
+    expect(f.element.scrollTop).toBe(2600)
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-0')
+    act(() => f.result.current.handleTimelineScroll())
+    f.resize()
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-0')
+    f.element.dispatchEvent(new WheelEvent('wheel', { deltaY: 20 }))
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-1')
+  })
+
   it('recomputes a same-length replacement without scrolling or paging', () => {
     const f = markerFixture()
     expect(f.result.current.visibleHistoryEntryId).toBe('entry-0')

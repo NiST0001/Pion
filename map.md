@@ -34,6 +34,7 @@
 | src/main/agent/agent-bridge.ts | 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
 | src/main/agent/message-revert.ts | 独占写入者前提下校验完整会话与所选用户消息，用 SDK 回到实际 parent 并追加持久分支标记；保留旧树，恢复文字及图片，不操作项目文件；兼容独立 usage、context_edit 与 retain-none 压缩记录 |
 | src/main/agent/stop-for-history.ts | 捕获 SDK 子进程并等待真实退出；超时/适配不兼容拒绝历史写入，不把 RpcClient.stop 提前返回当作退出证明 |
+| src/main/agent/live-session-state.ts | 后端私有当前轮显示快照：后台 root 输出持续归并、独立实例/revision 和有界行数/字节；字段级截断、最终空消息权威、静态安全预览；选回时随 SessionInfo 恢复，不重放请求或计费 |
 | src/main/agent/backend-pool.ts | 后端保留和容量管理 |
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态 |
 | src/main/agent/queue-projection.ts | 本地队列与原生队列投影 |
@@ -72,15 +73,16 @@
 | 路径 | 用途 |
 | --- | --- |
 | src/renderer/src/agent/types.ts、reducer.ts | UI 状态和事件归约；独立任务快照、结果有界去重、恢复请求与实时 revision 保护；以最终消息收口模型错误并显示实时压缩失败，空最终 text/thinking 清除旧流式草稿；工具增量仅处理文字，最终消息优先投影有界图片及生图请求/保存设置，相同有效预览的重复结果不重解码，设置变化仍更新，迟到执行结果不回退终态 |
+| src/renderer/src/agent/reducer.ts | 实时事件与选中会话显示状态；带 cwd/path/backend/revision 的后台显示快照只归并当前作用域，保留行身份/预览及权威空 final，不重放生命周期、任务或计费用量 |
 | src/renderer/src/agent/timeline.ts | 会话条目转时间线、缓存和分页类型；缓存单独保留任务快照，不能以当前页有无任务记录替代；历史回放保留助手错误诊断；按持久化身份及 SDK 消息时间戳/终态内容归并实时行与分页副本，保留组件身份及页面顺序，未覆盖的实时行仍留在尾部；最终结果/回放共用图片预览及生图请求型号/操作/设置/引用数与保存尺寸投影，不保留引用路径数组/输入字节，不从旧参数补造最终默认设置，设置-only 更新复用有效预览；同 scope 替换保留工具终态/key，旧分页及 result-only 页面补完已有调用，不创建孤立结果行 |
 | src/renderer/src/agent/modelError.ts | 对常见模型/API 额度、认证、限流、上下文、服务及网络错误做保守分类，生成简短中文提示并原样保留技术详情 |
 | src/renderer/src/agent/sessionFavorites.ts、sessionOrder.ts | 收藏与排序 |
 | src/renderer/src/hooks/useAgent.ts | Agent hooks 汇总、启动及模型刷新 |
-| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换/撤销、跳转窗口、任务恢复、事件驱动的索引/叶节点更新；首次实时会话建立逻辑归属，撤销隔离旧请求与缓存，区分后端暂时无状态和真实选择；游标区分页末与会话末尾 |
+| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换/撤销、跳转窗口、任务恢复、事件驱动的索引/叶节点更新；首次实时会话建立逻辑归属并封存缓存，切换前同步保存未落盘输出，缓存带后端身份；同作用域历史替换保留实时尾部，拒绝复活已失效运行；撤销隔离旧请求与缓存，区分后端暂时无状态和真实选择；游标区分页末与会话末尾 |
 | src/renderer/src/hooks/useMessageRevert.ts | 撤销确认、空草稿/附件读取门控、一次性文字/图片恢复及拒绝后的恢复重试；按逻辑选择隔离迟到结果，不持有后端或文件回滚 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
-| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别，历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
+| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别；真实会话末尾选最后已挂载用户轮次，加载占位/分页末尾除外；历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
 | src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让，权限请求及会话提问面板复用底部余量定位在输入框上方；全局认证仍居中，不测量展开详情、不重挂载消息或草稿 |
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
@@ -130,6 +132,7 @@
 
 以下为测试源码职责，实际验证范围以对应执行记录为准，不把文件清单当成全部通过的证明。
 
+- `tests/unit/live-session-state.test.ts`：后台当前轮快照、字段级截断/预算、最终空消息及工具终态、安全图片预览与生图元数据、实例身份及序列化界限；bridge 的后台切回及迟到状态竞态覆盖于 `agent-bridge-send-queue.test.ts`。
 - `tests/unit/`：后端策略、队列、运行记录、迁移和 reducer 等逻辑测试；`agent-compaction-state.test.ts` 覆盖压缩生命周期、迟到快照与会话切换重置；`compaction-context-usage.test.ts` 覆盖手动/自动压缩后的用量作废、失败保留和新响应用量更新；`model-error.test.ts` 与 `agent-error-state.test.ts` 覆盖模型/API 错误分类、实时最终消息收口、默认中止过滤、压缩失败及普通/retain-none 压缩的 wire 归并。
 - `tests/unit/session-tasks.test.ts`：缺少工具开始行仍接收任务、重复结果去重、空快照/错误区分、分页及异步恢复保护、分支祖先链和独立缓存。
 - `tests/unit/codex-image-transport.test.ts`：模拟订阅 generations/edits JSON（PNG/JPEG data URL）、size/quality 原样转发及空引用分流、私有字节/设置快照与 metadata 上传、每张/累计字节和 PNG inflate 前累计像素准入；官方默认/实验 2.5 型号转发、非法/未知参数（含 mask/input_fidelity）在 OAuth/网络前拒绝、不降级/重试/丢设置、不信任版本/质量回显、所属 runtime OAuth/刷新、拒绝 API-key/重定向/外部 URL、有界响应/输出/期限、额度/权益与编辑错误回显保护；不请求真实服务。

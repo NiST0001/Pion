@@ -10,6 +10,7 @@ import {
   entriesToTimeline,
   getViewportHistoryPageSize,
   parseToolArgs,
+  preserveTimelineToolState,
   reconcileNewerTimelineItems,
   uniqueTimelineItems
 } from '../../src/renderer/src/agent/timeline'
@@ -27,6 +28,52 @@ const imageTool: ToolItem = {
 }
 
 describe('timeline derivation', () => {
+  it('retains an unpersisted partial on same-scope replacement, but a same-entry disk final is authoritative', () => {
+    const draft: TimelineItem = { kind: 'assistant', id: 1999, entryId: 'same-message',
+      messageTimestamp: 100, text: 'partial', thinking: 'partial thought', streaming: true, live: true }
+    const unrelated: TimelineItem = { kind: 'user', id: 2000, entryId: 'page-user', text: 'history page' }
+    expect(preserveTimelineToolState([draft], [unrelated])).toEqual([unrelated, draft])
+    const final: TimelineItem = { kind: 'assistant', id: 2001, entryId: 'same-message',
+      messageTimestamp: 100, text: 'disk final', thinking: '', streaming: false }
+    const merged = preserveTimelineToolState([draft], [unrelated, final])
+    expect(merged).toEqual([unrelated, expect.objectContaining({
+      id: draft.id, text: 'disk final', thinking: '', streaming: false, historyReconciled: true
+    })])
+    const completed = { ...draft, text: 'stale live final', streaming: false }
+    expect(preserveTimelineToolState([completed], [final])[0]).toMatchObject({
+      id: draft.id, text: 'disk final', thinking: '', streaming: false
+    })
+  })
+
+  it('keeps only unpersisted live rows on replacement and reconciles their first persisted copy without remounting', () => {
+    const persisted: TimelineItem = { kind: 'user', id: 800, entryId: 'old', text: 'off window' }
+    const draft: TimelineItem = { kind: 'assistant', id: 801, live: true,
+      messageTimestamp: 100, text: 'partial', thinking: '', streaming: true }
+    const user: TimelineItem = { kind: 'user', id: 802, entryId: 'new', text: 'new page' }
+    expect(preserveTimelineToolState([persisted, draft], [user])).toEqual([user, draft])
+    const final: TimelineItem = { kind: 'assistant', id: 803, entryId: 'final',
+      messageTimestamp: 100, text: 'complete', thinking: '', streaming: false }
+    expect(preserveTimelineToolState([persisted, draft], [user, final])).toEqual([
+      user, expect.objectContaining({ id: draft.id, entryId: 'final', text: 'complete', streaming: false })
+    ])
+    expect(preserveTimelineToolState([persisted, draft], [user], false)).toEqual([user])
+  })
+
+  it('does not duplicate a pinned streaming row or regress a matching finalized image tool', () => {
+    const current: TimelineItem = { kind: 'assistant', id: 810, live: true,
+      messageTimestamp: 100, text: 'latest token', thinking: '', streaming: true }
+    const stale = { ...current, text: 'stale token' }
+    const tool: TimelineItem = { kind: 'tool', id: 811, tool: applyToolResult(imageTool,
+      { content: [{ type: 'text', text: 'live final' }, previewPart] }, false, 'message') }
+    const incoming: TimelineItem = { kind: 'tool', id: 812,
+      tool: { ...imageTool, outputText: 'stale partial' } }
+    const items = preserveTimelineToolState([tool, current], [incoming, stale])
+    expect(items).toHaveLength(2)
+    expect(items[0]).toMatchObject({ id: tool.id, tool: { outputText: 'live final', resultSource: 'message' } })
+    expect(items[0].kind === 'tool' && items[0].tool.images).toBe(tool.tool.images)
+    expect(items[1]).toBe(current)
+  })
+
   it('projects native argument schemas without serializing MCP image payloads', () => {
     expect(parseToolArgs('codemode', { code: 'return await tools.read({ path: "README.md" })' })).toEqual({ command: 'return await tools.read({ path: "README.md" })' })
     expect(parseToolArgs('tool_search', { query: 'find browser tools', limit: 5 })).toEqual({ command: 'find browser tools' })

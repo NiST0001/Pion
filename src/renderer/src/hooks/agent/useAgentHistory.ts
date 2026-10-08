@@ -59,6 +59,14 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   const expectedTimeline = useRef<{ path: string; items: TimelineItem[]; loadId?: number } | null>(null)
   const currentState = useRef(state)
   currentState.current = state
+  // React may batch a complete switch (including cache/page actions) before
+  // committing its clear. Capture the queued boundary, not only the last render.
+  const scopeRevision = useRef(state.timelineScopeRevision)
+  scopeRevision.current = Math.max(scopeRevision.current, state.timelineScopeRevision)
+  const clearTimeline = useCallback((sessionPath?: string): void => {
+    scopeRevision.current++
+    dispatch({ type: 'clearTimeline', sessionPath })
+  }, [dispatch])
   // A cleared owner must not immediately re-adopt the snapshot from before
   // an explicit new/switch intent. Only a subsequent authoritative snapshot
   // may claim an otherwise unowned live timeline.
@@ -86,8 +94,17 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const sameOwner = previous.ownerPath === ownerPath && previous.cwd === cwd
     // Backend restart/errors can temporarily clear state.session. They do not
     // select another conversation; retain its logical identity through gaps.
-    const sessionId = session?.sessionId ?? (sameOwner ? previous.sessionId : undefined)
-    const sessionPath = session?.sessionFile ?? (sameOwner ? previous.sessionPath : undefined)
+    // Ignore only the exact pre-switch snapshot, not any snapshot whose path
+    // differs from the timeline owner. A genuine external A -> B selection
+    // must invalidate readers even when it did not use switchSession().
+    const usableSessionSnapshot = session !== invalidatedOwnerSnapshot.current || session?.sessionFile === ownerPath
+    const sessionId = (usableSessionSnapshot ? session?.sessionId : undefined) ?? (sameOwner ? previous.sessionId : undefined)
+    const sessionPath = (usableSessionSnapshot ? session?.sessionFile : undefined) ?? (sameOwner ? previous.sessionPath : undefined)
+    // A selected backend may publish its SDK identity/file after history has
+    // already started. Filling unknown identity is not another selection and
+    // must not discard that selection's first page response.
+    if (sameOwner && !previous.sessionId && sessionId) previous.sessionId = sessionId
+    if (sameOwner && !previous.sessionPath && sessionPath) previous.sessionPath = sessionPath
     if (previous.ownerPath !== ownerPath || previous.cwd !== cwd
       || previous.sessionId !== sessionId || previous.sessionPath !== sessionPath) {
       selectionRef.current = {
@@ -112,6 +129,11 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   // pre-mutation branch. New selections of that path wait for its outcome.
   const revertInFlight = useRef<{ path: string; settled: boolean; done: Promise<void> } | null>(null)
   const branchRevisions = useRef(new Map<string, number>())
+  // Eviction alone is insufficient: the reducer may still display the old
+  // branch after undo succeeds in the background or replacement reads fail.
+  // Do not seed those rows as a fresh-session cache until an authoritative
+  // page or a replacement backend's selected live snapshot claims this path.
+  const invalidatedBranches = useRef(new Map<string, { backendId?: string }>())
   const invalidateHistoryReads = useCallback((): number => {
     const loadId = ++timelineLoadId.current
     ++historyIndexLoadId.current
@@ -139,23 +161,35 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   }, [])
 
   const showTimeline = useCallback((
-    path: string, items: TimelineItem[], mode: AgentMode, preserveToolState?: ToolStateScope
+    path: string, items: TimelineItem[], mode: AgentMode, preserveToolState?: ToolStateScope, cachedBackendId?: string
   ): void => {
     const loadId = timelineLoadId.current
     timelineOwnerPath.current = path
     expectedTimeline.current = { path, items, loadId }
-    dispatch({ type: 'loadEntries', items, mode, preserveToolState, loadId })
+    dispatch({ type: 'loadEntries', items, mode, preserveToolState, loadId, cachedBackendId })
   }, [dispatch])
 
   const restoreCachedTimeline = useCallback((path: string, cached: TimelineCacheEntry, revision: number): boolean => {
     if (revision !== (branchRevisions.current.get(path) ?? 0)
+      || invalidatedBranches.current.has(path)
       || (revertInFlight.current?.path === path && !revertInFlight.current.settled)) return false
     const loadId = ++timelineLoadId.current
     // Cached snapshots may contain live-created rows without `historical`, or
     // rows whose first reveal already ran before they were cached. Clone the
     // snapshot for each revisit so short and second-load sessions replay the
     // same restrained opacity cascade as a cold history load.
-    const items = cached.items.map((item) => ({ ...item, historical: true }))
+    const current = currentState.current
+    const liveBackendRetained = current.runningSessionPaths.includes(path)
+      && (cached.cwd === undefined || cached.cwd === current.status.cwd)
+      && current.status.phase !== 'stopped' && current.status.phase !== 'error'
+    const hydratedSelection = Boolean(current.liveSessionBackendId && current.liveSessionOwnerPath === path)
+    const items = cached.items.flatMap((item): TimelineItem[] => {
+      // Cached partial output is meaningful only while its backend still runs.
+      // A stopped/replaced backend must not resurrect a streaming input target.
+      if ((!liveBackendRetained || hydratedSelection) && ((item.kind === 'assistant' && item.streaming)
+        || (item.kind === 'tool' && item.tool.live && item.tool.status === 'running'))) return []
+      return [{ ...item, historical: true }]
+    })
     const revealedCache = { ...cached, items }
     const cursor: HistoryCursor | null = revealedCache.complete && revealedCache.newerComplete
       ? null
@@ -163,14 +197,17 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     historyCursor.current = cursor
     storeTimelineCache(timelineCache.current, path, revealedCache)
     if (cached.tasks !== undefined && cached.tasks !== null) dispatch({ type: 'cachedTasks', tasks: cached.tasks })
-    showTimeline(path, items, revealedCache.mode)
+    showTimeline(path, items, revealedCache.mode, {
+      revision: scopeRevision.current, cwd: current.status.cwd, sessionPath: path
+    }, cached.liveSessionBackendId)
     return true
   }, [dispatch, showTimeline])
 
-  // Keep a loaded session's rendered timeline in memory. Switching back to a
-  // retained backend should restore this snapshot instead of transferring and
-  // parsing the complete JSONL file again.
-  useEffect(() => {
+  // Fresh sessions may never have loaded a persisted page. Seed their cache
+  // too, and capture synchronously before a switch clears the reducer so the
+  // first revisit can paint output that has not reached JSONL yet.
+  const cacheCurrentTimeline = useCallback((): void => {
+    const state = currentState.current
     const expected = expectedTimeline.current
     if (expected && (expected.path !== timelineOwnerPath.current
       || (expected.loadId === undefined ? state.timeline !== expected.items : state.timelineLoadId !== expected.loadId))) return
@@ -179,17 +216,32 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const path = timelineOwnerPath.current
     if (!path || state.timelineLoading
       || (revertInFlight.current?.path === path && !revertInFlight.current.settled)) return
+    if (state.session?.sessionFile && state.session.sessionFile !== path) return
+    const invalidated = invalidatedBranches.current.get(path)
+    if (invalidated) {
+      if (state.liveSessionOwnerPath !== path || !state.liveSessionScopeSelected
+        || !state.liveSessionBackendId || state.liveSessionBackendId === invalidated.backendId) return
+      invalidatedBranches.current.delete(path)
+    }
     const cached = timelineCache.current.get(path)
-    if (!cached) return
+    if (cached?.cwd && state.status.cwd && cached.cwd !== state.status.cwd) return
+    if (!cached && (state.status.phase !== 'running' || !state.session?.sessionId)) return
     const cursor = historyCursor.current
     if (cursor?.path === path) cursor.items = state.timeline
     storeTimelineCache(timelineCache.current, path, {
-      ...cached,
+      ...(cached ?? { apiBefore: 0, apiAfter: 0, toolResults: [], complete: true,
+        newerComplete: true, leafId: null, total: 0 }),
+      cwd: state.status.cwd,
+      liveSessionBackendId: state.liveSessionBackendId,
       items: state.timeline,
       mode: state.mode,
       tasks: state.tasks
     })
-  }, [state.mode, state.timeline, state.timelineLoadId, state.tasks, state.timelineLoading])
+  }, [])
+  useEffect(cacheCurrentTimeline, [cacheCurrentTimeline, state.mode, state.timeline,
+    state.timelineLoadId, state.tasks, state.timelineLoading, state.session?.sessionFile,
+    state.status.phase, state.status.cwd, state.liveSessionOwnerPath,
+    state.liveSessionScopeSelected, state.liveSessionBackendId, state.liveSessionRevision])
 
   /** Load only the newest history window; older windows are fetched on demand. */
   const reloadTimeline = useCallback(async (sessionPath?: string): Promise<void> => {
@@ -204,7 +256,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const selection = readSelection()
     const preserveToolState: ToolStateScope | undefined = path && selection.ownerPath === path
       && (!selection.sessionPath || selection.sessionPath === path)
-      ? { revision: currentState.current.timelineScopeRevision, cwd: selection.cwd,
+      ? { revision: scopeRevision.current, cwd: selection.cwd,
           sessionId: selection.sessionId, sessionPath: path }
       : undefined
     // Capture the reducer's revision atomically, before the asynchronous read.
@@ -236,6 +288,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       return
     }
 
+    if (path) invalidatedBranches.current.delete(path)
     if (page.taskSnapshot !== undefined) {
       dispatch({ type: 'restoreTasks', id: loadId, tasks: page.taskSnapshot })
     }
@@ -526,7 +579,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       invalidateSelection()
       const result = await api.forkAt(entryId)
       if (!result.cancelled) {
-        dispatch({ type: 'clearTimeline' })
+        clearTimeline()
         timelineOwnerPath.current = undefined
         historyCursor.current = null
         await reloadTimeline()
@@ -534,12 +587,14 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       }
       return ''
     },
-    [api, dispatch, invalidateSelection, reloadTimeline]
+    [api, clearTimeline, dispatch, invalidateSelection, reloadTimeline]
   )
 
   const switchSession = useCallback(
     async (sessionPath: string): Promise<{ cancelled: boolean }> => {
       if (!api) return { cancelled: true }
+      readSelection()
+      cacheCurrentTimeline()
       invalidateSelection()
       const previousPath = timelineOwnerPath.current
       const previousCached = previousPath ? timelineCache.current.get(previousPath) : undefined
@@ -560,7 +615,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       timelineOwnerPath.current = sessionPath
       expectedTimeline.current = null
       dispatch({ type: 'historyIndex', index: null })
-      dispatch({ type: 'clearTimeline' })
+      clearTimeline(sessionPath)
       dispatch({ type: 'timelineLoading', loading: true })
 
       // Phase 1 is UI-only: commit the selected sidebar row and lightweight
@@ -580,7 +635,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
           historyCursor.current = null
           timelineOwnerPath.current = previousPath
           expectedTimeline.current = null
-          dispatch({ type: 'clearTimeline' })
+          clearTimeline(previousPath)
         }
       }
 
@@ -621,7 +676,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       await refreshHistoryIndex(sessionPath)
       return result
     },
-    [api, invalidateSelection, refreshHistoryIndex, reloadTimeline, restoreCachedTimeline]
+    [api, cacheCurrentTimeline, clearTimeline, invalidateSelection, readSelection, refreshHistoryIndex, reloadTimeline, restoreCachedTimeline]
   )
 
   const jumpToHistoryLandmark = useCallback(async (landmark: HistoryLandmark): Promise<void> => {
@@ -631,7 +686,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       || (revertInFlight.current?.path === index.sessionPath && !revertInFlight.current.settled)) return
     const selection = readSelection()
     const preserveToolState: ToolStateScope = {
-      revision: currentState.current.timelineScopeRevision, cwd: selection.cwd,
+      revision: scopeRevision.current, cwd: selection.cwd,
       sessionId: selection.sessionId, sessionPath: index.sessionPath
     }
     const loadId = ++timelineLoadId.current
@@ -661,6 +716,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     if (page.taskSnapshot !== undefined) {
       dispatch({ type: 'restoreTasks', id: loadId, tasks: page.taskSnapshot })
     }
+    invalidatedBranches.current.delete(index.sessionPath)
     const items = entriesToTimeline(
       page.entries,
       collectToolResults([...page.entries, ...page.toolResults]),
@@ -755,6 +811,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       // snapshots (including ones captured by an in-flight switch/cancellation).
       timelineCache.current.delete(path)
       branchRevisions.current.set(path, (branchRevisions.current.get(path) ?? 0) + 1)
+      invalidatedBranches.current.set(path, { backendId: current.liveSessionBackendId })
       // A cancelled selection can still own A's old cursor. Drop that cursor
       // without touching B's view, so a later scroll cannot re-cache old rows.
       if (historyCursor.current?.path === path) historyCursor.current = null
@@ -769,7 +826,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       dispatch({ type: 'tree', tree: null })
       dispatch({ type: 'historyIndex', index: null })
       dispatch({ type: 'resetHistoryNavigation' })
-      dispatch({ type: 'clearTimeline' })
+      clearTimeline()
       // clearTimeline resets per-session switches. Retain the latest session
       // snapshot while the idle backend reopens the selected persisted branch.
       dispatch({ type: 'session', session: currentState.current.session })
@@ -793,7 +850,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       release()
       if (revertInFlight.current === mutation) revertInFlight.current = null
     }
-  }, [api, dispatch, invalidateHistoryReads, readSelection, refreshHistoryIndex, reloadTimeline])
+  }, [api, clearTimeline, dispatch, invalidateHistoryReads, readSelection, refreshHistoryIndex, reloadTimeline])
 
   return {
     selectionRef,

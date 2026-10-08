@@ -4,11 +4,197 @@ import { entriesToTimeline } from '../../src/renderer/src/agent/timeline'
 import { toWireEntry } from '../../src/main/agent/wire'
 import { initialState } from '../../src/renderer/src/agent/types'
 import type { AgentState } from '../../src/renderer/src/agent/types'
-import type { WireEventInput } from '../../src/shared/types'
+import type { LiveSessionState, WireEventInput } from '../../src/shared/types'
 
 function applyEvent(state: AgentState, event: WireEventInput): AgentState {
   return reducer(state, { type: 'event', event })
 }
+
+describe('scoped live-session display snapshots', () => {
+  const cwd = '/workspace'
+  const path = '/sessions/a'
+  const timestamp = 1780000000000
+  const start: WireEventInput = { type: 'message_start', message: { role: 'assistant', timestamp, content: [] } }
+  const delta = (text: string): WireEventInput => ({ type: 'message_update', usage: null,
+    assistantMessageEvent: { type: 'text_delta', delta: text } })
+  const snapshot = (state: AgentState, revision: number, events: WireEventInput[], extra: Partial<LiveSessionState> = {}, streaming = true) => reducer(state, {
+    type: 'session', session: { sessionId: 'a', sessionFile: path, messageCount: 1, isStreaming: streaming,
+      liveState: { backendId: 'backend-a', revision, cwd, sessionPath: path, events, ...extra } }
+  })
+  const seed: AgentState = { ...initialState, status: { phase: 'running', cwd },
+    timeline: [{ kind: 'user', id: -1, entryId: 'old-page', text: 'retained history' }] }
+
+  it('replaces compacted deltas rather than concatenating on the first revisit, preserving row keys and paged history', () => {
+    let state = snapshot(seed, 3, [start, delta('first')])
+    const key = state.timeline[1].id
+    state = snapshot(state, 5, [start, delta('first plus background output'), {
+      type: 'tool_execution_start', toolCallId: 'background-call', toolName: 'read', args: { path: 'file.ts' }
+    }])
+    expect(state.timeline).toHaveLength(3)
+    expect(state.timeline[0]).toBe(seed.timeline[0])
+    expect(state.timeline[1]).toMatchObject({ id: key, text: 'first plus background output', streaming: true })
+    expect(state.timeline[2]).toMatchObject({ kind: 'tool', tool: { id: 'background-call' } })
+    const again = snapshot(state, 5, [start, delta('first plus background output')])
+    expect(again.timeline).toBe(state.timeline)
+  })
+
+  it('hydrates a first token whose assistant did not exist when the session was left', () => {
+    const state = snapshot(seed, 4, [start, delta('first background token')])
+    expect(state.timeline[1]).toMatchObject({ text: 'first background token' })
+  })
+
+  it.each([true, false])('honors a background empty final (SDK timestamp present: %s)', (hasTimestamp) => {
+    const message = { role: 'assistant', content: [], ...(hasTimestamp ? { timestamp } : {}) }
+    const events: WireEventInput[] = [{ type: 'message_start', message }, delta('removed'), { type: 'message_end', message }]
+    const draft = snapshot(seed, 2, events.slice(0, 2))
+    const ended = snapshot(draft, 4, events, {}, false)
+    expect(ended.timeline).toEqual(seed.timeline)
+    expect(ended.busy).toBe(false)
+  })
+
+  it('does not let old revisions rewind a newer final or newer lifecycle busy authority', () => {
+    let state = snapshot(seed, 2, [start, delta('draft')])
+    state = applyEvent(state, { type: 'message_end', message: { role: 'assistant', timestamp, content: 'final' },
+      _pionLive: { backendId: 'backend-a', revision: 6, cwd, sessionPath: path } })
+    state = applyEvent(state, { type: 'agent_settled', _pionLive: { backendId: 'backend-a', revision: 7, cwd, sessionPath: path } })
+    const stale = snapshot(state, 3, [start, delta('old draft')])
+    expect(stale.busy).toBe(false)
+    expect(stale.timeline).toBe(state.timeline)
+    expect(stale.timeline[1]).toMatchObject({ text: 'final', streaming: false })
+  })
+
+  it('drops old backend drafts when the same file gets a replacement backend', () => {
+    const state = snapshot(seed, 2, [start, delta('old backend')])
+    const replaced = snapshot(state, 1, [], { backendId: 'replacement' }, false)
+    expect(replaced.timeline).toEqual(seed.timeline)
+  })
+
+  it('rejects both cross-workspace and cross-session forwarded events', () => {
+    const state = snapshot(seed, 2, [start, delta('safe')])
+    for (const scope of [{ cwd: '/other', sessionPath: path }, { cwd, sessionPath: '/sessions/b' }]) {
+      const event = { ...delta('foreign'), _pionLive: { backendId: 'backend-a', revision: 8, ...scope } }
+      expect(applyEvent(state, event)).toBe(state)
+    }
+    expect(snapshot(state, 8, [start, delta('foreign')], { cwd: '/other' }).timeline).toBe(state.timeline)
+  })
+
+  it('accepts a late SDK session path within the selected fresh logical scope', () => {
+    const fresh = reducer(seed, { type: 'clearTimeline' })
+    const state = snapshot(fresh, 2, [start, delta('late identity')])
+    expect(state.timeline[0]).toMatchObject({ text: 'late identity' })
+    expect(state.liveSessionOwnerPath).toBe(path)
+  })
+
+  it('updates complete assistant fields despite unrelated image/argument truncation', () => {
+    const user: WireEventInput = { type: 'message_start', message: { role: 'user', timestamp: timestamp - 1,
+      content: [{ type: 'text', text: 'long request' }, { type: 'image', mimeType: 'image/png', data: 'attachment' }] } }
+    const state = snapshot(seed, 2, [user, start, delta('first')])
+    const updated = snapshot(state, 4, [
+      { type: 'message_start', message: { role: 'user', timestamp: timestamp - 1, content: 'long', _pionLiveTruncatedFields: ['text'] } },
+      start, delta('first with exact background suffix'),
+      { type: 'tool_execution_start', toolCallId: 'secret-args', toolName: 'read', args: {} }
+    ], { truncated: true })
+    expect(updated.timeline[1]).toMatchObject({ text: 'long request', images: [{ data: 'attachment' }] })
+    expect(updated.timeline[2]).toMatchObject({ text: 'first with exact background suffix', streaming: true })
+    expect(updated.timeline[2].id).toBe(state.timeline[2].id)
+  })
+
+  it('preserves a shortened final field without leaving the final streaming', () => {
+    const state = snapshot(seed, 2, [start, delta('complete active output')])
+    const ended = snapshot(state, 4, [start, { type: 'message_end', message: {
+      role: 'assistant', timestamp, content: 'bounded', _pionLiveTruncatedFields: ['text'] } }], { truncated: true }, false)
+    expect(ended.timeline[1]).toMatchObject({ text: 'complete active output', streaming: false })
+    expect(ended.busy).toBe(false)
+  })
+
+  it.each([{ fields: [] }, { fields: ['text'] }])('keeps unmarked short final thinking authoritative (marked fields: %j)', ({ fields }) => {
+    const state = snapshot(seed, 2, [start, delta('long text draft'), {
+      type: 'message_update', usage: null, assistantMessageEvent: { type: 'thinking_delta', delta: 'long thinking draft' }
+    }])
+    const ended = snapshot(state, 4, [start, { type: 'message_end', message: {
+      role: 'assistant', timestamp, _pionLiveTruncatedFields: fields, content: [
+        { type: 'text', text: 'short' }, { type: 'thinking', thinking: 'brief' }
+      ] } }], { truncated: true }, false)
+    expect(ended.timeline[1]).toMatchObject({ text: fields.length ? 'long text draft' : 'short',
+      thinking: 'brief', streaming: false })
+  })
+
+  it.each([{ fields: ['thinking'] }, { fields: ['text', 'thinking'] }])('retains budget-emptied marked fields and ends the stream: %j', ({ fields }) => {
+    const state = snapshot(seed, 2, [start, delta('text draft'), {
+      type: 'message_update', usage: null, assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking draft' }
+    }])
+    const ended = snapshot(state, 4, [start, { type: 'message_end', message: {
+      role: 'assistant', timestamp, content: [], _pionLiveTruncatedFields: fields
+    } }], { truncated: true }, false)
+    expect(ended.timeline[1]).toMatchObject({ text: fields.includes('text') ? 'text draft' : '',
+      thinking: 'thinking draft', streaming: false })
+    expect(ended.busy).toBe(false)
+    const empty = snapshot(seed, 4, [start, { type: 'message_end', message: {
+      role: 'assistant', timestamp, content: [], _pionLiveTruncatedFields: fields
+    } }], { truncated: true }, false)
+    expect(empty.timeline).toEqual(seed.timeline)
+  })
+
+  it('preserves omitted user attachments without any global truncation flag', () => {
+    const user: WireEventInput = { type: 'message_start', message: { role: 'user', timestamp,
+      content: [{ type: 'text', text: 'long request' }, { type: 'image', mimeType: 'image/png', data: 'attachment' }] } }
+    const state = snapshot(seed, 2, [user])
+    const updated = snapshot(state, 3, [{ type: 'message_start', message: { role: 'user', timestamp, content: 'short' } }])
+    expect(updated.timeline[1]).toMatchObject({ text: 'short', images: [{ data: 'attachment' }] })
+  })
+
+  it('honors a truly empty final even when an unrelated projection field was truncated', () => {
+    const state = snapshot(seed, 2, [start, delta('draft')])
+    const ended = snapshot(state, 4, [start, { type: 'message_end', message: {
+      role: 'assistant', timestamp, content: [] } }], { truncated: true }, false)
+    expect(ended.timeline).toEqual(seed.timeline)
+  })
+
+  it('does not resurrect a cached pre-final draft loaded after an empty-final snapshot', () => {
+    const draft = snapshot(seed, 2, [start, delta('cached draft')])
+    const ended = snapshot(draft, 4, [start, { type: 'message_end', message: {
+      role: 'assistant', timestamp, content: [] } }], {}, false)
+    const restored = reducer(ended, { type: 'loadEntries', items: draft.timeline,
+      preserveToolState: { revision: ended.timelineScopeRevision, cwd, sessionPath: path } })
+    expect(restored.timeline).toEqual(seed.timeline)
+    expect(restored.busy).toBe(false)
+  })
+
+  it('retains an accepted live snapshot while the first persisted page is empty', () => {
+    const current = snapshot(seed, 2, [start, delta('not yet persisted')])
+    const loaded = reducer(current, { type: 'loadEntries', items: [], preserveToolState: {
+      revision: current.timelineScopeRevision, cwd, sessionPath: path } })
+    expect(loaded.timeline).toHaveLength(1)
+    expect(loaded.timeline[0]).toMatchObject({ text: 'not yet persisted', streaming: true })
+  })
+
+  it('protects newer live lifecycle authority from old and equal revision busy flags', () => {
+    const current = applyEvent(snapshot(seed, 2, [start, delta('output')]), {
+      type: 'agent_start', _pionLive: { backendId: 'backend-a', revision: 5, cwd, sessionPath: path } })
+    for (const revision of [4, 5]) expect(snapshot(current, revision, [], {}, false).busy).toBe(true)
+  })
+
+  it('rejects a late same-cwd history replacement from a previous selection', () => {
+    const current = snapshot(seed, 2, [start, delta('safe')])
+    expect(reducer(current, { type: 'loadEntries', items: [], preserveToolState: {
+      revision: current.timelineScopeRevision - 1, cwd, sessionPath: path } })).toBe(current)
+  })
+
+  it('retains a hydrated same-cwd backend across its repeated ready descriptor', () => {
+    const current = snapshot(seed, 2, [start, delta('safe')])
+    const ready = reducer(current, { type: 'status', status: { phase: 'ready', cwd } })
+    expect(ready.timeline).toBe(current.timeline)
+    expect(ready.liveSessionBackendId).toBe(current.liveSessionBackendId)
+    expect(ready.busy).toBe(true)
+  })
+
+  it('does not shrink a complete active row from a truncated bounded snapshot', () => {
+    const state = snapshot(seed, 2, [start, delta('complete active output')])
+    const truncated = snapshot(state, 4, [{ type: 'message_start', message: {
+      role: 'assistant', timestamp, content: [], _pionLiveTruncatedFields: ['text'] } }, delta('suffix only')], { truncated: true })
+    expect(truncated.timeline[1]).toBe(state.timeline[1])
+  })
+})
 
 describe('assistant error state', () => {
   it('drops a nonempty streamed draft when the authoritative final message is empty', () => {

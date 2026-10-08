@@ -162,6 +162,11 @@ export interface AgentState {
   taskResultIds: string[]
   taskRestore?: { id: number; revision: number }
   timeline: TimelineItem[]
+  liveSessionOwnerPath?: string
+  liveSessionScopeSelected?: boolean
+  liveSessionBackendId?: string
+  liveSessionRevision?: number
+  liveSessionTurnIds?: number[]
   /** A clear selects a new transcript scope, even before the hook renders. */
   timelineScopeRevision: number
   /** Acknowledges a history replacement whose reducer projection may differ. */
@@ -246,9 +251,9 @@ export type Action =
   | { type: 'beginTaskRestore'; id: number }
   | { type: 'restoreTasks'; id: number; tasks: AgentTodo[] }
   | { type: 'cachedTasks'; tasks: AgentTodo[] }
-  | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode; preserveToolState?: ToolStateScope; loadId?: number }
+  | { type: 'loadEntries'; items: TimelineItem[]; mode?: AgentMode; preserveToolState?: ToolStateScope; loadId?: number; cachedBackendId?: string }
   | { type: 'prependEntries'; items: TimelineItem[]; toolResults?: WireEntry[] }
   | { type: 'appendEntries'; items: TimelineItem[]; toolResults?: WireEntry[] }
   | { type: 'timelineLoading'; loading: boolean }
   | { type: 'timelineError'; error?: string }
-  | { type: 'clearTimeline' }
+  | { type: 'clearTimeline'; sessionPath?: string }

@@ -81,6 +81,7 @@ import { BackendPool } from './backend-pool'
 import { revertSessionMessage } from './message-revert'
 import { stopForHistory } from './stop-for-history'
 import { applyBackendEvent } from './backend-events'
+import { LiveSessionProjection } from './live-session-state'
 import { PendingRequestStore } from './pending-requests'
 import { projectQueueSnapshot } from './queue-projection'
 import { ProviderAuthUi } from './provider-auth-ui'
@@ -1966,6 +1967,8 @@ export class AgentBridge {
         this.trackBackendEvent(backend, event, type)
         return
       }
+      const liveState = backend.liveState ??= new LiveSessionProjection()
+      liveState.record(event)
       if (type === 'agent_start' || type === 'agent_settled'
         || type === 'compaction_start' || type === 'compaction_end') {
         this.dispatchLifecycle(backend).generation += 1
@@ -2061,7 +2064,10 @@ export class AgentBridge {
       }
       if (this.activeKey !== backend.key) return
       if (type === 'agent_start') this.setActiveBackendStatus()
-      this.win?.webContents.send(EVENT_CHANNEL, forwardedEvent)
+      this.win?.webContents.send(EVENT_CHANNEL, {
+        ...forwardedEvent,
+        _pionLive: liveState.metadata(backend.cwd, backend.sessionPath)
+      })
       if (type === 'entry_appended' && (event as { entry?: { customType?: string } }).entry?.customType === 'pion-subagents-state') {
         void this.pushSessionInfo()
       }
@@ -2093,6 +2099,7 @@ export class AgentBridge {
       cwd,
       sessionPath,
       client,
+      liveState: new LiveSessionProjection(),
       phase: 'starting' as BackendPhase,
       busy: false,
       compacting: false,
@@ -3492,8 +3499,20 @@ export class AgentBridge {
 
   async getSessionInfo(): Promise<SessionInfo | null> {
     const backend = this.getActiveBackend()
+    const revision = this.historyRevision
+    const generation = this.sessionSelectionGeneration
     const info = await this.getSessionInfoSnapshot()
-    if (backend !== this.getActiveBackend()) return null
+    if (backend !== this.getActiveBackend()
+      || (backend && this.backendPool.get(backend.key) !== backend)
+      || revision !== this.historyRevision || generation !== this.sessionSelectionGeneration) return null
+    if (info && backend && (info.liveState?.revision !== backend.liveState?.revision
+      || info.liveState?.cwd !== backend.cwd || info.liveState?.sessionPath !== backend.sessionPath)) {
+      info.liveState = backend.liveState?.snapshot(backend.cwd, backend.sessionPath)
+      // The refreshed replay fence also fences lifecycle flags: never pair new
+      // agent_start/settled events with the earlier RPC's busy/compacting state.
+      info.isStreaming = backend.busy
+      info.isCompacting = backend.compacting
+    }
     if (info) info.subagentsEnabled = backend?.subagentsEnabled ?? DEFAULT_SUBAGENTS_ENABLED
     if (info) info.yolo = this.activeKey ? this.yoloSessions.has(this.activeKey) : false
     return info
@@ -3502,13 +3521,13 @@ export class AgentBridge {
   private async getSessionInfoSnapshot(): Promise<SessionInfo | null> {
     const backend = this.getActiveBackend()
     try {
-      if (backend?.phase === 'running') return await this.toSessionInfo(backend.client)
+      if (backend?.phase === 'running') return await this.toSessionInfo(backend)
       // A persisted session can be described directly from JSONL while its
       // colder RPC backend is still loading extensions and models.
       if (!this.activeSessionPath) {
         if (!backend) return null
         await backend.startPromise
-        return this.toSessionInfo(backend.client)
+        return this.toSessionInfo(backend)
       }
       const manager = this.openSessionManager(this.activeSessionPath)
       const context = manager.buildSessionContext()
@@ -3534,16 +3553,25 @@ export class AgentBridge {
     }
   }
 
-  private async toSessionInfo(client: RpcClient): Promise<SessionInfo | null> {
-    const state = await client.getState()
+  private async toSessionInfo(backend: BackendRecord): Promise<SessionInfo | null> {
+    const revision = this.historyRevision
+    const generation = this.sessionSelectionGeneration
+    const lifecycle = this.dispatchLifecycle(backend).generation
+    const busy = backend.busy
+    const compacting = backend.compacting
+    const state = await backend.client.getState()
+    if (this.backendPool.get(backend.key) !== backend || this.getActiveBackend() !== backend
+      || revision !== this.historyRevision || generation !== this.sessionSelectionGeneration) return null
     const model = state.model as { provider?: string; id?: string; name?: string } | undefined
+    const lifecycleChanged = lifecycle !== this.dispatchLifecycle(backend).generation
+      || busy !== backend.busy || compacting !== backend.compacting
     return {
       provider: model?.provider,
       model: model?.name ?? model?.id,
       modelId: model?.id,
       thinkingLevel: state.thinkingLevel,
-      isStreaming: state.isStreaming,
-      isCompacting: state.isCompacting,
+      isStreaming: lifecycleChanged ? backend.busy : state.isStreaming || backend.busy,
+      isCompacting: lifecycleChanged ? backend.compacting : state.isCompacting || backend.compacting,
       sessionFile: state.sessionFile,
       sessionId: state.sessionId,
       sessionName: state.sessionName,
@@ -3551,16 +3579,21 @@ export class AgentBridge {
       steeringMode: state.steeringMode,
       followUpMode: state.followUpMode,
       messageCount: state.messageCount,
-      pendingMessageCount: state.pendingMessageCount
+      pendingMessageCount: state.pendingMessageCount,
+      liveState: backend.liveState?.snapshot(backend.cwd, backend.sessionPath)
     }
   }
 
   private async pushSessionInfo(): Promise<void> {
+    const generation = this.sessionSelectionGeneration
+    const backend = this.getActiveBackend()
     const revision = this.historyRevision
     const activeKey = this.activeKey
     const activeSessionPath = this.activeSessionPath
     const info = await this.getSessionInfo()
-    if (revision !== this.historyRevision || this.activeKey !== activeKey || this.activeSessionPath !== activeSessionPath) return
+    if (revision !== this.historyRevision || generation !== this.sessionSelectionGeneration
+      || this.getActiveBackend() !== backend || (backend && this.backendPool.get(backend.key) !== backend)
+      || this.activeKey !== activeKey || this.activeSessionPath !== activeSessionPath) return
     this.win?.webContents.send(STATE_CHANNEL, info)
   }
 
@@ -3573,6 +3606,8 @@ export class AgentBridge {
 
   /** Push state + session list + branch tree to the renderer. */
   private async refresh(): Promise<void> {
+    const generation = this.sessionSelectionGeneration
+    const backend = this.getActiveBackend()
     const revision = this.historyRevision
     const activeKey = this.activeKey
     const activeSessionPath = this.activeSessionPath
@@ -3586,6 +3621,9 @@ export class AgentBridge {
     // state of a session selected while the refresh was in flight.
     if (
       revision !== this.historyRevision ||
+      generation !== this.sessionSelectionGeneration ||
+      this.getActiveBackend() !== backend ||
+      (backend && this.backendPool.get(backend.key) !== backend) ||
       this.activeKey !== activeKey ||
       this.activeSessionPath !== activeSessionPath ||
       this.activeCwd !== activeCwd

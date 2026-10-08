@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import type { BackendRecord } from '../../src/main/agent/types'
 import type { RunOperation } from '../../src/shared/operations'
+import type { SessionInfo } from '../../src/shared/types'
 import { RunStore } from '../../src/main/run-store'
 
 type Disposition = 'started' | 'queued' | 'handled'
@@ -17,6 +18,9 @@ interface BridgeHarness {
   dispatchNextLocalFollowUp(backend: BackendRecord): void
   createRun(backend: BackendRecord, state: null, message: string, images: [], kind: 'follow-up', phase: 'queued'): RunOperation
   activeKey: string
+  sessionSelectionGeneration: number
+  historyRevision: number
+  getSessionInfo(): Promise<SessionInfo | null>
 }
 const roots: string[] = []
 afterEach(async () => {
@@ -39,8 +43,11 @@ async function harness() {
     startPromise: Promise.resolve()
   } as unknown as BackendRecord
   const pool = new Map([[backend.key, backend]])
+  const wireSend = vi.fn()
   const bridge = Object.assign(Object.create(AgentBridge.prototype), {
     activeKey: backend.key, activeCwd: root, runStore,
+    sessionSelectionGeneration: 0, historyRevision: 0, yoloSessions: new Set(),
+    win: { webContents: { send: wireSend } },
     backendPool: pool, desiredModes: new Map([[backend.key, 'build']]),
     sessionCompletedListeners: new Set(), runCompletedListeners: new Set(), unreadSessionPaths: new Set(),
     ensureActiveBackend: vi.fn(async () => backend),
@@ -58,7 +65,7 @@ async function harness() {
   }
   const emit = (type: string, fields: Record<string, unknown> = {}) => listener({ type, ...fields })
   const runs = () => runStore.list({ limit: 100 })
-  return { bridge: api, backend, pool, state, runStore, getState, prompt, steer, emit, addQueued, runs }
+  return { bridge: api, backend, pool, state, runStore, getState, prompt, steer, emit, addQueued, runs, wireSend }
 }
 
 function deferred<T>() {
@@ -72,6 +79,87 @@ function deferred<T>() {
 async function dispatchGap() {
   for (let index = 0; index < 12; index += 1) await Promise.resolve()
 }
+
+describe('AgentBridge live session state', () => {
+  it('records background output without forwarding ordinary events and returns a complete selected snapshot', async () => {
+    const h = await harness()
+    h.bridge.activeKey = 'other'
+    h.emit('message_start', { message: { role: 'assistant', timestamp: 1, content: [] } })
+    h.emit('message_update', { assistantMessageEvent: { type: 'text_delta', delta: 'background' } })
+    expect(h.wireSend).not.toHaveBeenCalled()
+    h.bridge.activeKey = h.backend.key
+    const info = await h.bridge.getSessionInfo()
+    expect(JSON.stringify(info?.liveState?.events)).toContain('background')
+    h.emit('message_update', { assistantMessageEvent: { type: 'text_delta', delta: 'active' } })
+    expect(h.wireSend.mock.calls.at(-1)?.[1]).toMatchObject({
+      _pionLive: { backendId: info?.liveState?.backendId, revision: 3, cwd: h.backend.cwd }
+    })
+  })
+
+  it('captures events that arrive during getState rather than a pre-await snapshot', async () => {
+    const h = await harness()
+    const pending = deferred<typeof h.state>()
+    h.getState.mockReturnValueOnce(pending.promise)
+    const info = h.bridge.getSessionInfo()
+    h.emit('message_start', { message: { role: 'assistant', timestamp: 1 } })
+    h.emit('message_update', { assistantMessageEvent: { type: 'text_delta', delta: 'during await' } })
+    pending.resolve(h.state)
+    expect(JSON.stringify((await info)?.liveState?.events)).toContain('during await')
+  })
+
+  it('pairs a post-await agent_start snapshot with authoritative busy flags, not stale idle RPC flags', async () => {
+    const h = await harness()
+    const pending = deferred<typeof h.state>()
+    h.getState.mockReturnValueOnce(pending.promise)
+    const info = h.bridge.getSessionInfo()
+    h.emit('agent_start')
+    h.emit('message_start', { message: { role: 'assistant', timestamp: 1 } })
+    h.emit('message_update', { assistantMessageEvent: { type: 'text_delta', delta: 'new run' } })
+    pending.resolve({ ...h.state, isStreaming: false, isCompacting: false })
+    const result = await info
+    expect(result).toMatchObject({ isStreaming: true, isCompacting: false, liveState: { revision: 3 } })
+    expect(JSON.stringify(result?.liveState?.events)).toContain('new run')
+  })
+
+  it('does not restore streaming from an older RPC after the event lifecycle settles', async () => {
+    const h = await harness()
+    h.emit('agent_start')
+    const pending = deferred<typeof h.state>()
+    h.getState.mockReturnValueOnce(pending.promise)
+    const info = h.bridge.getSessionInfo()
+    h.emit('agent_settled')
+    pending.resolve({ ...h.state, isStreaming: true, isCompacting: true })
+    expect(await info).toMatchObject({ isStreaming: false, isCompacting: false, liveState: { revision: 2 } })
+  })
+
+  it('keeps an in-flight compaction busy across a stale state reply', async () => {
+    const h = await harness()
+    const pending = deferred<typeof h.state>()
+    h.getState.mockReturnValueOnce(pending.promise)
+    const info = h.bridge.getSessionInfo()
+    h.emit('compaction_start', { reason: 'manual' })
+    pending.resolve({ ...h.state, isStreaming: false, isCompacting: false })
+    expect(await info).toMatchObject({ isStreaming: true, isCompacting: true })
+  })
+
+  it('does not hide a dispatch reservation before the first agent_start event', async () => {
+    const h = await harness()
+    h.backend.busy = true
+    expect(await h.bridge.getSessionInfo()).toMatchObject({ isStreaming: true, isCompacting: false })
+  })
+
+  it.each(['replacement', 'selection', 'history'] as const)('rejects a late getState after %s changes', async (change) => {
+    const h = await harness()
+    const pending = deferred<typeof h.state>()
+    h.getState.mockReturnValueOnce(pending.promise)
+    const info = h.bridge.getSessionInfo()
+    if (change === 'replacement') h.pool.set(h.backend.key, { ...h.backend })
+    if (change === 'selection') h.bridge.sessionSelectionGeneration += 2 // A -> B -> A
+    if (change === 'history') h.bridge.historyRevision++
+    pending.resolve(h.state)
+    expect(await info).toBeNull()
+  })
+})
 
 describe('AgentBridge send and local queue', () => {
   it('sends Enter directly while preserving existing follow-ups', async () => {

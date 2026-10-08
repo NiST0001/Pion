@@ -16,6 +16,21 @@ const index: SessionHistoryIndex = {
 }
 
 describe('HistoryNavigator', () => {
+  it('uses the mounted turn identity, not the final whole-session index entry, including late indexing', () => {
+    const onJump = vi.fn()
+    const { container, rerender } = render(<HistoryNavigator index={null} activeEntryId="two" busy={false} onJump={onJump} />)
+    const fullIndex: SessionHistoryIndex = {
+      ...index,
+      totalEntries: 8,
+      landmarks: [...index.landmarks, { ...index.landmarks[1], entryId: 'unloaded-tail', ordinal: 3, entryIndex: 6 }]
+    }
+    rerender(<HistoryNavigator index={fullIndex} activeEntryId="two" busy={false} onJump={onJump} />)
+    expect(container.querySelector('.history-navigator-marker.active')).toHaveAttribute('data-entry-id', 'two')
+    rerender(<HistoryNavigator index={fullIndex} activeEntryId="unloaded-tail" busy={false} onJump={onJump} />)
+    expect(container.querySelector('.history-navigator-marker.active')).toHaveAttribute('data-entry-id', 'unloaded-tail')
+    expect(onJump).not.toHaveBeenCalled()
+  })
+
   it('adds live landmarks without snapping a manually browsed rail back to the active message', () => {
     const makeIndex = (count: number): SessionHistoryIndex => ({ ...index, totalEntries: count * 2,
       landmarks: Array.from({ length: count }, (_, n) => ({ ...index.landmarks[0], entryId: `live-${n + 1}`, entryIndex: n * 2, ordinal: n + 1, snippet: `live ${n + 1}` })) })

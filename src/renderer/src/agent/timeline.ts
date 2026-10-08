@@ -512,7 +512,7 @@ function reconcileLiveRow(live: TimelineItem, persisted: TimelineItem): Timeline
   }
   if (live.kind === 'assistant' && persisted.kind === 'assistant') {
     const next = { ...live, entryId: persisted.entryId, historyReconciled: true }
-    if (live.streaming) {
+    if (!persisted.streaming) {
       // Persistence can be observed just before the corresponding message_end
       // IPC event; the stored assistant is already a complete final snapshot.
       next.text = persisted.text
@@ -529,18 +529,29 @@ function reconcileLiveRow(live: TimelineItem, persisted: TimelineItem): Timeline
   return { ...live, historyReconciled: true }
 }
 
-/** Keep only matching tools when replacing a window in the same scope.
- * Unlike newer-page reconciliation, replacement must not retain off-window
- * rows or move the incoming page's positions. Only missing finals are filled. */
+/** Replace persisted history without replacing the backend's unpersisted tail.
+ * Off-window persisted rows are dropped. Matching tools retain their mounted
+ * identity/finals; live rows absent from JSONL remain until an authoritative
+ * final event or a persisted copy reconciles them. */
 export function preserveTimelineToolState(
-  existing: TimelineItem[], incoming: TimelineItem[]
+  existing: TimelineItem[], incoming: TimelineItem[], preserveLive = true
 ): TimelineItem[] {
   const tools = new Map<string, Extract<TimelineItem, { kind: 'tool' }>>()
   for (const item of existing) if (item.kind === 'tool') tools.set(item.tool.id, item)
-  return incoming.map((item) => {
+  const projected = incoming.map((item) => {
     const current = item.kind === 'tool' ? tools.get(item.tool.id) : undefined
     return current ? reconcileLiveRow(current, item) : item
   })
+  if (!preserveLive) return projected
+  // A jumped window can already pin a streaming row. Do not append its older
+  // hook snapshot beside the reducer's event-ordered version of the same row.
+  const live = existing.filter((item) => isUnreconciledLiveItem(item)
+    || (item.kind === 'assistant' && item.streaming))
+  const liveById = new Map(live.map((item) => [item.id, item]))
+  const pinnedIds = new Set(projected.filter((item) => item.kind === 'assistant'
+    && item.streaming && item.live && liveById.has(item.id)).map((item) => item.id))
+  const items = projected.map((item) => pinnedIds.has(item.id) ? liveById.get(item.id)! : item)
+  return reconcileNewerTimelineItems(live.filter((item) => !pinnedIds.has(item.id)), items).items
 }
 
 /** Final-only pages update mounted calls, never create isolated result rows. */
@@ -755,6 +766,9 @@ export function getViewportHistoryPageSize(): number {
 const MAX_TIMELINE_CACHE = 10
 
 export interface TimelineCacheEntry {
+  liveSessionBackendId?: string
+  /** Project/worktree owning this snapshot; never revive live rows across cwd. */
+  cwd?: string
   /** Full session task projection, not derived from these cached rows. */
   tasks?: AgentTodo[] | null
   items: TimelineItem[]
@@ -781,9 +795,11 @@ export function storeTimelineCache(
   path: string,
   entry: TimelineCacheEntry
 ): void {
-  const tasks = entry.tasks === undefined ? cache.get(path)?.tasks : entry.tasks
+  const previous = cache.get(path)
+  const tasks = entry.tasks === undefined ? previous?.tasks : entry.tasks
   cache.delete(path)
-  cache.set(path, { ...entry, tasks })
+  cache.set(path, { ...entry, cwd: entry.cwd ?? previous?.cwd,
+    liveSessionBackendId: entry.liveSessionBackendId ?? previous?.liveSessionBackendId, tasks })
   while (cache.size > MAX_TIMELINE_CACHE) {
     const oldest = cache.keys().next().value
     if (typeof oldest !== 'string') break

@@ -10,6 +10,7 @@ import type {
 } from '../../shared/types'
 import type { GitRunCheckpoint } from '../checkpoints'
 import type { RunOperation } from '../../shared/operations'
+import type { LiveSessionProjection } from './live-session-state'
 
 export interface PushedTree {
   tree: TreeNodeLite[]
@@ -52,6 +53,8 @@ export interface QueuedBackendMessage {
 }
 
 export interface BackendRecord {
+  /** Bounded current-root-turn projection, isolated to this backend instance. */
+  liveState?: LiveSessionProjection
   key: string
   cwd: string
   sessionPath?: string

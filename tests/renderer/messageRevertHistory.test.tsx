@@ -311,6 +311,60 @@ describe('message revert history', () => {
     expect(h.revert).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps a failed replacement branch uncacheable across fresh-session effects until an authoritative page loads', async () => {
+    const h = await setup()
+    h.getEntriesPage.mockRejectedValue(new Error('offline'))
+    let undo!: Promise<MessageRevertResult | null>
+    act(() => { undo = h.result.current.history.revertMessage('undo-user') })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(await undo).toEqual(draft)
+    })
+    // Mode/tasks/session commits used to treat eviction as a fresh session and
+    // seed an empty (or retained pre-undo) timeline despite failed hydration.
+    act(() => {
+      h.result.current.dispatch({ type: 'mode', mode: 'plan' })
+      h.result.current.dispatch({ type: 'cachedTasks', tasks: restoredTasks })
+      h.result.current.dispatch({ type: 'session', session: {
+        sessionId: 'a', sessionFile: path, isStreaming: false, messageCount: 2
+      } })
+    })
+    expect(h.result.current.history.timelineCache.current.has(path)).toBe(false)
+    expect(h.result.current.state.tasks).toEqual(restoredTasks)
+    h.getEntriesPage.mockResolvedValue(page())
+    await act(async () => { await h.result.current.history.reloadTimeline(path) })
+    expect(h.result.current.history.timelineCache.current.get(path)?.leafId).toBe('restored-leaf')
+    act(() => h.result.current.dispatch({ type: 'mode', mode: 'build' }))
+    expect(h.result.current.history.timelineCache.current.get(path)?.mode).toBe('build')
+    expect(h.result.current.history.timelineCache.current.get(path)?.items.some(
+      (item) => 'entryId' in item && item.entryId === 'old-leaf'
+    )).toBe(false)
+  })
+
+  it('allows a replacement backend live snapshot to seed the invalidated branch, but not the old backend', async () => {
+    const liveState = { backendId: 'before-undo', revision: 1, cwd: '/project', sessionPath: path, events: [] }
+    const h = await setup({ liveSessionBackendId: liveState.backendId,
+      liveSessionOwnerPath: path, liveSessionScopeSelected: true, liveSessionRevision: 1 })
+    h.getEntriesPage.mockRejectedValue(new Error('offline'))
+    let undo!: Promise<MessageRevertResult | null>
+    act(() => { undo = h.result.current.history.revertMessage('undo-user') })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(await undo).toEqual(draft)
+    })
+    act(() => h.result.current.dispatch({ type: 'session', session: {
+      sessionId: 'a', sessionFile: path, isStreaming: false, messageCount: 0,
+      liveState: { ...liveState, revision: 2 }
+    } }))
+    expect(h.result.current.history.timelineCache.current.has(path)).toBe(false)
+    act(() => h.result.current.dispatch({ type: 'session', session: {
+      sessionId: 'a', sessionFile: path, isStreaming: false, messageCount: 0,
+      liveState: { ...liveState, backendId: 'after-undo' }
+    } }))
+    expect(h.result.current.history.timelineCache.current.get(path)?.liveSessionBackendId).toBe('after-undo')
+    expect(h.result.current.history.timelineCache.current.get(path)?.items).toEqual([])
+  })
+
   it('keeps mutation success distinct from an index-only read failure', async () => {
     const h = await setup()
     h.getHistoryIndex.mockRejectedValue(new Error('index unavailable'))
