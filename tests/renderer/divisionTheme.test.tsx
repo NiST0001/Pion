@@ -20,12 +20,27 @@ function contrast(a: string, b: string): number {
   return (values[0] + 0.05) / (values[1] + 0.05)
 }
 
-describe('Division theme stylesheet contracts (not GUI rendering)', () => {
+describe('Signal Orange theme stylesheet contracts (not GUI rendering)', () => {
   it('adds an opt-in theme without changing the original four or the default', () => {
     expect(THEME_IDS).toContain('division-dark')
     expect(THEME_IDS.slice(0, 4)).toEqual(['terracotta-dark', 'terracotta-light', 'plain-dark', 'plain-light'])
     expect(DEFAULT_THEME).toBe('terracotta-dark')
     expect(isThemeId('division-dark')).toBe(true)
+  })
+
+  it('uses neutral gray surfaces and text without a blue cast and a brighter orange emphasis', () => {
+    for (const name of ['bg', 'bg-elev', 'bg-input', 'bg-hover', 'bg-active', 'border',
+      'border-soft', 'fg', 'fg-dim', 'fg-faint', 'on-accent', 'user-bubble', 'code-fg']) {
+      const channels = variables[`--${name}`].slice(1).match(/../g)!
+      expect(new Set(channels).size, name).toBe(1)
+    }
+    expect(variables['--accent']).toBe('#ff9419')
+    expect(variables['--accent-strong']).toBe('#ffad42')
+    expect(luminance(variables['--accent'])).toBeGreaterThan(luminance('#ff8b24'))
+    expect(variables['--selected-border']).toBe(variables['--accent'])
+    expect(variables['--surface-tint']).toBe('rgba(255, 255, 255, 0.035)')
+    const swatch = preview.slice(preview.indexOf('.theme-card-preview.division-dark'))
+    for (const name of ['--bg', '--bg-elev', '--accent', '--fg-faint']) expect(swatch).toContain(variables[name])
   })
 
   it('provides its full semantic palette after inherited typography and before native fallbacks', () => {

@@ -17,7 +17,7 @@ export const THEMES: ThemeOption[] = [
   { id: 'terracotta-light', name: '陶土浅色', description: '暖白纸张感，适合明亮环境' },
   { id: 'plain-dark', name: '深色', description: '近黑表面与白色重点操作' },
   { id: 'plain-light', name: '浅色', description: '纯白表面与黑色重点操作' },
-  { id: 'division-dark', name: '全境封锁', description: '深炭灰与信号橙，战术终端风格' }
+  { id: 'division-dark', name: '信号橙', description: '中性炭灰与明亮橙色，战术终端风格' }
 ]
 
 const THEME_STORAGE_KEY = 'pion:theme'

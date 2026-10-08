@@ -107,7 +107,7 @@
   - `SettingsModal.tsx`：设置外壳、导航与操作编排，继续持有原有会话名称草稿、压缩/导出状态、诊断日志及主题保存 revision，切页不因拆分而重置宿主状态。
   - `ModelsPage.tsx`、`SessionPage.tsx`、`SecurityPage.tsx`：模型与提供商、会话行为与工具、安全信任与权限页面；新增页面通过受控 props 回调操作，不反向依赖弹窗。
   - `AppearancePage.tsx`、`AboutPage.tsx`、`DiagnosticsPage.tsx`：外观、版本与更新日志、会话状态与 stderr 页面；`SettingsInfoRow.tsx` 为关于/诊断共用的信息行。
-  - `ReleaseNotes.tsx` 在关于 Pion 页展示可展开的更新日志；`WindowEffectsSettings.tsx` 提供简洁的“毛玻璃”开关，仅在重启、不可用或透明回退等必要状态下提示；外观页保留原四套主题并提供全境封锁风格主题，即时切换，不额外渲染实时预览；`SubagentSettings.tsx` 在会话页提供子代理全局数量/超时/轮数/结果长度配置，保存后下一批生效。
+  - `ReleaseNotes.tsx` 在关于 Pion 页展示可展开的更新日志；`WindowEffectsSettings.tsx` 提供简洁的“毛玻璃”开关，仅在重启、不可用或透明回退等必要状态下提示；外观页保留原四套主题并提供“信号橙”战术风格主题，即时切换，不额外渲染实时预览；`SubagentSettings.tsx` 在会话页提供子代理全局数量/超时/轮数/结果长度配置，保存后下一批生效。
 - `capabilities/`：技能工具列表与插件商店；`SkillsToolsModal.tsx` 将 Pion 内置任务/提问/子代理/生图与插件工具区分展示；生图卡片说明 size/quality 请求、≤5 个 PNG/JPEG 参考图编辑及另存新路径、原文件/metadata 上传、read + network + write、服务兼容性/精确尺寸未保证、mask 不支持、实验型号/实际版本未知、Codex 登录和账号额度及计划模式不可用。
 - `chrome/`：窗口标题栏等外壳组件；`DockHeader.tsx` 提供简洁拖动标题、带目标/方向图标的自定义布局菜单和隐藏按钮。
 - `terminal/TerminalPanel.tsx`：按需加载的 xterm.js 终端，保持 PTY 连接、可见尺寸适配、主题同步及结束确认。
@@ -123,7 +123,7 @@
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。
 - `styles/motion.css`：通用动效、详情网格高度过渡、工具箭头旋转及减少动态效果适配。
 - `utils/screenTextReveal.tsx`、`utils/historyReveal.ts`：文字渐入调度与历史行启用；静态前缀保留为文本节点，扫描跳过已启用字符的重复几何测量。
-- `styles/themes/division.css`：全境封锁风格的深炭灰/信号橙调色板及静态战术线条；保持文字对比、状态语义、胶囊控件、原生透明与强制色回退。`styles/settings/themes.css` 提供各主题选择卡片缩略样式。
+- `styles/themes/division.css`：“信号橙”的中性炭灰/明亮橙色调色板，内部 division-dark ID 保持兼容及静态战术线条；保持文字对比、状态语义、胶囊控件、原生透明与强制色回退。`styles/settings/themes.css` 提供各主题选择卡片缩略样式。
 - `utils/theme.ts`：主题即时应用、用户配置恢复、旧 localStorage 迁移和异步保存；`utils/metricsSettings.ts`：统计显示偏好。
 
 上面 styles/、utils/ 简写均相对于 `src/renderer/src/`。
@@ -169,7 +169,7 @@
   - `ReleaseNotes.test.tsx`：更新日志版本展示与默认展开状态。
   - `divisionTheme.test.tsx`：新增主题身份、完整语义变量、实底文字对比度、终端颜色格式、样式级联、无持续动画/外部图片及强制色装饰回退的静态契约，不替代 GUI 验证。
   - `theme.test.tsx`：主题文件优先、旧缓存迁移、不可写缓存、读取失败不覆盖、迟到恢复及保存失败重试。
-  - `SettingsModal.test.tsx`：提供商设置与内置主题即时切换（含全境封锁风格）；页面拆分后会话草稿、自动重试、压缩/导出状态和日志跨页保持，父更新不替换聚焦输入，主题失败提示/迟到失败隔离，以及信任与工具策略回调、忙碌和错误透传。
+  - `SettingsModal.test.tsx`：提供商设置与内置主题即时切换（含“信号橙”）；页面拆分后会话草稿、自动重试、压缩/导出状态和日志跨页保持，父更新不替换聚焦输入，主题失败提示/迟到失败隔离，以及信任与工具策略回调、忙碌和错误透传。
   - `WorkbenchDialogs.test.tsx`：首次按需 lazy 加载、关闭/重开及兄弟弹窗切换时的组件身份、草稿与独立挂起隔离，受控确认、操作页/修复回调透传，以及真实设置弹窗原有打开重置和在途操作保留；下游 mocks 在用例内注册并清理。
   - `windowEffects.test.tsx`：毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条、权限请求避让输入框与实底回退的源码契约（不替代 GPU 真机验证）。
   - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1 迁移、拖动预览与菜单操作时不重挂载内容。

@@ -262,11 +262,11 @@ describe('SettingsModal page state and callbacks', () => {
     renderSettings(settingsActions())
     goToSettingsPage(/^外观/)
     expect(screen.getByRole('button', { name: /陶土深色/ })).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByRole('button', { name: /全境封锁/ })).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByRole('button', { name: /信号橙/ })).toHaveAttribute('aria-pressed', 'false')
     expect(setTheme).not.toHaveBeenCalled()
 
     const options = [
-      { name: /全境封锁/, id: 'division-dark', scheme: 'dark' },
+      { name: /信号橙/, id: 'division-dark', scheme: 'dark' },
       { name: /陶土浅色/, id: 'terracotta-light', scheme: 'light' },
       { name: /^深色/, id: 'plain-dark', scheme: 'dark' },
       { name: /^浅色/, id: 'plain-light', scheme: 'light' },
@@ -315,7 +315,7 @@ describe('SettingsModal page state and callbacks', () => {
 
   it.each([
     { name: /^深色/, id: 'plain-dark' },
-    { name: /全境封锁/, id: 'division-dark' }
+    { name: /信号橙/, id: 'division-dark' }
   ] as const)('ignores an older theme-save failure after choosing $id on a revisited appearance page', async (selected) => {
     const oldSave = deferred<ThemeId>()
     finishPendingThemeSave = () => oldSave.resolve('terracotta-light')

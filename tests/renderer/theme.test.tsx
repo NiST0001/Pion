@@ -36,7 +36,7 @@ it('registers division-dark alongside the original themes without changing the d
   expect(THEME_IDS).toEqual(['terracotta-dark', 'terracotta-light', 'plain-dark', 'plain-light', 'division-dark'])
   expect(THEMES.map(({ id }) => id)).toEqual(THEME_IDS)
   expect(THEMES.find(({ id }) => id === 'division-dark')).toEqual({
-    id: 'division-dark', name: '全境封锁', description: '深炭灰与信号橙，战术终端风格'
+    id: 'division-dark', name: '信号橙', description: '中性炭灰与明亮橙色，战术终端风格'
   })
   expect(DEFAULT_THEME).toBe('terracotta-dark')
   expect(currentTheme()).toBe(DEFAULT_THEME)
