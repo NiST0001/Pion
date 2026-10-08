@@ -64,9 +64,12 @@
   color: var(--fg-dim);
 }
 
-.project-folder.active > .project-folder-head .project-folder-name,
-.project-branch-head.active .project-branch-name,
-.project-branch-head.active .project-branch-icon {
+/* Names stay equally legible whether selected or not; selection is conveyed
+   by the existing surface and edge markers, not lower text contrast. */
+.project-folder-name,
+.project-branch-name,
+.project-branch-icon,
+.side-session .side-item-label {
   color: var(--fg);
 }
 

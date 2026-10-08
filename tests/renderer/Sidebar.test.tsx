@@ -3,6 +3,7 @@
 import '@testing-library/jest-dom/vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { ProjectList } from '../../src/renderer/src/features/project/Sidebar'
 import type { BranchInfo, ProjectMeta } from '../../src/shared/types'
 
@@ -19,6 +20,25 @@ const branch: BranchInfo = {
   gitBranch: 'feature/old-name',
   isMain: true
 }
+
+describe('Sidebar selection typography', () => {
+  it('uses the selected foreground token for names without requiring selection', () => {
+    const style = document.createElement('style')
+    style.textContent = readFileSync(new URL('../../src/renderer/src/styles/refinements/final.css', import.meta.url), 'utf8')
+    document.head.appendChild(style)
+    try {
+      const rules = Array.from(style.sheet!.cssRules).filter((rule): rule is CSSStyleRule => 'selectorText' in rule)
+      for (const selector of ['.project-folder-name', '.project-branch-name', '.side-session .side-item-label']) {
+        const rule = rules.find((candidate) => candidate.selectorText.split(',').map((part) => part.trim()).includes(selector))
+        expect(rule).toBeDefined()
+        expect(rule!.style.getPropertyValue('color')).toBe('var(--fg)')
+        expect(rule!.selectorText).not.toContain('.active')
+      }
+    } finally {
+      style.remove()
+    }
+  })
+})
 
 describe('ProjectList branch actions', () => {
   it('opens a themed rename dialog and submits the selected Git branch', async () => {
