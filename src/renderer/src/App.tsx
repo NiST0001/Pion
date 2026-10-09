@@ -916,6 +916,8 @@ export function App(): ReactElement {
                 onScroll={handleTimelineScroll}
                 timeline={state.timeline}
                 timelineLoading={state.timelineLoading}
+                timelineError={state.timelineError}
+                onReloadHistory={() => { void actions.reloadTimeline() }}
                 busy={state.busy}
                 starting={state.status.phase === 'starting'}
                 cwd={state.status.cwd}

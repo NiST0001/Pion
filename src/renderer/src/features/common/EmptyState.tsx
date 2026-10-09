@@ -5,11 +5,15 @@ export function EmptyState({
   cwd,
   starting,
   loadingHistory,
+  historyError,
+  onReloadHistory,
   hasSessions
 }: {
   cwd?: string
   starting: boolean
   loadingHistory: boolean
+  historyError?: string
+  onReloadHistory?: () => void
   hasSessions: boolean
 }): ReactElement {
   return (
@@ -17,21 +21,26 @@ export function EmptyState({
       <div className="empty-mark">
         <Sparkles size={40} />
       </div>
-      <h2>{loadingHistory ? '正在加载会话…' : starting ? '正在启动 agent…' : 'Pion 已就绪'}</h2>
+      <h2>{loadingHistory ? '正在加载会话…' : historyError ? '会话历史未加载完成' : starting ? '正在启动 agent…' : 'Pion 已就绪'}</h2>
       <p>
         {cwd ? (
           <>
             工作目录 <code>{cwd}</code>
             {loadingHistory
               ? '。正在直接读取会话历史，无需等待 Agent 后台启动。'
-              : hasSessions
-                ? '。左侧选择历史会话继续，或直接开始新对话。'
-                : '。发送一条消息开始。'}
+              : historyError
+                ? onReloadHistory ? '。请重新加载会话历史。' : '。请重新选择该会话。'
+                : hasSessions
+                  ? '。左侧选择历史会话继续，或直接开始新对话。'
+                  : '。发送一条消息开始。'}
           </>
         ) : (
           '点击左上角「+」添加项目目录'
         )}
       </p>
+      {historyError && !loadingHistory && onReloadHistory && (
+        <button type="button" className="btn" onClick={onReloadHistory}>重新加载</button>
+      )}
       <div className="empty-tips">
         <span>
           <FolderOpen size={11} /> 侧栏管理项目

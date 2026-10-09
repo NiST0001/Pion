@@ -31,7 +31,7 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| src/main/agent/agent-bridge.ts | 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；运行中状态有界等待及后端私有快照/在途缓存，历史 manager 依文件签名更新而非事件无条件重读；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
+| src/main/agent/agent-bridge.ts | 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；隐式最新页跳过不可显示的元数据尾部但保持物理游标和有界条目，数字分页/定位不变；运行中状态有界等待及后端私有快照/在途缓存，历史 manager 依文件签名更新而非事件无条件重读；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
 | src/main/agent/message-revert.ts | 独占写入者前提下校验完整会话与所选用户消息，用 SDK 回到实际 parent 并追加持久分支标记；保留旧树，恢复文字及图片，不操作项目文件；兼容独立 usage、context_edit 与 retain-none 压缩记录 |
 | src/main/agent/stop-for-history.ts | 捕获 SDK 子进程并等待真实退出；超时/适配不兼容拒绝历史写入，不把 RpcClient.stop 提前返回当作退出证明 |
 | src/main/agent/live-session-state.ts | 后端私有当前轮显示快照：后台 root 输出持续归并、独立实例/revision 和有界行数/字节；实时事件与快照共用稳定消息身份，不伪造 SDK 时间戳/持久 ID；字段级截断、最终空消息权威、静态安全预览；选回时随 SessionInfo 恢复，不重放请求或计费 |
@@ -79,7 +79,7 @@
 | src/renderer/src/agent/modelError.ts | 对常见模型/API 额度、认证、限流、上下文、服务及网络错误做保守分类，生成简短中文提示并原样保留技术详情 |
 | src/renderer/src/agent/sessionFavorites.ts、sessionOrder.ts | 收藏与排序 |
 | src/renderer/src/hooks/useAgent.ts | Agent hooks 汇总、启动及模型刷新 |
-| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换/撤销、跳转窗口、任务恢复、事件驱动的索引/叶节点更新；首次实时会话建立逻辑归属并封存缓存，切换前同步保存未落盘输出，缓存带后端身份；缓存回访清除分页渐显抑制标记，首次后台快照显示恢复历史渐显，普通刷新/分页不重播；切换成功后并行补读所属显示快照，metadata 不冒充水合完成，runningPaths 延迟不单独否定已知后端缓存；同作用域历史替换保留实时尾部，拒绝复活已失效运行；撤销隔离旧请求与缓存，区分后端暂时无状态和真实选择；游标区分页末与会话末尾；历史读取等待有界、按 loadId/选择/scope 收口，所有清空入口同步登记作用域，过期后不追加请求，失败空壳不伪装成功缓存 |
+| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换/撤销、跳转窗口、任务恢复、事件驱动的索引/叶节点更新；首次实时会话建立逻辑归属并封存缓存，切换前同步保存未落盘输出，缓存带后端身份；缓存回访清除分页渐显抑制标记，首次后台快照显示恢复历史渐显，普通刷新/分页不重播；切换成功后并行补读所属显示快照，metadata 不冒充水合完成，runningPaths 延迟不单独否定已知后端缓存；同作用域历史替换保留实时尾部，拒绝复活已失效运行；撤销隔离旧请求与缓存，区分后端暂时无状态和真实选择；游标区分页末与会话末尾；历史读取等待有界、按 loadId/选择/scope 收口，所有清空入口同步登记作用域，过期后不追加请求，失败空壳不伪装成功缓存，空实时投影不冒充磁盘空历史、空缓存不隐藏加载及失败；显式重新加载仅重读所属历史 |
 | src/renderer/src/hooks/useMessageRevert.ts | 撤销确认、空草稿/附件读取门控、一次性文字/图片恢复及拒绝后的恢复重试；按逻辑选择隔离迟到结果，不持有后端或文件回滚 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步；分支/会话列表有界并发逐 cwd 发布，慢/失败项不阻挡已完成项，实时推送优先于迟到初次查询 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
@@ -97,7 +97,7 @@
 
 以下目录位于 `src/renderer/src/features/`：
 
-- `chat/`：ChatTimeline（含稳定的滚动占位容器）、ChatMessage、Markdown、ToolCallItem、Composer；ChatMessage 将模型/API 错误显示为可操作的短提示，原始诊断默认折叠且历史回放不注册实时播报；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
+- `chat/`：ChatTimeline（含稳定的滚动占位容器，读取失败显示未加载状态并提供显式重新加载，不伪装就绪）、ChatMessage、Markdown、ToolCallItem、Composer；ChatMessage 将模型/API 错误显示为可操作的短提示，原始诊断默认折叠且历史回放不注册实时播报；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
 - `chat/ToolCallItem.tsx`：按需工具详情；生图分别展示请求型号/实际版本未知、请求操作/size/quality/引用数、输出 PNG 原图保存尺寸与缩略图上限，不把请求尺寸或质量当实际输出承诺，不补造旧历史设置，也不展示输入原图或引用路径数组。
 - `chat/ToolResultImages.tsx`：ToolCallItem 的有界静态 PNG/JPEG 输出结果预览；按详情展开/收起挂载和释放，以工具 ID/内容位置维持图片身份，固定框显示加载/失败状态；不读取原图/提供商 URL，不参与字符渐入，加载事件不滚动消息区。
 - `session/`：HistoryNavigator 跳转条、SessionList 会话行、QueuedMessagesCard、TaskPanel、TaskHistoryPanel；`TaskPanel` 全部完成后隐藏但混合计划保留完成行；`ComposerSupportPanels.tsx` 共用状态判定，保持任务/排队面板的网格槽位及相邻草稿身份稳定。
@@ -150,6 +150,7 @@
 - `tests/renderer/`：React 组件及 hooks 测试。
   - `sessionTasks.test.tsx`：任务记录在历史页之外的恢复、跳转保留面板节点、请求期间实时清空、跨会话迟到结果、缓存无需重绘时恢复快照，以及复制/分叉/删除的任务作用域重置和取消保留。
   - `conversationFollow.test.tsx`：用户离开/接近/回到末尾时的新输出行为、无 scroll 事件时恢复跟随、连续手势和延迟布局；程序化定位不代表用户恢复跟随。
+  - `ChatTimeline.test.tsx`：空历史的加载/失败/成功空分支区分、显式重新加载及失败时保留已显示消息。
   - `historyPaging.test.tsx`：无 scroll 事件的边界输入、在途去重、嵌套输出区、失败重试、旧填充请求隔离，以及跳转后连续加载多页直到真实会话末尾；区分历史追加与实时追加，覆盖最终错误与分页返回竞态、实时行身份及顺序归并。
   - `conversationNavigation.test.tsx`：密集短消息定位、底部位置受限时保持明确点击目标；浮层余量变化补偿与无遮挡历史参考点；同长度替换、布局变化和索引迟到刷新活动标记，不提前选择下一轮；历史跳转、同会话替换、尺寸变化和程序化滚动不恢复跟随。
   - `conversationOverlays.test.tsx`：统计条/输入区域尺寸观测、详情展开不改变余量、条件挂载与 observer 清理、草稿节点身份保持。

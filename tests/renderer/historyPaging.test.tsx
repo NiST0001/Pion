@@ -1053,7 +1053,7 @@ it.each(['reload', 'jump'] as const)('releases a never-resolving %s read and ign
   expect(h.result.current.state.timeline).toEqual([])
 })
 
-it('releases a discarded selection response and leaves the next load retryable', async () => {
+it.each(['identity', 'cwd'] as const)('releases a discarded %s selection response and leaves the next explicit load retryable', async (change) => {
   const first = deferred<SessionEntriesPage>(), second = deferred<SessionEntriesPage>()
   const path = '/reader.jsonl'
   const api = { getEntriesPage: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise),
@@ -1067,13 +1067,17 @@ it('releases a discarded selection response and leaves the next load retryable',
   h.result.current.timelineOwnerPath.current = path
   let one!: Promise<void>, two!: Promise<void>
   act(() => { one = h.result.current.reloadTimeline(path) })
-  await act(async () => { h.result.current.dispatch({ type: 'session', session: {
-    sessionId: 'replacement', sessionFile: path
-  } as never }) })
+  await act(async () => {
+    if (change === 'cwd') h.result.current.dispatch({ type: 'status', status: { phase: 'running', cwd: '/other-worktree' } })
+    else h.result.current.dispatch({ type: 'session', session: {
+      sessionId: 'replacement', sessionFile: path
+    } as never })
+  })
   const page: SessionEntriesPage = { entries: [], toolResults: [], start: 0, end: 0,
     total: 0, leafId: null, mode: 'build' }
   await act(async () => { first.resolve(page); await one })
   expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.result.current.timelineCache.current.has(path)).toBe(false)
   act(() => { two = h.result.current.reloadTimeline(path) })
   expect(h.result.current.state.timelineLoading).toBe(true)
   await act(async () => { second.resolve(page); await two })
@@ -1485,4 +1489,81 @@ it.each(['owned snapshot', 'late previous selection'] as const)('pulls unpersist
     expect(h.result.current.state.timeline[0]).toMatchObject({ text: 'background first token', streaming: true })
     expect(findTool(h.result.current.state.timeline, 'pulled-tool').tool).toMatchObject({ status: 'running', outputText: 'running label' })
   }
+})
+
+it('rebuilds an empty cached projection from an unchanged nonempty persisted window', async () => {
+  const path = '/synthetic-empty-projection.jsonl'
+  const page: SessionEntriesPage = { entries: [{ type: 'message', id: 'stored-user',
+    parentId: null, timestamp: '', message: { role: 'user', content: 'persisted question' } }],
+    toolResults: [], start: 3077, end: 3078, total: 3078, leafId: 'same-leaf', mode: 'build' }
+  const pending = deferred<SessionEntriesPage>()
+  const api = { getEntriesPage: vi.fn(() => pending.promise),
+    getHistoryIndex: vi.fn().mockResolvedValue(null), onEvent: vi.fn(() => () => undefined) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' },
+      session: { sessionId: 'stored', sessionFile: path, messageCount: 3078, isStreaming: false } })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  h.result.current.timelineCache.current.set(path, { items: [], mode: 'build', apiBefore: 3077,
+    apiAfter: 3078, total: 3078, leafId: 'same-leaf', toolResults: [], complete: false, newerComplete: true })
+  let read!: Promise<void>
+  act(() => { read = h.result.current.reloadTimeline(path) })
+  expect(h.result.current.state.timelineLoading).toBe(true)
+  await act(async () => { pending.resolve(page); await read })
+  expect(h.result.current.state.timeline).toEqual([expect.objectContaining({ text: 'persisted question', entryId: 'stored-user' })])
+  expect(h.result.current.state.timelineError).toBeUndefined()
+  expect(h.result.current.state.timelineLoading).toBe(false)
+})
+
+it('does not hide a failed read behind a blank cache or treat empty live metadata as persisted emptiness', async () => {
+  vi.useFakeTimers()
+  const cwd = '/project', path = '/synthetic-empty-live.jsonl'
+  const api = { getEntriesPage: vi.fn().mockResolvedValue(null),
+    getHistoryIndex: vi.fn().mockResolvedValue(null), onEvent: vi.fn(() => () => undefined) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState, status: { phase: 'running', cwd },
+      session: { sessionId: 'stored', sessionFile: path, messageCount: 3078, isStreaming: false } })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state, dispatch }
+  })
+  act(() => h.result.current.dispatch({ type: 'session', session: {
+    sessionId: 'stored', sessionFile: path, messageCount: 3078, isStreaming: false,
+    liveState: { backendId: 'empty-live', revision: 1, cwd, sessionPath: path, events: [] }
+  } }))
+  expect(h.result.current.timelineCache.current.has(path)).toBe(false)
+  // A previously blanked cache must not suppress either loading or failure.
+  h.result.current.timelineCache.current.set(path, { items: [], mode: 'build', apiBefore: 3077,
+    apiAfter: 3078, total: 3078, leafId: 'same-leaf', toolResults: [], complete: false, newerComplete: true })
+  let read!: Promise<void>
+  act(() => { read = h.result.current.reloadTimeline(path) })
+  expect(h.result.current.state.timelineLoading).toBe(true)
+  await act(async () => { await vi.advanceTimersByTimeAsync(1_000); await read })
+  expect(h.result.current.state.timelineError).toContain('会话历史加载失败')
+  expect(h.result.current.state.timelineLoading).toBe(false)
+})
+
+it('keeps the loading shell during a switch even when an empty cache already exists', async () => {
+  vi.useFakeTimers()
+  const path = '/empty-cached-switch.jsonl'
+  const pendingSwitch = deferred<{ cancelled: boolean }>()
+  const api = { switchSession: vi.fn(() => pendingSwitch.promise),
+    getEntriesPage: vi.fn().mockResolvedValue({ entries: [], toolResults: [], start: 0, end: 0,
+      total: 0, leafId: null, mode: 'build' }), getHistoryIndex: vi.fn().mockResolvedValue(null) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: '/project' } })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  h.result.current.timelineCache.current.set(path, { items: [], mode: 'build', apiBefore: 0,
+    apiAfter: 0, total: 0, leafId: null, toolResults: [], complete: true, newerComplete: true })
+  let switching!: Promise<{ cancelled: boolean }>
+  act(() => { switching = h.result.current.switchSession(path) })
+  await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+  expect(api.switchSession).toHaveBeenCalledTimes(1)
+  expect(h.result.current.state.timelineLoading).toBe(true)
+  expect(h.result.current.state.timelineError).toBeUndefined()
+  await act(async () => { pendingSwitch.resolve({ cancelled: false }); await vi.advanceTimersByTimeAsync(100) })
+  await switching
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.result.current.state.timelineError).toBeUndefined()
 })

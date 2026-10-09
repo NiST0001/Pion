@@ -259,6 +259,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const authoritativeLive = Boolean(live && state.liveSessionOwnerPath === path
       && live.backendId === state.liveSessionBackendId && live.revision === state.liveSessionRevision
       && (!live.sessionPath || live.sessionPath === path))
+    // A bounded empty live projection is not proof that the persisted branch
+    // is empty. Keep any known history cache until its page can be rebuilt.
+    if (state.timeline.length === 0 && (state.session?.messageCount ?? 0) > 0) return
     // A failed cold read is not an empty session. An accepted backend snapshot,
     // however, can authoritatively clear a draft/branch even with no rows.
     if (state.timelineError && !authoritativeLive && (cached || state.timeline.length === 0
@@ -307,7 +310,14 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     // Capture the reducer's revision atomically, before the asynchronous read.
     dispatch({ type: 'beginTaskRestore', id: loadId })
     const cached = path ? timelineCache.current.get(path) : undefined
-    const keepVisibleCache = Boolean(path && cached && timelineOwnerPath.current === path)
+    // An empty live/cache projection does not prove persisted history is empty.
+    // Only an actually paintable view may suppress the read shell or its error.
+    // A cache restore can be queued in the same React batch as this read.
+    // Inspect its accepted projection, not the source cache or the old render.
+    const displayedItems = path && expectedTimeline.current?.path === path
+      ? expectedTimeline.current.items : currentState.current.timeline
+    const keepVisibleCache = Boolean(path && cached && timelineOwnerPath.current === path
+      && displayedItems.length > 0)
     if (refreshLive && path && api.getState) {
       const requestedBackendId = currentState.current.liveSessionBackendId
       // JSONL may have the same leaf/count while the retained backend has new
@@ -342,8 +352,10 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     }
     if (loadId !== timelineLoadId.current || revision !== scopeRevision.current
       || readSelection() !== selection) return
+    const visibleItems = path && expectedTimeline.current?.path === path
+      ? expectedTimeline.current.items : currentState.current.timeline
     if (!page) {
-      if (keepVisibleCache) {
+      if (keepVisibleCache && visibleItems.length > 0) {
         console.warn('[pion] retained timeline revalidation failed; keeping cached view:', path)
         return
       }
@@ -362,6 +374,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     if (
       path
       && cached
+      // Only reuse a currently paintable projection. The source cache can still
+      // contain filtered drafts from a stopped/replaced backend.
+      && keepVisibleCache && visibleItems.length > 0
       && cached.leafId === page.leafId
       && cached.total === page.total
     ) {
@@ -369,7 +384,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       // Do not put that stale snapshot back into the cursor/cache on a no-op
       // revalidation, even when the leaf/count have not changed yet.
       const latest = timelineCache.current.get(path) ?? cached
-      const refreshed = keepVisibleCache ? { ...latest, items: currentState.current.timeline } : latest
+      const refreshed = { ...latest, items: visibleItems }
       const cursor: HistoryCursor | null = refreshed.complete && refreshed.newerComplete
         ? null
         : { path, ...refreshed, loading: false, loadId }
@@ -377,7 +392,6 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       storeTimelineCache(timelineCache.current, path, refreshed)
       // The exact snapshot is already on screen. Avoid a second replace action,
       // which would reset scroll position and look like another session load.
-      if (!keepVisibleCache) showTimeline(path, refreshed.items, refreshed.mode, preserveToolState)
       return
     }
 
@@ -693,7 +707,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       const cacheRevision = branchRevisions.current.get(sessionPath) ?? 0
       const cached = timelineCache.current.get(sessionPath)
       const restorableLimit = getViewportHistoryPageSize()
-      const restorableCache = cached && cached.items.length <= restorableLimit
+      // An empty projection cannot paint a cache restore or end the loading
+      // shell before the selected persisted branch has actually been read.
+      const restorableCache = cached && cached.items.length > 0 && cached.items.length <= restorableLimit
         && !(revertInFlight.current?.path === sessionPath && !revertInFlight.current.settled)
         ? cached
         : undefined

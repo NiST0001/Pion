@@ -46,7 +46,7 @@ import type {
   WireEntry,
   WireMessage
 } from '../../shared/types'
-import { messageText } from '../../shared/types'
+import { messageText, messageThinking, messageToolCalls } from '../../shared/types'
 import {
   deriveSessionTaskRuns,
   taskHistorySnapshotFromEntry,
@@ -3024,8 +3024,33 @@ export class AgentBridge {
       ? Math.min(Math.max(Math.trunc(before), 0), total)
       : total
     const pageSize = Math.min(Math.max(Math.trunc(limit) || 160, 1), 240)
-    const start = Math.max(0, end - pageSize)
-    const entries = result.entries.slice(start, end)
+    let sliceEnd = end
+    if (before === undefined) {
+      // Only the implicit latest window omits a non-displayable tail. Cursor
+      // positions remain physical branch-entry offsets: end still covers that
+      // tail, so omitted metadata does not look like another forward page.
+      while (sliceEnd > 0) {
+        const entry = result.entries[sliceEnd - 1]
+        if (entry.type === 'compaction' && typeof entry.summary === 'string') break
+        if (entry.type === 'message') {
+          const message = entry.message as unknown as WireMessage
+          if (message.role === 'user') break
+          if (message.role === 'assistant') {
+            const error = message.stopReason === 'error'
+              || (message.stopReason === undefined && typeof message.errorMessage === 'string'
+                && message.errorMessage.trim() !== ''
+                && !/^request (?:was )?aborted[.!]?$/i.test(message.errorMessage.trim()))
+            const rootCall = messageToolCalls(message).some((call) =>
+              typeof call.id === 'string' && typeof call.name === 'string'
+              && typeof (call as unknown as Record<string, unknown>).parentToolCallId !== 'string')
+            if (messageText(message) !== '' || messageThinking(message) !== '' || error || rootCall) break
+          }
+        }
+        sliceEnd--
+      }
+    }
+    const start = Math.max(0, sliceEnd - pageSize)
+    const entries = result.entries.slice(start, sliceEnd)
     const toolResults = filterToolResults(result.entries, toolCallIds(entries))
 
     return {

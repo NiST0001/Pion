@@ -3,9 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
+import type { SessionEntry } from '@earendil-works/pi-coding-agent'
 import type { BackendRecord } from '../../src/main/agent/types'
 import type { RunOperation } from '../../src/shared/operations'
-import type { SessionInfo, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
+import type { SessionEntriesPage, SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
 import { RunStore } from '../../src/main/run-store'
 import { SessionListCache } from '../../src/main/agent/session-list-cache'
 
@@ -27,6 +28,7 @@ interface BridgeHarness {
   sessionSelectionGeneration: number
   historyRevision: number
   getSessionInfo(): Promise<SessionInfo | null>
+  getEntriesPage(before?: number, limit?: number, sessionPath?: string): Promise<SessionEntriesPage | null>
 }
 const roots: string[] = []
 afterEach(async () => {
@@ -86,6 +88,108 @@ function deferred<T>() {
 async function dispatchGap() {
   for (let index = 0; index < 12; index += 1) await Promise.resolve()
 }
+
+describe('AgentBridge latest history window', () => {
+  // Wire-shaped fixtures enter at the SDK manager boundary; all parent links
+  // are explicit, so getEntriesPage still traverses the real selected branch.
+  async function history(records: Array<Partial<WireEntry>>, abandoned: WireEntry[] = []) {
+    const h = await harness()
+    const entries: WireEntry[] = records.map((record, index) => ({
+      type: 'custom', id: `entry-${index}`, parentId: index ? `entry-${index - 1}` : null,
+      timestamp: '2026-01-01T00:00:00.000Z', ...record
+    }))
+    const leafId = entries.at(-1)?.id ?? null
+    const path = join(h.backend.cwd, 'history.jsonl')
+    const open = vi.fn(async () => ({
+      getEntries: () => [...entries, ...abandoned] as unknown as SessionEntry[],
+      getLeafId: () => leafId
+    }))
+    Object.assign(h.bridge, {
+      resolveListedSession: vi.fn(async () => path), openCurrentSessionManager: open
+    })
+    return { entries, leafId, page: (before?: number, limit?: number) => h.bridge.getEntriesPage(before, limit, path) }
+  }
+
+  const metadataTail = () => Array.from({ length: 300 }, (_, index): Partial<WireEntry> =>
+    index % 2 ? { customType: 'usage', data: { tokens: index } } : {
+      type: 'message', message: { role: 'toolResult', toolCallId: 'call', toolName: 'read',
+        content: [{ type: 'text', text: 'result' }], isError: false, timestamp: index }
+    })
+
+  it('keeps bounded content and physical cursors while folding the full selected branch tail', async () => {
+    const records: Array<Partial<WireEntry>> = [
+      ...Array.from({ length: 270 }, (): Partial<WireEntry> => ({
+        type: 'message', message: { role: 'user', content: 'older', timestamp: 1 }
+      })),
+      { type: 'message', message: { role: 'assistant', content: [
+        { type: 'toolCall', id: 'call', name: 'read', arguments: { path: 'a.ts' } }
+      ], timestamp: 2 } },
+      ...metadataTail(),
+      { customType: 'plan-mode-state', data: { enabled: true } },
+      { customType: 'pion-task-state', data: { native: 'pion', tasks: [
+        { id: 1, subject: 'selected task', status: 'pending' }
+      ], nextId: 2 } }
+    ]
+    const h = await history(records, [{
+      type: 'message', id: 'abandoned', parentId: 'entry-0', timestamp: 'date',
+      message: { role: 'assistant', content: 'not selected' }
+    }])
+    const page = await h.page()
+    expect(page).toMatchObject({ start: 111, end: records.length, total: records.length,
+      leafId: h.leafId, mode: 'plan', taskSnapshot: [{ id: 1, title: 'selected task', status: 'pending' }] })
+    expect(page?.entries).toEqual(h.entries.slice(111, 271))
+    expect(page?.toolResults).toHaveLength(150)
+    expect(page?.toolResults.every((entry) => entry.message?.toolCallId === 'call')).toBe(true)
+    const capped = await h.page(undefined, 999)
+    expect(capped?.entries).toHaveLength(240)
+    expect(capped?.start).toBe(31)
+    expect(capped?.end).toBe(records.length)
+  })
+
+  it.each<WireMessage>([
+    { role: 'user', content: [{ type: 'image', data: 'AA==', mimeType: 'image/png' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
+    { role: 'assistant', content: [{ type: 'thinking', thinking: 'reasoning' }] },
+    { role: 'assistant', content: [], stopReason: 'error' },
+    { role: 'assistant', content: [], errorMessage: 'provider failed' }
+  ])('retains the last displayable message before empty assistants and metadata (%j)', async (message) => {
+    const h = await history([
+      { type: 'message', message },
+      { type: 'message', message: { role: 'assistant', content: [] } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'toolCall',
+        id: 'child', name: 'read', arguments: {}, parentToolCallId: 'parent' }] } },
+      ...metadataTail()
+    ])
+    expect(await h.page()).toMatchObject({ entries: [h.entries[0]], start: 0, end: 303, total: 303 })
+  })
+
+  it('retains compaction summaries, including an empty summary string', async () => {
+    const h = await history([{ type: 'compaction', summary: '' }, ...metadataTail()])
+    expect(await h.page()).toMatchObject({ entries: [h.entries[0]], start: 0, end: 301 })
+  })
+
+  it('returns successful empty windows for entirely non-displayable and genuinely empty branches', async () => {
+    for (const records of [[], metadataTail(), [
+      { type: 'custom_message', customType: 'notice', content: 'not a transcript row', display: true },
+      { type: 'model_change', provider: 'openai', modelId: 'model' },
+      { type: 'message', message: { role: 'assistant', content: [], stopReason: 'aborted', errorMessage: 'Request aborted' } },
+      { type: 'message', message: { role: 'assistant', content: [], stopReason: 'stop', errorMessage: 'stale failure' } }
+    ]] as Array<Array<Partial<WireEntry>>>) {
+      const h = await history(records)
+      expect(await h.page()).toMatchObject({ entries: [], toolResults: [], start: 0,
+        end: records.length, total: records.length, leafId: h.leafId })
+    }
+  })
+
+  it('preserves explicit physical paging, including non-finite numeric cursors', async () => {
+    const h = await history([{ type: 'message', message: { role: 'user', content: 'question' } }, ...metadataTail()])
+    for (const before of [0, 20, 301, 999, Infinity, NaN]) {
+      const end = Number.isFinite(before) ? Math.min(Math.max(Math.trunc(before), 0), 301) : 301
+      const start = Math.max(0, end - 160)
+      expect(await h.page(before)).toMatchObject({ entries: h.entries.slice(start, end), start, end, total: 301 })
+    }
+  })
+})
 
 describe('AgentBridge live session state', () => {
   it('forwards stable root identities shared by the snapshot without resending the prompt or mutating SDK messages', async () => {

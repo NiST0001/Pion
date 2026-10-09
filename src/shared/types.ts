@@ -194,7 +194,10 @@ export interface WireEntry {
 
 /** A bounded history window. Older windows are requested only when needed. */
 export interface SessionEntriesPage {
-  /** Entries in [start, end), ordered from oldest to newest. */
+  /** Entries within physical branch offsets [start, end), oldest first.
+   * The implicit latest window may omit a non-displayable metadata suffix;
+   * end still covers that suffix, and entries remain bounded by the limit.
+   */
   entries: WireEntry[]
   /** Tool results for calls in the page, including results outside its bounds. */
   toolResults: WireEntry[]

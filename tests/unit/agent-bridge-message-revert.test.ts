@@ -962,11 +962,15 @@ describe('AgentBridge conversation-only message revert', () => {
     await finishRestart(h)
     const ids = [...h.prefixIds, result.leafId]
     const lastPage = await h.bridge.getEntriesPage(undefined, 1, h.request.sessionPath)
-    expect(lastPage).toMatchObject({ start: ids.length - 1, end: ids.length, total: ids.length,
-      leafId: result.leafId, mode: 'plan', entries: [{ id: result.leafId }],
-      taskSnapshot: [{ id: 1, title: 'Kept task', status: 'completed' }] })
-    expect((await h.bridge.getEntriesPage())?.entries.map((entry) => entry.id)).toEqual(ids)
     const callEnd = h.prefixIds.indexOf(h.call) + 1
+    // Latest display omits the metadata/revert marker tail, without changing
+    // the selected leaf, physical bounds, task fold or explicit pagination.
+    expect(lastPage).toMatchObject({ start: callEnd - 1, end: ids.length, total: ids.length,
+      leafId: result.leafId, mode: 'plan', entries: [{ id: h.call }],
+      taskSnapshot: [{ id: 1, title: 'Kept task', status: 'completed' }] })
+    expect((await h.bridge.getEntriesPage())?.entries.map((entry) => entry.id)).toEqual(ids.slice(0, callEnd))
+    expect((await h.bridge.getEntriesPage(ids.length, 1, h.request.sessionPath))?.entries.map((entry) => entry.id))
+      .toEqual([result.leafId])
     const callPage = await h.bridge.getEntriesPage(callEnd, 1, h.request.sessionPath)
     expect(callPage?.entries.map((entry) => entry.id)).toEqual([h.call])
     expect(callPage?.toolResults.map((entry) => entry.id)).toEqual([h.keptResult, h.keptTasks])

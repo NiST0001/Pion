@@ -19,6 +19,8 @@ export interface ChatTimelineProps {
   onScroll: () => void
   timeline: TimelineItem[]
   timelineLoading: boolean
+  timelineError?: string
+  onReloadHistory?: () => void
   busy: boolean
   starting: boolean
   cwd?: string
@@ -46,6 +48,8 @@ export function ChatTimeline({
   onScroll,
   timeline,
   timelineLoading,
+  timelineError,
+  onReloadHistory,
   busy,
   starting,
   cwd,
@@ -89,6 +93,8 @@ export function ChatTimeline({
           cwd={cwd}
           starting={starting}
           loadingHistory={timelineLoading}
+          historyError={timelineError}
+          onReloadHistory={onReloadHistory}
           hasSessions={hasSessions}
         />
       ) : (
