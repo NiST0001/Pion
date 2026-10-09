@@ -75,6 +75,22 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   const expectedTimeline = useRef<{ path: string; items: TimelineItem[]; loadId?: number } | null>(null)
   const currentState = useRef(state)
   currentState.current = state
+  // A switch may finish in one React batch. Mirror only our queued status
+  // until the next render acknowledges dispatch order; never pin a cwd over
+  // a later authoritative status or an external project/session selection.
+  const queuedStatus = useRef<{ status: AgentState['status']; snapshot: AgentState['status'] } | null>(null)
+  const readStatus = useCallback((): AgentState['status'] => {
+    const queued = queuedStatus.current
+    // Task/cache updates may render before the queued status. Only a new
+    // status object acknowledges it (or proves a real external selection).
+    if (queued && currentState.current.status === queued.snapshot) return queued.status
+    queuedStatus.current = null
+    return currentState.current.status
+  }, [])
+  const selectStatus = useCallback((status: AgentState['status']): void => {
+    queuedStatus.current = { status, snapshot: currentState.current.status }
+    dispatch({ type: 'status', status })
+  }, [dispatch])
   // React may batch a complete switch (including cache/page actions) before
   // committing its clear. Capture the queued boundary, not only the last render.
   const scopeRevision = useRef(state.timelineScopeRevision)
@@ -97,16 +113,17 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   const readSelection = useCallback(() => {
     const previous = selectionRef.current
     const current = currentState.current
+    const status = readStatus()
     const session = current.session
     if (!timelineOwnerPath.current && session?.sessionFile && session.sessionId
-      && current.status.phase === 'running' && session !== invalidatedOwnerSnapshot.current) {
+      && status.phase === 'running' && session !== invalidatedOwnerSnapshot.current) {
       // Fresh sessions do not load history before their first live messages.
       // Establish ownership without replacing those rows, before consumers
       // capture the selection generation (in particular, before undo starts).
       timelineOwnerPath.current = session.sessionFile
     }
     const ownerPath = timelineOwnerPath.current
-    const cwd = current.status.cwd ?? previous.cwd
+    const cwd = status.cwd ?? previous.cwd
     const sameOwner = previous.ownerPath === ownerPath && previous.cwd === cwd
     // Backend restart/errors can temporarily clear state.session. They do not
     // select another conversation; retain its logical identity through gaps.
@@ -132,7 +149,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       }
     }
     return selectionRef.current
-  }, [])
+  }, [readStatus])
   const { ownerPath: logicalOwnerPath, sessionId: logicalSessionId } = readSelection()
   useEffect(() => () => {
     selectionRef.current = { ...selectionRef.current, generation: selectionRef.current.generation + 1 }
@@ -195,6 +212,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     // snapshot for each revisit so short and second-load sessions replay the
     // same restrained opacity cascade as a cold history load.
     const current = currentState.current
+    const status = readStatus()
     const sameOwnerBackend = current.liveSessionOwnerPath === path && current.liveSessionBackendId
       ? current.liveSessionBackendId === cached.liveSessionBackendId : undefined
     // The startup running-path query and selected metadata are not a display
@@ -203,8 +221,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     const liveBackendRetained = (current.runningSessionPaths.includes(path)
       || Boolean(cached.liveSessionBackendId))
       && sameOwnerBackend !== false
-      && (cached.cwd === undefined || cached.cwd === current.status.cwd)
-      && current.status.phase !== 'stopped' && current.status.phase !== 'error'
+      && (cached.cwd === undefined || cached.cwd === status.cwd)
+      && status.phase !== 'stopped' && status.phase !== 'error'
     const live = current.session?.liveState
     const hydratedSelection = Boolean(live && current.liveSessionOwnerPath === path
       && live.backendId === current.liveSessionBackendId
@@ -229,10 +247,10 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     // The accepted reducer/page result owns subsequent cache publication.
     if (cached.tasks !== undefined && cached.tasks !== null) dispatch({ type: 'cachedTasks', tasks: cached.tasks })
     showTimeline(path, items, revealedCache.mode, {
-      revision: scopeRevision.current, cwd: current.status.cwd, sessionPath: path
+      revision: scopeRevision.current, cwd: status.cwd, sessionPath: path
     }, cached.liveSessionBackendId, true)
     return true
-  }, [dispatch, showTimeline])
+  }, [dispatch, readStatus, showTimeline])
 
   // Fresh sessions may never have loaded a persisted page. Seed their cache
   // too, and capture synchronously before a switch clears the reducer so the
@@ -314,10 +332,19 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     // Only an actually paintable view may suppress the read shell or its error.
     // A cache restore can be queued in the same React batch as this read.
     // Inspect its accepted projection, not the source cache or the old render.
-    const displayedItems = path && expectedTimeline.current?.path === path
-      ? expectedTimeline.current.items : currentState.current.timeline
+    const readDisplayedItems = (): TimelineItem[] => {
+      if (path && expectedTimeline.current?.path === path) return expectedTimeline.current.items
+      const current = currentState.current
+      const displayedOwner = current.liveSessionOwnerPath ?? current.session?.sessionFile
+      // The logical owner can already be B while React still renders A. Those
+      // old rows cannot make B's empty cache look paintable or skip its page.
+      if (current.timelineScopeRevision !== scopeRevision.current) return []
+      const sameOwner = displayedOwner === undefined
+        ? timelineOwnerPath.current === path : displayedOwner === path
+      return path && sameOwner ? current.timeline : []
+    }
     const keepVisibleCache = Boolean(path && cached && timelineOwnerPath.current === path
-      && displayedItems.length > 0)
+      && readDisplayedItems().length > 0)
     if (refreshLive && path && api.getState) {
       const requestedBackendId = currentState.current.liveSessionBackendId
       // JSONL may have the same leaf/count while the retained backend has new
@@ -352,8 +379,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     }
     if (loadId !== timelineLoadId.current || revision !== scopeRevision.current
       || readSelection() !== selection) return
-    const visibleItems = path && expectedTimeline.current?.path === path
-      ? expectedTimeline.current.items : currentState.current.timeline
+    const visibleItems = readDisplayedItems()
     if (!page) {
       if (keepVisibleCache && visibleItems.length > 0) {
         console.warn('[pion] retained timeline revalidation failed; keeping cached view:', path)
@@ -696,16 +722,24 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   )
 
   const switchSession = useCallback(
-    async (sessionPath: string): Promise<{ cancelled: boolean }> => {
+    async (sessionPath: string, targetCwd?: string): Promise<{ cancelled: boolean }> => {
       if (!api) return { cancelled: true }
       readSelection()
       cacheCurrentTimeline()
-      invalidateSelection()
+      const previousStatus = readStatus()
       const previousPath = timelineOwnerPath.current
       const previousCached = previousPath ? timelineCache.current.get(previousPath) : undefined
       const previousRevision = previousPath ? branchRevisions.current.get(previousPath) ?? 0 : 0
+      invalidateSelection()
       const cacheRevision = branchRevisions.current.get(sessionPath) ?? 0
       const cached = timelineCache.current.get(sessionPath)
+      // App already knows the selected worktree. Legacy callers may use local
+      // exact-path evidence, but an unknown target must not claim A's cwd as B.
+      const listedCwd = Object.values(currentState.current.sessionsByProject)
+        .flat().find((session) => session.path === sessionPath && session.projectCwd)?.projectCwd
+      // A cache from another cwd is not independent selection evidence.
+      const selectedCwd = targetCwd ?? listedCwd
+        ?? (cached?.cwd === previousStatus.cwd ? cached?.cwd : undefined)
       const restorableLimit = getViewportHistoryPageSize()
       // An empty projection cannot paint a cache restore or end the loading
       // shell before the selected persisted branch has actually been read.
@@ -722,6 +756,10 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       timelineOwnerPath.current = sessionPath
       expectedTimeline.current = null
       dispatch({ type: 'historyIndex', index: null })
+      // Register B's cwd before clearing/painting or reading its page. Waiting
+      // for the backend's READY/STARTING would capture an A-scoped replacement
+      // and discard a valid B response when that same selection becomes ready.
+      if (selectedCwd !== undefined) selectStatus({ phase: 'starting', cwd: selectedCwd })
       clearTimeline(sessionPath)
       dispatch({ type: 'timelineLoading', loading: true })
 
@@ -738,11 +776,17 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       }
 
       const restorePreviousTimeline = (): void => {
-        if (!(previousPath && previousCached && restoreCachedTimeline(previousPath, previousCached, previousRevision))) {
-          historyCursor.current = null
-          timelineOwnerPath.current = previousPath
-          expectedTimeline.current = null
-          clearTimeline(previousPath)
+        // Cancellation restores both the directory/phase and the transcript
+        // scope before its cache action. The queued mirror also covers a
+        // cancel+restore that React has not painted yet; B must not scope A.
+        selectStatus(previousStatus)
+        historyCursor.current = null
+        timelineOwnerPath.current = previousPath
+        expectedTimeline.current = null
+        clearTimeline(previousPath)
+        if (previousPath && previousCached && previousCached.items.length > 0
+          && previousCached.items.length <= restorableLimit) {
+          restoreCachedTimeline(previousPath, previousCached, previousRevision)
         }
       }
 
@@ -803,7 +847,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       await refreshHistoryIndex(sessionPath)
       return result
     },
-    [api, cacheCurrentTimeline, clearTimeline, invalidateSelection, readSelection, refreshHistoryIndex, reloadTimeline, restoreCachedTimeline]
+    [api, cacheCurrentTimeline, clearTimeline, invalidateSelection, readSelection, readStatus,
+      refreshHistoryIndex, reloadTimeline, restoreCachedTimeline, selectStatus]
   )
 
   const jumpToHistoryLandmark = useCallback(async (landmark: HistoryLandmark): Promise<void> => {

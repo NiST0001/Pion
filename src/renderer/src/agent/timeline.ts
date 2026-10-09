@@ -10,7 +10,7 @@ import type {
   WireEntry,
   WireMessage
 } from '../../../shared/types'
-import { messageImages, messageText, messageThinking, messageToolCalls } from '../../../shared/types'
+import { messageImages, messageText, messageThinking, messageToolCalls, messageTimestamp } from '../../../shared/types'
 import { collectToolImages } from '../../../shared/tool-images'
 import {
   CODEX_IMAGE_REQUEST_ALIAS,
@@ -288,12 +288,7 @@ export function assistantErrorText(message: WireMessage | undefined | null): str
 }
 
 export function wireMessageTimestamp(message: WireMessage | undefined | null): number | undefined {
-  const raw = message?.timestamp
-  const timestamp = typeof raw === 'number' ? raw
-    : typeof raw === 'string' && raw.trim() !== ''
-      ? (/^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : Date.parse(raw)) : undefined
-  return timestamp !== undefined && Number.isFinite(timestamp) && timestamp > 0
-    ? timestamp : undefined
+  return messageTimestamp(message)
 }
 
 export function compactionFingerprint(value: unknown): string | undefined {

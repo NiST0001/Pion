@@ -224,18 +224,20 @@
   transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease, outline-color 0.12s ease;
 }
 
-/* Keep the running light in the right padding, clear of names, stars and drag grips. */
+/* A complete rounded running halo breathes together, without an orbiting spot.
+   Mask only this decoration, never the row's text, controls or floating menus. */
 .side-session.running::before {
   content: '';
   position: absolute;
-  right: 2px;
-  top: 50%;
-  margin-top: -2.5px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: inherit;
   pointer-events: none;
   background: var(--accent-strong);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
   opacity: 1;
   animation: side-session-breathe 2.6s ease-in-out infinite;
 }
@@ -258,7 +260,11 @@
 
 @media (forced-colors: active) {
   .side-session.running::before {
-    background: Highlight;
+    background: none;
+    -webkit-mask: none;
+    mask: none;
+    padding: 0;
+    border: 1.5px solid Highlight;
     animation: none;
     opacity: 1;
   }

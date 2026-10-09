@@ -11,6 +11,150 @@ function applyEvent(state: AgentState, event: WireEventInput): AgentState {
   return reducer(state, { type: 'event', event })
 }
 
+describe('selected history acceptance state', () => {
+  const cwd = '/workspace'
+  const path = '/sessions/selected.jsonl'
+  const timestamp = 1780000000000
+  const item: AgentState['timeline'][number] = Object.freeze({
+    kind: 'user', id: 810, entryId: 'accepted-history', messageTimestamp: timestamp,
+    text: 'history fixture', historical: true, noReveal: true
+  })
+  const selected = (): AgentState => reducer({ ...initialState, status: { phase: 'running', cwd } }, {
+    type: 'clearTimeline', sessionPath: path
+  })
+  const scope = (state: AgentState) => ({ revision: state.timelineScopeRevision, cwd, sessionPath: path })
+
+  it('reports an unaccepted history read after queued STATUS changes cwd without weakening the scope guard', () => {
+    let reading = applyEvent(selected(), { type: 'queue_update', steering: ['steer'], followUp: ['follow-up'], nativeFollowUpCount: 1 })
+    reading = { ...reading, tasks: [], taskRevision: 4, taskResultIds: ['retained-task'] }
+    reading = reducer(reading, { type: 'timelineLoading', loading: true })
+    const capturedScope = scope(reading)
+    const changed = reducer(reading, { type: 'status', status: { phase: 'running', cwd: '/other-workspace' } })
+    const rejected = reducer(changed, { type: 'loadEntries', items: [item], loadId: 17, preserveToolState: capturedScope })
+    expect(rejected).toBe(changed)
+    expect(rejected.timelineLoadId).toBe(reading.timelineLoadId)
+    expect(rejected).toMatchObject({ timelineReady: false, timelineLoading: true, timeline: [] })
+
+    const closed = reducer(rejected, { type: 'timelineLoading', loading: false })
+    expect(closed).toMatchObject({ timelineReady: false, timelineLoading: false,
+      timelineError: '会话历史未载入，请重新加载。', historyRevealRestorePending: true })
+    expect(closed.queued).toBe(reading.queued)
+    expect(closed.queuedMessages).toBe(reading.queuedMessages)
+    expect(closed.tasks).toBe(reading.tasks)
+    expect(closed.taskRevision).toBe(4)
+    expect(closed.taskResultIds).toBe(reading.taskResultIds)
+    expect(closed.timelineMutation).toBe(reading.timelineMutation)
+    expect(item).toMatchObject({ messageTimestamp: timestamp, noReveal: true })
+  })
+
+  it('marks an accepted nonempty history page ready and retains readiness during same-scope loading', () => {
+    const reading = reducer(selected(), { type: 'timelineLoading', loading: true })
+    const loaded = reducer(reading, { type: 'loadEntries', items: [item], loadId: 18, preserveToolState: scope(reading) })
+    expect(loaded).toMatchObject({ timelineReady: true, timelineLoading: false, timelineLoadId: 18 })
+    expect(loaded.timelineError).toBeUndefined()
+    expect(loaded.timeline[0]).toBe(item)
+    expect(loaded.timeline[0]).toMatchObject({ messageTimestamp: timestamp, historical: true, noReveal: true })
+    expect(loaded.historyRevealRestorePending).toBe(reading.historyRevealRestorePending)
+    const reloading = reducer(loaded, { type: 'timelineLoading', loading: true })
+    expect(reloading.timelineReady).toBe(true)
+    expect(reloading.timeline).toBe(loaded.timeline)
+    const closed = reducer(reloading, { type: 'timelineLoading', loading: false })
+    expect(closed.timelineReady).toBe(true)
+    expect(closed.timelineError).toBeUndefined()
+  })
+
+  it('marks a scoped nonempty cache restore ready without mutating cached timestamps or reveal flags', () => {
+    const reading = reducer(selected(), { type: 'timelineLoading', loading: true })
+    const restored = reducer(reading, { type: 'loadEntries', items: [item], replayHistory: true,
+      loadId: 19, preserveToolState: scope(reading) })
+    expect(restored).toMatchObject({ timelineReady: true, timelineLoading: false, timelineLoadId: 19 })
+    expect(restored.timeline[0]).toMatchObject({ id: item.id, messageTimestamp: timestamp, historical: true, noReveal: false })
+    expect(item).toMatchObject({ messageTimestamp: timestamp, historical: true, noReveal: true })
+  })
+
+  it('accepts a genuinely empty branch even when SDK metadata counts other physical messages', () => {
+    let reading = reducer(selected(), { type: 'timelineLoading', loading: true })
+    reading = reducer(reading, { type: 'session', session: {
+      sessionId: 'selected', sessionFile: path, messageCount: 2090, isStreaming: false
+    } })
+    const loaded = reducer(reading, { type: 'loadEntries', items: [], loadId: 20, preserveToolState: scope(reading) })
+    expect(loaded).toMatchObject({ timeline: [], timelineReady: true, timelineLoading: false, timelineLoadId: 20 })
+    expect(reducer(loaded, { type: 'timelineLoading', loading: false }).timelineError).toBeUndefined()
+    expect(loaded.historyRevealRestorePending).toBe(reading.historyRevealRestorePending)
+  })
+
+  it('does not treat an empty cache projection as an accepted empty branch or clear its read failure', () => {
+    const reading = reducer(selected(), { type: 'timelineLoading', loading: true })
+    const restore = { type: 'loadEntries' as const, items: [], replayHistory: true, preserveToolState: scope(reading) }
+    const restored = reducer(reading, restore)
+    expect(restored).toMatchObject({ timelineReady: false, timelineLoading: true, timeline: [] })
+    expect(reducer(restored, { type: 'timelineLoading', loading: false }).timelineError).toBe('会话历史未载入，请重新加载。')
+    const failed = reducer(reading, { type: 'timelineError', error: '保留读取诊断' })
+    expect(reducer(failed, restore)).toMatchObject({ timelineReady: false, timelineError: '保留读取诊断' })
+  })
+
+  it('resets acceptance on clear and leaves a fresh conversation without an owner free of history errors', () => {
+    expect(initialState.timelineReady).toBe(false)
+    const loaded = reducer(selected(), { type: 'loadEntries', items: [] })
+    expect(reducer(loaded, { type: 'clearTimeline', sessionPath: '/sessions/next.jsonl' }).timelineReady).toBe(false)
+    const fresh = reducer(loaded, { type: 'clearTimeline' })
+    expect(fresh).toMatchObject({ timelineReady: false, timeline: [] })
+    expect(fresh.liveSessionOwnerPath).toBeUndefined()
+    const reading = reducer(fresh, { type: 'timelineLoading', loading: true })
+    const closed = reducer(reading, { type: 'timelineLoading', loading: false })
+    expect(closed.timelineReady).toBe(false)
+    expect(closed.timelineError).toBeUndefined()
+  })
+
+  it('preserves the original history diagnostic when the loading shell closes', () => {
+    const reading = reducer(selected(), { type: 'timelineLoading', loading: true })
+    const failed = reducer(reading, { type: 'timelineError', error: '保留读取诊断' })
+    expect(reducer(failed, { type: 'timelineLoading', loading: false }).timelineError).toBe('保留读取诊断')
+    const withDiagnostic = { ...reading, timelineError: '原始读取诊断' }
+    expect(reducer(withDiagnostic, { type: 'timelineLoading', loading: false }).timelineError).toBe('原始读取诊断')
+  })
+
+  it.each([0, 2090])('does not infer history acceptance from empty STATE metadata or runtime lifecycle (messageCount: %s)', (messageCount) => {
+    const reading = reducer(selected(), { type: 'timelineLoading', loading: true })
+    let state = reducer(reading, { type: 'session', session: {
+      sessionId: 'selected', sessionFile: path, messageCount, isStreaming: false,
+      liveState: { backendId: 'selected-backend', revision: 1, cwd, sessionPath: path, events: [] }
+    } })
+    expect(state).toMatchObject({ timelineReady: false, timelineLoading: true, timeline: [] })
+    state = applyEvent(state, { type: 'agent_start', _pionLive: {
+      backendId: 'selected-backend', revision: 2, cwd, sessionPath: path
+    } })
+    expect(state).toMatchObject({ timelineReady: false, busy: true })
+    state = applyEvent(state, { type: 'agent_settled', _pionLive: {
+      backendId: 'selected-backend', revision: 3, cwd, sessionPath: path
+    } })
+    expect(state).toMatchObject({ timelineReady: false, busy: false })
+    expect(reducer(state, { type: 'timelineLoading', loading: false }).timelineError).toBe('会话历史未载入，请重新加载。')
+  })
+
+  it('keeps partial live output and working status without using it as historical acceptance', () => {
+    let state = reducer(selected(), { type: 'timelineLoading', loading: true })
+    state = applyEvent(state, { type: 'agent_start' })
+    state = applyEvent(state, { type: 'message_start', message: { role: 'assistant', timestamp, content: [] } })
+    state = applyEvent(state, { type: 'message_update', usage: null, assistantMessageEvent: { type: 'text_delta', delta: 'live fixture' } })
+    const closed = reducer(state, { type: 'timelineLoading', loading: false })
+    expect(closed).toMatchObject({ timelineReady: false, busy: true, timelineError: '会话历史未载入，请重新加载。' })
+    expect(closed.timeline).toBe(state.timeline)
+    expect(closed.timeline[0]).toMatchObject({ text: 'live fixture', streaming: true, messageTimestamp: timestamp })
+    expect(deriveWorkingStatus(closed).label).toBe('组织回复中...')
+  })
+
+  it('rejects stale history after a clear without acknowledging its load ID or closing another scope', () => {
+    const reading = reducer(selected(), { type: 'timelineLoading', loading: true })
+    const next = reducer(reading, { type: 'clearTimeline', sessionPath: '/sessions/next.jsonl' })
+    expect(reducer(next, { type: 'loadEntries', items: [item], loadId: 21, preserveToolState: scope(reading) })).toBe(next)
+    const unchanged = reducer(next, { type: 'timelineLoading', loading: false })
+    expect(unchanged).toMatchObject({ timelineReady: false, timelineLoading: false, timeline: [] })
+    expect(unchanged.timelineLoadId).toBe(next.timelineLoadId)
+    expect(unchanged.timelineError).toBeUndefined()
+  })
+})
+
 describe('user message identity reconciliation', () => {
   const cwd = '/workspace'
   const path = '/sessions/a'

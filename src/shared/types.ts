@@ -140,6 +140,16 @@ export interface WireMessage {
   [key: string]: unknown
 }
 
+/** Normalize only an actual SDK message clock; never synthesize append time. */
+export function messageTimestamp(message: WireMessage | undefined | null): number | undefined {
+  const raw = message?.timestamp
+  const timestamp = typeof raw === 'number' ? raw
+    : typeof raw === 'string' && raw.trim() !== ''
+      ? (/^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : Date.parse(raw)) : undefined
+  return timestamp !== undefined && Number.isFinite(timestamp) && timestamp > 0
+    ? timestamp : undefined
+}
+
 export interface WireAssistantMessageEvent {
   type: string
   delta?: string
@@ -257,6 +267,10 @@ export interface HistoryLandmark {
   ordinal: number
   snippet: string
   responseSnippet?: string
+  /** SDK message clock, distinct from the entry append clock below.
+   * Display-only identity bridge; never a substitute for entryId on mutations.
+   */
+  messageTimestamp?: number
   timestamp: string
 }
 

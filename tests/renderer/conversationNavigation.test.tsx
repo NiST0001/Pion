@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
-import { act, renderHook } from '@testing-library/react'
+import { act, render, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useConversationNavigation } from '../../src/renderer/src/hooks/useConversationNavigation'
 import type { TimelineItem } from '../../src/renderer/src/agent/types'
+import type { SessionHistoryIndex } from '../../src/shared/types'
+import { ChatMessage } from '../../src/renderer/src/features/chat/ChatMessage'
+import { HistoryNavigator } from '../../src/renderer/src/features/session/HistoryNavigator'
 
-vi.mock('../../src/renderer/src/utils/historyReveal', () => ({ armPendingHistoryRevealRows: vi.fn() }))
+vi.mock('../../src/renderer/src/utils/historyReveal', () => ({ armPendingHistoryRevealRows: vi.fn(), armHistoryRevealRow: vi.fn() }))
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren() })
 
 function markerFixture() {
@@ -63,6 +66,84 @@ function markerFixture() {
 }
 
 describe('conversation navigation', () => {
+  it('tracks the real mounted live turn without an entry ID, including a late same-session index and running response', () => {
+    const f = markerFixture()
+    const content = f.element.querySelector<HTMLElement>('.timeline')!
+    content.replaceChildren()
+    const surface = document.createElement('div')
+    f.element.replaceChildren(surface)
+    surface.append(content)
+    f.result.current.scrollSurfaceRef.current = surface
+    Object.defineProperty(content, 'offsetHeight', { get: () => 3000 })
+    surface.getBoundingClientRect = () => ({ height: 3000 } as DOMRect)
+    const previous: Extract<TimelineItem, { kind: 'user' }> = {
+      kind: 'user', id: 100, entryId: 'previous', text: 'same text', messageTimestamp: 4000
+    }
+    const latest: Extract<TimelineItem, { kind: 'user' }> = {
+      kind: 'user', id: 101, liveMessageId: 'backend:2', text: 'same text', messageTimestamp: 5000
+    }
+    const answer: Extract<TimelineItem, { kind: 'assistant' }> = {
+      kind: 'assistant', id: 102, text: '', thinking: 'working', streaming: true
+    }
+    render(<><ChatMessage item={previous} canFork={false} />
+      <ChatMessage item={latest} canFork={false} />
+      <ChatMessage item={answer} canFork={false} /></>, { container: content })
+    const rows = [...content.querySelectorAll<HTMLElement>('.row-user')]
+    rows[0].getBoundingClientRect = () => ({ top: 2700 - f.element.scrollTop } as DOMRect)
+    rows[1].getBoundingClientRect = () => ({ top: 2950 - f.element.scrollTop } as DOMRect)
+    expect(rows[1].dataset.entryId).toBeUndefined()
+    const timeline: TimelineItem[] = [previous, latest, answer,
+      { kind: 'tool', id: 103, tool: { id: 'working', name: 'read', status: 'running', isError: false } }]
+    f.element.scrollTop = 2600
+    const scrollWrite = vi.spyOn(f.element, 'scrollTop', 'set')
+    const oldIndex: SessionHistoryIndex = { sessionPath: '/a', totalEntries: 4, landmarks: [
+      { entryId: 'previous', entryIndex: 0, ordinal: 1, snippet: 'same text', timestamp: 'append clock', messageTimestamp: 4000 }
+    ] }
+    f.rerender({ ...f.options, busy: true, timeline, historyIndex: oldIndex })
+    f.flush()
+    // A latest mounted row without a persisted locator must not mark N-1.
+    expect(f.result.current.visibleHistoryEntryId).toBeUndefined()
+    const index: SessionHistoryIndex = { ...oldIndex, totalEntries: 8, landmarks: [
+      ...oldIndex.landmarks,
+      { entryId: 'latest', entryIndex: 4, ordinal: 2, snippet: 'same text', timestamp: 'different append clock', messageTimestamp: 5000 },
+      { entryId: 'unmounted', entryIndex: 7, ordinal: 3, snippet: 'later unseen', timestamp: '', messageTimestamp: 6000 }
+    ] }
+    // Only the index changes, not its session path or the mounted messages.
+    f.rerender({ ...f.options, busy: true, timeline, historyIndex: index })
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('latest')
+    const bar = render(<HistoryNavigator index={index} activeEntryId={f.result.current.visibleHistoryEntryId}
+      busy onJump={vi.fn()} />)
+    expect(bar.container.querySelector<HTMLElement>('.history-navigator-marker.active')?.dataset.entryId).toBe('latest')
+    f.rerender({ ...f.options, busy: true, timeline: [previous, latest, { ...answer, thinking: 'working longer' }, timeline[3]], historyIndex: index })
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('latest')
+    expect(rows[1].dataset.entryId).toBeUndefined() // navigation does not invent undo/fork identity
+    expect(scrollWrite).not.toHaveBeenCalled()
+    expect(f.options.loadOlder).not.toHaveBeenCalled()
+    expect(f.options.loadNewer).not.toHaveBeenCalled()
+  })
+
+  it.each(['missing clock', 'duplicate index clock', 'duplicate row clock', 'claimed entry', 'wrong session', 'append clock only'] as const)(
+    'does not guess the latest mounted user marker from %s', (reason) => {
+      const f = markerFixture()
+      const latest = f.rows[1]
+      delete latest.dataset.entryId
+      if (reason !== 'missing clock') latest.dataset.userMessageTime = '5000'
+      if (reason === 'duplicate row clock') f.rows[0].dataset.userMessageTime = '5000'
+      if (reason === 'claimed entry') f.rows[0].dataset.entryId = 'latest'
+      const index: SessionHistoryIndex = { sessionPath: reason === 'wrong session' ? '/other' : '/a', totalEntries: 3, landmarks: [
+        { entryId: 'latest', entryIndex: 1, ordinal: 1, snippet: 'text', timestamp: '5000',
+          ...(reason === 'append clock only' ? {} : { messageTimestamp: 5000 }) },
+        ...(reason === 'duplicate index clock' ? [{ entryId: 'conflict', entryIndex: 2, ordinal: 2, snippet: 'text', timestamp: '', messageTimestamp: 5000 }] : [])
+      ] }
+      f.element.scrollTop = 2600
+      f.rerender({ ...f.options, historyIndex: index })
+      f.flush()
+      expect(f.result.current.visibleHistoryEntryId).toBeUndefined()
+    }
+  )
+
   it('marks the last mounted short turn at the session end without moving or resuming follow', () => {
     const f = markerFixture()
     f.positions[0] = 2750

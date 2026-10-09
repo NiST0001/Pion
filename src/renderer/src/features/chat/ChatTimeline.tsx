@@ -19,6 +19,9 @@ export interface ChatTimelineProps {
   onScroll: () => void
   timeline: TimelineItem[]
   timelineLoading: boolean
+  /** Undefined retains compatibility with callers that do not track history acceptance. */
+  timelineReady?: boolean
+  historySelected?: boolean
   timelineError?: string
   onReloadHistory?: () => void
   busy: boolean
@@ -48,6 +51,8 @@ export function ChatTimeline({
   onScroll,
   timeline,
   timelineLoading,
+  timelineReady,
+  historySelected = false,
   timelineError,
   onReloadHistory,
   busy,
@@ -94,6 +99,7 @@ export function ChatTimeline({
           starting={starting}
           loadingHistory={timelineLoading}
           historyError={timelineError}
+          historyUnloaded={historySelected && timelineReady === false}
           onReloadHistory={onReloadHistory}
           hasSessions={hasSessions}
         />

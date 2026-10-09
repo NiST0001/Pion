@@ -180,6 +180,8 @@ export interface AgentState {
   /** Acknowledges a history replacement whose reducer projection may differ. */
   timelineLoadId: number
   timelineMutation: 'replace' | 'prepend' | 'history-append' | 'append' | null
+  /** A scoped history read or nonempty cache was accepted; live metadata is not history. */
+  timelineReady: boolean
   timelineLoading: boolean
   timelineError?: string
   busy: boolean
@@ -218,6 +220,7 @@ export const initialState: AgentState = {
   timelineScopeRevision: 0,
   timelineLoadId: 0,
   timelineMutation: null,
+  timelineReady: false,
   timelineLoading: false,
   busy: false,
   compacting: false,

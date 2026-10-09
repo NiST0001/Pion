@@ -6,7 +6,7 @@ import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import type { SessionEntry } from '@earendil-works/pi-coding-agent'
 import type { BackendRecord } from '../../src/main/agent/types'
 import type { RunOperation } from '../../src/shared/operations'
-import type { SessionEntriesPage, SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
+import type { SessionEntriesPage, SessionHistoryIndex, SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
 import { RunStore } from '../../src/main/run-store'
 import { SessionListCache } from '../../src/main/agent/session-list-cache'
 
@@ -29,6 +29,7 @@ interface BridgeHarness {
   historyRevision: number
   getSessionInfo(): Promise<SessionInfo | null>
   getEntriesPage(before?: number, limit?: number, sessionPath?: string): Promise<SessionEntriesPage | null>
+  getHistoryIndex(sessionPath?: string): Promise<SessionHistoryIndex | null>
 }
 const roots: string[] = []
 afterEach(async () => {
@@ -102,13 +103,29 @@ describe('AgentBridge latest history window', () => {
     const path = join(h.backend.cwd, 'history.jsonl')
     const open = vi.fn(async () => ({
       getEntries: () => [...entries, ...abandoned] as unknown as SessionEntry[],
+      getBranch: () => entries as unknown as SessionEntry[],
       getLeafId: () => leafId
     }))
     Object.assign(h.bridge, {
       resolveListedSession: vi.fn(async () => path), openCurrentSessionManager: open
     })
-    return { entries, leafId, page: (before?: number, limit?: number) => h.bridge.getEntriesPage(before, limit, path) }
+    return { entries, leafId, page: (before?: number, limit?: number) => h.bridge.getEntriesPage(before, limit, path),
+      index: () => h.bridge.getHistoryIndex(path) }
   }
+
+  it.each([
+    [5000, 5000], ['5000', 5000], ['2026-01-01T00:00:00.000Z', Date.parse('2026-01-01T00:00:00.000Z')],
+    [undefined, undefined], ['', undefined], [0, undefined], [NaN, undefined], [Infinity, undefined], ['invalid', undefined]
+  ])('indexes the actual message clock independently of entry append time (%j)', async (clock, expected) => {
+    const h = await history([{ type: 'message', timestamp: '2030-01-01T00:00:00.000Z',
+      message: { role: 'user', content: 'synthetic', timestamp: clock } }])
+    const index = await h.index()
+    expect(index?.landmarks).toHaveLength(1)
+    expect(index?.landmarks[0]).toMatchObject({ entryId: 'entry-0', ordinal: 1,
+      timestamp: '2030-01-01T00:00:00.000Z' })
+    expect(index?.landmarks[0].messageTimestamp).toBe(expected)
+    expect(h.entries[0].message?.timestamp).toBe(clock)
+  })
 
   const metadataTail = () => Array.from({ length: 300 }, (_, index): Partial<WireEntry> =>
     index % 2 ? { customType: 'usage', data: { tokens: index } } : {

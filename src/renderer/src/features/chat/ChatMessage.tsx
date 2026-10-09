@@ -93,8 +93,23 @@ export const ChatMessage = memo(function ChatMessage({
 
   if (item.kind === 'user') {
     const entryId = item.entryId
+    // A live user can be persisted before its SDK entry ID reaches the UI.
+    // These are display-only locators, never fork/undo identities. In
+    // particular, item.timestamp is the entry's separate append-time clock.
+    const liveMessageId = typeof item.liveMessageId === 'string'
+      && item.liveMessageId.length > 0 && item.liveMessageId.length <= 512
+      ? item.liveMessageId : undefined
+    const messageTimestamp = typeof item.messageTimestamp === 'number'
+      && Number.isFinite(item.messageTimestamp) && item.messageTimestamp > 0
+      ? item.messageTimestamp : undefined
     return (
-      <div ref={rowRef} className={`row row-user${item.historical ? ' history-reveal' : ''}`} data-entry-id={item.entryId}>
+      <div
+        ref={rowRef}
+        className={`row row-user${item.historical ? ' history-reveal' : ''}`}
+        data-entry-id={entryId}
+        data-live-message-id={liveMessageId}
+        data-user-message-time={messageTimestamp}
+      >
         <div
           className={`bubble bubble-user${revealSuppressed ? '' : ` ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${item.historical ? SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS : SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS}`}`}
           ref={revealSuppressed ? undefined : assignLineRevealDelay}

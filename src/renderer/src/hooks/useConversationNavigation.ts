@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import type { AgentState, TimelineItem } from '../agent/types'
+import type { SessionHistoryIndex } from '../../../shared/types'
 import { armPendingHistoryRevealRows } from '../utils/historyReveal'
 import { consumedInside, useHistoryPaging } from './useHistoryPaging'
 
@@ -18,6 +19,7 @@ interface UseConversationNavigationOptions {
   projectCwd?: string
   sessionPath?: string
   historyIndexSessionPath?: string
+  historyIndex?: SessionHistoryIndex | null
   historyJump: AgentState['historyJump']
   /** Explicit same-session branch replacement (undo), not an ordinary reload. */
   historyResetRevision?: number
@@ -45,6 +47,7 @@ export function useConversationNavigation({
   projectCwd,
   sessionPath,
   historyIndexSessionPath,
+  historyIndex,
   historyJump,
   historyResetRevision = 0,
   panelsVisible,
@@ -53,6 +56,8 @@ export function useConversationNavigation({
   hasNewerHistory = noNewerHistory
 }: UseConversationNavigationOptions) {
   const [visibleHistoryEntryId, setVisibleHistoryEntryId] = useState<string | undefined>()
+  const historyIdentity = useRef({ sessionPath, index: historyIndex })
+  historyIdentity.current = { sessionPath, index: historyIndex }
   const historyScrollFrame = useRef<number | null>(null)
   const highlightedHistoryRow = useRef<HTMLElement | null>(null)
   const historyHighlightTimer = useRef<number | null>(null)
@@ -113,7 +118,23 @@ export function useConversationNavigation({
       setVisibleHistoryEntryId(explicitHistoryEntry.current)
       return
     }
-    const rows = [...container.querySelectorAll<HTMLElement>('.row-user[data-entry-id]')]
+    // The last live turn may already be persisted/indexed while its SDK entry
+    // ID has not reached the message row. Do not silently omit that user row.
+    const rows = [...container.querySelectorAll<HTMLElement>('.row-user')]
+    const entryForRow = (row: HTMLElement | undefined): string | undefined => {
+      if (!row) return undefined
+      if (row.dataset.entryId) return row.dataset.entryId
+      const time = Number(row.dataset.userMessageTime)
+      const { sessionPath: selectedPath, index } = historyIdentity.current
+      if (!Number.isFinite(time) || time <= 0 || !selectedPath || index?.sessionPath !== selectedPath) return undefined
+      // This is a display-only bridge, never a fork/undo identity. Both clocks
+      // must be actual message clocks and unique; append time/text/ordinal are
+      // not substitutes. Conflicting known row IDs also rule out the bridge.
+      if (rows.filter((other) => Number(other.dataset.userMessageTime) === time).length !== 1) return undefined
+      const matches = index.landmarks.filter((mark) => mark.messageTimestamp === time)
+      if (matches.length !== 1 || rows.some((other) => other !== row && other.dataset.entryId === matches[0].entryId)) return undefined
+      return matches[0].entryId
+    }
     const content = container.querySelector<HTMLElement>('.timeline')
     const hasBlankTail = reservedHeight.current > 0
       && (!content || reservedHeight.current > content.offsetHeight + 1)
@@ -124,7 +145,7 @@ export function useConversationNavigation({
     // A loading/min-height placeholder or a paged window's end is not that end.
     if (rows.length > 0 && atScrollEnd(container) && !hasNewerHistory()
       && !loadingRef.current && !hasBlankTail) {
-      setVisibleHistoryEntryId(rows[rows.length - 1].dataset.entryId)
+      setVisibleHistoryEntryId(entryForRow(rows[rows.length - 1]))
       return
     }
     const anchor = historyAnchor(container)
@@ -136,7 +157,7 @@ export function useConversationNavigation({
       if (row.getBoundingClientRect().top > anchor) break
       active = row
     }
-    setVisibleHistoryEntryId(active?.dataset.entryId)
+    setVisibleHistoryEntryId(entryForRow(active))
   }, [scrollRef, hasNewerHistory])
 
   const scheduleVisibleHistoryUpdate = useCallback((): void => {
@@ -345,7 +366,7 @@ export function useConversationNavigation({
 
   useEffect(() => {
     scheduleVisibleHistoryUpdate()
-  }, [scheduleVisibleHistoryUpdate, projectCwd, sessionPath, timeline, timelineLoading, historyResetRevision, historyIndexSessionPath, panelsVisible])
+  }, [scheduleVisibleHistoryUpdate, projectCwd, sessionPath, timeline, timelineLoading, historyResetRevision, historyIndexSessionPath, historyIndex, panelsVisible])
 
   useLayoutEffect(() => {
     const jump = historyJump

@@ -277,6 +277,9 @@ export function reducer(state: AgentState, action: Action): AgentState {
           || legacyAssistantBridge(item, row))
         return cached ? { ...item, historical: true, noReveal: false } : item
       }) : merged
+      // Empty cache projections cannot prove an empty persisted branch. An
+      // accepted disk read can, without consulting SDK/list message counts.
+      const acceptedHistory = !action.replayHistory || action.items.length > 0
       const loaded: AgentState = {
         ...state,
         timeline,
@@ -284,8 +287,9 @@ export function reducer(state: AgentState, action: Action): AgentState {
         timelineLoadId: action.loadId ?? state.timelineLoadId,
         mode: action.mode ?? state.mode,
         timelineMutation: 'replace',
-        timelineLoading: false,
-        timelineError: undefined,
+        timelineReady: state.timelineReady || acceptedHistory,
+        timelineLoading: acceptedHistory ? false : state.timelineLoading,
+        timelineError: acceptedHistory ? undefined : state.timelineError,
         // History replacement must not erase a running/compacting backend
         // selected while the page was being loaded.
         busy: state.busy,
@@ -322,12 +326,18 @@ export function reducer(state: AgentState, action: Action): AgentState {
         timelineMutation: 'history-append'
       }
     }
-    case 'timelineLoading':
+    case 'timelineLoading': {
+      // A scoped loadEntries may be rejected after a queued cwd/selection
+      // change. Closing the reader's shell alone must not imply readiness.
+      const unreadHistory = !action.loading && state.timelineLoading
+        && !state.timelineReady && Boolean(state.liveSessionOwnerPath)
       return {
         ...state,
         timelineLoading: action.loading,
-        timelineError: action.loading ? undefined : state.timelineError
+        timelineError: action.loading ? undefined
+          : state.timelineError || (unreadHistory ? '会话历史未载入，请重新加载。' : undefined)
       }
+    }
     case 'timelineError':
       return { ...state, timelineLoading: false, timelineError: action.error }
     case 'resetHistoryNavigation':
@@ -352,6 +362,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
         mode: 'build',
         yolo: false,
         timelineMutation: 'replace',
+        timelineReady: false,
         timelineLoading: false,
         timelineError: undefined,
         busy: false,

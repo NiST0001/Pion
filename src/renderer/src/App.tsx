@@ -283,6 +283,7 @@ export function App(): ReactElement {
     projectCwd: resourceCwd,
     sessionPath: resourceSessionPath,
     historyIndexSessionPath: state.historyIndex?.sessionPath,
+    historyIndex: state.historyIndex,
     historyJump: state.historyJump,
     historyResetRevision: state.historyResetRevision,
     panelsVisible: state.queuedMessages.steering.length > 0
@@ -385,7 +386,7 @@ export function App(): ReactElement {
     try {
       const movedPath = await actions.migrateSessionToProject(migrationTarget)
       setMigrationTarget(null)
-      if (movedPath) await actions.switchSession(movedPath)
+      if (movedPath) await actions.switchSession(movedPath, migrationTarget)
     } catch (error) {
       setMigrationError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -458,6 +459,7 @@ export function App(): ReactElement {
         cwd === state.status.cwd &&
         path === state.session?.sessionFile &&
         selectionRef.current.ownerPath === path && !state.timelineError &&
+        (state.timelineReady || state.timelineLoading) &&
         (state.status.phase === 'running' || state.status.phase === 'starting')
       ) {
         setSelectedSession(null)
@@ -475,7 +477,7 @@ export function App(): ReactElement {
         // Persisted sessions are global pool entries. switchSession resolves the
         // session's cwd and activates its retained backend; starting the project
         // first would blank the timeline and create a throwaway logical session.
-        const result = await actions.switchSession(path)
+        const result = await actions.switchSession(path, cwd)
         if (result.cancelled && requestId === sessionSelectionId.current) {
           setSelectedSession(previousSelection)
           setReviewPath(previousReviewPath)
@@ -491,7 +493,7 @@ export function App(): ReactElement {
         console.error('[pion] 切换会话失败', error)
       }
     },
-    [actions, capturedReviewChange, reviewPath, selectedSession, selectionRef, state.session?.sessionFile, state.status.cwd, state.status.phase, state.timelineError]
+    [actions, capturedReviewChange, reviewPath, selectedSession, selectionRef, state.session?.sessionFile, state.status.cwd, state.status.phase, state.timelineError, state.timelineReady, state.timelineLoading]
   )
 
   const handleDeleteSession = useCallback(
@@ -916,6 +918,8 @@ export function App(): ReactElement {
                 onScroll={handleTimelineScroll}
                 timeline={state.timeline}
                 timelineLoading={state.timelineLoading}
+                timelineReady={state.timelineReady}
+                historySelected={Boolean(selectedSession)}
                 timelineError={state.timelineError}
                 onReloadHistory={() => { void actions.reloadTimeline() }}
                 busy={state.busy}

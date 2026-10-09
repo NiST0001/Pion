@@ -6,6 +6,9 @@ import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { createRef } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as modelError from '../../src/renderer/src/agent/modelError'
+import { reducer } from '../../src/renderer/src/agent/reducer'
+import { entriesToTimeline } from '../../src/renderer/src/agent/timeline'
+import { initialState } from '../../src/renderer/src/agent/types'
 import { ChatMessage } from '../../src/renderer/src/features/chat/ChatMessage'
 import { ChatTimeline } from '../../src/renderer/src/features/chat/ChatTimeline'
 import type { ChatTimelineProps } from '../../src/renderer/src/features/chat/ChatTimeline'
@@ -28,6 +31,102 @@ describe('ChatMessage', () => {
     cleanup()
     vi.restoreAllMocks()
     vi.useRealTimers()
+  })
+
+  it('exposes live user locators without inventing an entry ID and keeps them stable on a late real attachment', () => {
+    const message = { role: 'user' as const, timestamp: '1767225600000',
+      _pionLiveMessageId: 'fixture-backend:1', content: '当前用户轮次' }
+    const started = reducer(initialState, { type: 'event', event: { type: 'message_start', message } })
+    const ended = reducer(started, { type: 'event', event: { type: 'message_end', message } })
+    const item = ended.timeline[0]
+    if (item?.kind !== 'user') throw new Error('Expected the synthetic live user row')
+    expect(item.entryId).toBeUndefined()
+    const onFork = vi.fn(), onRevert = vi.fn()
+    const props = { canFork: true, canRevert: true, onFork, onRevert }
+    const { container, queryByRole, getByRole, rerender } = render(<ChatMessage item={item} {...props} />)
+    const row = container.querySelector('.row-user')
+    expect(row).toHaveAttribute('data-live-message-id', 'fixture-backend:1')
+    expect(row).toHaveAttribute('data-user-message-time', '1767225600000')
+    expect(row).not.toHaveAttribute('data-entry-id')
+    expect(queryByRole('button', { name: '分叉' })).not.toBeInTheDocument()
+    expect(queryByRole('button', { name: '撤销' })).not.toBeInTheDocument()
+
+    const attached = reducer(ended, { type: 'event', event: { type: 'entry_appended', entry: {
+      type: 'message', id: 'real-user-entry', parentId: null,
+      timestamp: '2026-01-01T00:00:00.001Z', message
+    } } })
+    const persisted = attached.timeline[0]
+    if (persisted?.kind !== 'user') throw new Error('Expected the attached synthetic user row')
+    rerender(<ChatMessage item={persisted} {...props} />)
+    expect(container.querySelector('.row-user')).toBe(row)
+    expect(row).toHaveAttribute('data-entry-id', 'real-user-entry')
+    expect(row).toHaveAttribute('data-live-message-id', 'fixture-backend:1')
+    expect(row).toHaveAttribute('data-user-message-time', '1767225600000')
+    expect(item.entryId).toBeUndefined()
+    fireEvent.click(getByRole('button', { name: '分叉' }))
+    fireEvent.click(getByRole('button', { name: '撤销' }))
+    expect(onFork).toHaveBeenCalledExactlyOnceWith('real-user-entry')
+    expect(onRevert).toHaveBeenCalledExactlyOnceWith('real-user-entry')
+  })
+
+  it('uses the normalized SDK message clock rather than the independently generated entry timestamp', () => {
+    const items = entriesToTimeline([{ type: 'message', id: 'clock-entry', parentId: null,
+      timestamp: '2026-01-01T00:00:00.001Z',
+      message: { role: 'user', content: '两个不同的时钟', timestamp: '2026-01-01T00:00:00.000Z' }
+    }])
+    const item = items[0]
+    if (item?.kind !== 'user') throw new Error('Expected the synthetic persisted user row')
+    const { container, rerender } = render(<ChatMessage item={item} canFork={false} />)
+    const row = container.querySelector('.row-user')
+    expect(row).toHaveAttribute('data-user-message-time', '1767225600000')
+    expect(row).not.toHaveAttribute('data-live-message-id')
+    expect(row).toHaveAttribute('data-entry-id', 'clock-entry')
+    rerender(<ChatMessage item={{ ...item, messageTimestamp: undefined }} canFork={false} />)
+    expect(container.querySelector('.row-user')).toBe(row)
+    expect(row).not.toHaveAttribute('data-user-message-time')
+    expect(row).toHaveAttribute('data-entry-id', 'clock-entry')
+  })
+
+  it.each([undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'does not expose an unknown or invalid message timestamp (%s) or substitute append time', (messageTimestamp) => {
+      const { container } = render(<ChatMessage item={{ ...persistedUserMessage,
+        timestamp: '2026-01-01T00:00:00.001Z', messageTimestamp
+      }} canFork={false} />)
+      expect(container.querySelector('.row-user')).not.toHaveAttribute('data-user-message-time')
+    }
+  )
+
+  it.each([undefined, '', 'x'.repeat(513)])('omits unavailable or unbounded live locators', (liveMessageId) => {
+    const { container } = render(<ChatMessage item={{ ...persistedUserMessage, liveMessageId }} canFork={false} />)
+    expect(container.querySelector('.row-user')).not.toHaveAttribute('data-live-message-id')
+  })
+
+  it('mounts the last unresolved user turn and identical sends without reusing the previous persisted entry ID', () => {
+    const props: ChatTimelineProps = {
+      scrollRef: createRef<HTMLDivElement>(), onScroll: vi.fn(),
+      timeline: [persistedUserMessage,
+        { kind: 'user', id: 7, text: persistedUserMessage.text, live: true,
+          liveMessageId: 'fixture-backend:2', messageTimestamp: 1767225600000 },
+        { kind: 'user', id: 8, text: persistedUserMessage.text, live: true,
+          liveMessageId: 'fixture-backend:3', messageTimestamp: 1767225600000 }],
+      timelineLoading: false, busy: true, starting: false, hasSessions: true,
+      canFork: true, onFork: vi.fn(), canRevert: false, onRevert: vi.fn(),
+      agentActivity: true, workingStatus: { label: '运行中' }, latestRunChanges: [],
+      runCheckpoint: null, rollbackBusy: false, rollbackError: '',
+      onUndo: vi.fn(), onReview: vi.fn(), onSelectChange: vi.fn()
+    }
+    const { container } = render(<ChatTimeline {...props} />)
+    const rows = container.querySelectorAll('.row-user')
+    expect(rows).toHaveLength(3)
+    expect(container.querySelectorAll('.row-user[data-entry-id]')).toHaveLength(1)
+    expect(rows[0]).toHaveAttribute('data-entry-id', 'user-entry-6')
+    expect(rows[1]).toHaveAttribute('data-live-message-id', 'fixture-backend:2')
+    expect(rows[2]).toHaveAttribute('data-live-message-id', 'fixture-backend:3')
+    for (const row of [rows[1], rows[2]]) {
+      expect(row).not.toHaveAttribute('data-entry-id')
+      expect(row).toHaveAttribute('data-user-message-time', '1767225600000')
+      expect(row.querySelector('.message-actions')).not.toBeInTheDocument()
+    }
   })
 
   it('reverts the persisted user entry independently of the adjacent fork action', () => {

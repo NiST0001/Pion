@@ -46,7 +46,7 @@ import type {
   WireEntry,
   WireMessage
 } from '../../shared/types'
-import { messageText, messageThinking, messageToolCalls } from '../../shared/types'
+import { messageText, messageThinking, messageToolCalls, messageTimestamp } from '../../shared/types'
 import {
   deriveSessionTaskRuns,
   taskHistorySnapshotFromEntry,
@@ -2954,6 +2954,7 @@ export class AgentBridge {
             entryIndex,
             ordinal,
             snippet: snippet || '(空消息)',
+            messageTimestamp: messageTimestamp(entry.message as unknown as WireMessage),
             timestamp: String(entry.timestamp)
           })
           pendingResponse = landmarks.length - 1

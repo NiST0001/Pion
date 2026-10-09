@@ -2,13 +2,13 @@
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { useReducer, type Dispatch } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
-import type { SessionEntriesPage, WireEntry, WireMessage } from '../../src/shared/types'
+import type { SessionEntriesPage, SessionMeta, WireEntry, WireMessage } from '../../src/shared/types'
 import { useHistoryPaging } from '../../src/renderer/src/hooks/useHistoryPaging'
 import { useConversationNavigation } from '../../src/renderer/src/hooks/useConversationNavigation'
 import { useAgentHistory } from '../../src/renderer/src/hooks/agent/useAgentHistory'
 import { useAgentSubscriptions } from '../../src/renderer/src/hooks/agent/useAgentSubscriptions'
 import { reducer } from '../../src/renderer/src/agent/reducer'
-import { initialState, type Action, type TimelineItem } from '../../src/renderer/src/agent/types'
+import { initialState, type Action, type AgentState, type TimelineItem } from '../../src/renderer/src/agent/types'
 import { ToolCallItem } from '../../src/renderer/src/features/chat/ToolCallItem'
 import { IMAGE_GENERATION_TOOL_NAME } from '../../src/shared/image-generation'
 import { applyToolResult } from '../../src/renderer/src/agent/timeline'
@@ -739,6 +739,270 @@ it('marks history-page append separately from live append in the reducer', () =>
   expect(state.timelineMutation).toBe('history-append')
 })
 
+const switchPaths = { a: '/selected-a.jsonl', b: '/selected-b.jsonl', c: '/selected-c.jsonl' }
+const switchCwds = { a: '/worktree-a', b: '/worktree-b', c: '/worktree-c' }
+
+function switchHistoryPage(label: string): SessionEntriesPage {
+  return { entries: [
+    { type: 'message', id: `${label}-user`, parentId: null, timestamp: '',
+      message: { role: 'user', content: `${label} question` } },
+    { type: 'message', id: `${label}-assistant`, parentId: `${label}-user`, timestamp: '',
+      message: { role: 'assistant', content: `${label} answer` } }
+  ], toolResults: [], start: 0, end: 2, total: 2, leafId: `${label}-assistant`, mode: 'build' }
+}
+
+function switchHistoryFixture(source: 'explicit' | 'sidebar' | 'cache' | 'unknown' = 'explicit') {
+  const frames: FrameRequestCallback[] = []
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    frames.push(callback); return frames.length
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+  const ack = deferred<{ cancelled: boolean }>(), page = deferred<SessionEntriesPage>()
+  const api = {
+    switchSession: vi.fn(() => ack.promise), getEntriesPage: vi.fn(() => page.promise),
+    // A cold selected backend can have no SDK snapshot yet. It is not an
+    // authoritative empty transcript and must not gate its first disk page.
+    getState: vi.fn().mockResolvedValue(null), getHistoryIndex: vi.fn().mockResolvedValue(null),
+    onEvent: vi.fn(() => () => undefined)
+  }
+  const sessionMeta = (key: keyof typeof switchPaths): SessionMeta => ({
+    id: key, path: switchPaths[key], projectCwd: switchCwds[key], timestamp: '',
+    mtime: 0, preview: '', messageCount: 2
+  })
+  const seed: AgentState = { ...initialState,
+    status: { phase: 'running', cwd: switchCwds.a },
+    session: { sessionId: 'sdk-a', sessionFile: switchPaths.a, messageCount: 2, isStreaming: false },
+    sessionsByProject: {
+      [switchCwds.a]: [sessionMeta('a')],
+      ...(source === 'cache' || source === 'unknown' ? {} : { [switchCwds.b]: [sessionMeta('b')] }),
+      [switchCwds.c]: [sessionMeta('c')]
+    },
+    timeline: [{ kind: 'user', id: 3001, text: 'A already visible' }], timelineReady: true
+  }
+  const actions: Action[] = []
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer((previous: AgentState, action: Action) => {
+      actions.push(action)
+      return reducer(previous, action)
+    }, seed)
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state, dispatch }
+  })
+  if (source === 'cache' || source === 'explicit') h.result.current.timelineCache.current.set(switchPaths.b, {
+    // Explicit caller/sidebar knowledge outranks an obsolete cache cwd.
+    // A cache alone cannot establish a different selected worktree.
+    cwd: source === 'cache' ? switchCwds.b : '/obsolete-cache-worktree',
+    items: [], mode: 'build', apiBefore: 0, apiAfter: 2, total: 2,
+    toolResults: [], complete: true, newerComplete: true, leafId: 'B-assistant'
+  })
+  const paint = async (): Promise<void> => {
+    for (let frame = 0; frame < 2; frame++) await act(async () => {
+      frames.splice(0).forEach((callback) => callback(0))
+    })
+  }
+  return { ...h, api, ack, page, paint, actions }
+}
+
+it.each(['explicit', 'sidebar'] as const)('registers the selected cwd from %s before a cold page and accepts later same-cwd backend metadata', async (source) => {
+  const h = switchHistoryFixture(source)
+  let switching!: Promise<{ cancelled: boolean }>
+  act(() => { switching = h.result.current.switchSession(switchPaths.b, source === 'explicit' ? switchCwds.b : undefined) })
+  expect(h.result.current.state.status.cwd).toBe(switchCwds.b)
+  expect(h.result.current.state.timelineReady).toBe(false)
+  expect(h.result.current.state.timelineLoading).toBe(true)
+  await h.paint()
+  await act(async () => { h.ack.resolve({ cancelled: false }) })
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(1)
+  expect(h.api.getEntriesPage).toHaveBeenCalledWith(undefined, expect.any(Number), switchPaths.b)
+  const selected = h.result.current.selectionRef.current
+  expect(selected).toMatchObject({ ownerPath: switchPaths.b, cwd: switchCwds.b })
+  expect(selected.sessionId).toBeUndefined()
+  expect(selected.sessionPath).toBeUndefined()
+  for (const phase of ['ready', 'starting', 'running'] as const) {
+    act(() => h.result.current.dispatch({ type: 'status', status: { phase, cwd: switchCwds.b } }))
+    expect(h.result.current.selectionRef.current).toBe(selected)
+  }
+  act(() => h.result.current.dispatch({ type: 'session', session: {
+    sessionId: 'late-sdk-b', sessionFile: switchPaths.b, messageCount: 2, isStreaming: false
+  } }))
+  expect(h.result.current.selectionRef.current).toBe(selected)
+  await act(async () => { h.page.resolve(switchHistoryPage('B')) })
+  await h.paint()
+  await act(async () => { expect(await switching).toEqual({ cancelled: false }) })
+  expect(h.result.current.state.timeline).toEqual([
+    expect.objectContaining({ kind: 'user', text: 'B question' }),
+    expect.objectContaining({ kind: 'assistant', text: 'B answer' })
+  ])
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.result.current.state.timelineError).toBeUndefined()
+  expect(h.result.current.expectedTimeline.current).toBeNull()
+  expect(h.result.current.state.timelineReady).toBe(true)
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(1)
+  expect(h.api.getState).toHaveBeenCalledTimes(1)
+  expect(h.actions.find((action) => action.type === 'loadEntries')).toMatchObject({
+    preserveToolState: { cwd: switchCwds.b, sessionPath: switchPaths.b }
+  })
+})
+
+it('accepts STATUS(B) followed by a nonempty page in the same React batch without capturing A cwd', async () => {
+  const h = switchHistoryFixture()
+  // Deliberately finish both paint barriers as microtasks inside one act: the
+  // hook must capture queued selection intent even before React renders it.
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    queueMicrotask(() => callback(0)); return 1
+  })
+  const request = deferred<void>()
+  let capturedSelection: { ownerPath?: string; cwd?: string } | undefined
+  h.api.getEntriesPage.mockImplementation(() => {
+    capturedSelection = { ...h.result.current.selectionRef.current }
+    request.resolve()
+    return h.page.promise
+  })
+  await act(async () => {
+    const switching = h.result.current.switchSession(switchPaths.b, switchCwds.b)
+    h.ack.resolve({ cancelled: false })
+    await request.promise
+    h.result.current.dispatch({ type: 'status', status: { phase: 'ready', cwd: switchCwds.b } })
+    h.result.current.dispatch({ type: 'session', session: {
+      sessionId: 'batch-sdk-b', sessionFile: switchPaths.b, messageCount: 2, isStreaming: false
+    } })
+    h.page.resolve(switchHistoryPage('B'))
+    expect(await switching).toEqual({ cancelled: false })
+  })
+  expect(capturedSelection).toMatchObject({ ownerPath: switchPaths.b, cwd: switchCwds.b })
+  expect(h.result.current.state.timeline, JSON.stringify({
+    captured: capturedSelection,
+    selected: h.result.current.selectionRef.current,
+    cwd: h.result.current.state.status.cwd,
+    error: h.result.current.state.timelineError,
+    actions: h.actions.map((action) => ({ type: action.type,
+      ...('preserveToolState' in action ? { scope: action.preserveToolState } : {}) }))
+  })).toHaveLength(2)
+  expect(h.result.current.state.timelineReady).toBe(true)
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.result.current.state.timelineError).toBeUndefined()
+  expect(h.result.current.selectionRef.current).toMatchObject({ ownerPath: switchPaths.b, cwd: switchCwds.b })
+  expect(h.actions.find((action) => action.type === 'loadEntries')).toMatchObject({
+    preserveToolState: { cwd: switchCwds.b, sessionPath: switchPaths.b }
+  })
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(1)
+})
+
+it.each(['a', 'c'] as const)('keeps a late B page from replacing the selected %s after a cross-worktree switch', async (key) => {
+  const h = switchHistoryFixture()
+  let first!: Promise<{ cancelled: boolean }>
+  act(() => { first = h.result.current.switchSession(switchPaths.b, switchCwds.b) })
+  await h.paint()
+  await act(async () => { h.ack.resolve({ cancelled: false }) })
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(1)
+  h.api.switchSession.mockResolvedValue({ cancelled: false })
+  h.api.getEntriesPage.mockResolvedValue(switchHistoryPage(key.toUpperCase()))
+  // Simulate the SDK gap while another explicit selection is made. The
+  // next owner/cwd, not a filled identity for B, invalidates the old reader.
+  act(() => h.result.current.dispatch({ type: 'session', session: null }))
+  let next!: Promise<{ cancelled: boolean }>
+  act(() => { next = h.result.current.switchSession(switchPaths[key], switchCwds[key]) })
+  await h.paint()
+  await h.paint()
+  await act(async () => { expect(await next).toEqual({ cancelled: false }) })
+  const timeline = h.result.current.state.timeline
+  expect(timeline).toEqual([
+    expect.objectContaining({ text: `${key.toUpperCase()} question` }),
+    expect.objectContaining({ text: `${key.toUpperCase()} answer` })
+  ])
+  await act(async () => { h.page.resolve(switchHistoryPage('late B')) })
+  await h.paint()
+  await act(async () => { expect(await first).toEqual({ cancelled: true }) })
+  expect(h.result.current.state.timeline).toBe(timeline)
+  expect(h.result.current.state.status.cwd).toBe(switchCwds[key])
+  expect(h.result.current.selectionRef.current.ownerPath).toBe(switchPaths[key])
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(2)
+})
+
+it.each(['cwd', 'path', 'identity'] as const)('still rejects a late B page after a genuine external %s change', async (change) => {
+  const h = switchHistoryFixture()
+  let switching!: Promise<{ cancelled: boolean }>
+  act(() => { switching = h.result.current.switchSession(switchPaths.b, switchCwds.b) })
+  await h.paint()
+  await act(async () => { h.ack.resolve({ cancelled: false }) })
+  act(() => h.result.current.dispatch({ type: 'session', session: {
+    sessionId: 'sdk-b', sessionFile: switchPaths.b, messageCount: 2, isStreaming: false
+  } }))
+  const selected = h.result.current.selectionRef.current
+  act(() => {
+    if (change === 'cwd') h.result.current.dispatch({ type: 'status', status: { phase: 'running', cwd: switchCwds.c } })
+    else h.result.current.dispatch({ type: 'session', session: {
+      sessionId: change === 'identity' ? 'replacement-sdk-b' : 'sdk-c',
+      sessionFile: change === 'path' ? switchPaths.c : switchPaths.b, messageCount: 2, isStreaming: false
+    } })
+  })
+  expect(h.result.current.selectionRef.current.generation).toBeGreaterThan(selected.generation)
+  await act(async () => { h.page.resolve(switchHistoryPage('obsolete B')) })
+  await h.paint()
+  await act(async () => { await switching })
+  expect(h.result.current.state.timeline).toEqual([])
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(1)
+})
+
+it.each(['committed target', 'queued target'] as const)('restores A status and bounded cached output after a cancelled cross-cwd switch with %s', async (timing) => {
+  const h = switchHistoryFixture()
+  const draft: TimelineItem = { kind: 'assistant', id: 3002, live: true,
+    text: 'A unfinished draft', thinking: '', streaming: true }
+  act(() => {
+    h.result.current.dispatch({ type: 'loadEntries', items: [...h.result.current.state.timeline, draft] })
+    h.result.current.dispatch({ type: 'event', event: { type: 'agent_start',
+      _pionLive: { backendId: 'backend-a', revision: 1, cwd: switchCwds.a, sessionPath: switchPaths.a } } })
+  })
+  const cached = h.result.current.timelineCache.current.get(switchPaths.a)!
+  if (timing === 'queued target') vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    queueMicrotask(() => callback(0)); return 1
+  })
+  let switching!: Promise<{ cancelled: boolean }>
+  if (timing === 'committed target') {
+    act(() => { switching = h.result.current.switchSession(switchPaths.b, switchCwds.b) })
+    expect(h.result.current.state.status.cwd).toBe(switchCwds.b)
+    await h.paint()
+    await act(async () => { h.ack.resolve({ cancelled: true }); expect(await switching).toEqual({ cancelled: true }) })
+  } else await act(async () => {
+    switching = h.result.current.switchSession(switchPaths.b, switchCwds.b)
+    h.ack.resolve({ cancelled: true })
+    expect(await switching).toEqual({ cancelled: true })
+  })
+  expect(h.result.current.state.status).toEqual({ phase: 'running', cwd: switchCwds.a })
+  expect(h.result.current.selectionRef.current).toMatchObject({ ownerPath: switchPaths.a, cwd: switchCwds.a })
+  expect(h.result.current.state.timeline).toEqual([
+    expect.objectContaining({ text: 'A already visible', historical: true, noReveal: false }),
+    expect.objectContaining({ text: 'A unfinished draft', streaming: true, historical: true, noReveal: false })
+  ])
+  expect(cached.items[1]).toBe(draft)
+  expect(h.result.current.expectedTimeline.current).toBeNull()
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.actions.filter((action) => action.type === 'loadEntries').at(-1)).toMatchObject({
+    preserveToolState: { cwd: switchCwds.a, sessionPath: switchPaths.a }
+  })
+  expect(h.api.getEntriesPage).not.toHaveBeenCalled()
+})
+
+it.each(['unknown', 'cache'] as const)('does not guess an unknown target cwd from %s evidence', async (source) => {
+  const h = switchHistoryFixture(source)
+  let switching!: Promise<{ cancelled: boolean }>
+  act(() => { switching = h.result.current.switchSession(switchPaths.b) })
+  await h.paint()
+  await act(async () => { h.ack.resolve({ cancelled: false }) })
+  const selected = h.result.current.selectionRef.current
+  // Legacy callers with no local directory evidence cannot claim this is the
+  // same worktree. A real later cwd change must keep the old read obsolete.
+  act(() => h.result.current.dispatch({ type: 'status', status: { phase: 'ready', cwd: switchCwds.b } }))
+  expect(h.result.current.selectionRef.current.generation).toBeGreaterThan(selected.generation)
+  await act(async () => { h.page.resolve(switchHistoryPage('unknown old scope')) })
+  await h.paint()
+  await act(async () => { await switching })
+  expect(h.result.current.state.status.cwd).toBe(switchCwds.b)
+  expect(h.result.current.state.timeline).toEqual([])
+  expect(h.result.current.state.timelineLoading).toBe(false)
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(1)
+})
+
 it('rearms cached scroll-page rows only on a real A → B → A selection without mutating the old cache', async () => {
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
     queueMicrotask(() => callback(0)); return 1
@@ -1218,7 +1482,9 @@ it.each(['stopped backend', 'other cwd'])('does not restore cached partial outpu
     mode: 'build', apiBefore: 0, apiAfter: 0, toolResults: [], complete: true,
     newerComplete: true, leafId: null, total: 0
   })
-  await act(async () => { await h.result.current.switchSession(path) })
+  // The known selected cwd, rather than an obsolete cache descriptor, owns
+  // this fixture. Unknown callers may legitimately derive a target cache cwd.
+  await act(async () => { await h.result.current.switchSession(path, '/project') })
   expect(h.result.current.state.timeline).toEqual([])
   expect(h.result.current.state.busy).toBe(false)
 })

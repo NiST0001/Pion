@@ -31,6 +31,39 @@ describe('HistoryNavigator', () => {
     expect(onJump).not.toHaveBeenCalled()
   })
 
+  it('clears the preceding marker when the mounted current turn has no persisted locator', () => {
+    const onJump = vi.fn()
+    const { container, rerender } = render(<HistoryNavigator index={index} activeEntryId="one" busy={false} onJump={onJump} />)
+    const markers = [...container.querySelectorAll('.history-navigator-marker')]
+    expect(container.querySelector('.history-navigator-marker.active')).toBe(markers[0])
+    rerender(<HistoryNavigator index={index} activeEntryId={undefined} busy={false} onJump={onJump} />)
+    expect(container.querySelector('.history-navigator-marker.active')).not.toBeInTheDocument()
+    expect([...container.querySelectorAll('.history-navigator-marker')]).toEqual(markers)
+    // Backend-private display IDs must not be silently treated as SDK IDs or
+    // resolve to the latest whole-session index landmark.
+    rerender(<HistoryNavigator index={index} activeEntryId="fixture-backend:2" busy={false} onJump={onJump} />)
+    expect(container.querySelector('.history-navigator-marker.active')).not.toBeInTheDocument()
+    expect(onJump).not.toHaveBeenCalled()
+  })
+
+  it('keeps same-text, same-time landmarks distinct and jumps only to the explicitly selected SDK identity', () => {
+    const duplicateIndex: SessionHistoryIndex = { ...index, landmarks: index.landmarks.map((landmark) => ({
+      ...landmark, snippet: '相同的用户消息', timestamp: '2026-01-01T00:00:00.000Z'
+    })) }
+    const onJump = vi.fn()
+    const { container, rerender } = render(<HistoryNavigator index={duplicateIndex} activeEntryId="conflicting-entry" busy={false} onJump={onJump} />)
+    const markers = [...container.querySelectorAll('.history-navigator-marker')]
+    expect(markers).toHaveLength(2)
+    expect(container.querySelector('.history-navigator-marker.active')).not.toBeInTheDocument()
+    expect(markers[0]).toHaveAttribute('data-entry-id', 'one')
+    expect(markers[1]).toHaveAttribute('data-entry-id', 'two')
+    fireEvent.click(markers[1], { detail: 0 })
+    expect(onJump).toHaveBeenCalledExactlyOnceWith(duplicateIndex.landmarks[1])
+    rerender(<HistoryNavigator index={duplicateIndex} activeEntryId="two" busy={false} onJump={onJump} />)
+    expect(container.querySelector('.history-navigator-marker.active')).toBe(markers[1])
+    expect(onJump).toHaveBeenCalledTimes(1)
+  })
+
   it('adds live landmarks without snapping a manually browsed rail back to the active message', () => {
     const makeIndex = (count: number): SessionHistoryIndex => ({ ...index, totalEntries: count * 2,
       landmarks: Array.from({ length: count }, (_, n) => ({ ...index.landmarks[0], entryId: `live-${n + 1}`, entryIndex: n * 2, ordinal: n + 1, snippet: `live ${n + 1}` })) })
