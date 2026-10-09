@@ -491,6 +491,7 @@ function timelineMessageIdentity(item: TimelineItem): string | undefined {
 
 function timelineIdentitiesCompatible(row: TimelineItem, item: TimelineItem): boolean {
   if (row.kind !== item.kind) return false
+  if (row.kind === 'tool' && item.kind === 'tool' && row.tool.id !== item.tool.id) return false
   if (row.kind !== 'tool' && item.kind !== 'tool'
     && row.entryId && item.entryId && row.entryId !== item.entryId) return false
   if ((row.kind === 'user' || row.kind === 'assistant') && (item.kind === 'user' || item.kind === 'assistant')
@@ -544,10 +545,73 @@ function reconcileLiveRow(live: TimelineItem, persisted: TimelineItem): Timeline
   return live
 }
 
-/** Replace persisted history without replacing the backend's unpersisted tail.
+/**
+ * Merge two already-reconciled display orders around their unique shared keys.
+ * Callers must first establish row identity, transfer the mounted key and
+ * provide unique keys within each input. This helper does not match bodies/
+ * clocks or interpret private ID sequences as disk order. Primary order wins.
+ * Secondary-only runs go before their next shared anchor; its suffix goes last.
+ * Reversed anchors fall back to primary-then-unrepresented-secondary order.
+ * Invalid duplicate keys disable weaving: suppress only identity-proven overlap
+ * one-for-one, without repairing duplicate keys or inventing replacement IDs.
+ */
+export function orderTimelineAroundAnchors(
+  primary: TimelineItem[], secondary: TimelineItem[]
+): TimelineItem[] {
+  const primaryIndices = new Map<number, number[]>()
+  const secondaryCounts = new Map<number, number>()
+  primary.forEach((row, index) => primaryIndices.set(row.id, [...(primaryIndices.get(row.id) ?? []), index]))
+  for (const row of secondary) secondaryCounts.set(row.id, (secondaryCounts.get(row.id) ?? 0) + 1)
+  if (primaryIndices.size !== primary.length || secondaryCounts.size !== secondary.length) {
+    const consumed = new Set<number>()
+    const unrepresented = secondary.filter((row) => {
+      const identity = timelineItemIdentity(row)
+      const index = primaryIndices.get(row.id)?.find((candidate) => {
+        if (consumed.has(candidate)) return false
+        const current = primary[candidate]
+        if (!timelineIdentitiesCompatible(current, row)) return false
+        return current === row || (identity !== undefined && timelineItemIdentity(current) === identity)
+          || ((current.kind === 'user' || current.kind === 'assistant')
+            && (row.kind === 'user' || row.kind === 'assistant')
+            && Boolean(row.liveMessageId) && current.liveMessageId === row.liveMessageId)
+      })
+      if (index === undefined) return true
+      consumed.add(index)
+      return false
+    })
+    return [...primary, ...unrepresented]
+  }
+  const anchors = new Map<number, number>()
+  for (const row of secondary) {
+    const indices = primaryIndices.get(row.id)
+    if (indices?.length !== 1 || secondaryCounts.get(row.id) !== 1
+      || !timelineIdentitiesCompatible(primary[indices[0]], row)) continue
+    anchors.set(row.id, indices[0])
+  }
+  let previous = -1
+  for (const index of anchors.values()) {
+    if (index <= previous) {
+      // Conflicting orders are not evidence for moving any unlocated rows.
+      return [...primary, ...secondary.filter((item) => !anchors.has(item.id))]
+    }
+    previous = index
+  }
+  const before = new Map<number, TimelineItem[]>()
+  let pending: TimelineItem[] = []
+  for (const row of secondary) {
+    const anchor = anchors.get(row.id)
+    if (anchor !== undefined) {
+      if (pending.length > 0) before.set(anchor, pending)
+      pending = []
+    } else pending.push(row)
+  }
+  return primary.flatMap((row, index) => [...(before.get(index) ?? []), row]).concat(pending)
+}
+
+/** Replace persisted history without replacing unpersisted backend rows.
  * Off-window persisted rows are dropped. Matching tools retain their mounted
- * identity/finals; live rows absent from JSONL remain until an authoritative
- * final event or a persisted copy reconciles them. */
+ * identity/finals; unique common rows preserve the live turn's proven order
+ * around a bounded page, without guessing where an unanchored turn belongs. */
 export function preserveTimelineToolState(
   existing: TimelineItem[], incoming: TimelineItem[], preserveLive = true
 ): TimelineItem[] {
@@ -587,7 +651,12 @@ export function preserveTimelineToolState(
   const pinnedIds = new Set(projected.filter((item) => item.kind === 'assistant'
     && item.streaming && item.live && liveById.has(item.id)).map((item) => item.id))
   const items = projected.map((item) => pinnedIds.has(item.id) ? liveById.get(item.id)! : item)
-  return reconcileNewerTimelineItems(live.filter((item) => !pinnedIds.has(item.id)), items).items
+  const reconciled = reconcileTimelinePage(live.filter((item) => !pinnedIds.has(item.id)), items)
+  const byId = new Map(reconciled.items.map((item) => [item.id, item]))
+  return orderTimelineAroundAnchors(reconciled.page, existing.flatMap((item) => {
+    const retained = byId.get(item.id)
+    return retained ? [retained] : []
+  }))
 }
 
 /** Final-only pages update mounted calls, never create isolated result rows. */
@@ -627,24 +696,28 @@ export function uniqueTimelineItems(
   })
 }
 
-/** Prepend unique rows while finishing overlapping tools in the retained prefix. */
+/** Locate older live copies by the same strict identities as newer pages.
+ * Only genuinely new rows count as prepends; locating a mounted row must not
+ * stop the history hook from scanning through metadata/result-only pages. */
 export function reconcileOlderTimelineItems(
   existing: TimelineItem[], incoming: TimelineItem[],
   toolResults: Map<string, HistoricalToolResult> = new Map()
 ): { items: TimelineItem[]; prepended: TimelineItem[] } {
-  const incomingTools = new Map<string, Extract<TimelineItem, { kind: 'tool' }>>()
-  for (const item of incoming) if (item.kind === 'tool') incomingTools.set(item.tool.id, item)
-  let changed = false
-  const retained = existing.map((item) => {
-    const persisted = item.kind === 'tool' ? incomingTools.get(item.tool.id) : undefined
-    if (item.kind !== 'tool' || !persisted?.tool.resultReceived
-      || (item.tool.status !== 'running' && item.tool.resultReceived)) return item
-    changed = true
-    return reconcileLiveRow(item, persisted)
-  })
-  const completed = completeTimelineToolResults(changed ? retained : existing, toolResults)
-  const prepended = uniqueTimelineItems(completed, incoming)
-  return { items: prepended.length > 0 ? [...prepended, ...completed] : completed, prepended }
+  const reconciled = reconcileTimelinePage(existing, incoming, toolResults)
+  // Result-only pages carry no placement evidence. Preserve the existing
+  // array when all finals were already applied, as well as each preview row.
+  if (incoming.length === 0) return { items: reconciled.items, prepended: reconciled.added }
+  const byId = new Map(reconciled.items.map((item) => [item.id, item]))
+  const retained = existing.map((item) => byId.get(item.id) ?? item)
+  // First establish disk direction: this older page precedes already located
+  // newer rows. Use the original markers, not the rows just matched above.
+  const located = existing.filter((item) => !isUnreconciledLiveItem(item))
+    .map((item) => byId.get(item.id) ?? item)
+  const pageOrder = orderTimelineAroundAnchors(reconciled.page, located)
+  // A bounded older page may itself be the middle of the live snapshot. Keep
+  // its matched rows as anchors: removing them would move that middle before
+  // the unlocated opening. Repeated pages must retain the same full-live order.
+  return { items: orderTimelineAroundAnchors(pageOrder, retained), prepended: reconciled.added }
 }
 
 export interface ReconciledNewerTimeline {
@@ -663,8 +736,18 @@ export function reconcileNewerTimelineItems(
   incoming: TimelineItem[],
   toolResults: Map<string, HistoricalToolResult> = new Map()
 ): ReconciledNewerTimeline {
+  const { items, appended } = reconcileTimelinePage(existing, incoming, toolResults)
+  return { items, appended }
+}
+
+/** Shared identity/terminal-state projection; page direction controls only placement. */
+function reconcileTimelinePage(
+  existing: TimelineItem[], incoming: TimelineItem[],
+  toolResults: Map<string, HistoricalToolResult> = new Map()
+): ReconciledNewerTimeline & { page: TimelineItem[]; added: TimelineItem[] } {
   if (incoming.length === 0) {
-    return { items: completeTimelineToolResults(existing, toolResults), appended: [] }
+    return { items: completeTimelineToolResults(existing, toolResults), appended: [],
+      page: [], added: [] }
   }
   const known = new Map<string, TimelineItem[]>()
   const pinnedLiveIds = new Set<number>()
@@ -742,18 +825,27 @@ export function reconcileNewerTimelineItems(
 
   const matchedIds = new Set<number>()
   const appended: TimelineItem[] = []
+  const added: TimelineItem[] = []
+  const page: TimelineItem[] = []
   for (const item of incoming) {
     const identity = timelineItemIdentity(item)
-    if (identity && known.get(identity)?.some((row) => timelineIdentitiesCompatible(row, item))) {
+    const knownRows = identity ? known.get(identity)?.filter((row) => timelineIdentitiesCompatible(row, item)) : undefined
+    if (knownRows?.length) {
+      // An already represented entry is not another message. If conflicting
+      // live identities share it, keep those rows without guessing an anchor
+      // or multiplying copies on each revisit of the bare disk page.
+      if (knownRows.length !== 1) continue
       // A call-only page can have placed the row before its result was saved.
       // A later overlapping page may finish that row, but cannot replace its
       // mounted key or move the already-reconciled prefix to the page tail.
-      const existingTool = existingTools.get(identity)
+      const existingTool = identity ? existingTools.get(identity) : undefined
       if (item.kind === 'tool' && item.tool.resultReceived
         && existingTool && (existingTool.tool.status === 'running' || !existingTool.tool.resultReceived)
         && !completedTools.has(existingTool.id)) {
         completedTools.set(existingTool.id, reconcileLiveRow(existingTool, item))
       }
+      // Expose known overlaps for ordering, but never count them as new rows.
+      if (!page.some((row) => row.id === knownRows[0].id)) page.push(knownRows[0])
       continue
     }
     const messageIdentity = timelineMessageIdentity(item)
@@ -799,14 +891,18 @@ export function reconcileNewerTimelineItems(
       appended.push(reconcileLiveRow(live, item))
     } else {
       appended.push(item)
+      added.push(item)
     }
+    page.push(appended[appended.length - 1])
     if (identity) known.set(identity, [...(known.get(identity) ?? []), appended[appended.length - 1]])
   }
 
   const retained = existing.filter((item) => !pinnedLiveIds.has(item.id))
     .map((item) => completedTools.get(item.id) ?? item)
   const tailItems = existing.filter((item) => pinnedLiveIds.has(item.id) && !matchedIds.has(item.id))
-  return { items: completeTimelineToolResults([...retained, ...appended, ...tailItems], toolResults), appended }
+  const items = completeTimelineToolResults([...retained, ...appended, ...tailItems], toolResults)
+  const byId = new Map(items.map((item) => [item.id, item]))
+  return { items, appended, page: page.map((item) => byId.get(item.id) ?? item), added }
 }
 
 /**

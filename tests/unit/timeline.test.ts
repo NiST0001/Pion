@@ -4,15 +4,18 @@ import { describe, expect, it } from 'vitest'
 import {
   applyToolResult,
   assistantErrorText,
+  collectToolResults,
   deriveAgentTodos,
   deriveLatestRunChanges,
   diffStats,
   entriesToTimeline,
   getViewportHistoryPageSize,
+  orderTimelineAroundAnchors,
   parseToolArgs,
   preserveTimelineToolState,
   reconcileCompletedAssistantRows,
   reconcileNewerTimelineItems,
+  reconcileOlderTimelineItems,
   uniqueTimelineItems,
   wireMessageTimestamp
 } from '../../src/renderer/src/agent/timeline'
@@ -28,6 +31,403 @@ const previewPart = {
 const imageTool: ToolItem = {
   id: 'image-call', name: IMAGE_GENERATION_TOOL_NAME, status: 'running', isError: false, live: true
 }
+
+describe('bounded newest-page restore and older-page identity', () => {
+  const clock = 1_780_000_000_000
+  type MessageRow = Extract<TimelineItem, { kind: 'user' | 'assistant' }>
+  const messageKinds = ['user', 'assistant'] as const
+
+  function liveMessage(kind: MessageRow['kind'], id = 5000): MessageRow {
+    const common = { id, liveMessageId: `synthetic:${id}`, messageTimestamp: clock,
+      text: 'synthetic final body', live: true, historical: true, noReveal: true }
+    return kind === 'user' ? { ...common, kind } : {
+      ...common, kind, thinking: 'synthetic final thought', streaming: false
+    }
+  }
+
+  function diskMessage(live: MessageRow, entryId = 'synthetic-entry', id = live.id + 100): MessageRow {
+    const { liveMessageId: _liveId, live: _live, noReveal: _noReveal,
+      historyReconciled: _reconciled, ...row } = live
+    return { ...row, id, entryId }
+  }
+
+  function liveTool(id: number, callId: string, name = 'read'): Extract<TimelineItem, { kind: 'tool' }> {
+    return { kind: 'tool', id, historical: true, noReveal: true,
+      tool: applyToolResult({ id: callId, name, status: 'running', isError: false, live: true },
+        { content: [{ type: 'text', text: `synthetic final ${callId}` }] }, false, 'message') }
+  }
+
+  function syntheticTimeline() {
+    // One opening user and one opening assistant, followed by its six calls.
+    // Later task/subagent batches put these rows outside the newest page. This
+    // is a display projection, not a fake ordinary-message entry_appended event.
+    const user = liveMessage('user', 5100)
+    const assistant = { ...liveMessage('assistant', 5101), messageTimestamp: clock + 1 }
+    const tools = Array.from({ length: 6 }, (_, index) => liveTool(5102 + index, `T${index + 1}`))
+    const batches = [liveTool(5108, 'task', 'pion_task'), liveTool(5109, 'subagents', 'pion_subagents')]
+    const streamtail: TimelineItem = { kind: 'assistant', id: 5110, liveMessageId: 'synthetic:streamtail',
+      messageTimestamp: clock + 100, text: 'synthetic streaming tail', thinking: '', streaming: true,
+      live: true, historical: true, noReveal: true }
+    const fullLive: TimelineItem[] = [user, assistant, ...tools, ...batches, streamtail]
+    const disk: TimelineItem[] = fullLive.slice(0, -1).map((row) => {
+      if (row.kind === 'user' || row.kind === 'assistant') return diskMessage(row, `entry-${row.kind}`)
+      if (row.kind !== 'tool') throw new Error('Expected a synthetic tool')
+      // A call-only history row cannot erase a completed live result.
+      return { kind: 'tool', id: row.id + 100, historical: true,
+        tool: { id: row.tool.id, name: row.tool.name, status: 'done', isError: false } }
+    })
+    return { fullLive, newestPage: disk.slice(8), olderPage: disk.slice(0, 8) }
+  }
+
+  function order(items: TimelineItem[]): string[] {
+    return items.map((row) => row.kind === 'tool' ? row.tool.id
+      : row.kind === 'assistant' && row.streaming ? 'streamtail' : row.kind)
+  }
+
+  it('keeps the whole live turn in order when the newest slice omits its opening and six early calls', () => {
+    const { fullLive, newestPage } = syntheticTimeline()
+    expect(order(newestPage)).toEqual(['task', 'subagents'])
+    const restored = preserveTimelineToolState(fullLive, newestPage)
+    expect(order(restored)).toEqual(['user', 'assistant', 'T1', 'T2', 'T3', 'T4', 'T5', 'T6',
+      'task', 'subagents', 'streamtail'])
+    expect(restored.map((row) => row.id)).toEqual(fullLive.map((row) => row.id))
+  })
+
+  it('joins the older opening once, preserving the full turn order, mounted keys, live IDs, finals and markers', () => {
+    const { fullLive, newestPage, olderPage } = syntheticTimeline()
+    const restored = preserveTimelineToolState(fullLive, newestPage)
+    const merged = reconcileOlderTimelineItems(restored, olderPage)
+    // IDs are the actual ChatTimeline React keys, not a second synthetic key.
+    expect.soft(order(merged.items)).toEqual(['user', 'assistant', 'T1', 'T2', 'T3', 'T4', 'T5', 'T6',
+      'task', 'subagents', 'streamtail'])
+    expect.soft(merged.items.map((row) => row.id)).toEqual(fullLive.map((row) => row.id))
+    expect.soft(merged.prepended).toEqual([])
+    for (const original of fullLive) {
+      const rows = merged.items.filter((row) => row.id === original.id)
+      expect.soft(rows).toHaveLength(1)
+      expect.soft(rows[0]).toMatchObject({ historical: true, noReveal: true })
+      if (original.kind === 'user' || original.kind === 'assistant') {
+        expect.soft(rows[0]).toMatchObject({ liveMessageId: original.liveMessageId })
+        if (original.id !== 5110) expect.soft(rows[0]).toMatchObject({
+          entryId: `entry-${original.kind}`, historyReconciled: true
+        })
+      }
+      if (original.kind === 'tool') {
+        expect.soft(rows[0]).toMatchObject({ historyReconciled: true, tool: original.tool })
+        expect.soft(rows[0]?.kind === 'tool' && rows[0].tool).toBe(original.tool)
+      }
+    }
+  })
+
+  it.each([
+    { name: 'immediately preceding', start: 6, end: 8 },
+    { name: 'middle', start: 3, end: 6 }
+  ])('retains the full snapshot order across a $name older page, its repeat, then the opening', ({ start, end }) => {
+    const { fullLive, newestPage, olderPage } = syntheticTimeline()
+    const restored = preserveTimelineToolState(fullLive, newestPage)
+    const middle = olderPage.slice(start, end)
+    const first = reconcileOlderTimelineItems(restored, middle)
+    expect.soft(first.items.map((row) => row.id)).toEqual(fullLive.map((row) => row.id))
+    expect.soft(first.prepended).toEqual([])
+    const repeated = reconcileOlderTimelineItems(first.items, middle.map((row) => ({ ...row })))
+    expect.soft(repeated.items).toEqual(first.items)
+    expect.soft(repeated.items.map((row) => row.id)).toEqual(fullLive.map((row) => row.id))
+    expect.soft(repeated.prepended).toEqual([])
+    // The next older page excludes the middle rather than repairing order
+    // accidentally by replaying the entire turn in one complete page.
+    const openingPage = olderPage.slice(0, start)
+    const opening = reconcileOlderTimelineItems(repeated.items, openingPage)
+    expect.soft(opening.items.map((row) => row.id)).toEqual(fullLive.map((row) => row.id))
+    expect.soft(opening.prepended).toEqual([])
+    for (const original of fullLive) {
+      const row = opening.items.find((item) => item.id === original.id)
+      expect.soft(row).toMatchObject({ historical: true, noReveal: true })
+      if (original.kind === 'tool') expect.soft(row?.kind === 'tool' && row.tool).toBe(original.tool)
+      if (original.kind === 'user' || original.kind === 'assistant') {
+        expect.soft(row).toMatchObject({ liveMessageId: original.liveMessageId })
+      }
+    }
+    expect(reconcileOlderTimelineItems(opening.items, openingPage).items).toEqual(opening.items)
+  })
+
+  it('keeps an unlocated prefix before a single newly located middle call and an already located later call', () => {
+    const early = liveMessage('user', 5600)
+    const middle = liveTool(5601, 'middle')
+    const later = { ...liveTool(5602, 'later'), historyReconciled: true }
+    const persisted: TimelineItem = { kind: 'tool', id: 5701,
+      tool: { id: 'middle', name: 'read', status: 'done', isError: false } }
+    const result = reconcileOlderTimelineItems([early, middle, later], [persisted])
+    expect(result).toEqual({ items: [early, { ...middle, historyReconciled: true }, later], prepended: [] })
+    expect(reconcileOlderTimelineItems(result.items, [persisted])).toEqual(result)
+  })
+
+  it('uses both message and tool anchors without reordering the live-only runs between them', () => {
+    const early = liveTool(5800, 'early')
+    const message = liveMessage('assistant', 5801)
+    const between = liveTool(5802, 'between')
+    const call = liveTool(5803, 'anchor-call')
+    const later = { ...liveTool(5804, 'located-later'), historyReconciled: true }
+    const tail = liveMessage('user', 5805)
+    const fullLive = [early, message, between, call, later, tail]
+    const page: TimelineItem[] = [diskMessage(message, 'message-anchor'), {
+      kind: 'tool', id: 5903, tool: { id: call.tool.id, name: 'read', status: 'done', isError: false }
+    }]
+    const first = reconcileOlderTimelineItems(fullLive, page)
+    expect.soft(first.items.map((row) => row.id)).toEqual(fullLive.map((row) => row.id))
+    expect.soft(first.prepended).toEqual([])
+    expect.soft(first.items.find((row) => row.id === message.id)).toMatchObject({
+      entryId: 'message-anchor', liveMessageId: message.liveMessageId, historyReconciled: true
+    })
+    expect(reconcileOlderTimelineItems(first.items, page).items).toEqual(first.items)
+  })
+
+  it.each(messageKinds.flatMap((kind) => ['entryId', 'liveMessageId'].map((identity) => ({ kind, identity }))))(
+    'reconciles an older $kind by strong $identity without remounting', ({ kind, identity }) => {
+      const live = liveMessage(kind)
+      if (identity === 'entryId') live.entryId = 'synthetic-entry'
+      const persisted = diskMessage(live)
+      if (identity === 'liveMessageId') persisted.liveMessageId = live.liveMessageId
+      // Strong identity, not equal text or clock, is the proof in this case.
+      persisted.messageTimestamp = clock + 1
+      if (persisted.kind === 'assistant') persisted.text = 'synthetic authoritative final'
+      // This row belongs to the already loaded newest page, not an earlier
+      // unlocated row in the same full-live snapshot as the matched message.
+      const later = { ...liveTool(5200, 'later'), historyReconciled: true }
+      const result = reconcileOlderTimelineItems([later, live], [persisted])
+      expect(result.items).toEqual([
+        expect.objectContaining({ id: live.id, entryId: persisted.entryId,
+          liveMessageId: live.liveMessageId, historical: true, noReveal: true, historyReconciled: true }), later
+      ])
+      if (kind === 'assistant') expect(result.items[0]).toMatchObject({ text: persisted.text, streaming: false })
+      expect(result.prepended).toEqual([])
+    }
+  )
+
+  it('keeps a proven full-live prefix before a strongly matched older message if that prefix is not yet located', () => {
+    const early = liveTool(5250, 'unlocated-prefix')
+    const live = { ...liveMessage('user', 5251), entryId: 'matched-user' }
+    const result = reconcileOlderTimelineItems([early, live], [diskMessage(live, live.entryId)])
+    expect(result.items.map((row) => row.id)).toEqual([early.id, live.id])
+    expect(result.items[0]).toBe(early)
+    expect(result.items[1]).toMatchObject({ entryId: live.entryId, liveMessageId: live.liveMessageId,
+      historyReconciled: true })
+    expect(result.prepended).toEqual([])
+  })
+
+  it('places unanchored older history before the loaded newer window without guessing live row positions', () => {
+    const early = liveTool(5260, 'unlocated')
+    const located = { ...liveTool(5261, 'located-newer'), historyReconciled: true }
+    const page = [diskMessage(liveMessage('user', 5262), 'unrelated-older')]
+    const result = reconcileOlderTimelineItems([early, located], page)
+    expect(result).toEqual({ items: [...page, early, located], prepended: page })
+    expect(result.items[1].historyReconciled).toBeUndefined()
+    expect(result.items[1]).not.toHaveProperty('entryId')
+  })
+
+  it.each(messageKinds.flatMap((kind) => ['older', 'newer'].map((direction) => ({ kind, direction }))))(
+    'does not multiply a bare $kind disk row on $direction revisits after a known entry/live identity conflict', ({ kind, direction }) => {
+      const a = { ...liveMessage(kind, 5280), entryId: 'shared-entry', historyReconciled: true }
+      const b = { ...a, id: 5281, liveMessageId: 'synthetic:conflicting' }
+      // Preserve the existing conflict; do not guess which live identity owns
+      // the entry. A later bare disk copy is already represented, not a third
+      // message or a trustworthy anchor for selecting either mounted row.
+      let rows = reconcileNewerTimelineItems([a], [b]).items
+      expect(rows).toEqual([a, b])
+      const disk = diskMessage(a, a.entryId, 5380)
+      for (let repeat = 0; repeat < 3; repeat++) {
+        const page = [{ ...disk }]
+        const result = direction === 'older'
+          ? reconcileOlderTimelineItems(rows, page) : reconcileNewerTimelineItems(rows, page)
+        expect(result.items).toEqual([a, b])
+        expect(new Set(result.items.map((row) => row.id)).size).toBe(2)
+        expect('prepended' in result ? result.prepended : result.appended).toEqual([])
+        rows = result.items
+      }
+    }
+  )
+
+  it.each(messageKinds)('binds a unique actual SDK clock and full final %s body on an older page', (kind) => {
+    // Old cache markers without a real entry ID are not proof of reconciliation.
+    const live = { ...liveMessage(kind), historyReconciled: true }
+    const persisted = diskMessage(live)
+    const result = reconcileOlderTimelineItems([live], [persisted])
+    expect(result.items).toEqual([expect.objectContaining({ id: live.id, entryId: persisted.entryId,
+      liveMessageId: live.liveMessageId, messageTimestamp: clock, historyReconciled: true })])
+    expect(result.prepended).toEqual([])
+  })
+
+  it.each([
+    { messageTimestamp: undefined }, { messageTimestamp: clock + 1 },
+    { text: 'synthetic different final' }, { thinking: 'synthetic different thought' },
+    { error: 'synthetic provider error' }
+  ])('does not identify an older assistant by text alone or an incomplete final body: %j', (patch) => {
+    const live = liveMessage('assistant')
+    const persisted = { ...diskMessage(live), ...patch } as MessageRow
+    expect(reconcileOlderTimelineItems([live], [persisted])).toEqual({
+      items: [persisted, live], prepended: [persisted]
+    })
+  })
+
+  it.each(messageKinds.flatMap((kind) => [1, 0].map((clockOffset) => ({ kind, clockOffset }))))(
+    'keeps real same-text $kind sends distinct with clock offset $clockOffset', ({ kind, clockOffset }) => {
+      const first = liveMessage(kind, 5300)
+      const second = { ...liveMessage(kind, 5301), messageTimestamp: clock + clockOffset }
+      const page = [diskMessage(first, 'entry-first'), diskMessage(second, 'entry-second')]
+      const result = reconcileOlderTimelineItems([first, second], page)
+      if (clockOffset === 0) {
+        expect(result).toEqual({ items: [...page, first, second], prepended: page })
+      } else {
+        expect(result.items).toEqual([
+          expect.objectContaining({ id: first.id, entryId: 'entry-first', liveMessageId: first.liveMessageId }),
+          expect.objectContaining({ id: second.id, entryId: 'entry-second', liveMessageId: second.liveMessageId })
+        ])
+        expect(result.prepended).toEqual([])
+      }
+    }
+  )
+
+  it.each(messageKinds)('never deletes an older %s with a conflicting entry or live ID', (kind) => {
+    const base = liveMessage(kind)
+    const page = diskMessage(base)
+    const pairs: Array<[MessageRow, MessageRow]> = [
+      [{ ...base, entryId: 'entry-other' }, { ...page, liveMessageId: base.liveMessageId }],
+      [base, { ...page, liveMessageId: 'synthetic:other' }],
+      [{ ...base, entryId: page.entryId, historyReconciled: true }, { ...page, liveMessageId: 'synthetic:other' }]
+    ]
+    for (const [live, persisted] of pairs) {
+      expect(reconcileOlderTimelineItems([live], [persisted])).toEqual({
+        items: [persisted, live], prepended: [persisted]
+      })
+    }
+  })
+
+  it.each(messageKinds)('requires both sides to be unique for an older %s clock/body bridge', (kind) => {
+    const live = liveMessage(kind)
+    const otherLive = { ...live, id: live.id + 1, liveMessageId: 'synthetic:other' }
+    const persisted = diskMessage(live)
+    const otherPersisted = { ...persisted, id: persisted.id + 1, entryId: 'entry-other' }
+    expect(reconcileOlderTimelineItems([live, otherLive], [persisted])).toEqual({
+      items: [persisted, live, otherLive], prepended: [persisted]
+    })
+    expect(reconcileOlderTimelineItems([live], [persisted, otherPersisted])).toEqual({
+      items: [persisted, otherPersisted, live], prepended: [persisted, otherPersisted]
+    })
+    // An earlier strong match cannot make the remaining same-clock body unique.
+    const strong = { ...persisted, liveMessageId: live.liveMessageId }
+    const result = reconcileOlderTimelineItems([live, otherLive], [strong, otherPersisted])
+    expect(result.items).toEqual([
+      expect.objectContaining({ id: live.id, entryId: strong.entryId }), otherPersisted, otherLive
+    ])
+    expect(result.prepended).toEqual([otherPersisted])
+  })
+
+  it('returns only genuinely new history as prepended and is idempotent across repeated older pages', () => {
+    const { fullLive, olderPage } = syntheticTimeline()
+    const earlier = diskMessage({ ...liveMessage('user', 5400), messageTimestamp: clock - 1 }, 'entry-before')
+    const page = [earlier, ...olderPage]
+    const first = reconcileOlderTimelineItems(fullLive, page)
+    expect.soft(first.prepended).toEqual([earlier])
+    expect.soft(first.items.map((row) => row.id)).toEqual([earlier.id, ...fullLive.map((row) => row.id)])
+    const repeated = reconcileOlderTimelineItems(first.items, page.map((row) => ({ ...row })))
+    expect.soft(repeated.items).toEqual(first.items)
+    expect.soft(repeated.prepended).toEqual([])
+  })
+
+  it('finishes result-only older pages without orphan rows or false placement, then locates the call once', () => {
+    const running: TimelineItem = { kind: 'tool', id: 5500, historical: true, noReveal: true,
+      tool: { id: 'result-only', name: 'read', status: 'running', live: true, isError: false } }
+    const resultEntry: WireEntry = { type: 'message', id: 'entry-result', parentId: 'entry-call',
+      timestamp: new Date(clock + 20_000).toISOString(), message: { role: 'toolResult',
+        toolCallId: running.tool.id, toolName: running.tool.name, isError: false,
+        content: [{ type: 'text', text: 'synthetic final result' }] } }
+    const page = entriesToTimeline([resultEntry])
+    expect(page).toEqual([])
+    const first = reconcileOlderTimelineItems([running], page, collectToolResults([resultEntry]))
+    expect(first.prepended).toEqual([])
+    expect(first.items).toEqual([expect.objectContaining({ id: running.id, historical: true, noReveal: true,
+      tool: expect.objectContaining({ status: 'done', resultReceived: true, resultSource: 'history',
+        live: true, outputText: 'synthetic final result' }) })])
+    expect(first.items[0].historyReconciled).toBeUndefined()
+    expect(reconcileOlderTimelineItems(first.items, page, collectToolResults([resultEntry]))).toEqual(first)
+    const call: TimelineItem = { kind: 'tool', id: 5501,
+      tool: { id: running.tool.id, name: 'read', status: 'done', isError: false } }
+    const located = reconcileOlderTimelineItems(first.items, [call])
+    expect(located.items).toEqual([{ ...first.items[0], historyReconciled: true }])
+    expect(located.prepended).toEqual([])
+    const staleFinal = { ...call, tool: applyToolResult(call.tool,
+      { content: [{ type: 'text', text: 'synthetic stale result' }] }, true, 'history') }
+    expect(reconcileOlderTimelineItems(located.items, [staleFinal])).toEqual(located)
+  })
+})
+
+describe('already-reconciled timeline anchor ordering', () => {
+  const user: TimelineItem = { kind: 'user', id: 6000, entryId: 'anchor-user',
+    liveMessageId: 'synthetic:user', messageTimestamp: 200, text: 'same body' }
+  const call: TimelineItem = { kind: 'tool', id: 6001,
+    tool: { id: 'anchor-call', name: 'read', status: 'done', isError: false } }
+  const assistant: TimelineItem = { kind: 'assistant', id: 6002, entryId: 'anchor-assistant',
+    liveMessageId: 'synthetic:assistant', text: 'same body', thinking: '', streaming: false }
+  const before: TimelineItem = { kind: 'user', id: 6100, text: 'same body', messageTimestamp: 300 }
+  const between: TimelineItem = { kind: 'user', id: 6101, text: 'same body', messageTimestamp: 100 }
+  const tail: TimelineItem = { kind: 'user', id: 6102, text: 'same body', messageTimestamp: 200 }
+
+  it('weaves secondary-only runs around several message/tool anchors, preserving primary row objects', () => {
+    expect(orderTimelineAroundAnchors([user, call, assistant], [before, { ...user }, between, { ...call }, { ...assistant }, tail]))
+      .toEqual([before, user, between, call, assistant, tail])
+  })
+
+  it('keeps primary then secondary without shared keys, never sorting or deduplicating equal bodies/clocks', () => {
+    expect(orderTimelineAroundAnchors([user], [before, between, tail])).toEqual([user, before, between, tail])
+    expect(orderTimelineAroundAnchors([], [before, between, tail])).toEqual([before, between, tail])
+    expect(orderTimelineAroundAnchors([user], [])).toEqual([user])
+  })
+
+  it('falls back to primary order for reversed anchors without losing secondary-only rows', () => {
+    expect(orderTimelineAroundAnchors([user, call], [before, { ...call }, between, { ...user }, tail]))
+      .toEqual([user, call, before, between, tail])
+  })
+
+  it.each([
+    { name: 'entry ID', row: { ...user, entryId: 'other-entry' } as TimelineItem },
+    { name: 'private live ID', row: { ...user, liveMessageId: 'synthetic:other' } as TimelineItem },
+    { name: 'row kind', row: { ...assistant, id: user.id } as TimelineItem }
+  ])('does not drop a same-key row with a conflicting $name', ({ row }) => {
+    expect(orderTimelineAroundAnchors([user], [before, row, tail])).toEqual([user, before, row, tail])
+  })
+
+  it('does not mistake a colliding numeric key for a shared tool call identity', () => {
+    const other: TimelineItem = { ...call, tool: { ...call.tool, id: 'different-call' } }
+    expect(orderTimelineAroundAnchors([call], [before, other, tail])).toEqual([call, before, other, tail])
+  })
+
+  it('does not amplify duplicate shared keys outside the unique-key contract', () => {
+    const copy = { ...user }
+    // Invalid input remains invalid; do not invent replacement React/entry IDs
+    // or use the ambiguous key to weave rows. Suppress only proven one-to-one
+    // overlap, preserving the larger multiplicity instead of creating a third.
+    expect(orderTimelineAroundAnchors([user], [copy, copy])).toEqual([user, copy])
+    expect(orderTimelineAroundAnchors([user, copy], [copy])).toEqual([user, copy])
+    expect(orderTimelineAroundAnchors([user, copy], [copy, copy])).toEqual([user, copy])
+    expect(orderTimelineAroundAnchors([user], [before, copy, copy, tail])).toEqual([user, before, copy, tail])
+    expect(orderTimelineAroundAnchors([user], [before, before])).toEqual([user, before, before])
+    const liveOnly: TimelineItem = { ...user, entryId: undefined }
+    const liveCopy = { ...liveOnly }
+    expect(orderTimelineAroundAnchors([liveOnly], [liveCopy, liveCopy])).toEqual([liveOnly, liveCopy])
+  })
+
+  it('preserves conflicting duplicate keys rather than assigning fake identities or dropping distinct rows', () => {
+    const other: TimelineItem = { ...user, entryId: 'different-entry' }
+    expect(orderTimelineAroundAnchors([user], [other, other])).toEqual([user, other, other])
+    const bare: TimelineItem = { kind: 'user', id: user.id, text: user.text }
+    // The duplicated key voids the helper precondition; absent shared true
+    // identity, matching text/key alone cannot prove any overlap to remove.
+    expect(orderTimelineAroundAnchors([user], [bare, bare])).toEqual([user, bare, bare])
+    const emptyIdentity: TimelineItem = { ...bare, liveMessageId: '' }
+    const emptyCopy = { ...emptyIdentity }
+    expect(orderTimelineAroundAnchors([emptyIdentity], [emptyCopy, emptyCopy]))
+      .toEqual([emptyIdentity, emptyCopy, emptyCopy])
+  })
+})
 
 describe('timeline derivation', () => {
   it('normalizes SDK numeric and ISO wire timestamps without inventing missing identity', () => {

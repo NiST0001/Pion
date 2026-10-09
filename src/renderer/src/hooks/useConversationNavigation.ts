@@ -263,7 +263,8 @@ export function useConversationNavigation({
       nearBottomRef.current = false
       readingHistory.current = true
     }
-    if (timelineMutation === 'prepend' && addedTimelineItems && previousHeight > 0 && pendingJumpNonce.current === null) {
+    if (timelineMutation === 'prepend' && previousHeight > 0 && pendingJumpNonce.current === null) {
+      // Older pages can also relocate mounted live rows without adding any.
       // Prepending moves existing rows, even during manual scrolling. Keeping
       // the same numeric scrollTop would jump to the newly inserted page.
       // Measure a retained row in layout coordinates (not transformed screen

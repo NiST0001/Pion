@@ -77,8 +77,8 @@
 | 路径 | 用途 |
 | --- | --- |
 | src/renderer/src/agent/types.ts、reducer.ts | UI 状态和事件归约；timelineReady 独立记录正文是否已被所选作用域接受，不能从 loading 结束或空 STATE 推断；独立任务快照、结果有界去重、恢复请求与实时 revision 保护；以最终消息收口模型错误并显示实时压缩失败，空最终 text/thinking 清除旧流式草稿；工具增量仅处理文字，最终消息优先投影有界图片及生图请求/保存设置，相同有效预览的重复结果不重解码，设置变化仍更新，迟到执行结果不回退终态 |
-| src/renderer/src/agent/reducer.ts | 实时事件与选中会话显示状态；带 cwd/path/backend/revision 的后台显示快照只归并当前作用域；区分显示版本与生命周期权威，同版本可补齐显示但不复活已结束运行；有界记住同目录/路径的已替代后端，拒绝迟到复活；消息增量/end 按唯一真实身份路由，缓存补齐已知 entry ID、仅填明确截断字段，最终快照收敛已分裂助手副本；保留运行中工具、行身份/预览及权威空 final，不重放生命周期、任务或计费用量 |
-| src/renderer/src/agent/timeline.ts | 会话条目转时间线、缓存和分页类型；缓存单独保留任务快照，不能以当前页有无任务记录替代；历史回放保留助手错误诊断；按持久化身份、稳定 live 消息身份及双方唯一的 SDK 消息时间戳/完整终态内容归并实时行与分页副本；缓存/live 互并缺少真实 entry ID 不误登记历史对齐，兼容旧误标；先排除冲突的已知身份再判断唯一性，不用已匹配后的剩余项猜测；用户时间戳/内容歧义不猜测，保留真实重复发送及已有撤销 ID，保留组件身份及页面顺序，未覆盖的实时行仍留在尾部；最终结果/回放共用图片预览及生图请求型号/操作/设置/引用数与保存尺寸投影，不保留引用路径数组/输入字节，不从旧参数补造最终默认设置，设置-only 更新复用有效预览；同 scope 替换保留工具终态及已挂载消息 key/撤销身份，旧分页及 result-only 页面补完已有调用，不创建孤立结果行 |
+| src/renderer/src/agent/reducer.ts | 实时事件与选中会话显示状态；带 cwd/path/backend/revision 的后台显示快照只归并当前作用域；区分显示版本与生命周期权威，同版本可补齐显示但不复活已结束运行；有界记住同目录/路径的已替代后端，拒绝迟到复活；消息增量/end 按唯一真实身份路由，缓存补齐已知 entry ID、仅填明确截断字段，最终快照收敛已分裂助手副本；有界历史页先到时，以完整 replay 的已匹配共同锚点插入缺失开场，后续 STATE 新增行保持既有显示顺序；保留运行中工具、行身份/预览及权威空 final，不重放生命周期、任务或计费用量 |
+| src/renderer/src/agent/timeline.ts | 会话条目转时间线、缓存和分页类型；缓存单独保留任务快照，不能以当前页有无任务记录替代；历史回放保留助手错误诊断；按持久化身份、稳定 live 消息身份及双方唯一的 SDK 消息时间戳/完整终态内容归并实时行与分页副本；缓存/live 互并缺少真实 entry ID 不误登记历史对齐，兼容旧误标；先排除冲突的已知身份再判断唯一性，不用已匹配后的剩余项猜测；用户时间戳/内容歧义不猜测，保留真实重复发送及已有撤销 ID，较旧/较新页共用严格身份归并，回填 entry 保留挂载 key；有界最新页与中段旧页用唯一且顺序一致的共同锚点保留完整 live 顺序，无锚点才保守保留尾部，冲突不猜排序；已知身份歧义不选择锚点或倍增重复磁盘副本；最终结果/回放共用图片预览及生图请求型号/操作/设置/引用数与保存尺寸投影，不保留引用路径数组/输入字节，不从旧参数补造最终默认设置，设置-only 更新复用有效预览；同 scope 替换保留工具终态及已挂载消息 key/撤销身份，旧分页及 result-only 页面补完已有调用，不创建孤立结果行 |
 | src/renderer/src/agent/modelError.ts | 对常见模型/API 额度、认证、限流、上下文、服务及网络错误做保守分类，生成简短中文提示并原样保留技术详情 |
 | src/renderer/src/agent/sessionFavorites.ts、sessionOrder.ts | 收藏与排序 |
 | src/renderer/src/hooks/useAgent.ts | Agent hooks 汇总、启动及模型刷新 |
@@ -86,7 +86,7 @@
 | src/renderer/src/hooks/useMessageRevert.ts | 撤销确认、空草稿/附件读取门控、一次性文字/图片恢复及拒绝后的恢复重试；按逻辑选择隔离迟到结果，不持有后端或文件回滚 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步；分支/会话列表有界并发逐 cwd 发布，慢/失败项不阻挡已完成项，实时推送优先于迟到初次查询 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
-| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别；真实会话末尾选最后已挂载用户轮次，包含无持久 ID 的实时行；仅以所属索引与挂载行均唯一的实际 SDK 消息时钟作显示桥接，歧义清除旧标记、不补造撤销 ID；加载占位/分页末尾除外；历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
+| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页（含只迁移未新增行）、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别；真实会话末尾选最后已挂载用户轮次，包含无持久 ID 的实时行；仅以所属索引与挂载行均唯一的实际 SDK 消息时钟作显示桥接，歧义清除旧标记、不补造撤销 ID；加载占位/分页末尾除外；历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
 | src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让，权限请求及会话提问面板复用底部余量定位在输入框上方；全局认证仍居中，不测量展开详情、不重挂载消息或草稿 |
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
@@ -143,7 +143,7 @@
 - `tests/renderer/McpStatusPage.test.tsx`：状态/曝光/数量和安全文案、缓存读取与 push 优先、A→B→A generation/后端替换、关闭/隐藏/切 tab、实际 IPC 槽至收口、挂起读取下独立过期和同缓存不续期；不启动 Electron/SDK/服务器。
 - `tests/unit/session-list-cache.test.ts`：列表在途去重、并发/容量、软/硬失效、持续输出和迟到扫描防护；`worktree-session-isolation.test.ts` 补充 manager 签名复用，`agent-bridge-send-queue.test.ts` 补充状态等待期限及私有缓存回归。
 - `tests/unit/live-session-state.test.ts`：后台当前轮快照、字段级截断/预算、最终空消息及工具终态、安全图片预览与生图元数据、实例身份及序列化界限；bridge 的后台切回及迟到状态竞态覆盖于 `agent-bridge-send-queue.test.ts`。
-- `tests/unit/session-restore-identity.test.ts`：真实投影与独立 RPC JSON 克隆、普通消息结束后落盘且没有虚构 entry_appended，STATE/cache/disk 顺序、重复恢复/分页、助手 ID 保留与迟到结束路由、同文真实重发/相同 SDK 时钟、终态变钟后的分裂收敛、明确截断字段与缓存补齐，以及 cwd/path/backend 替换隔离。`timeline.test.ts` 补充旧误标、双侧唯一及冲突/歧义保护。
+- `tests/unit/session-restore-identity.test.ts`：真实投影与独立 RPC JSON 克隆、普通消息结束后落盘且没有虚构 entry_appended，STATE/cache/disk 顺序、重复恢复/分页、助手 ID 保留与迟到结束路由、同文真实重发/相同 SDK 时钟、终态变钟后的分裂收敛、明确截断字段与缓存补齐，以及 cwd/path/backend 替换隔离。`timeline.test.ts` 补充旧误标、双侧唯一、冲突/歧义复访保护及有界最新页→中段旧页→开场的身份/顺序归并，锚点逆序或重复 key 保守回退；STATE 新增行不得打乱尚未由 older 定位的开场。
 - `tests/unit/`：后端策略、队列、运行记录、迁移和 reducer 等逻辑测试；`agent-compaction-state.test.ts` 覆盖压缩生命周期、迟到快照与会话切换重置；`compaction-context-usage.test.ts` 覆盖手动/自动压缩后的用量作废、失败保留和新响应用量更新；`model-error.test.ts` 与 `agent-error-state.test.ts` 覆盖模型/API 错误分类、实时最终消息收口、默认中止过滤、压缩失败及普通/retain-none 压缩的 wire 归并。
 - `tests/unit/session-tasks.test.ts`：缺少工具开始行仍接收任务、重复结果去重、空快照/错误区分、分页及异步恢复保护、分支祖先链和独立缓存。
 - `tests/unit/codex-image-transport.test.ts`：模拟订阅 generations/edits JSON（PNG/JPEG data URL）、size/quality 原样转发及空引用分流、私有字节/设置快照与 metadata 上传、每张/累计字节和 PNG inflate 前累计像素准入；官方默认/实验 2.5 型号转发、非法/未知参数（含 mask/input_fidelity）在 OAuth/网络前拒绝、不降级/重试/丢设置、不信任版本/质量回显、所属 runtime OAuth/刷新、拒绝 API-key/重定向/外部 URL、有界响应/输出/期限、额度/权益与编辑错误回显保护；不请求真实服务。
@@ -157,11 +157,11 @@
 - `tests/unit/tool-permission-policy.test.ts`：策略/worktree 继承；无引用 network + write、有引用增加 read 且文字授权不能覆盖读取；每个输入风险、字面 @、全部最大有界路径/角色与 metadata 上传说明、无效/超限参数不遍历或回显、请求设置校验与短型号/实验提示；既有检查点、待确认期间各策略 deny 优先及旧项目授权保护、拒绝/取消/无 UI 不执行；子代理沿原有写工具门控，不新增生图权限。
 - `tests/fixtures/static-png.ts`：无 I/O、确定性的静态 RGB PNG 内存 fixture，独立 CRC 与有界尺寸/压缩数据，供传输、保存和完整性测试使用。
 - `tests/renderer/`：React 组件及 hooks 测试。
-  - `sessionRestoreIdentity.test.tsx`：实际历史 hook/订阅/reducer 及消息组件的 A→B→A 恢复；STATE/cache 先后、真实跳转中窗后的 loadNewer 分页、重复 STATE/磁盘页、后台同文重发及相同 SDK 时钟；核对行数、真实 entry ID、React key/DOM 节点保留，不作为真实 GUI 或旧源码失败的证明。
+  - `sessionRestoreIdentity.test.tsx`：实际历史 hook/订阅/reducer 及消息组件的 A→B→A 恢复；STATE/cache/有界最新页先后、长轮多批工具与 loadOlder/视口填充、跳转中窗后的 loadNewer、重复 STATE/捕获的 prepend action、新 STATE 行、后台同文重发及相同 SDK 时钟；在 older 前后核对全轮顺序、entry 回填、工具终态及 React key/已连接 DOM 保留；完成后切换与后台完成矩阵覆盖可恢复/超限缓存及真实旧游标，分别检查最终回复完整存在和无后继可显内容时的末位，区分错位与真正丢行；合成 RPC/分页/布局不替代真实 GUI 或现场 IPC 诊断。
   - `sessionTasks.test.tsx`：任务记录在历史页之外的恢复、跳转保留面板节点、请求期间实时清空、跨会话迟到结果、缓存无需重绘时恢复快照，以及复制/分叉/删除的任务作用域重置和取消保留。
   - `conversationFollow.test.tsx`：用户离开/接近/回到末尾时的新输出行为、无 scroll 事件时恢复跟随、连续手势和延迟布局；程序化定位不代表用户恢复跟随。
   - `ChatTimeline.test.tsx`：空历史的未接收/加载/失败/成功空分支区分、显式重新加载及失败时保留已显示消息。
-  - `historyPaging.test.tsx`：无 scroll 事件的边界输入、在途去重、嵌套输出区、失败重试、旧填充请求隔离，以及跳转后连续加载多页直到真实会话末尾；区分历史追加与实时追加，覆盖最终错误与分页返回竞态、实时行身份及顺序归并。
+  - `historyPaging.test.tsx`：无 scroll 事件的边界输入、在途去重、嵌套输出区、失败重试、旧填充请求隔离，以及跳转后连续加载多页直到真实会话末尾；区分历史追加与实时追加，覆盖最终错误与分页返回竞态、实时行身份及顺序归并；固定物理分支切片驱动 older 插入/纯迁移/仅回填，按 DOM 位移验证在途上滚、阅读锚点、补偿不连锁分页及显式跳转释放占位。
   - `conversationNavigation.test.tsx`：密集短消息定位、底部位置受限时保持明确点击目标；浮层余量变化补偿与无遮挡历史参考点；同长度替换、布局变化和索引迟到刷新活动标记，不提前选择下一轮；历史跳转、同会话替换、尺寸变化和程序化滚动不恢复跟随。
   - `conversationOverlays.test.tsx`：统计条/输入区域尺寸观测、详情展开不改变余量、条件挂载与 observer 清理、草稿节点身份保持。
   - `ExtensionUiModal.test.tsx`：选项/自定义回答/取消与全局认证；会话提问使用输入区域实测底部余量，输入增高不重建问题或两处草稿，全局认证不受该偏移影响。

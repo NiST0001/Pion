@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
-import { useReducer, type Dispatch } from 'react'
+import { useReducer, useRef, type Dispatch } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import type { SessionEntriesPage, SessionMeta, WireEntry, WireMessage } from '../../src/shared/types'
 import { useHistoryPaging } from '../../src/renderer/src/hooks/useHistoryPaging'
@@ -200,6 +200,259 @@ it('reads session-tail availability from the current cursor, not a stale render 
   cursor.newerComplete = false
   h.result.current.timelineLoadId.current++
   expect(h.result.current.hasNewerHistory()).toBe(false)
+})
+
+// Exercise the public history/navigation hooks together. jsdom has no layout;
+// derive each fixed-height row's offset from its actual keyed DOM siblings,
+// never from the scroll position or the compensation we expect to observe.
+function olderReadingFixture(seed: TimelineItem[], heights: Record<string, number>, branch: WireEntry[]) {
+  const path = '/older-reading.jsonl'
+  const pending = deferred<void>()
+  // These scenarios exercise explicit numeric windows, not implicit newest
+  // reads. Match AgentBridge's physical before/limit slicing, including every
+  // metadata entry; only entriesToTimeline may discard non-displayable rows.
+  const physicalPage = (before: number, limit = 160): SessionEntriesPage => {
+    const end = Number.isFinite(before) ? Math.min(Math.max(Math.trunc(before), 0), branch.length) : branch.length
+    const pageSize = Math.min(Math.max(Math.trunc(limit) || 160, 1), 240)
+    const start = Math.max(0, end - pageSize)
+    return { entries: branch.slice(start, end), toolResults: [], start, end,
+      total: branch.length, leafId: branch.at(-1)?.id ?? null, mode: 'build' }
+  }
+  const pages: SessionEntriesPage[] = []
+  const api = { getEntriesPage: vi.fn(async (before?: number, limit?: number, sessionPath?: string) => {
+    expect(sessionPath).toBe(path)
+    if (before === undefined) throw new Error('This fixture expects explicit physical history windows')
+    const page = physicalPage(before, limit)
+    pages.push(page)
+    if (pages.length === 1) await pending.promise
+    return page
+  }) }
+  const frames = new Map<number, FrameRequestCallback>()
+  let nextFrame = 0
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    frames.set(++nextFrame, callback)
+    return nextFrame
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id) })
+  let current!: {
+    state: AgentState; dispatch: Dispatch<Action>
+    history: ReturnType<typeof useAgentHistory>
+    navigation: ReturnType<typeof useConversationNavigation>
+  }
+  let element!: HTMLDivElement, surface!: HTMLDivElement, timeline!: HTMLDivElement
+  let top = 0
+  const rowHeight = (row: Element) => Number((row as HTMLElement).dataset.height)
+  const contentHeight = () => timeline ? [...timeline.children].reduce((sum, row) => sum + rowHeight(row), 0) : 0
+  const totalHeight = () => Math.max(400, contentHeight(), parseFloat(surface?.style.minHeight) || 0)
+  const loadOlder = vi.fn((options?: { viaScroll?: boolean }) => current.history.loadOlder(options))
+  const loadNewer = vi.fn((options?: { viaScroll?: boolean }) => current.history.loadNewer(options))
+  function Fixture() {
+    const [state, dispatch] = useReducer(reducer, { ...initialState, timeline: seed, timelineReady: true,
+      status: { phase: 'running', cwd: '/reading-project' } })
+    const history = useAgentHistory({ api: api as never, state, dispatch })
+    const scrollRef = useRef<HTMLDivElement>(null)
+    const navigation = useConversationNavigation({
+      scrollRef, timeline: state.timeline, timelineMutation: state.timelineMutation,
+      busy: state.busy, timelineLoading: state.timelineLoading, sessionPath: path,
+      historyJump: state.historyJump, historyIndex: state.historyIndex,
+      loadOlder, loadNewer, hasNewerHistory: history.hasNewerHistory
+    })
+    current = { state, dispatch, history, navigation }
+    return <div ref={(node) => {
+      scrollRef.current = node
+      if (!node) return
+      element = node
+      Object.defineProperties(node, {
+        clientHeight: { configurable: true, value: 400 },
+        scrollHeight: { configurable: true, get: totalHeight },
+        scrollTop: { configurable: true,
+          get: () => { top = Math.max(0, Math.min(top, totalHeight() - 400)); return top },
+          set: (value: number) => { top = Math.max(0, Math.min(value, totalHeight() - 400)) } }
+      })
+    }} onScroll={() => navigation.handleTimelineScroll()}>
+      <div ref={(node) => {
+        navigation.scrollSurfaceRef.current = node
+        if (!node) return
+        surface = node
+        node.getBoundingClientRect = () => ({ height: totalHeight() } as DOMRect)
+      }}>
+        <div className="timeline" ref={(node) => {
+          if (!node) return
+          timeline = node
+          Object.defineProperty(node, 'offsetHeight', { configurable: true, get: contentHeight })
+        }}>
+          {state.timeline.map((item) => <div key={item.id} data-timeline-id={item.id}
+            className={`row-${item.kind}`} data-entry-id={item.kind === 'tool' ? undefined : item.entryId}
+            data-height={heights[item.kind === 'tool' ? item.tool.id : item.kind === 'compaction' ? item.summary : item.text] ?? 600}
+            ref={(row) => {
+              if (!row) return
+              Object.defineProperty(row, 'offsetTop', { configurable: true, get: () => {
+                let offset = 0
+                for (let previous = row.previousElementSibling; previous; previous = previous.previousElementSibling) offset += rowHeight(previous)
+                return offset
+              } })
+              row.getBoundingClientRect = () => ({ top: row.offsetTop - element.scrollTop, height: rowHeight(row) } as DOMRect)
+            }}>{item.kind === 'tool' ? item.tool.id : item.kind === 'compaction' ? item.summary : item.text}</div>)}
+        </div>
+      </div>
+    </div>
+  }
+  const view = render(<Fixture />)
+  current.history.timelineOwnerPath.current = path
+  // A retained middle window can carry an unresolved live tail. The distant
+  // jump later selects a different real window in this same physical branch.
+  const retainedPage = physicalPage(20, 10)
+  const cached = { items: seed, mode: retainedPage.mode, apiBefore: retainedPage.start, apiAfter: retainedPage.end,
+    toolResults: retainedPage.toolResults, complete: retainedPage.start === 0,
+    newerComplete: retainedPage.end === retainedPage.total, leafId: retainedPage.leafId, total: retainedPage.total }
+  current.history.timelineCache.current.set(path, cached)
+  current.history.historyCursor.current = { ...cached, path, loading: false, loadId: current.history.timelineLoadId.current }
+  const paint = () => act(() => {
+    const ready = [...frames.values()]
+    frames.clear()
+    ready.forEach((callback) => callback(0))
+  })
+  return { ...view, api, pending, pages, path, element, surface, timeline, paint, loadOlder, loadNewer,
+    get current() { return current } }
+}
+
+it.each(['insert and relocate', 'backfill only', 'relocate only'] as const)('preserves keyed reading rows through a real older live/history merge: %s', async (operation) => {
+  const user: TimelineItem = { kind: 'user', id: 901, text: 'live question', live: true,
+    liveMessageId: 'reading:user', messageTimestamp: 1_780_000_000_001 }
+  const assistant: TimelineItem = { kind: 'assistant', id: 902, text: 'live answer', thinking: '',
+    streaming: false, live: true, liveMessageId: 'reading:assistant', messageTimestamp: 1_780_000_000_002 }
+  const latest: TimelineItem = { kind: 'assistant', id: 903, entryId: 'latest', text: 'latest page',
+    thinking: '', streaming: false }
+  const tail: TimelineItem = { kind: 'assistant', id: 904, text: 'unfinished tail', thinking: '',
+    streaming: true, live: true, liveMessageId: 'reading:tail', messageTimestamp: 1_780_000_000_003 }
+  const inserting = operation === 'insert and relocate'
+  const relocating = operation !== 'backfill only'
+  const seed = relocating ? [latest, user, assistant, tail] : [user, assistant, tail]
+  // All data is synthetic. Unrendered metadata keeps real physical offsets:
+  // older [0,10), retained [10,20), and jump [35,45) are disjoint windows.
+  // Put the jump AFTER the retained window so the older match-only cases can
+  // genuinely reach start=0 without importing another visible message.
+  const branch: WireEntry[] = Array.from({ length: 60 }, (_, index) => ({
+    type: 'custom', id: `metadata-${index}`, parentId: null, timestamp: '',
+    customType: 'synthetic-reading-metadata', data: { index }
+  }))
+  if (inserting) branch[7] = { type: 'message', id: 'earlier', parentId: null, timestamp: '',
+    message: { role: 'user', content: 'earlier question' } }
+  branch[8] = { type: 'message', id: 'stored-user', parentId: null, timestamp: '',
+    message: { role: 'user', timestamp: user.messageTimestamp, content: user.text } }
+  branch[9] = { type: 'message', id: 'stored-assistant', parentId: null, timestamp: '',
+    message: { role: 'assistant', timestamp: assistant.messageTimestamp, content: assistant.text } }
+  if (relocating) branch[10] = { type: 'message', id: 'latest', parentId: null, timestamp: '',
+    message: { role: 'assistant', content: latest.text } }
+  const landmark = { entryId: 'jump-target', entryIndex: 42, ordinal: inserting ? 3 : 2, snippet: '', timestamp: '' }
+  branch[landmark.entryIndex] = { type: 'message', id: landmark.entryId, parentId: null, timestamp: '',
+    message: { role: 'user', content: 'jump target' } }
+  branch.forEach((entry, index) => { entry.parentId = branch[index - 1]?.id ?? null })
+  const h = olderReadingFixture(seed, { 'latest page': 1000, 'live question': relocating ? 20 : 1000,
+    'live answer': 30, 'earlier question': 10, 'jump target': 200,
+    'unfinished tail grows after history': 900, 'unfinished tail grows after history and jump': 1100 }, branch)
+  const readingRow = h.timeline.firstElementChild as HTMLElement
+  const userNode = h.timeline.querySelector('[data-timeline-id="901"]')
+  const assistantNode = h.timeline.querySelector('[data-timeline-id="902"]')
+  // The outward gesture and real navigation callback start loadOlder; then the
+  // reader moves again while that exact IPC promise is pending.
+  fireEvent.wheel(h.element, { deltaY: -300 })
+  h.element.scrollTop = 50
+  fireEvent.scroll(h.element)
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(1)
+  expect(h.api.getEntriesPage).toHaveBeenCalledWith(10, 10, h.path)
+  expect(h.pages[0]).toEqual({ entries: branch.slice(0, 10), toolResults: [],
+    start: 0, end: 10, total: 60, leafId: 'metadata-59', mode: 'build' })
+  expect(h.pages[0].entries).toHaveLength(10)
+  expect(h.pages[0].entries.filter((entry) => entry.type === 'message')).toHaveLength(inserting ? 3 : 2)
+  expect(h.current.history.historyCursor.current?.loading).toBe(true)
+  expect(h.loadOlder).toHaveBeenCalledTimes(1)
+  h.element.scrollTop = 25
+  fireEvent.scroll(h.element)
+  const readingTop = readingRow.getBoundingClientRect().top
+  expect(readingTop).toBe(-25)
+  const beforeLength = h.current.state.timeline.length
+  const beforeContentHeight = h.timeline.offsetHeight
+  await act(async () => { h.pending.resolve() })
+
+  const merged = h.current.state.timeline
+  expect(merged.map((item) => item.kind === 'tool' ? item.tool.id : item.entryId))
+    .toEqual([...(inserting ? ['earlier'] : []), 'stored-user', 'stored-assistant',
+      ...(relocating ? ['latest'] : []), undefined])
+  expect(merged).toHaveLength(beforeLength + (inserting ? 1 : 0))
+  expect(h.timeline.offsetHeight).toBe(beforeContentHeight + (inserting ? 10 : 0))
+  expect(merged.find((item) => item.id === user.id)).toMatchObject({ entryId: 'stored-user', historyReconciled: true })
+  expect(merged.find((item) => item.id === assistant.id)).toMatchObject({ entryId: 'stored-assistant', historyReconciled: true })
+  expect(h.timeline.querySelector('[data-timeline-id="901"]')).toBe(userNode)
+  expect(h.timeline.querySelector('[data-timeline-id="902"]')).toBe(assistantNode)
+  expect(h.timeline.contains(readingRow)).toBe(true)
+  expect(h.current.state.timelineMutation).toBe('prepend')
+  // Relocation moves latest by 50px even without adding a row or any height;
+  // insertion adds another 10px. Both must preserve the in-flight 50 -> 25px
+  // user movement, not compensate using total height/length growth alone.
+  const readingDisplacement = relocating ? 50 + (inserting ? 10 : 0) : 0
+  expect(readingRow.offsetTop).toBe(readingDisplacement)
+  expect(h.element.scrollTop).toBe(25 + readingDisplacement)
+  expect(readingRow.getBoundingClientRect().top).toBe(readingTop)
+  expect(h.current.history.timelineCache.current.get(h.path)?.items).toBe(merged)
+  expect(h.current.history.historyCursor.current?.loading ?? false).toBe(false)
+
+  // Even inside the 96px prefetch zone, the browser event caused by layout
+  // compensation/ID backfill is not another gesture or permission to follow.
+  fireEvent.scroll(h.element)
+  h.paint()
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(1)
+  expect(h.loadOlder).toHaveBeenCalledTimes(1)
+  expect(h.loadNewer).not.toHaveBeenCalled()
+  expect(h.current.navigation.visibleHistoryEntryId).toBe('stored-user')
+  act(() => h.current.dispatch({ type: 'event', event: {
+    type: 'message_update', message: { role: 'assistant', timestamp: tail.messageTimestamp,
+      _pionLiveMessageId: tail.liveMessageId },
+    assistantMessageEvent: { type: 'text_delta', delta: ' grows after history' }
+  } }))
+  h.paint()
+  expect(h.current.state.timeline.find((item) => item.id === tail.id)).toMatchObject({ text: 'unfinished tail grows after history' })
+  expect(h.element.scrollTop).toBe(25 + readingDisplacement)
+  expect(readingRow.getBoundingClientRect().top).toBe(readingTop)
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(1)
+  expect(h.loadOlder).toHaveBeenCalledTimes(1)
+  expect(h.loadNewer).not.toHaveBeenCalled()
+
+  // An explicit jump really replaces the history window. Newly learned entry
+  // IDs must not turn off-window copies into an extra live tail, nor may the
+  // old reading reservation force the much shorter target page to its end.
+  act(() => h.current.dispatch({ type: 'historyIndex', index: {
+    sessionPath: h.path, totalEntries: branch.length, landmarks: [landmark]
+  } }))
+  await act(async () => { await h.current.history.jumpToHistoryLandmark(landmark) })
+  h.paint()
+  expect(h.api.getEntriesPage).toHaveBeenNthCalledWith(2, 45, 10, h.path)
+  expect(h.pages[1]).toEqual({ entries: branch.slice(35, 45), toolResults: [],
+    start: 35, end: 45, total: 60, leafId: 'metadata-59', mode: 'build' })
+  expect(h.pages[1].entries).toHaveLength(10)
+  expect(h.pages[1].entries.some((entry) => ['stored-user', 'stored-assistant', 'latest'].includes(entry.id))).toBe(false)
+  expect(h.current.state.timeline.map((item) => item.kind === 'tool' ? item.tool.id : item.entryId))
+    .toEqual(['jump-target', undefined])
+  expect(h.timeline.querySelector('[data-timeline-id="901"]')).toBeNull()
+  expect(h.timeline.querySelector('[data-timeline-id="902"]')).toBeNull()
+  expect(h.surface.style.minHeight).toBe('')
+  expect(h.element.scrollHeight).toBe(1100)
+  expect(h.element.scrollTop).toBe(0)
+  expect(h.current.navigation.visibleHistoryEntryId).toBe('jump-target')
+  expect(h.current.history.hasNewerHistory()).toBe(true)
+  fireEvent.scroll(h.element)
+  act(() => h.current.dispatch({ type: 'event', event: {
+    type: 'message_update', message: { role: 'assistant', timestamp: tail.messageTimestamp,
+      _pionLiveMessageId: tail.liveMessageId },
+    assistantMessageEvent: { type: 'text_delta', delta: ' and jump' }
+  } }))
+  h.paint()
+  expect(h.element.scrollHeight).toBe(1300)
+  expect(h.element.scrollTop).toBe(0)
+  expect(h.current.navigation.visibleHistoryEntryId).toBe('jump-target')
+  expect(h.api.getEntriesPage).toHaveBeenCalledTimes(2)
+  expect(h.loadOlder).toHaveBeenCalledTimes(1)
+  expect(h.loadNewer).not.toHaveBeenCalled()
 })
 
 it('reconciles a finalized live assistant into the ordered newer history page', async () => {

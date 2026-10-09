@@ -175,6 +175,46 @@ function restoreStep(state: AgentState, step: RestoreStep, fixture: RpcFixture, 
 }
 
 describe('session restore identity across real RPC-shaped messages', () => {
+  it.each(['STATE first', 'page first'] as const)('keeps unlocated opening order when the next STATE adds rows before older paging: %s', (order) => {
+    const fixture = new RpcFixture()
+    fixture.emit({ type: 'agent_start' })
+    const completeCall = (id: string, timestamp: number) => {
+      const call = { type: 'toolCall', id, name: 'read', arguments: { path: `${id}.ts` } }
+      const message: WireMessage = { role: 'assistant', timestamp, content: [call], stopReason: 'toolUse' }
+      fixture.emit({ type: 'message_start', message: { ...message, content: [] } })
+      fixture.emit({ type: 'message_end', message })
+      const entry = fixture.manager.appendMessage(`calls-${id}`, message)
+      fixture.emit({ type: 'tool_execution_start', toolCallId: id, toolName: 'read', args: call.arguments })
+      fixture.emit({ type: 'tool_execution_end', toolCallId: id, toolName: 'read',
+        result: { content: [{ type: 'text', text: `result ${id}` }] }, isError: false })
+      return entry
+    }
+    completeCall('opening', T)
+    const later = completeCall('later', T + 1_000)
+    const page = (state: AgentState) => reducer(state, { type: 'loadEntries',
+      items: fixture.page([later]), preserveToolState: scopeOf(state) })
+    let state = order === 'STATE first'
+      ? page(acceptState(selectedState(), fixture))
+      : acceptState(page(selectedState()), fixture)
+    const keys = state.timeline.map((row) => row.id)
+    expect(state.timeline.map((row) => row.kind === 'tool' && row.tool.id)).toEqual(['opening', 'later'])
+    if (order === 'STATE first') {
+      expect(state.timeline.map((row) => row.historyReconciled === true)).toEqual([false, true])
+    }
+    completeCall('new', T + 2_000)
+    for (let repeat = 0; repeat < 2; repeat++) {
+      state = acceptState(state, fixture)
+      expect(state.timeline.map((row) => row.kind === 'tool' && row.tool.id)).toEqual(['opening', 'later', 'new'])
+      expect(state.timeline.slice(0, 2).map((row) => row.id)).toEqual(keys)
+      for (const row of state.timeline) {
+        expect(row.kind).toBe('tool')
+        if (row.kind === 'tool') expect(row.tool).toMatchObject({ status: 'done', resultReceived: true,
+          outputText: `result ${row.tool.id}` })
+      }
+    }
+    expect(fixture.parsed.some((event) => event.type === 'entry_appended')).toBe(false)
+  })
+
   it('keeps parsed lifecycle objects and unannotated manager entries separate, with independent clocks', () => {
     const { fixture, turn } = completedFixture()
     const lifecycle = fixture.parsed.filter((event) => event.type === 'message_start' || event.type === 'message_end')

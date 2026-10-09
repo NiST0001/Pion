@@ -17,6 +17,7 @@ import {
   collectToolResults,
   compactionFingerprint,
   nextTimelineId,
+  orderTimelineAroundAnchors,
   parseToolArgs,
   preserveTimelineToolState,
   reconcileCompletedAssistantRows,
@@ -712,13 +713,19 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
   // A final snapshot can finish a draft whose start clock differed from the
   // stored final. Fold only the now-proven unique clock/full-body counterpart.
   const reconciled = reconcileCompletedAssistantRows(reconcileNewerTimelineItems(retained, added).items)
-  // Snapshot rows have no persisted page positions: keep all already mounted
-  // rows in place, and append only genuinely new turn rows in replay order.
-  const retainedOrder = new Map(retained.map((row, index) => [row.id, index]))
-  const newOrder = new Map(added.map((row, index) => [row.id, retained.length + index]))
-  const ordered = [...reconciled].sort((a, b) =>
-    (retainedOrder.get(a.id) ?? newOrder.get(a.id) ?? Infinity)
-    - (retainedOrder.get(b.id) ?? newOrder.get(b.id) ?? Infinity))
+  // A bounded disk page can arrive before the complete live turn. Strictly
+  // matched messages/calls are ordering anchors: put the missing opening and
+  // early calls before their next shared row, not after the page's later tools.
+  // Keep existing history order and fall back to appending when no consistent
+  // shared anchor proves placement; snapshot sequence is never a disk ID.
+  const byId = new Map(reconciled.map((row) => [row.id, row]))
+  const acceptedRows = (rows: TimelineItem[]): TimelineItem[] => rows.flatMap((row) => {
+    const accepted = byId.get(row.id)
+    return accepted ? [accepted] : []
+  })
+  // The identity pass uses page placement, but these additions came from a
+  // snapshot, not a newer disk page. Keep the actual retained display order.
+  const ordered = orderTimelineAroundAnchors(acceptedRows(retained), acceptedRows(incoming))
   // Backend idle is authoritative, but busy alone must never complete every
   // tool: other calls can remain active after one message/result finishes.
   const settled = active ? ordered : finalizeStreaming({ ...state, timeline: ordered }).timeline
