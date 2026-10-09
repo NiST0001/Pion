@@ -841,15 +841,25 @@ it('keeps cached reveal markers when the selected live STATE arrives before the 
   expect(h.result.current.state.timeline[0]).toMatchObject({ text: 'fresh final', historical: true, noReveal: false })
 })
 
-it('seeds a fresh running session cache and keeps its draft on the first A → B → A revisit with empty JSONL pages', async () => {
+it.each(['running paths', 'backend identity', 'metadata first'] as const)('seeds a fresh running session cache and keeps its draft on the first A → B → A revisit with empty JSONL pages using %s', async (proof) => {
+  let beforeCachedPaint: (() => void) | undefined
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
-    queueMicrotask(() => callback(0))
+    queueMicrotask(() => {
+      const publish = beforeCachedPaint
+      beforeCachedPaint = undefined
+      publish?.()
+      callback(0)
+    })
     return 1
   })
   vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
   const a = '/fresh-running-a.jsonl', b = '/fresh-running-b.jsonl'
   const draft: TimelineItem = { kind: 'assistant', id: 901, live: true,
     messageTimestamp: 100, text: 'first token', thinking: '', streaming: true }
+  const tool: Extract<TimelineItem, { kind: 'tool' }> = { kind: 'tool', id: 902, tool: { id: 'cached-running-tool', name: 'read',
+    path: 'file.ts', outputText: 'running progress label', status: 'running',
+    isError: false, live: true } }
+  const rows = proof !== 'running paths' ? [draft, tool] : [draft]
   const session = (path: string) => ({ sessionId: path, sessionFile: path,
     isStreaming: path === a, isCompacting: false }) as NonNullable<typeof initialState.session>
   let dispatch!: Dispatch<Action>
@@ -867,17 +877,25 @@ it('seeds a fresh running session cache and keeps its draft on the first A → B
   const h = renderHook(() => {
     const [state, nextDispatch] = useReducer(reducer, { ...initialState,
       status: { phase: 'running', cwd: '/project' }, session: session(a),
-      busy: true, runningSessionPaths: [a], timeline: [draft] })
+      busy: true, runningSessionPaths: proof === 'running paths' ? [a] : [],
+      liveSessionOwnerPath: a, liveSessionBackendId: proof !== 'running paths' ? 'backend-a' : undefined,
+      timeline: rows })
     dispatch = nextDispatch
     return { ...useAgentHistory({ api: api as never, state, dispatch: nextDispatch }), state }
   })
-  expect(h.result.current.timelineCache.current.get(a)?.items).toEqual([draft])
+  expect(h.result.current.timelineCache.current.get(a)?.items).toEqual(rows)
   await act(async () => { await h.result.current.switchSession(b) })
   expect(h.result.current.state.timeline).toEqual([])
+  if (proof === 'metadata first') beforeCachedPaint = () => dispatch({ type: 'event', event: {
+    type: 'agent_start', _pionLive: { backendId: 'backend-a', revision: 8, cwd: '/project', sessionPath: a }
+  } })
   await act(async () => { await h.result.current.switchSession(a) })
-  expect(h.result.current.state.timeline).toEqual([expect.objectContaining({
+  expect(h.result.current.state.timeline[0]).toMatchObject({
     id: draft.id, text: 'first token', streaming: true
-  })])
+  })
+  expect(h.result.current.state.timeline).toHaveLength(rows.length)
+  if (proof !== 'running paths') expect(findTool(h.result.current.state.timeline, tool.tool.id).tool)
+    .toMatchObject({ outputText: 'running progress label', status: 'running' })
   expect(h.result.current.state.busy).toBe(true)
   expect(h.result.current.state.timelineLoading).toBe(false)
   await act(async () => dispatch({ type: 'event', event: { type: 'message_update',
@@ -1337,6 +1355,38 @@ it('does not seed failed empty history as a successful cache and reports failure
   }
 })
 
+it('keeps one reversible user row when a safe STATE projection follows its persisted history page', async () => {
+  const cwd = '/project', path = '/user-identity.jsonl', timestamp = 1_780_000_000_000
+  const api = { getEntriesPage: vi.fn().mockResolvedValue({ entries: [
+    { type: 'message', id: 'user-entry-a', parentId: null, timestamp: '', message: {
+      role: 'user', timestamp, content: [{ type: 'text', text: '安装这个吧' }, previewPart] } }
+  ], toolResults: [], leafId: 'user-entry-a', total: 1, start: 0, end: 1, hasOlder: false, hasNewer: false }),
+  getHistoryIndex: vi.fn().mockResolvedValue(null), onEvent: vi.fn(() => () => undefined) }
+  const h = renderHook(() => {
+    const [state, dispatch] = useReducer(reducer, { ...initialState, status: { phase: 'running', cwd },
+      session: { sessionId: 'user', sessionFile: path } as never })
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state, dispatch }
+  })
+  await act(async () => { await h.result.current.reloadTimeline(path) })
+  const old = h.result.current.state.timeline[0]
+  const view = render(<ToolHistoryRows items={h.result.current.state.timeline} />)
+  const bubble = screen.getByText('安装这个吧')
+  act(() => h.result.current.dispatch({ type: 'session', session: {
+    sessionId: 'user', sessionFile: path, messageCount: 1, isStreaming: false,
+    liveState: { backendId: 'backend-user', revision: 2, cwd, sessionPath: path, events: [
+      { type: 'message_start', message: { role: 'user', timestamp: String(timestamp),
+        content: '安装这个吧', _pionLiveMessageId: 'backend-user:1' } }
+    ] }
+  } }))
+  view.rerender(<ToolHistoryRows items={h.result.current.state.timeline} />)
+  expect(screen.getAllByText('安装这个吧')).toHaveLength(1)
+  expect(screen.getByText('安装这个吧')).toBe(bubble)
+  expect(h.result.current.state.timeline[0]).toMatchObject({ id: old.id,
+    entryId: 'user-entry-a', liveMessageId: 'backend-user:1' })
+  expect(h.result.current.state.timeline[0].kind === 'user' && h.result.current.state.timeline[0].images)
+    .toEqual(old.kind === 'user' ? old.images : undefined)
+})
+
 it('keeps newly selected live output when its first history read fails', async () => {
   vi.useFakeTimers()
   const path = '/live-failure.jsonl'
@@ -1387,4 +1437,52 @@ it('replaces a pinned live row before appending its ordered persisted page', () 
   expect(state.timeline.map((item) => item.id)).toEqual([1, 3, live.id, stillLive.id])
   expect(state.timeline[2]).toMatchObject({ entryId: 'final', historyReconciled: true })
   expect(state.timelineMutation).toBe('history-append')
+})
+
+it.each(['owned snapshot', 'late previous selection'] as const)('pulls unpersisted background display independently of same-leaf history: %s', async (mode) => {
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+    queueMicrotask(() => callback(0)); return 1
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
+  const a = '/pulled-a', b = '/pulled-b', cwd = '/project'
+  const pending = deferred<NonNullable<typeof initialState.session>>()
+  const empty: SessionEntriesPage = { entries: [], toolResults: [], start: 0,
+    end: 0, total: 0, leafId: null, mode: 'build' }
+  const session = (path: string) => ({ sessionId: path, sessionFile: path,
+    messageCount: 0, isStreaming: path === a })
+  let dispatch!: Dispatch<Action>
+  const api = {
+    onEvent: vi.fn(() => () => undefined),
+    getEntriesPage: vi.fn().mockResolvedValue(empty),
+    getHistoryIndex: vi.fn().mockResolvedValue(null),
+    getState: vi.fn(() => pending.promise),
+    switchSession: vi.fn(async (path: string) => {
+      dispatch({ type: 'session', session: session(path) }); return { cancelled: false }
+    })
+  }
+  const h = renderHook(() => {
+    const [state, nextDispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd }, session: session(b) })
+    dispatch = nextDispatch
+    return { ...useAgentHistory({ api: api as never, state, dispatch }), state }
+  })
+  await act(async () => { await h.result.current.switchSession(a) })
+  expect(api.getState).toHaveBeenCalledTimes(1)
+  if (mode === 'late previous selection') await act(async () => { await h.result.current.switchSession(b) })
+  await act(async () => { pending.resolve({ ...session(a), liveState: {
+    backendId: 'pulled-backend', revision: 8, cwd, sessionPath: a, events: [
+      { type: 'message_start', message: { role: 'assistant', timestamp: 100, content: [] } },
+      { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'background first token' } },
+      { type: 'tool_execution_start', toolCallId: 'pulled-tool', toolName: 'read', args: { path: 'file.ts' } },
+      { type: 'tool_execution_update', toolCallId: 'pulled-tool', toolName: 'read', args: { path: 'file.ts' },
+        partialResult: { content: [{ type: 'text', text: 'running label' }] } }
+    ]
+  } } as NonNullable<typeof initialState.session>) })
+  if (mode === 'late previous selection') {
+    expect(h.result.current.state.timeline).toEqual([])
+    expect(h.result.current.state.session?.sessionFile).toBe(b)
+  } else {
+    expect(h.result.current.state.timeline[0]).toMatchObject({ text: 'background first token', streaming: true })
+    expect(findTool(h.result.current.state.timeline, 'pulled-tool').tool).toMatchObject({ status: 'running', outputText: 'running label' })
+  }
 })

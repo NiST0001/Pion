@@ -2080,7 +2080,7 @@ export class AgentBridge {
       if (this.activeKey !== backend.key) return
       if (type === 'agent_start') this.setActiveBackendStatus()
       this.win?.webContents.send(EVENT_CHANNEL, {
-        ...forwardedEvent,
+        ...liveState.annotateEvent(forwardedEvent),
         _pionLive: liveState.metadata(backend.cwd, backend.sessionPath)
       })
       if (type === 'entry_appended' && (event as { entry?: { customType?: string } }).entry?.customType === 'pion-subagents-state') {
@@ -2752,7 +2752,7 @@ export class AgentBridge {
     // instead of waiting for a fresh pi subprocess to boot.
     void this.ensureActiveBackend()
       .then(async () => {
-        if (this.activeSessionPath !== target) return
+        if (generation !== this.sessionSelectionGeneration || this.activeSessionPath !== target) return
         // Selection does not mutate the session index. Avoid rescanning every
         // project while the renderer is mounting a large conversation.
         await this.pushSessionInfo()

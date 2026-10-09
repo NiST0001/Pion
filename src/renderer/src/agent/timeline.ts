@@ -288,10 +288,12 @@ export function assistantErrorText(message: WireMessage | undefined | null): str
 }
 
 export function wireMessageTimestamp(message: WireMessage | undefined | null): number | undefined {
-  const timestamp = message?.timestamp
-  return typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0
-    ? timestamp
-    : undefined
+  const raw = message?.timestamp
+  const timestamp = typeof raw === 'number' ? raw
+    : typeof raw === 'string' && raw.trim() !== ''
+      ? (/^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : Date.parse(raw)) : undefined
+  return timestamp !== undefined && Number.isFinite(timestamp) && timestamp > 0
+    ? timestamp : undefined
 }
 
 export function compactionFingerprint(value: unknown): string | undefined {
@@ -508,7 +510,10 @@ function reconcileLiveRow(live: TimelineItem, persisted: TimelineItem): Timeline
     return { ...live, tool, historyReconciled: true }
   }
   if (live.kind === 'user' && persisted.kind === 'user') {
-    return { ...live, entryId: persisted.entryId, timestamp: persisted.timestamp, historyReconciled: true }
+    return { ...live, entryId: persisted.entryId ?? live.entryId, timestamp: persisted.timestamp,
+      ...(persisted.liveMessageId && !live.liveMessageId ? { liveMessageId: persisted.liveMessageId } : {}),
+      ...(persisted.images?.length && !live.images?.length ? { images: persisted.images } : {}),
+      historyReconciled: true }
   }
   if (live.kind === 'assistant' && persisted.kind === 'assistant') {
     const next = { ...live, entryId: persisted.entryId, historyReconciled: true }
@@ -538,15 +543,32 @@ export function preserveTimelineToolState(
 ): TimelineItem[] {
   const tools = new Map<string, Extract<TimelineItem, { kind: 'tool' }>>()
   for (const item of existing) if (item.kind === 'tool') tools.set(item.tool.id, item)
+  // Reconciled messages still own mounted keys on later same-scope reads.
+  // Only project rows present in this window; never append off-window history.
+  const mountedMessages = existing.filter((item) => (item.kind === 'user' || item.kind === 'assistant') && item.entryId)
   const projected = incoming.map((item) => {
     const current = item.kind === 'tool' ? tools.get(item.tool.id) : undefined
-    return current ? reconcileLiveRow(current, item) : item
+    if (current) return reconcileLiveRow(current, item)
+    if ((item.kind !== 'user' && item.kind !== 'assistant') || !item.entryId) return item
+    const matches = mountedMessages.filter((row) => (row.kind === 'user' || row.kind === 'assistant')
+      && row.kind === item.kind && row.entryId === item.entryId
+      && !(row.liveMessageId && item.liveMessageId && row.liveMessageId !== item.liveMessageId))
+    if (matches.length !== 1 || incoming.filter((row) => row.kind === item.kind && row.entryId === item.entryId).length !== 1) return item
+    const mounted = matches[0]
+    if (mounted.kind !== 'user' && mounted.kind !== 'assistant') return item
+    return { ...item, id: mounted.id, live: mounted.live,
+      historical: mounted.historical, noReveal: mounted.noReveal,
+      historyReconciled: mounted.historyReconciled,
+      ...(mounted.liveMessageId ? { liveMessageId: mounted.liveMessageId } : {}) }
   })
   if (!preserveLive) return projected
   // A jumped window can already pin a streaming row. Do not append its older
   // hook snapshot beside the reducer's event-ordered version of the same row.
   const live = existing.filter((item) => isUnreconciledLiveItem(item)
-    || (item.kind === 'assistant' && item.streaming))
+    || (item.kind === 'assistant' && item.streaming)
+    // A call-only history page locates a tool, but does not finish execution.
+    // Keep that live call even when a later page no longer includes its row.
+    || (item.kind === 'tool' && item.tool.live && item.tool.status === 'running'))
   const liveById = new Map(live.map((item) => [item.id, item]))
   const pinnedIds = new Set(projected.filter((item) => item.kind === 'assistant'
     && item.streaming && item.live && liveById.has(item.id)).map((item) => item.id))
@@ -636,6 +658,7 @@ export function reconcileNewerTimelineItems(
   const existingTools = new Map<string, Extract<TimelineItem, { kind: 'tool' }>>()
   const completedTools = new Map<number, TimelineItem>()
   const liveByMessage = new Map<string, TimelineItem[]>()
+  const liveByStableId = new Map<string, TimelineItem[]>()
   const streamingByTimestamp = new Map<number, TimelineItem[]>()
   const incomingTimestampCounts = new Map<number, number>()
   for (const item of incoming) {
@@ -651,6 +674,11 @@ export function reconcileNewerTimelineItems(
       continue
     }
     pinnedLiveIds.add(item.id)
+    if ((item.kind === 'user' || item.kind === 'assistant') && item.liveMessageId) {
+      const rows = liveByStableId.get(item.liveMessageId) ?? []
+      rows.push(item)
+      liveByStableId.set(item.liveMessageId, rows)
+    }
     if (identity) liveByIdentity.set(identity, item)
     if (item.kind === 'assistant' && item.streaming) {
       if (!identity && item.messageTimestamp !== undefined) {
@@ -687,16 +715,39 @@ export function reconcileNewerTimelineItems(
       continue
     }
     const messageIdentity = timelineMessageIdentity(item)
-    const matchingRows = messageIdentity ? liveByMessage.get(messageIdentity) : undefined
+    const matchingRows = item.kind === 'user' && item.messageTimestamp !== undefined
+      ? existing.filter((row) => row.kind === 'user' && isUnreconciledLiveItem(row) && !row.entryId
+        && row.messageTimestamp === item.messageTimestamp && row.text === item.text
+        && ((row.liveMessageId && !row.images?.length)
+          || JSON.stringify(row.images ?? []) === JSON.stringify(item.images ?? [])))
+      : messageIdentity ? liveByMessage.get(messageIdentity) : undefined
     const streamingRows = item.kind === 'assistant' && item.messageTimestamp !== undefined
       && incomingTimestampCounts.get(item.messageTimestamp) === 1
       ? streamingByTimestamp.get(item.messageTimestamp)
       : undefined
     // Timestamp-only matching is limited to an unambiguous in-flight row; final
     // messages still require their exact identity or timestamp/content tuple.
-    const streamingMatch = streamingRows?.length === 1 ? streamingRows[0] : undefined
-    const live = (identity ? liveByIdentity.get(identity) : undefined)
-      ?? matchingRows?.shift() ?? streamingMatch
+    const compatible = (row: TimelineItem): boolean => {
+      if (matchedIds.has(row.id) || row.kind !== item.kind) return false
+      if ('entryId' in row && 'entryId' in item && row.entryId && item.entryId && row.entryId !== item.entryId) return false
+      if ((row.kind === 'user' || row.kind === 'assistant') && (item.kind === 'user' || item.kind === 'assistant')
+        && row.liveMessageId && item.liveMessageId && row.liveMessageId !== item.liveMessageId) return false
+      return true
+    }
+    const stableRows = (item.kind === 'user' || item.kind === 'assistant') && item.liveMessageId
+      ? liveByStableId.get(item.liveMessageId)?.filter(compatible) : undefined
+    const stableMatch = stableRows?.length === 1 ? stableRows[0] : undefined
+    const streamingMatch = streamingRows?.length === 1 && compatible(streamingRows[0]) ? streamingRows[0] : undefined
+    const compatibleRows = matchingRows?.filter(compatible)
+    const messageMatch = item.kind === 'user'
+      ? (compatibleRows?.length === 1
+        && incoming.filter((row) => row.kind === 'user' && row.messageTimestamp === item.messageTimestamp
+          && row.text === item.text).length === 1
+        ? compatibleRows[0] : undefined)
+      : compatibleRows?.[0]
+    const identityMatch = identity ? liveByIdentity.get(identity) : undefined
+    const live = (identityMatch && compatible(identityMatch) ? identityMatch : undefined)
+      ?? stableMatch ?? messageMatch ?? streamingMatch
     if (live && !matchedIds.has(live.id)) {
       matchedIds.add(live.id)
       appended.push(reconcileLiveRow(live, item))

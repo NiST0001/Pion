@@ -5,9 +5,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import type { BackendRecord } from '../../src/main/agent/types'
 import type { RunOperation } from '../../src/shared/operations'
-import type { SessionInfo } from '../../src/shared/types'
+import type { SessionInfo, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
 import { RunStore } from '../../src/main/run-store'
 import { SessionListCache } from '../../src/main/agent/session-list-cache'
+
+function messageOf(event: WireEventInput): WireMessage {
+  if (event.type !== 'message_start' && event.type !== 'message_end') throw new Error('Expected a message lifecycle event')
+  return (event as Extract<WireEvent, { type: 'message_start' | 'message_end' }>).message
+}
 
 type Disposition = 'started' | 'queued' | 'handled'
 interface BridgeHarness {
@@ -83,6 +88,47 @@ async function dispatchGap() {
 }
 
 describe('AgentBridge live session state', () => {
+  it('forwards stable root identities shared by the snapshot without resending the prompt or mutating SDK messages', async () => {
+    const h = await harness()
+    await h.bridge.send('one question')
+    const message = { role: 'user', timestamp: 1, content: 'one question' }
+    h.emit('agent_start')
+    h.emit('message_start', { message, preserved: 'root-field' })
+    h.emit('message_end', { message })
+    const forwarded = h.wireSend.mock.calls.map((call) => call[1]).filter((event) =>
+      event.type === 'message_start' || event.type === 'message_end')
+    const id = `${h.backend.liveState!.backendId}:1`
+    expect(forwarded).toHaveLength(2)
+    expect(forwarded[0]).toMatchObject({ preserved: 'root-field', message: { _pionLiveMessageId: id } })
+    expect(forwarded[1]).toMatchObject({ message: { _pionLiveMessageId: id } })
+    expect(h.backend.liveState!.snapshot(h.backend.cwd).events.every((event) => messageOf(event)._pionLiveMessageId === id)).toBe(true)
+    const entry = { type: 'message', id: 'disk-user', parentId: 'actual-parent', timestamp: 'date', message }
+    h.emit('entry_appended', { entry, preserved: 'entry-field' })
+    const forwardedEntry = h.wireSend.mock.calls.map((call) => call[1]).find((event) => event.type === 'entry_appended')
+    expect(forwardedEntry).toMatchObject({ preserved: 'entry-field', entry: { parentId: 'actual-parent', message: {
+      _pionLiveMessageId: id, _pionLiveEntryId: 'disk-user'
+    } } })
+    expect(entry.message).not.toHaveProperty('_pionLiveEntryId')
+    expect(message).not.toHaveProperty('_pionLiveMessageId')
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    expect(h.steer).not.toHaveBeenCalled()
+  })
+
+  it('projects inactive roots with the same identity later forwarded, while nested messages stay excluded', async () => {
+    const h = await harness()
+    h.bridge.activeKey = 'elsewhere'
+    h.emit('message_start', { message: { role: 'user', timestamp: 1, content: 'background' } })
+    h.emit('message_start', { parentToolCallId: 'child', message: { role: 'user', timestamp: 1, content: 'nested' } })
+    expect(h.backend.liveState!.snapshot(h.backend.cwd).events).toHaveLength(1)
+    const id = `${h.backend.liveState!.backendId}:1`
+    h.bridge.activeKey = h.backend.key
+    h.emit('message_end', { message: { role: 'user', timestamp: 1, content: 'background' } })
+    const forwarded = h.wireSend.mock.calls.map((call) => call[1]).find((event) => event.type === 'message_end')
+    expect(forwarded).toMatchObject({ message: { _pionLiveMessageId: id } })
+    expect(JSON.stringify(h.backend.liveState!.snapshot(h.backend.cwd))).not.toContain('nested')
+    expect(h.prompt).not.toHaveBeenCalled()
+  })
+
   it('bounds UI waiting to two seconds, shares the real pending RPC, and overlays latest live flags', async () => {
     const h = await harness()
     await h.bridge.getSessionInfo() // last successful SDK state

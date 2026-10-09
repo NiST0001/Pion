@@ -35,8 +35,6 @@
   --code-overlay: rgba(0, 0, 0, 0.24);
   --shadow-pop: 0 16px 44px rgba(0, 0, 0, 0.46);
   --composer-shadow: 0 5px 22px rgba(0, 0, 0, 0.28);
-  --radius: 6px;
-  --radius-sm: 4px;
 }
 
 /* Small instruments, not a grid over the reading surface. Native materials own
@@ -67,13 +65,9 @@
   letter-spacing: 0.06em;
 }
 
-/* Squared panels without changing metrics, clipping menus or modifying the
-   capsule-shaped composer controls (including the subagents toggle). */
-:root[data-theme='division-dark'] :is(.dock-workspace > [data-dock-panel],
-  .project-folder-head, .project-branch-head, .project-branch-sessions .side-session,
-  .review-file-item, .theme-choice, .task-panel-card, .modal, .operations-modal) {
-  border-radius: 5px;
-}
+/* Keep the shared radius scale and each component's parent/child corner
+   contract. Theme-wide radius overrides mismatch nested card/header surfaces;
+   capsules and intentionally rectangular content keep their own geometry. */
 
 /* Selection uses a neutral surface without decorative frames or edge bars.
    Orange stays on primary actions and icons, not a brown blended text surface. */
@@ -96,6 +90,7 @@
 
 /* Preserve border widths/box metrics, but suppress painted borders and
    shadow-based rings throughout this theme, including native-surface styles.
+   The floating composer retains its depth shadow, not a decorative ring.
    Keyboard focus remains visible; system high-contrast colors retain control. */
 @media not all and (forced-colors: active) {
   :root[data-theme='division-dark'] *,
@@ -110,9 +105,26 @@
     outline-color: transparent !important;
   }
 
-  :root[data-theme='division-dark'] :focus-visible {
+  /* Chromium can promote pointer focus on Shift; use the application's
+     Tab/Shift+Tab traversal gate rather than raw :focus-visible alone. */
+  :root[data-theme='division-dark'].pion-keyboard-focus :focus-visible {
     outline: 2px solid var(--accent-strong) !important;
     outline-offset: 2px;
+  }
+
+  :root[data-theme='division-dark'] .composer-row {
+    box-shadow: var(--composer-shadow) !important;
+  }
+
+  /* Paint textarea focus on the rounded shell, not its inner rectangular box.
+     Other composer controls retain their own keyboard focus indicators. */
+  :root[data-theme='division-dark'].pion-keyboard-focus .composer-row:has(textarea:focus-visible) {
+    outline: 2px solid var(--accent-strong) !important;
+    outline-offset: 2px;
+  }
+
+  :root[data-theme='division-dark'].pion-keyboard-focus .composer-row:has(textarea:focus-visible) textarea:focus-visible {
+    outline: none !important;
   }
 }
 

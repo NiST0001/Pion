@@ -12,7 +12,8 @@ import {
   parseToolArgs,
   preserveTimelineToolState,
   reconcileNewerTimelineItems,
-  uniqueTimelineItems
+  uniqueTimelineItems,
+  wireMessageTimestamp
 } from '../../src/renderer/src/agent/timeline'
 import type { TimelineItem, ToolItem } from '../../src/renderer/src/agent/types'
 import type { WireEntry } from '../../src/shared/types'
@@ -28,6 +29,34 @@ const imageTool: ToolItem = {
 }
 
 describe('timeline derivation', () => {
+  it('normalizes SDK numeric and ISO wire timestamps without inventing missing identity', () => {
+    const timestamp = 1780000000000
+    expect(wireMessageTimestamp({ role: 'user', timestamp })).toBe(timestamp)
+    expect(wireMessageTimestamp({ role: 'user', timestamp: String(timestamp) })).toBe(timestamp)
+    expect(wireMessageTimestamp({ role: 'user', timestamp: new Date(timestamp).toISOString() })).toBe(timestamp)
+    for (const value of [undefined, '', 'invalid', 0, NaN, Infinity]) {
+      expect(wireMessageTimestamp({ role: 'user', timestamp: value })).toBeUndefined()
+    }
+  })
+
+  it('does not content-match two equal-time users with different stable live identities', () => {
+    const first: TimelineItem = { kind: 'user', id: 1, liveMessageId: 'backend:1', live: true,
+      messageTimestamp: 100, text: 'same' }
+    const second: TimelineItem = { kind: 'user', id: 2, liveMessageId: 'backend:2', live: true,
+      messageTimestamp: 100, text: 'same' }
+    expect(reconcileNewerTimelineItems([first], [second]).items).toHaveLength(2)
+    const persisted = { ...second, entryId: 'user-2' }
+    expect(reconcileNewerTimelineItems([first, second], [persisted]).items).toEqual([
+      expect.objectContaining({ id: second.id, entryId: 'user-2' }), first
+    ])
+  })
+
+  it('preserves different persisted user IDs even when timestamp and contents are identical', () => {
+    const first: TimelineItem = { kind: 'user', id: 1, entryId: 'user-1', liveMessageId: 'same-live', live: true,
+      messageTimestamp: 100, text: 'same' }
+    const second: TimelineItem = { ...first, id: 2, entryId: 'user-2' }
+    expect(reconcileNewerTimelineItems([first], [second]).items).toHaveLength(2)
+  })
   it('retains an unpersisted partial on same-scope replacement, but a same-entry disk final is authoritative', () => {
     const draft: TimelineItem = { kind: 'assistant', id: 1999, entryId: 'same-message',
       messageTimestamp: 100, text: 'partial', thinking: 'partial thought', streaming: true, live: true }
@@ -57,6 +86,36 @@ describe('timeline derivation', () => {
       user, expect.objectContaining({ id: draft.id, entryId: 'final', text: 'complete', streaming: false })
     ])
     expect(preserveTimelineToolState([persisted, draft], [user], false)).toEqual([user])
+  })
+
+  it('preserves mounted reconciled message keys without pulling off-window rows into repeated reads', () => {
+    const first: TimelineItem = { kind: 'user', id: 820, entryId: 'send-1', liveMessageId: 'native-1',
+      text: 'same', messageTimestamp: 100, live: true, historyReconciled: true }
+    const second: TimelineItem = { ...first, id: 821, entryId: 'send-2', liveMessageId: 'native-2' }
+    const offWindow: TimelineItem = { ...first, id: 822, entryId: 'off-window', liveMessageId: 'native-3' }
+    const page = [first, second].map(({ liveMessageId: _liveId, ...row }, index) => ({ ...row, id: 900 + index }))
+    const merged = preserveTimelineToolState([first, second, offWindow], page)
+    expect(merged.map((row) => row.id)).toEqual([820, 821])
+    expect(preserveTimelineToolState(merged, page).map((row) => row.id)).toEqual([820, 821])
+    const final: TimelineItem = { kind: 'assistant', id: 823, entryId: 'assistant', liveMessageId: 'native-4',
+      text: 'old final', thinking: '', streaming: false, live: true, historyReconciled: true }
+    expect(preserveTimelineToolState([final], [{ ...final, id: 903, text: 'disk final' }])[0])
+      .toMatchObject({ id: 823, text: 'disk final', liveMessageId: 'native-4', historyReconciled: true })
+  })
+
+  it('retains a located but unfinished live tool outside the next history window', () => {
+    const active: TimelineItem = { kind: 'tool', id: 824, historyReconciled: true,
+      tool: { id: 'active', name: 'read', status: 'running', live: true, resultReceived: false, isError: false } }
+    const placeholder: TimelineItem = { ...active, id: 904,
+      tool: { ...active.tool, status: 'done', live: undefined } }
+    const first = preserveTimelineToolState([active], [placeholder])
+    expect(first[0]).toMatchObject({ id: 824, tool: { status: 'running', resultReceived: false } })
+    expect(preserveTimelineToolState(first, [])).toEqual(first)
+    expect(preserveTimelineToolState(first, [], false)).toEqual([])
+    const final: TimelineItem = { ...placeholder, tool: applyToolResult(placeholder.tool, { content: [{ type: 'text', text: 'finished' }] }, false, 'history') }
+    const done = preserveTimelineToolState(first, [final])
+    expect(done[0]).toMatchObject({ id: 824, tool: { status: 'done', resultReceived: true, outputText: 'finished' } })
+    expect(preserveTimelineToolState(done, [])).toEqual([])
   })
 
   it('does not duplicate a pinned streaming row or regress a matching finalized image tool', () => {
@@ -157,6 +216,29 @@ describe('timeline derivation', () => {
       items: [existing[0], incoming[0], incoming[1], reconciledError],
       appended: [incoming[0], incoming[1], reconciledError]
     })
+  })
+
+  it('links an image-free stable user projection to its unique persisted page without losing images', () => {
+    const timestamp = 1_780_000_000_000
+    const live: TimelineItem = { kind: 'user', id: 301, live: true,
+      liveMessageId: 'backend-a:1', messageTimestamp: timestamp, text: 'install' }
+    const stored: Extract<TimelineItem, { kind: 'user' }> = { kind: 'user', id: 302, entryId: 'user-a',
+      messageTimestamp: timestamp, text: 'install', images: [{ type: 'image' as const, mimeType: 'image/png', data: 'original' }] }
+    const result = reconcileNewerTimelineItems([live], [stored])
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0]).toMatchObject({ id: live.id, liveMessageId: 'backend-a:1',
+      entryId: 'user-a', images: stored.images, historyReconciled: true })
+  })
+
+  it('does not assign a persisted user to ambiguous equal-time live or incoming users', () => {
+    const timestamp = 1_780_000_000_000
+    const live: TimelineItem = { kind: 'user', id: 303, live: true,
+      liveMessageId: 'backend-a:1', messageTimestamp: timestamp, text: 'same' }
+    const stored: TimelineItem = { kind: 'user', id: 305, entryId: 'user-a',
+      messageTimestamp: timestamp, text: 'same' }
+    expect(reconcileNewerTimelineItems([live, { ...live, id: 304, liveMessageId: 'backend-a:2' }], [stored]).items).toHaveLength(3)
+    expect(reconcileNewerTimelineItems([live], [stored, { ...stored, id: 306, entryId: 'user-b' }]).items).toHaveLength(3)
+    expect(reconcileNewerTimelineItems([live], [{ ...stored, liveMessageId: 'backend-a:2' }]).items).toHaveLength(2)
   })
 
   it('matches same-timestamp live assistants one-to-one by final content', () => {

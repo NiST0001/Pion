@@ -74,9 +74,66 @@ describe('Signal Orange theme stylesheet contracts (not GUI rendering)', () => {
     expect(normal).toContain(':not(:focus-visible)')
     expect(normal).toContain(':focus-visible')
     expect(normal).toContain('outline: 2px solid var(--accent-strong) !important')
-    expect(normal).not.toMatch(/border\s*:|border-width\s*:|padding\s*:|margin\s*:|display\s*:|outline\s*:\s*(?:none|0)/)
+    expect(normal).not.toMatch(/border\s*:|border-width\s*:|padding\s*:|margin\s*:|display\s*:/)
+    // Only the textarea with a visible rounded shell indicator loses its own outline.
+    const suppressedOutlines = [...normal.matchAll(/([^{}]+)\{[^{}]*outline:\s*(?:none|0)[^{}]*\}/g)]
+    expect(suppressedOutlines).toHaveLength(1)
+    expect(suppressedOutlines[0][1].trim()).toBe(":root[data-theme='division-dark'].pion-keyboard-focus .composer-row:has(textarea:focus-visible) textarea:focus-visible")
     const forcedColors = css.slice(css.indexOf('@media (forced-colors: active)'))
     expect(forcedColors).not.toContain('border-color: transparent')
+  })
+
+  it('keeps Shift-only pointer focus suppressed while preserving Tab and Shift+Tab indicators', () => {
+    const normal = css.slice(css.indexOf('@media not all and (forced-colors: active)'), css.indexOf('@media (forced-colors: active)'))
+    const outlines = [...normal.matchAll(/([^{}]+)\{([^{}]*outline:\s*2px solid[^{}]*)\}/g)]
+    expect(outlines).toHaveLength(2)
+    for (const rule of outlines) expect(rule[1]).toContain(":root[data-theme='division-dark'].pion-keyboard-focus")
+    expect(normal).not.toContain(":root[data-theme='division-dark'] :focus-visible {")
+    expect(normal).not.toContain(":root[data-theme='division-dark'] .composer-row:has(textarea:focus-visible) {")
+    const base = readFileSync('src/renderer/src/styles/base.css', 'utf8')
+    expect(base).toMatch(/html:not\(\.pion-keyboard-focus\)[\s\S]*?:focus-visible\s*\{\s*outline: none !important;/)
+    const startup = readFileSync('src/renderer/src/main.tsx', 'utf8')
+    expect(startup).toContain("if (event.key === 'Tab') document.documentElement.classList.add(keyboardFocusClass)")
+    expect(startup).toContain("window.addEventListener('pointerdown'")
+    expect(startup).not.toMatch(/event\.key\s*===\s*['"]Shift['"]\s*\)/)
+  })
+
+  it('restores the floating composer depth shadow and moves textarea focus to its rounded shell', () => {
+    const normal = css.slice(css.indexOf('@media not all and (forced-colors: active)'), css.indexOf('@media (forced-colors: active)'))
+    const shellShadow = normal.match(/:root\[data-theme='division-dark'\] \.composer-row\s*\{([^}]+)\}/)![1]
+    expect(shellShadow).toContain('box-shadow: var(--composer-shadow) !important')
+    expect(shellShadow).not.toContain('--accent-soft')
+    expect(normal.indexOf(shellShadow)).toBeGreaterThan(normal.indexOf('box-shadow: none !important'))
+    const shellFocus = normal.match(/\.composer-row:has\(textarea:focus-visible\)\s*\{([^}]+)\}/)![1]
+    expect(shellFocus).toContain('outline: 2px solid var(--accent-strong) !important')
+    expect(shellFocus).toContain('outline-offset: 2px')
+    expect(normal).not.toMatch(/\.composer-row:focus-within\s*\{/)
+    // The outline uses the existing shell geometry; no clipping or inner radius approximation.
+    const refinements = readFileSync('src/renderer/src/styles/refinements.css', 'utf8')
+    expect(refinements.match(/\.composer-row\s*\{([^}]+)\}/)![1]).toContain('border-radius: 18px')
+    expect(shellFocus).not.toMatch(/border-radius|overflow/)
+    const forcedColors = css.slice(css.indexOf('@media (forced-colors: active)'))
+    expect(forcedColors).not.toContain('outline: none')
+    expect(forcedColors).not.toContain('var(--composer-shadow)')
+  })
+
+  it('uses shared radii and component corner contracts instead of flattening nested surfaces', () => {
+    const base = readFileSync('src/renderer/src/styles/base.css', 'utf8')
+    expect(base).toMatch(/--radius:\s*11px;/)
+    expect(base).toMatch(/--radius-sm:\s*7px;/)
+    expect(variables['--radius']).toBeUndefined()
+    expect(variables['--radius-sm']).toBeUndefined()
+    const declarations = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    // No blanket 5px override or universal inherit: cards, headers and pills
+    // keep their component-specific geometry without clipping overlays.
+    expect(declarations).not.toMatch(/border-radius\s*:|overflow\s*:|clip-path\s*:|mask(?:-image)?\s*:|contain\s*:/)
+    const sharedPreview = preview.match(/\.theme-card-preview\s*\{([^}]+)\}/)![1]
+    expect(sharedPreview).toContain('border-radius: 7px')
+    const themePreviewRules = [...preview.matchAll(/([^{}]*\.division-dark[^{}]*)\{([^}]+)\}/g)]
+    expect(themePreviewRules.length).toBeGreaterThanOrEqual(5)
+    for (const [, , body] of themePreviewRules) expect(body).not.toMatch(/border-radius\s*:/)
+    expect(preview.match(/\.theme-card-top i\s*\{([^}]+)\}/)![1]).toContain('border-radius: 50%')
+    expect(preview.match(/\.theme-card-line,\s*\.theme-card-pill\s*\{([^}]+)\}/)![1]).toContain('border-radius: 999px')
   })
 
   it('provides its full semantic palette after inherited typography and before native fallbacks', () => {

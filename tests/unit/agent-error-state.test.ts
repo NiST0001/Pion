@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { reducer } from '../../src/renderer/src/agent/reducer'
+import { deriveWorkingStatus } from '../../src/renderer/src/agent/workingStatus'
 import { entriesToTimeline } from '../../src/renderer/src/agent/timeline'
 import { toWireEntry } from '../../src/main/agent/wire'
 import { initialState } from '../../src/renderer/src/agent/types'
@@ -9,6 +10,187 @@ import type { LiveSessionState, WireEventInput } from '../../src/shared/types'
 function applyEvent(state: AgentState, event: WireEventInput): AgentState {
   return reducer(state, { type: 'event', event })
 }
+
+describe('user message identity reconciliation', () => {
+  const cwd = '/workspace'
+  const path = '/sessions/a'
+  const timestamp = 1780000000000
+  const start = (content: string, identity = 'row-a', entryId?: string, time: unknown = timestamp): WireEventInput => ({
+    type: 'message_start', message: { role: 'user', content, timestamp: time,
+      _pionLiveMessageId: identity, ...(entryId ? { _pionLiveEntryId: entryId } : {}) }
+  })
+  const entry = (id: string, content?: string, time: unknown = timestamp): WireEventInput => ({
+    type: 'entry_appended', entry: { type: 'message', id, parentId: null, timestamp: '',
+      message: { role: 'user', ...(content === undefined ? {} : { content }), ...(time === undefined ? {} : { timestamp: time }) } }
+  })
+  const snapshot = (state: AgentState, revision: number, events: WireEventInput[]) => reducer(state, {
+    type: 'session', session: { sessionId: 'a', sessionFile: path, messageCount: 1, isStreaming: false,
+      liveState: { backendId: 'backend-a', revision, cwd, sessionPath: path, events } }
+  })
+  const seed: AgentState = { ...initialState, status: { phase: 'running', cwd } }
+
+  it('keeps the persistent ID and React key when STATE resumes a user already on disk', () => {
+    const page = entriesToTimeline([{ type: 'message', id: 'user-a', parentId: null, timestamp: '',
+      message: { role: 'user', timestamp, content: '安装这个吧' } }])
+    let state = { ...seed, timeline: page }
+    state = snapshot(state, 2, [start('安装这个吧', 'row-a', 'user-a'), entry('user-a')])
+    expect(state.timeline).toHaveLength(1)
+    expect(state.timeline[0]).toMatchObject({ id: page[0].id, entryId: 'user-a' })
+    state = applyEvent(state, start('安装这个吧', 'row-a', 'user-a'))
+    expect(state.timeline).toHaveLength(1)
+    expect(state.timeline[0]).toMatchObject({ id: page[0].id, entryId: 'user-a' })
+  })
+
+  it('accepts an entry-before-start identity and does not append another bubble on revisit', () => {
+    let state = applyEvent(seed, entry('user-a', 'install'))
+    state = applyEvent(state, start('install', 'row-a', 'user-a'))
+    const key = state.timeline[0].id
+    expect(state.timeline[0]).toMatchObject({ entryId: 'user-a' })
+    state = snapshot(state, 2, [start('install', 'row-a', 'user-a')])
+    expect(state.timeline).toHaveLength(1)
+    expect(state.timeline[0]).toMatchObject({ id: key, entryId: 'user-a' })
+  })
+
+  it('merges STATE-before-live-start without manufacturing a timestamp or an entry ID', () => {
+    const event = start('install', 'row-a', undefined, undefined)
+    // Explicitly delete timestamp: default parameters otherwise supply it.
+    delete (event as { message: Record<string, unknown> }).message.timestamp
+    let state = snapshot(seed, 2, [event])
+    const key = state.timeline[0].id
+    state = applyEvent(state, event)
+    expect(state.timeline).toHaveLength(1)
+    expect(state.timeline[0]).toMatchObject({ id: key })
+    expect(state.timeline[0]).not.toHaveProperty('entryId')
+    expect(state.timeline[0].kind === 'user' && state.timeline[0].messageTimestamp).toBeUndefined()
+  })
+
+  it('reconciles a delayed history page with the live user without losing its mounted identity', () => {
+    let state = applyEvent(seed, start('install'))
+    const key = state.timeline[0].id
+    const items = entriesToTimeline([{ type: 'message', id: 'user-a', parentId: null, timestamp: '',
+      message: { role: 'user', timestamp, content: 'install' } }])
+    state = reducer(state, { type: 'loadEntries', items,
+      preserveToolState: { revision: state.timelineScopeRevision, cwd } })
+    state = snapshot(state, 3, [start('install', 'row-a', 'user-a')])
+    expect(state.timeline).toHaveLength(1)
+    expect(state.timeline[0]).toMatchObject({ id: key, entryId: 'user-a' })
+  })
+
+  it('retains a reconciled user key and undo ID across repeated same-scope history replacement', () => {
+    const images = [{ type: 'image' as const, mimeType: 'image/png', data: 'original' }]
+    let state = applyEvent(seed, { type: 'message_start', message: { role: 'user', timestamp,
+      _pionLiveMessageId: 'row-a', content: [{ type: 'text', text: 'install' }, ...images] } })
+    const key = state.timeline[0].id
+    const page = entriesToTimeline([{ type: 'message', id: 'user-a', parentId: null, timestamp: '',
+      message: { role: 'user', timestamp, content: [{ type: 'text', text: 'install' }, ...images] } }])
+    for (let i = 0; i < 3; i++) {
+      state = reducer(state, { type: 'loadEntries', items: page,
+        preserveToolState: { revision: state.timelineScopeRevision, cwd } })
+      expect(state.timeline).toHaveLength(1)
+      expect(state.timeline[0]).toMatchObject({ id: key, entryId: 'user-a', liveMessageId: 'row-a', images,
+        historyReconciled: true })
+      expect(state.timelineMutation).toBe('replace')
+    }
+    const changed = page.map((row) => row.kind === 'user' ? { ...row, text: 'authoritative history' } : row)
+    state = reducer(state, { type: 'loadEntries', items: changed,
+      preserveToolState: { revision: state.timelineScopeRevision, cwd } })
+    expect(state.timeline[0]).toMatchObject({ id: key, entryId: 'user-a', text: 'authoritative history' })
+    expect(reducer(state, { type: 'loadEntries', items: [] }).timeline).toEqual([])
+  })
+
+  it('preserves two real equal-text sends, including equal timestamps and different persisted IDs', () => {
+    let state = applyEvent(seed, start('install', 'row-a', 'user-a'))
+    state = applyEvent(state, start('install', 'row-b', 'user-b'))
+    state = snapshot(state, 3, [start('install', 'row-a', 'user-a'), start('install', 'row-b', 'user-b')])
+    expect(state.timeline.filter((row) => row.kind === 'user').map((row) => row.entryId)).toEqual(['user-a', 'user-b'])
+    const unpersisted = applyEvent(applyEvent(seed, start('install', 'row-a')), start('install', 'row-b'))
+    expect(snapshot(unpersisted, 3, [start('install', 'row-a'), start('install', 'row-b')]).timeline).toHaveLength(2)
+  })
+
+  it('allows genuinely repeated raw starts without treating equal text/timestamp as retransmission proof', () => {
+    const raw: WireEventInput = { type: 'message_start', message: { role: 'user', timestamp, content: 'same' } }
+    const state = applyEvent(applyEvent(seed, raw), raw)
+    expect(state.timeline).toHaveLength(2)
+    const later = applyEvent(applyEvent(seed, start('same', 'row-a')), start('same', 'row-b', undefined, timestamp + 1))
+    expect(later.timeline).toHaveLength(2)
+  })
+
+  it('does not collapse equal timestamps with changed text or attachments without stable proof', () => {
+    const raw: WireEventInput = { type: 'message_start', message: { role: 'user', timestamp, content: 'first' } }
+    let state = applyEvent(seed, raw)
+    state = snapshot(state, 2, [{ type: 'message_start', message: { role: 'user', timestamp, content: 'second' } }])
+    expect(state.timeline).toHaveLength(2)
+    state = applyEvent(state, { type: 'message_start', message: { role: 'user', timestamp,
+      content: [{ type: 'text', text: 'first' }, { type: 'image', mimeType: 'image/png', data: 'new-image' }] } })
+    expect(state.timeline).toHaveLength(3)
+  })
+
+  it('links an image-free projection to a unique persisted user, preserving its key and original images', () => {
+    const images = [{ type: 'image' as const, mimeType: 'image/png', data: 'cached-original' }]
+    const page: AgentState['timeline'] = [{ kind: 'user', id: 401, entryId: 'user-a',
+      messageTimestamp: timestamp, text: 'install', images }]
+    let state = snapshot({ ...seed, timeline: page }, 2, [start('install', 'row-a', undefined, String(timestamp))])
+    expect(state.timeline).toHaveLength(1)
+    expect(state.timeline[0]).toMatchObject({ id: 401, entryId: 'user-a', liveMessageId: 'row-a', images })
+    state = applyEvent(state, { ...start('install'), _pionLive: {
+      backendId: 'backend-a', revision: 2, cwd, sessionPath: path } })
+    expect(state.timeline).toHaveLength(1)
+    state = applyEvent(state, { ...start('install'), _pionLive: {
+      backendId: 'backend-a', revision: 3, cwd, sessionPath: path } })
+    expect(snapshot(state, 4, [start('install')]).timeline).toHaveLength(1)
+    expect(state.timeline[0]).toMatchObject({ id: 401, entryId: 'user-a', images })
+  })
+
+  it('keeps image originals when an image-free snapshot precedes cache restoration', () => {
+    const images = [{ type: 'image' as const, mimeType: 'image/png', data: 'cached-original' }]
+    let state = snapshot(seed, 2, [start('install')])
+    const key = state.timeline[0].id
+    state = reducer(state, { type: 'loadEntries', replayHistory: true,
+      preserveToolState: { revision: state.timelineScopeRevision, cwd, sessionPath: path },
+      items: [{ kind: 'user', id: 402, entryId: 'user-a', messageTimestamp: timestamp,
+        text: 'install', images }] })
+    expect(state.timeline).toHaveLength(1)
+    expect(state.timeline[0]).toMatchObject({ id: key, entryId: 'user-a', liveMessageId: 'row-a', images })
+  })
+
+  it('does not guess between equal-time persisted users or two snapshot identities', () => {
+    const row = { kind: 'user' as const, messageTimestamp: timestamp, text: 'install' }
+    const page = [{ ...row, id: 403, entryId: 'user-a' }, { ...row, id: 404, entryId: 'user-b' }]
+    expect(snapshot({ ...seed, timeline: page }, 2, [start('install')]).timeline).toHaveLength(3)
+    const state = snapshot({ ...seed, timeline: page.slice(0, 1) }, 2,
+      [start('install', 'row-a'), start('install', 'row-b')])
+    expect(state.timeline).toHaveLength(3)
+  })
+
+  it('rejects conflicting live and persisted identities, even with identical time/text', () => {
+    let state = applyEvent(seed, start('install', 'row-a', 'user-a'))
+    state = applyEvent(state, start('install', 'row-b', 'user-a'))
+    state = applyEvent(state, start('install', 'row-a', 'user-b'))
+    expect(state.timeline).toHaveLength(3)
+  })
+
+  it('supplements a user end timestamp and entry only with stable identity proof', () => {
+    const event = start('install')
+    delete (event as { message: Record<string, unknown> }).message.timestamp
+    let state = applyEvent(seed, event)
+    const key = state.timeline[0].id
+    state = applyEvent(state, { type: 'message_end', message: { role: 'user', content: 'install',
+      timestamp: new Date(timestamp).toISOString(), _pionLiveMessageId: 'row-a', _pionLiveEntryId: 'user-a' } })
+    expect(state.timeline).toEqual([expect.objectContaining({ id: key, messageTimestamp: timestamp, entryId: 'user-a' })])
+    expect(applyEvent(seed, { type: 'message_end', message: { role: 'user', content: '', timestamp } }).timeline).toEqual([])
+  })
+
+  it('attaches a late entry to the matching user, not the latest equal-time different message', () => {
+    let state = applyEvent(applyEvent(seed, start('first', 'row-a')), start('second', 'row-b'))
+    state = applyEvent(state, entry('user-a', 'first'))
+    expect(state.timeline[0]).toMatchObject({ entryId: 'user-a' })
+    expect(state.timeline[1]).not.toHaveProperty('entryId')
+    const unknown = entry('unknown') as Extract<WireEventInput, { type: 'entry_appended' }>
+    delete unknown.entry.message!.timestamp
+    state = applyEvent(state, unknown)
+    expect(state.timeline[1]).not.toHaveProperty('entryId')
+  })
+})
 
 describe('scoped live-session display snapshots', () => {
   const cwd = '/workspace'
@@ -83,6 +265,33 @@ describe('scoped live-session display snapshots', () => {
     expect(continued.timeline[0]).toMatchObject({ id: restored.timeline[0].id, text: 'background live suffix', live: true, streaming: true })
   })
 
+  it('bridges unique legacy cache assistants only at the explicit same-backend restore boundary', () => {
+    const end: WireEventInput = { type: 'message_end', message: { role: 'assistant', timestamp,
+      content: [{ type: 'text', text: 'fresh final' }] } }
+    const selected = snapshot({ ...seed, timeline: [] }, 3, [start, end], {}, false)
+    const key = selected.timeline[0].id
+    const cached = { kind: 'assistant' as const, id: 990, messageTimestamp: timestamp,
+      text: 'cached final', thinking: '', streaming: false, historical: true, noReveal: true }
+    const scope = { revision: selected.timelineScopeRevision, cwd, sessionPath: path }
+    const restored = reducer(selected, { type: 'loadEntries', replayHistory: true,
+      preserveToolState: scope, items: [cached] })
+    expect(restored.timeline).toHaveLength(1)
+    expect(restored.timeline[0]).toMatchObject({ id: key, text: 'fresh final', noReveal: false })
+    const ordinary = reducer(selected, { type: 'loadEntries', preserveToolState: scope, items: [cached] })
+    expect(ordinary.timeline).toHaveLength(2)
+    const oldBackend = reducer(selected, { type: 'loadEntries', replayHistory: true,
+      preserveToolState: scope, cachedBackendId: 'older-backend', items: [cached] })
+    expect(oldBackend.timeline).toHaveLength(2)
+    const ambiguous = reducer(selected, { type: 'loadEntries', replayHistory: true,
+      preserveToolState: scope, items: [cached, { ...cached, id: 991, text: 'other cached final' }] })
+    expect(ambiguous.timeline).toHaveLength(3)
+    const native = snapshot({ ...seed, timeline: [] }, 3, [{ ...start, message: { ...(start.message as Record<string, unknown>), _pionLiveMessageId: 'native-a' } },
+      { ...end, message: { ...(end.message as Record<string, unknown>), _pionLiveMessageId: 'native-a' } }], {}, false)
+    const conflict = reducer(native, { type: 'loadEntries', replayHistory: true,
+      preserveToolState: scope, items: [{ ...cached, liveMessageId: 'native-b' }] })
+    expect(conflict.timeline).toHaveLength(2)
+  })
+
   it('does not arm a fresh empty session or change paged reveal flags', () => {
     const fresh = reducer(seed, { type: 'clearTimeline' })
     expect(fresh.historyRevealRestorePending).toBe(false)
@@ -91,6 +300,195 @@ describe('scoped live-session display snapshots', () => {
       { kind: 'user', id: -20, entryId: 'older', text: 'older page', historical: true, noReveal: true }
     ] })
     expect(paged.timeline[0]).toMatchObject({ historical: true, noReveal: true })
+  })
+
+  it('restores call-only history immediately and keeps running status across another same-scope read', () => {
+    const toolStart: WireEventInput = { type: 'tool_execution_start', toolCallId: 'active-call', toolName: 'read', args: { path: 'a.ts' } }
+    const callPage = entriesToTimeline([{ type: 'message', id: 'assistant-call', parentId: null, timestamp: '',
+      message: { role: 'assistant', content: [{ type: 'toolCall', id: 'active-call', name: 'read', arguments: { path: 'a.ts' } }] } }])
+    let state = reducer(seed, { type: 'clearTimeline', sessionPath: path })
+    const scope = { revision: state.timelineScopeRevision, cwd, sessionPath: path }
+    state = reducer(state, { type: 'loadEntries', items: callPage, preserveToolState: scope })
+    const key = state.timeline[0].id
+    state = snapshot(state, 4, [toolStart])
+    expect(state.timeline[0]).toMatchObject({ id: key, tool: { status: 'running', live: true } })
+    state = reducer(state, { type: 'loadEntries', items: callPage, preserveToolState: scope })
+    expect(state.timeline[0]).toMatchObject({ id: key, tool: { status: 'running' } })
+    state = reducer(state, { type: 'loadEntries', items: [], preserveToolState: scope })
+    expect(state.timeline[0]).toMatchObject({ id: key, tool: { status: 'running' } })
+  })
+
+  it('restores a live-marked call placeholder on execution_start without requiring a second STATE', () => {
+    const state: AgentState = { ...seed, busy: true, timeline: [{ kind: 'tool', id: 999,
+      tool: { id: 'cached-call', name: 'read', status: 'done', live: true, resultReceived: false, isError: false } }] }
+    const restored = applyEvent(state, { type: 'tool_execution_start', toolCallId: 'cached-call', toolName: 'read', args: { path: 'a.ts' } })
+    expect(restored.timeline).toHaveLength(1)
+    expect(restored.timeline[0]).toMatchObject({ id: 999, tool: { status: 'running', path: 'a.ts' } })
+  })
+
+  it('hydrates display at the forwarded event revision without replaying lifecycle or task accounting', () => {
+    let state = reducer(seed, { type: 'clearTimeline', sessionPath: path })
+    state = applyEvent(state, { type: 'agent_start', _pionLive: { backendId: 'backend-a', revision: 4, cwd, sessionPath: path } })
+    const restored = snapshot(state, 4, [start, delta('background text'), {
+      type: 'tool_execution_start', toolCallId: 'active-call', toolName: 'read', args: { path: 'a.ts' }
+    }])
+    expect(restored.timeline).toHaveLength(2)
+    expect(restored.timeline[0]).toMatchObject({ text: 'background text', streaming: true })
+    expect(restored.timeline[1]).toMatchObject({ tool: { status: 'running' } })
+    expect(restored.taskRevision).toBe(state.taskRevision)
+    expect(restored.taskResultIds).toBe(state.taskResultIds)
+    expect(snapshot(restored, 4, [start, delta('background text'), {
+      type: 'tool_execution_start', toolCallId: 'active-call', toolName: 'read', args: { path: 'a.ts' }
+    }]).timeline).toBe(restored.timeline)
+    const missing = { ...restored, timeline: [], liveSessionTurnIds: [] }
+    expect(snapshot(missing, 4, [start, delta('background text')]).timeline[0]).toMatchObject({ text: 'background text' })
+  })
+
+  it.each(['tool_execution_start', 'tool_execution_update'] as const)(
+    'hydrates lifecycle from the first equal-revision STATE after metadata-only %s', (type) => {
+      const toolStart: WireEventInput = { type: 'tool_execution_start', toolCallId: 'active-call', toolName: 'read', args: { path: 'a.ts' } }
+      const toolUpdate: WireEventInput = { type: 'tool_execution_update', toolCallId: 'active-call', toolName: 'read',
+        partialResult: { content: [{ type: 'text', text: 'reading' }] } }
+      let state = reducer(seed, { type: 'clearTimeline', sessionPath: path })
+      state = applyEvent(state, { ...(type === 'tool_execution_start' ? toolStart : toolUpdate),
+        _pionLive: { backendId: 'backend-a', revision: 10, cwd, sessionPath: path } })
+      expect(state.busy).toBe(false)
+      expect(state.liveSessionRevision).toBe(10)
+      expect(state.liveSessionLifecycleRevision).toBeUndefined()
+      const events = [start, delta('partial assistant'), toolStart, toolUpdate]
+      const restored = snapshot(state, 10, events)
+      expect(restored).toMatchObject({ busy: true, liveSessionLifecycleRevision: 10 })
+      expect(restored.timeline.find((row) => row.kind === 'assistant')).toMatchObject({ text: 'partial assistant', streaming: true })
+      expect(restored.timeline.find((row) => row.kind === 'tool')).toMatchObject({ tool: { status: 'running', outputText: 'reading' } })
+      const tool = restored.timeline.find((row) => row.kind === 'tool')
+      if (tool?.kind === 'tool') {
+        expect(tool.tool.resultReceived).not.toBe(true)
+        expect(tool.tool.resultSource).not.toBe('history')
+      }
+      expect(deriveWorkingStatus(restored).label).toBe('读取项目中...')
+      expect(restored.taskRevision).toBe(state.taskRevision)
+      expect(restored.taskResultIds).toBe(state.taskResultIds)
+      // An already accepted STATE can restore rows after cache replacement,
+      // but must not replace the known lifecycle with conflicting equal flags.
+      const missing = { ...restored, timeline: [], liveSessionTurnIds: [] }
+      const reprojected = snapshot(missing, 10, events, {}, false)
+      expect(reprojected.busy).toBe(true)
+      expect(deriveWorkingStatus(reprojected).label).toBe('读取项目中...')
+      const loaded = reducer(restored, { type: 'loadEntries', items: [], preserveToolState: {
+        revision: restored.timelineScopeRevision, cwd, sessionPath: path } })
+      expect(loaded.busy).toBe(true)
+      expect(deriveWorkingStatus(loaded).label).toBe('读取项目中...')
+    }
+  )
+
+  it('hydrates a metadata-first assistant delta at equal revision, even after older lifecycle proof', () => {
+    let state = reducer(seed, { type: 'clearTimeline', sessionPath: path })
+    state = applyEvent(state, { type: 'agent_settled', _pionLive: { backendId: 'backend-a', revision: 9, cwd, sessionPath: path } })
+    state = applyEvent(state, { ...delta('suffix'), _pionLive: { backendId: 'backend-a', revision: 10, cwd, sessionPath: path } })
+    expect(state).toMatchObject({ busy: false, liveSessionRevision: 10, liveSessionLifecycleRevision: 9 })
+    const restored = snapshot(state, 10, [start, delta('complete partial body')])
+    expect(restored).toMatchObject({ busy: true, compacting: false, liveSessionLifecycleRevision: 10 })
+    expect(restored.timeline[0]).toMatchObject({ text: 'complete partial body', streaming: true })
+    expect(deriveWorkingStatus(restored).label).toBe('组织回复中...')
+    const older = snapshot(restored, 9, [], {}, false)
+    expect(older.busy).toBe(true)
+    expect(older.timeline).toBe(restored.timeline)
+  })
+
+  it('keeps a known root settled revision idle when equal STATE still says streaming', () => {
+    const toolStart: WireEventInput = { type: 'tool_execution_start', toolCallId: 'active-call', toolName: 'read', args: {} }
+    let state = snapshot(reducer(seed, { type: 'clearTimeline', sessionPath: path }), 10, [start, delta('partial'), toolStart])
+    state = applyEvent(state, { type: 'agent_settled', _pionLive: { backendId: 'backend-a', revision: 20, cwd, sessionPath: path } })
+    const restored = snapshot(state, 20, [start, delta('partial'), toolStart])
+    expect(restored).toMatchObject({ busy: false, compacting: false, liveSessionLifecycleRevision: 20 })
+    expect(restored.timeline.find((row) => row.kind === 'assistant')).toMatchObject({ streaming: false })
+    const tool = restored.timeline.find((row) => row.kind === 'tool')
+    expect(tool).toMatchObject({ tool: { status: 'done' } })
+    if (tool?.kind === 'tool') {
+      expect(tool.tool.resultReceived).not.toBe(true)
+      expect(tool.tool.resultSource).not.toBe('history')
+    }
+    expect(deriveWorkingStatus(restored).label).not.toBe('读取项目中...')
+  })
+
+  it('accepts higher idle STATE with full cached prefix and releases its active display tails', () => {
+    const toolStart: WireEventInput = { type: 'tool_execution_start', toolCallId: 'active-call', toolName: 'read', args: {} }
+    const current = snapshot(reducer(seed, { type: 'clearTimeline', sessionPath: path }), 10,
+      [start, delta('complete cached prefix'), toolStart])
+    const ended = snapshot(current, 11, [start, { type: 'message_end', message: {
+      role: 'assistant', timestamp, content: '', _pionLiveTruncatedFields: ['text'] } }, toolStart], { truncated: true }, false)
+    expect(ended).toMatchObject({ busy: false, liveSessionLifecycleRevision: 11 })
+    expect(ended.timeline[0]).toMatchObject({ id: current.timeline[0].id, text: 'complete cached prefix', streaming: false })
+    expect(ended.timeline[1]).toMatchObject({ tool: { status: 'done' } })
+    const loaded = reducer(ended, { type: 'loadEntries', items: current.timeline, preserveToolState: {
+      revision: ended.timelineScopeRevision, cwd, sessionPath: path } })
+    expect(loaded.timeline[0]).toMatchObject({ text: 'complete cached prefix', streaming: false })
+    expect(loaded.busy).toBe(false)
+  })
+
+  it('records root compaction lifecycle proof and preserves it against equal STATE flags', () => {
+    let state = reducer(seed, { type: 'clearTimeline', sessionPath: path })
+    state = applyEvent(state, { type: 'compaction_start', reason: 'manual',
+      _pionLive: { backendId: 'backend-a', revision: 10, cwd, sessionPath: path } })
+    state = snapshot(state, 10, [], {}, false)
+    expect(state).toMatchObject({ busy: true, compacting: true, liveSessionLifecycleRevision: 10 })
+    state = applyEvent(state, { type: 'compaction_end', reason: 'manual', result: {}, aborted: false, willRetry: false,
+      _pionLive: { backendId: 'backend-a', revision: 11, cwd, sessionPath: path } })
+    expect(snapshot(state, 11, [])).toMatchObject({ busy: false, compacting: false, liveSessionLifecycleRevision: 11 })
+  })
+
+  it('resets lifecycle proof on scope clear, ready reset, dead status and backend replacement', () => {
+    const current = snapshot(seed, 10, [start, delta('partial')])
+    expect(reducer(current, { type: 'clearTimeline', sessionPath: path }).liveSessionLifecycleRevision).toBeUndefined()
+    for (const phase of ['stopped', 'error', 'ready'] as const) {
+      const resettable = { ...current, status: { ...current.status, phase: 'starting' as const } }
+      expect(reducer(resettable, { type: 'status', status: { phase, cwd } }).liveSessionLifecycleRevision).toBeUndefined()
+    }
+    const replacement = applyEvent(current, { ...delta('other backend'),
+      _pionLive: { backendId: 'replacement', revision: 1, cwd, sessionPath: path } })
+    expect(replacement.liveSessionLifecycleRevision).toBeUndefined()
+  })
+
+  it('does not let timestampless snapshot fallback overwrite a different stable assistant', () => {
+    const nativeStart = (identity: string): WireEventInput => ({ type: 'message_start', message: {
+      role: 'assistant', content: [], _pionLiveMessageId: identity } })
+    const first = snapshot({ ...seed, timeline: [] }, 2, [nativeStart('first'), delta('first text')])
+    const second = snapshot(first, 3, [nativeStart('second'), delta('second text')])
+    expect(second.timeline).toHaveLength(2)
+    expect(second.timeline[0]).toMatchObject({ liveMessageId: 'first', text: 'first text' })
+    expect(second.timeline[1]).toMatchObject({ liveMessageId: 'second', text: 'second text' })
+    const emptySecond = snapshot(first, 4, [nativeStart('second'), { type: 'message_end', message: {
+      role: 'assistant', content: [], _pionLiveMessageId: 'second' } }])
+    expect(emptySecond.timeline).toEqual(first.timeline)
+  })
+
+  it('restores a cache-only assistant marked reconciled but never replaces a persisted final with a partial', () => {
+    const nativeStart: WireEventInput = { type: 'message_start', message: { role: 'assistant',
+      content: [], _pionLiveMessageId: 'active-assistant' } }
+    const cached = { kind: 'assistant' as const, id: 998, liveMessageId: 'active-assistant',
+      text: 'cache text', thinking: '', streaming: false, historyReconciled: true }
+    const restored = snapshot({ ...seed, timeline: [cached] }, 4, [nativeStart, delta('fresh text')])
+    expect(restored.timeline[0]).toMatchObject({ id: 998, text: 'fresh text', streaming: true })
+    const persisted = snapshot({ ...seed, timeline: [{ ...cached, entryId: 'final-entry' }] }, 4, [nativeStart, delta('partial')])
+    expect(persisted.timeline[0]).toMatchObject({ id: 998, text: 'cache text', streaming: false })
+    const different = snapshot({ ...seed, timeline: [{ ...cached, entryId: 'final-entry' }] }, 4,
+      [{ type: 'message_start', message: { role: 'assistant', content: [], _pionLiveMessageId: 'different-assistant', _pionLiveEntryId: 'different-entry' } }, delta('other text')])
+    expect(different.timeline).toHaveLength(2)
+  })
+
+  it('does not revive a completed tool from a partial snapshot, or finish other tools while the backend is busy', () => {
+    const toolStart = (id: string): WireEventInput => ({ type: 'tool_execution_start', toolCallId: id, toolName: 'read', args: {} })
+    let state = snapshot({ ...seed, timeline: [] }, 2, [toolStart('first'), toolStart('second')])
+    state = applyEvent(state, { type: 'message_end', message: { role: 'toolResult', toolCallId: 'first', content: [{ type: 'text', text: 'final' }] } })
+    state = snapshot(state, 3, [toolStart('first'), toolStart('second')])
+    expect(state.timeline[0]).toMatchObject({ tool: { status: 'done', resultReceived: true, outputText: 'final' } })
+    expect(state.timeline[1]).toMatchObject({ tool: { status: 'running' } })
+    const idle = snapshot(state, 4, [toolStart('first'), toolStart('second')], {}, false)
+    expect(idle.busy).toBe(false)
+    expect(idle.timeline[1]).toMatchObject({ tool: { status: 'done' } })
+    const settled = applyEvent(state, { type: 'agent_settled' })
+    expect(settled.busy).toBe(false)
+    expect(settled.timeline[1]).toMatchObject({ tool: { status: 'done' } })
   })
 
   it('hydrates a first token whose assistant did not exist when the session was left', () => {
@@ -141,11 +539,11 @@ describe('scoped live-session display snapshots', () => {
   })
 
   it('updates complete assistant fields despite unrelated image/argument truncation', () => {
-    const user: WireEventInput = { type: 'message_start', message: { role: 'user', timestamp: timestamp - 1,
+    const user: WireEventInput = { type: 'message_start', message: { role: 'user', timestamp: timestamp - 1, _pionLiveMessageId: 'user-request',
       content: [{ type: 'text', text: 'long request' }, { type: 'image', mimeType: 'image/png', data: 'attachment' }] } }
     const state = snapshot(seed, 2, [user, start, delta('first')])
     const updated = snapshot(state, 4, [
-      { type: 'message_start', message: { role: 'user', timestamp: timestamp - 1, content: 'long', _pionLiveTruncatedFields: ['text'] } },
+      { type: 'message_start', message: { role: 'user', timestamp: timestamp - 1, _pionLiveMessageId: 'user-request', content: 'long', _pionLiveTruncatedFields: ['text'] } },
       start, delta('first with exact background suffix'),
       { type: 'tool_execution_start', toolCallId: 'secret-args', toolName: 'read', args: {} }
     ], { truncated: true })
@@ -191,10 +589,10 @@ describe('scoped live-session display snapshots', () => {
   })
 
   it('preserves omitted user attachments without any global truncation flag', () => {
-    const user: WireEventInput = { type: 'message_start', message: { role: 'user', timestamp,
+    const user: WireEventInput = { type: 'message_start', message: { role: 'user', timestamp, _pionLiveMessageId: 'user-with-image',
       content: [{ type: 'text', text: 'long request' }, { type: 'image', mimeType: 'image/png', data: 'attachment' }] } }
     const state = snapshot(seed, 2, [user])
-    const updated = snapshot(state, 3, [{ type: 'message_start', message: { role: 'user', timestamp, content: 'short' } }])
+    const updated = snapshot(state, 3, [{ type: 'message_start', message: { role: 'user', timestamp, _pionLiveMessageId: 'user-with-image', content: 'short' } }])
     expect(updated.timeline[1]).toMatchObject({ text: 'short', images: [{ data: 'attachment' }] })
   })
 

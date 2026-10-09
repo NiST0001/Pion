@@ -22,6 +22,26 @@ const branch: BranchInfo = {
 }
 
 describe('Sidebar selection typography', () => {
+  it('keeps running names readable and limits breathing to a small noninteractive light', () => {
+    const css = readFileSync('src/renderer/src/styles/refinements/project.css', 'utf8')
+    const indicator = css.match(/\.side-session\.running::before\s*\{([^}]+)\}/)?.[1]
+    expect(indicator).toBeDefined()
+    expect(indicator).toContain('width: 5px')
+    expect(indicator).toContain('height: 5px')
+    expect(indicator).toContain('position: absolute')
+    expect(indicator).toContain('right: 2px')
+    expect(indicator).toContain('pointer-events: none')
+    expect(indicator).toContain('background: var(--accent-strong)')
+    expect(indicator).toContain('animation: side-session-breathe 2.6s ease-in-out infinite')
+    expect(css).toMatch(/@keyframes side-session-breathe\s*\{\s*0%, 100%\s*\{\s*opacity: 0\.4;\s*\}\s*50%\s*\{\s*opacity: 1;\s*\}\s*\}/)
+    expect(css).not.toMatch(/conic-gradient|repeating-linear-gradient|background-clip|session-name-sweep|side-session-border-spin|--side-session-border-angle/)
+    expect(css).not.toMatch(/\.side-session\.running\s+\.side-item-label\s*\{/)
+    expect(indicator).not.toMatch(/transform|box-shadow|mask/)
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.side-session\.running::before\s*\{\s*animation: none;\s*opacity: 1;/)
+    expect(css).toMatch(/@media \(forced-colors: active\)\s*\{\s*\.side-session\.running::before\s*\{\s*background: Highlight;\s*animation: none;\s*opacity: 1;/)
+    expect(css).not.toContain('forced-color-adjust: none')
+  })
+
   it('uses the selected foreground token for names without requiring selection', () => {
     const style = document.createElement('style')
     style.textContent = readFileSync('src/renderer/src/styles/refinements/final.css', 'utf8')

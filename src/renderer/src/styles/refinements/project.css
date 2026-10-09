@@ -224,84 +224,43 @@
   transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease, outline-color 0.12s ease;
 }
 
-.side-session.running {
-  overflow: hidden;
-  isolation: isolate;
-}
-
-/* A bright spot orbits the row border while the session runs. */
-@property --side-session-border-angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
-}
-
+/* Keep the running light in the right padding, clear of names, stars and drag grips. */
 .side-session.running::before {
   content: '';
   position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1.5px;
+  right: 2px;
+  top: 50%;
+  margin-top: -2.5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
   pointer-events: none;
-  background: conic-gradient(
-    from var(--side-session-border-angle),
-    transparent 0%,
-    transparent 62%,
-    rgba(var(--accent-rgb), 0.85) 78%,
-    transparent 94%
-  );
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  mask-composite: exclude;
-  animation: side-session-border-spin 2.8s linear infinite;
+  background: var(--accent-strong);
+  opacity: 1;
+  animation: side-session-breathe 2.6s ease-in-out infinite;
 }
 
-@keyframes side-session-border-spin {
-  to {
-    --side-session-border-angle: 360deg;
+@keyframes side-session-breathe {
+  0%, 100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .side-session.running::before {
     animation: none;
-    background: rgba(var(--accent-rgb), 0.45);
+    opacity: 1;
   }
 }
 
-/* The running sweep lives on the session name glyphs, not the row background. */
-.side-session.running .side-item-label {
-  background: repeating-linear-gradient(
-    100deg,
-    var(--fg-dim) 0%,
-    var(--fg-dim) 38%,
-    var(--accent-strong) 50%,
-    var(--fg-dim) 62%,
-    var(--fg-dim) 100%
-  );
-  background-size: 200% 100%;
-  background-repeat: repeat-x;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: session-name-sweep 1.8s linear infinite;
-}
-
-@keyframes session-name-sweep {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: 0% 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .side-session.running .side-item-label {
-    background: none;
-    color: var(--fg-dim);
+@media (forced-colors: active) {
+  .side-session.running::before {
+    background: Highlight;
     animation: none;
+    opacity: 1;
   }
 }
 

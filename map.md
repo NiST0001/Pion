@@ -34,7 +34,7 @@
 | src/main/agent/agent-bridge.ts | 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；运行中状态有界等待及后端私有快照/在途缓存，历史 manager 依文件签名更新而非事件无条件重读；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
 | src/main/agent/message-revert.ts | 独占写入者前提下校验完整会话与所选用户消息，用 SDK 回到实际 parent 并追加持久分支标记；保留旧树，恢复文字及图片，不操作项目文件；兼容独立 usage、context_edit 与 retain-none 压缩记录 |
 | src/main/agent/stop-for-history.ts | 捕获 SDK 子进程并等待真实退出；超时/适配不兼容拒绝历史写入，不把 RpcClient.stop 提前返回当作退出证明 |
-| src/main/agent/live-session-state.ts | 后端私有当前轮显示快照：后台 root 输出持续归并、独立实例/revision 和有界行数/字节；字段级截断、最终空消息权威、静态安全预览；选回时随 SessionInfo 恢复，不重放请求或计费 |
+| src/main/agent/live-session-state.ts | 后端私有当前轮显示快照：后台 root 输出持续归并、独立实例/revision 和有界行数/字节；实时事件与快照共用稳定消息身份，不伪造 SDK 时间戳/持久 ID；字段级截断、最终空消息权威、静态安全预览；选回时随 SessionInfo 恢复，不重放请求或计费 |
 | src/main/agent/session-list-cache.ts | exact cwd 的轻量会话列表缓存、在途扫描合并及并发界限；落盘软失效避免持续输出饿死扫描，显式变更硬失效防止旧行复活；不缓存 SDK 全量消息文本 |
 | src/main/agent/backend-pool.ts | 后端保留和容量管理 |
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态 |
@@ -74,12 +74,12 @@
 | 路径 | 用途 |
 | --- | --- |
 | src/renderer/src/agent/types.ts、reducer.ts | UI 状态和事件归约；独立任务快照、结果有界去重、恢复请求与实时 revision 保护；以最终消息收口模型错误并显示实时压缩失败，空最终 text/thinking 清除旧流式草稿；工具增量仅处理文字，最终消息优先投影有界图片及生图请求/保存设置，相同有效预览的重复结果不重解码，设置变化仍更新，迟到执行结果不回退终态 |
-| src/renderer/src/agent/reducer.ts | 实时事件与选中会话显示状态；带 cwd/path/backend/revision 的后台显示快照只归并当前作用域，保留行身份/预览及权威空 final，不重放生命周期、任务或计费用量 |
-| src/renderer/src/agent/timeline.ts | 会话条目转时间线、缓存和分页类型；缓存单独保留任务快照，不能以当前页有无任务记录替代；历史回放保留助手错误诊断；按持久化身份及 SDK 消息时间戳/终态内容归并实时行与分页副本，保留组件身份及页面顺序，未覆盖的实时行仍留在尾部；最终结果/回放共用图片预览及生图请求型号/操作/设置/引用数与保存尺寸投影，不保留引用路径数组/输入字节，不从旧参数补造最终默认设置，设置-only 更新复用有效预览；同 scope 替换保留工具终态/key，旧分页及 result-only 页面补完已有调用，不创建孤立结果行 |
+| src/renderer/src/agent/reducer.ts | 实时事件与选中会话显示状态；带 cwd/path/backend/revision 的后台显示快照只归并当前作用域；区分显示版本与生命周期权威，同版本可补齐显示但不复活已结束运行；保留运行中工具、行身份/预览及权威空 final，不重放生命周期、任务或计费用量 |
+| src/renderer/src/agent/timeline.ts | 会话条目转时间线、缓存和分页类型；缓存单独保留任务快照，不能以当前页有无任务记录替代；历史回放保留助手错误诊断；按持久化身份、稳定 live 消息身份及 SDK 消息时间戳/终态内容归并实时行与分页副本；用户时间戳/内容歧义不猜测，保留真实重复发送及已有撤销 ID，保留组件身份及页面顺序，未覆盖的实时行仍留在尾部；最终结果/回放共用图片预览及生图请求型号/操作/设置/引用数与保存尺寸投影，不保留引用路径数组/输入字节，不从旧参数补造最终默认设置，设置-only 更新复用有效预览；同 scope 替换保留工具终态及已挂载消息 key/撤销身份，旧分页及 result-only 页面补完已有调用，不创建孤立结果行 |
 | src/renderer/src/agent/modelError.ts | 对常见模型/API 额度、认证、限流、上下文、服务及网络错误做保守分类，生成简短中文提示并原样保留技术详情 |
 | src/renderer/src/agent/sessionFavorites.ts、sessionOrder.ts | 收藏与排序 |
 | src/renderer/src/hooks/useAgent.ts | Agent hooks 汇总、启动及模型刷新 |
-| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换/撤销、跳转窗口、任务恢复、事件驱动的索引/叶节点更新；首次实时会话建立逻辑归属并封存缓存，切换前同步保存未落盘输出，缓存带后端身份；缓存回访清除分页渐显抑制标记，首次后台快照显示恢复历史渐显，普通刷新/分页不重播；同作用域历史替换保留实时尾部，拒绝复活已失效运行；撤销隔离旧请求与缓存，区分后端暂时无状态和真实选择；游标区分页末与会话末尾；历史读取等待有界、按 loadId/选择/scope 收口，所有清空入口同步登记作用域，过期后不追加请求，失败空壳不伪装成功缓存 |
+| src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换/撤销、跳转窗口、任务恢复、事件驱动的索引/叶节点更新；首次实时会话建立逻辑归属并封存缓存，切换前同步保存未落盘输出，缓存带后端身份；缓存回访清除分页渐显抑制标记，首次后台快照显示恢复历史渐显，普通刷新/分页不重播；切换成功后并行补读所属显示快照，metadata 不冒充水合完成，runningPaths 延迟不单独否定已知后端缓存；同作用域历史替换保留实时尾部，拒绝复活已失效运行；撤销隔离旧请求与缓存，区分后端暂时无状态和真实选择；游标区分页末与会话末尾；历史读取等待有界、按 loadId/选择/scope 收口，所有清空入口同步登记作用域，过期后不追加请求，失败空壳不伪装成功缓存 |
 | src/renderer/src/hooks/useMessageRevert.ts | 撤销确认、空草稿/附件读取门控、一次性文字/图片恢复及拒绝后的恢复重试；按逻辑选择隔离迟到结果，不持有后端或文件回滚 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步；分支/会话列表有界并发逐 cwd 发布，慢/失败项不阻挡已完成项，实时推送优先于迟到初次查询 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
@@ -118,13 +118,13 @@
 
 - `src/renderer/src/styles.css`：样式导入顺序。
 - `src/renderer/src/styles/`：按功能拆分的 CSS；`refinements/` 为细化样式。
-- `styles/refinements/project.css`：会话运行流光、未读标记和项目列表细节。
+- `styles/refinements/project.css`：会话运行状态圆点呼吸灯（减少动态效果/强制色时静态可见）、未读标记和项目列表细节。
 - `styles/dock.css`、`styles/terminal.css`：模块化工作区、拖动反馈、分隔条及终端面板。
 - `styles/window-effects.css`：连续工作区底色与局部磨砂；悬浮输入框/统计条、侧栏底部设置/插件商店栏、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。
 - `styles/motion.css`：通用动效、详情网格高度过渡、工具箭头旋转及减少动态效果适配。
 - `utils/screenTextReveal.tsx`、`utils/historyReveal.ts`：文字渐入调度与历史行启用；静态前缀保留为文本节点，扫描跳过已启用字符的重复几何测量。
-- `styles/themes/division.css`：“信号橙”的中性炭灰/鲜明红橙调色板，内部 division-dark ID 保持兼容及静态战术线条；侧栏以中性灰底区分选中，不混成棕色；该主题普通界面统一隐藏边框和阴影描边，但保留尺寸、键盘焦点与系统强制色回退；保持文字对比、状态语义、胶囊控件、原生透明与强制色回退。`styles/settings/themes.css` 提供各主题选择卡片缩略样式。
+- `styles/themes/division.css`：“信号橙”的中性炭灰/鲜明红橙调色板，内部 division-dark ID 保持兼容及静态战术线条；圆角沿共享尺度和组件父子契约，不统一压成小圆角；侧栏以中性灰底区分选中，不混成棕色；该主题普通界面统一隐藏边框和阴影描边，但保留尺寸、键盘焦点与系统强制色回退；输入框恢复悬浮阴影，textarea 焦点沿外层圆角显示并沿 Tab/Shift+Tab 导航门控，不绕过鼠标焦点抑制；保持文字对比、状态语义、胶囊控件、原生透明与强制色回退。`styles/settings/themes.css` 提供各主题选择卡片缩略样式。
 - `utils/theme.ts`：主题即时应用、用户配置恢复、旧 localStorage 迁移和异步保存；`utils/metricsSettings.ts`：统计显示偏好。
 
 上面 styles/、utils/ 简写均相对于 `src/renderer/src/`。

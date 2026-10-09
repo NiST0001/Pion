@@ -70,6 +70,8 @@ export type TimelineItem = (
       kind: 'user'
       id: number
       entryId?: string
+      /** Backend-private display identity, shared by events and snapshots; not an SDK entry ID. */
+      liveMessageId?: string
       /** Stable timestamp carried by the SDK user message itself. */
       messageTimestamp?: number
       text: string
@@ -85,6 +87,8 @@ export type TimelineItem = (
       kind: 'assistant'
       id: number
       entryId?: string
+      /** Backend-private display identity, shared by events and snapshots; not an SDK entry ID. */
+      liveMessageId?: string
       /** Stable timestamp carried by the SDK assistant message itself. */
       messageTimestamp?: number
       text: string
@@ -166,6 +170,8 @@ export interface AgentState {
   liveSessionScopeSelected?: boolean
   liveSessionBackendId?: string
   liveSessionRevision?: number
+  /** Same-backend accepted STATE/root lifecycle authority, not display-only metadata. */
+  liveSessionLifecycleRevision?: number
   liveSessionTurnIds?: number[]
   /** First display-bearing snapshot after selecting an existing transcript may reveal history. */
   historyRevealRestorePending?: boolean

@@ -159,7 +159,6 @@
 .theme-card-preview.division-dark {
   background: #1c1c1c;
   border-color: #565656;
-  border-radius: 3px;
   background-image: linear-gradient(rgba(204, 204, 204, 0.05) 1px, transparent 1px),
     linear-gradient(90deg, rgba(204, 204, 204, 0.05) 1px, transparent 1px);
   background-size: 12px 12px;
@@ -172,17 +171,14 @@
 
 .division-dark .theme-card-top i {
   background: #ff7a1a;
-  border-radius: 0;
 }
 
 .division-dark .theme-card-line {
   background: #ababab;
-  border-radius: 0;
 }
 
 .division-dark .theme-card-pill {
   background: #ff7a1a;
-  border-radius: 1px;
 }
 
 @media (forced-colors: active) {

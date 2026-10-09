@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { LiveSessionState, WireEventInput, WireMessage } from '../../shared/types'
 import { collectToolImages } from '../../shared/tool-images'
 import { generatedImageModelInfo, generatedImageSettingsInfo } from '../../shared/image-generation'
@@ -17,6 +17,10 @@ type Row = {
   truncatedFields?: Set<TruncatedField>
   role: string
   id?: string
+  liveMessageId?: string
+  entryId?: string
+  fingerprint?: string
+  ended?: boolean
   timestamp?: unknown
   events: WireEventInput[]
   text: string
@@ -29,6 +33,34 @@ type Row = {
 const object = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' ? value as Record<string, unknown> : {}
 const encodedBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value) ?? '')
+const safeTimestamp = (value: unknown): number | string | undefined =>
+  typeof value === 'number' && Number.isFinite(value) ? value
+    : typeof value === 'string' && value.length <= 128 ? value : undefined
+const timestampKey = (value: unknown): number | undefined => {
+  const raw = safeTimestamp(value)
+  const parsed = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim()
+    ? (/^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : Date.parse(raw)) : undefined
+  return parsed !== undefined && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+}
+// Proof only, never output identity. Retain no original image bytes or SDK objects.
+const contentFingerprint = (message: Record<string, unknown>): string | undefined => {
+  const parts = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content
+  if (!Array.isArray(parts) || parts.length > 256) return undefined
+  const hash = createHash('sha256'); let bytes = 0
+  for (const part of parts) {
+    const p = object(part)
+    const value = p.type === 'text' ? p.text : p.type === 'thinking' ? p.thinking : p.type === 'image' ? p.data : undefined
+    if (typeof value !== 'string' || value.length > 24 * 1024 * 1024) return undefined
+    bytes += Buffer.byteLength(value)
+    if (bytes > 24 * 1024 * 1024) return undefined
+    hash.update(String(p.type)); hash.update(String(value.length)); hash.update(':'); hash.update(value)
+    if (p.type === 'image') {
+      if (typeof p.mimeType !== 'string' || p.mimeType.length > 128) return undefined
+      hash.update(p.mimeType)
+    }
+  }
+  return hash.digest('hex')
+}
 
 /** Current root turn only. Never retain SDK model/state objects or token-event queues. */
 export class LiveSessionProjection {
@@ -38,6 +70,37 @@ export class LiveSessionProjection {
   private bytes = 0
   private truncated = false
   private assistant?: Row
+  private user?: Row
+  private rowSequence = 0
+  private entryOwners = new Map<string, string>()
+  private previousProofs: { role: string; timestamp?: unknown; fingerprint?: string }[] = []
+  private messageRows = new WeakMap<object, string>()
+  private eventRows = new WeakMap<object, string>()
+
+  /** Clone only the forwarded event; backend accounting consumes the untouched SDK event. */
+  annotateEvent<T extends object>(input: T): T {
+    const event = object(input)
+    if (typeof event.parentToolCallId === 'string' && event.parentToolCallId) return input
+    const id = this.eventRows.get(input)
+    const row = this.rows.find((candidate) => candidate.liveMessageId === id)
+    if (!row?.liveMessageId) return input
+    const annotate = (message: unknown) => ({ ...object(message), _pionLiveMessageId: row.liveMessageId,
+      ...(row.entryId ? { _pionLiveEntryId: row.entryId } : {}) })
+    if (event.type === 'entry_appended') return { ...event, entry: { ...object(event.entry), message: annotate(object(event.entry).message) } } as T
+    if (event.type === 'message_start' || event.type === 'message_end') return { ...event, message: annotate(event.message) } as T
+    return { ...event, _pionLiveMessageId: row.liveMessageId } as T
+  }
+
+  private bind(event: Record<string, unknown>, message: Record<string, unknown>, row: Row): void {
+    if (!row.liveMessageId) return
+    this.eventRows.set(event, row.liveMessageId)
+    this.messageRows.set(message, row.liveMessageId)
+  }
+
+  private knownRow(message: Record<string, unknown>): Row | undefined {
+    const id = this.messageRows.get(message) ?? (typeof message._pionLiveMessageId === 'string' ? message._pionLiveMessageId : undefined)
+    return id ? this.rows.find((row) => row.liveMessageId === id && row.role === message.role) : undefined
+  }
 
   metadata(cwd: string, sessionPath?: string): Omit<LiveSessionState, 'events' | 'truncated'> {
     return { backendId: this.backendId, revision: this.revision, cwd, ...(sessionPath ? { sessionPath } : {}) }
@@ -65,22 +128,27 @@ export class LiveSessionProjection {
     // Even ignored root lifecycle events advance: an awaited state must not rewind newer events.
     this.revision++
     if (event.type === 'agent_start') {
-      this.rows = []; this.bytes = 0; this.assistant = undefined; this.truncated = false
+      this.previousProofs = [...this.previousProofs, ...this.rows.filter((row) => row.liveMessageId)
+        .map(({ role, timestamp, fingerprint }) => ({ role, timestamp, fingerprint }))].slice(-64)
+      this.rows = []; this.bytes = 0; this.assistant = undefined; this.user = undefined; this.truncated = false
+      this.messageRows = new WeakMap(); this.eventRows = new WeakMap()
       return
     }
     if (event.type === 'message_start') {
       const message = object(event.message)
       if (message.role !== 'assistant' && message.role !== 'user') return
       // Each start has its own stable identity; don't concatenate sequential assistants.
-      const timestamp = typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)
-        ? message.timestamp : typeof message.timestamp === 'string' && message.timestamp.length <= 128
-          ? message.timestamp : Date.now()
+      const timestamp = safeTimestamp(message.timestamp)
+      const liveMessageId = `${this.backendId}:${++this.rowSequence}`
       const safe = message.role === 'assistant'
         ? { role: 'assistant', timestamp, content: [] } as WireMessage
         : this.message(message, VALUE_BYTES)
-      safe.timestamp = timestamp
-      const row: Row = { role: String(message.role), timestamp, events: [{ type: 'message_start', message: safe }], text: '', thinking: '', textBytes: 0, bytes: ROW_OVERHEAD + encodedBytes([{ type: 'message_start', message: safe }]), streaming: message.role === 'assistant' }
+      if (timestamp !== undefined) safe.timestamp = timestamp
+      safe._pionLiveMessageId = liveMessageId
+      const row: Row = { role: String(message.role), liveMessageId, fingerprint: contentFingerprint(message), timestamp, events: [{ type: 'message_start', message: safe }], text: '', thinking: '', textBytes: 0, bytes: ROW_OVERHEAD + encodedBytes([{ type: 'message_start', message: safe }]), streaming: message.role === 'assistant' }
       if (row.streaming) this.assistant = row
+      else this.user = row
+      this.bind(event, message, row)
       this.add(row)
       return
     }
@@ -88,6 +156,7 @@ export class LiveSessionProjection {
       const sub = object(event.assistantMessageEvent)
       const row = this.assistant
       if (!row?.streaming) return
+      this.eventRows.set(event, row.liveMessageId!)
       if (sub.type === 'error') {
         const raw = object(sub.error)
         const error = this.message({ role: 'assistant', errorMessage: raw.errorMessage, stopReason: raw.stopReason }, VALUE_BYTES)
@@ -110,10 +179,23 @@ export class LiveSessionProjection {
     }
     if (event.type === 'message_end') {
       const message = object(event.message)
-      if (message.role === 'assistant' && this.assistant?.streaming) {
-        const row = this.assistant
-        const safe = this.message(message, LIVE_MAX_BYTES - STREAM_RESERVE)
-        safe.timestamp ??= row.timestamp
+      if (message.role === 'assistant' || message.role === 'user') {
+        const row = this.knownRow(message) ?? (message.role === 'assistant' ? this.assistant : this.user)
+        if (!row || row.role !== message.role || row.ended || !this.rows.includes(row)) return
+        this.bind(event, message, row)
+        row.ended = true
+        row.fingerprint = contentFingerprint(message)
+        const safe = this.message(message, message.role === 'assistant' ? LIVE_MAX_BYTES - STREAM_RESERVE : VALUE_BYTES)
+        row.timestamp = safeTimestamp(message.timestamp) ?? row.timestamp
+        if (row.timestamp !== undefined) {
+          safe.timestamp = row.timestamp
+          const start = row.events[0]
+          if (start.type === 'message_start') {
+            row.events[0] = { ...start, message: { ...object(start.message), timestamp: row.timestamp } } as WireEventInput
+          }
+        }
+        safe._pionLiveMessageId = row.liveMessageId
+        if (row.entryId) safe._pionLiveEntryId = row.entryId
         // The final message (including empty text/thinking) replaces all provisional deltas.
         this.bytes -= row.bytes
         row.text = ''; row.thinking = ''; row.textBytes = 0; row.streaming = false
@@ -147,18 +229,35 @@ export class LiveSessionProjection {
     if (event.type === 'entry_appended') {
       const entry = object(event.entry); const message = object(entry.message)
       if (entry.type !== 'message' || typeof entry.id !== 'string') return
-      const row = [...this.rows].reverse().find((r) => message.role === 'toolResult'
+      if (!entry.id || entry.id.length > 512) return
+      const key = timestampKey(message.timestamp)
+      const fingerprint = contentFingerprint(message)
+      const candidates = this.rows.filter((r) => message.role === 'toolResult'
         ? r.role === 'tool' && r.id === message.toolCallId
-        : r.role === message.role && (message.timestamp === undefined || r.timestamp === message.timestamp))
-      if (!row || row.events.some((e) => e.type === 'entry_appended')) return
-      // Identity only: the final message already carries the authoritative bounded contents.
-      const timestamp = typeof message.timestamp === 'number' && Number.isFinite(message.timestamp)
-        ? message.timestamp : typeof message.timestamp === 'string' && message.timestamp.length <= 128
-          ? message.timestamp : row.timestamp
-      const identity = { role: String(message.role), timestamp,
+        : r.role === message.role && key !== undefined && key === timestampKey(r.timestamp)
+          && fingerprint !== undefined && fingerprint === r.fingerprint)
+      // Do not pick the last role or exclude already-associated rows: collisions stay unknown.
+      const previousCollision = key !== undefined && fingerprint !== undefined && this.previousProofs.some((proof) =>
+        proof.role === message.role && timestampKey(proof.timestamp) === key && proof.fingerprint === fingerprint)
+      const row = this.knownRow(message) ?? (!previousCollision && candidates.length === 1 ? candidates[0] : undefined)
+      if (!row || row.role !== (message.role === 'toolResult' ? 'tool' : message.role)
+        || (row.entryId && row.entryId !== entry.id)
+        || (this.entryOwners.has(entry.id) && this.entryOwners.get(entry.id) !== (row.liveMessageId ?? row.id))) return
+      this.bind(event, message, row)
+      if (row.events.some((e) => e.type === 'entry_appended')) return
+      row.entryId = entry.id
+      this.entryOwners.set(entry.id, row.liveMessageId ?? row.id!)
+      if (this.entryOwners.size > 64) this.entryOwners.delete(this.entryOwners.keys().next().value!)
+      const timestamp = safeTimestamp(message.timestamp) ?? row.timestamp
+      const identity = { role: String(message.role), ...(timestamp !== undefined ? { timestamp } : {}),
+        ...(row.liveMessageId ? { _pionLiveMessageId: row.liveMessageId, _pionLiveEntryId: row.entryId } : {}),
         ...(row.role === 'tool' ? { toolCallId: row.id } : {}) } as WireMessage
-      const attached = { type: 'entry_appended', entry: { type: 'message', id: entry.id.slice(0, 512), parentId: null, timestamp: typeof entry.timestamp === 'string' ? entry.timestamp.slice(0, 128) : '', message: identity } } as WireEventInput
-      this.replace(row, [...row.events, attached])
+      const attached = { type: 'entry_appended', entry: { type: 'message', id: entry.id,
+        ...(entry.parentId === null || (typeof entry.parentId === 'string' && entry.parentId.length <= 512) ? { parentId: entry.parentId } : {}),
+        ...(typeof entry.timestamp === 'string' && entry.timestamp.length <= 128 ? { timestamp: entry.timestamp } : {}), message: identity } } as WireEventInput
+      const events = row.events.map((e) => e.type === 'message_start' || e.type === 'message_end'
+        ? { ...e, message: { ...object(e.message), _pionLiveEntryId: row.entryId } } as WireEventInput : e)
+      this.replace(row, [...events, attached])
     }
   }
 
@@ -206,7 +305,7 @@ export class LiveSessionProjection {
   }
 
   private message(raw: Record<string, unknown>, budget: number, images = false): WireMessage {
-    const result: WireMessage = { role: String(raw.role ?? '').slice(0, 128), ...(typeof raw.timestamp === 'number' || (typeof raw.timestamp === 'string' && raw.timestamp.length <= 128) ? { timestamp: raw.timestamp } : {}), ...(typeof raw.toolCallId === 'string' ? { toolCallId: raw.toolCallId.slice(0, 512) } : {}), ...(typeof raw.isError === 'boolean' ? { isError: raw.isError } : {}) }
+    const result: WireMessage = { role: String(raw.role ?? '').slice(0, 128), ...(safeTimestamp(raw.timestamp) !== undefined ? { timestamp: safeTimestamp(raw.timestamp) } : {}), ...(typeof raw.toolCallId === 'string' ? { toolCallId: raw.toolCallId.slice(0, 512) } : {}), ...(typeof raw.isError === 'boolean' ? { isError: raw.isError } : {}) }
     let remaining = budget - MESSAGE_OVERHEAD
     const fields = new Set<TruncatedField>()
     const contentField = raw.role === 'toolResult' ? 'outputText' : 'text'

@@ -195,10 +195,21 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     // snapshot for each revisit so short and second-load sessions replay the
     // same restrained opacity cascade as a cold history load.
     const current = currentState.current
-    const liveBackendRetained = current.runningSessionPaths.includes(path)
+    const sameOwnerBackend = current.liveSessionOwnerPath === path && current.liveSessionBackendId
+      ? current.liveSessionBackendId === cached.liveSessionBackendId : undefined
+    // The startup running-path query and selected metadata are not a display
+    // snapshot. Keep a known backend's bounded draft provisionally until the
+    // selected getState read validates it; explicit death/replacement wins.
+    const liveBackendRetained = (current.runningSessionPaths.includes(path)
+      || Boolean(cached.liveSessionBackendId))
+      && sameOwnerBackend !== false
       && (cached.cwd === undefined || cached.cwd === current.status.cwd)
       && current.status.phase !== 'stopped' && current.status.phase !== 'error'
-    const hydratedSelection = Boolean(current.liveSessionBackendId && current.liveSessionOwnerPath === path)
+    const live = current.session?.liveState
+    const hydratedSelection = Boolean(live && current.liveSessionOwnerPath === path
+      && live.backendId === current.liveSessionBackendId
+      && live.revision === current.liveSessionRevision
+      && live.sessionPath === path)
     const items = cached.items.flatMap((item): TimelineItem[] => {
       // Cached partial output is meaningful only while its backend still runs.
       // A stopped/replaced backend must not resurrect a streaming input target.
@@ -214,7 +225,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       ? null
       : { path, ...revealedCache, loading: false, loadId }
     historyCursor.current = cursor
-    storeTimelineCache(timelineCache.current, path, revealedCache)
+    // Never replace the source cache with a provisional filtered projection.
+    // The accepted reducer/page result owns subsequent cache publication.
     if (cached.tasks !== undefined && cached.tasks !== null) dispatch({ type: 'cachedTasks', tasks: cached.tasks })
     showTimeline(path, items, revealedCache.mode, {
       revision: scopeRevision.current, cwd: current.status.cwd, sessionPath: path
@@ -260,7 +272,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       ...(cached ?? { apiBefore: 0, apiAfter: 0, toolResults: [], complete: true,
         newerComplete: true, leafId: null, total: 0 }),
       cwd: state.status.cwd,
-      liveSessionBackendId: state.liveSessionBackendId,
+      liveSessionBackendId: state.liveSessionBackendId ?? cached?.liveSessionBackendId,
       items: state.timeline,
       mode: state.mode,
       tasks: state.tasks
@@ -272,7 +284,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     state.liveSessionScopeSelected, state.liveSessionBackendId, state.liveSessionRevision])
 
   /** Load only the newest history window; older windows are fetched on demand. */
-  const reloadTimeline = useCallback(async (sessionPath?: string): Promise<void> => {
+  const reloadTimeline = useCallback(async (sessionPath?: string, refreshLive = false): Promise<void> => {
     if (!api) return
     const loadId = ++timelineLoadId.current
     const revision = scopeRevision.current
@@ -296,6 +308,25 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     dispatch({ type: 'beginTaskRestore', id: loadId })
     const cached = path ? timelineCache.current.get(path) : undefined
     const keepVisibleCache = Boolean(path && cached && timelineOwnerPath.current === path)
+    if (refreshLive && path && api.getState) {
+      const requestedBackendId = currentState.current.liveSessionBackendId
+      // JSONL may have the same leaf/count while the retained backend has new
+      // unpersisted output. Pull its owned display snapshot independently of
+      // STATE delivery, without restarting the backend or replaying input.
+      void readWithDeadline(() => api.getState(), deadline).then((session) => {
+        if (loadId !== timelineLoadId.current || revision !== scopeRevision.current
+          || timelineOwnerPath.current !== path || readSelection() !== selection
+          || !session || session.sessionFile !== path
+          || (session.liveState && (session.liveState.cwd !== selection.cwd
+            || session.liveState.sessionPath !== path))) return
+        const selectedBackendId = currentState.current.liveSessionBackendId
+        if (session.liveState && selectedBackendId && selectedBackendId !== requestedBackendId
+          && selectedBackendId !== session.liveState.backendId) return
+        dispatch({ type: 'session', session })
+      }).catch((error) => {
+        console.warn('[pion] selected live snapshot read failed; keeping visible timeline:', path, error)
+      })
+    }
     historyCursor.current = null
     // A retained session is already fully paintable from memory. Revalidate its
     // JSONL in the background without showing a loading state or blanking it.
@@ -745,7 +776,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
 
       // Phase 2 finishes with a bounded newest history window. Give its opacity
       // cascade a real paint before indexing the full session or enabling Git.
-      const content = reloadTimeline(sessionPath)
+      const content = reloadTimeline(sessionPath, true)
       const contentLoadId = timelineLoadId.current
       await content
       await waitForNextPaint()

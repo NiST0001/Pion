@@ -41,6 +41,17 @@ describe('ToolCallItem', () => {
     expect(screen.getByRole('button', { name: '展开提问工具详情' })).toBeInTheDocument()
   })
 
+  it('shows the restored running label immediately even for historical noReveal rows', () => {
+    const { container, rerender } = render(<ToolCallItem tool={{ ...liveTool, status: 'done', resultReceived: false }} historical noReveal />)
+    expect(container).not.toHaveTextContent('执行中…')
+    rerender(<ToolCallItem tool={liveTool} historical noReveal />)
+    expect(container).toHaveTextContent('执行中…')
+    expect(container.querySelector('.tool-icon')).toHaveClass('spin')
+    rerender(<ToolCallItem tool={{ ...liveTool, status: 'done', resultReceived: true }} historical noReveal />)
+    expect(container).not.toHaveTextContent('执行中…')
+    expect(container.querySelector('.tool-icon')).not.toHaveClass('spin')
+  })
+
   it('reveals live tool headers and details as streamed text arrives', () => {
     const { container } = render(<ToolCallItem tool={liveTool} />)
 

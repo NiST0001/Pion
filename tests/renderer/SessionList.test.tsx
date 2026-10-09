@@ -17,6 +17,50 @@ const optimistic: SessionMeta = {
   optimistic: true
 }
 
+describe('SessionItems running indicator state', () => {
+  it('scopes the light to running rows without changing selection, unread or favorite actions', () => {
+    const session: SessionMeta = {
+      ...optimistic,
+      path: '/tmp/project/running-session.jsonl',
+      id: 'running-session',
+      optimistic: false
+    }
+    const onToggleFavorite = vi.fn()
+    const props = {
+      sessions: [session],
+      activePath: session.path,
+      unreadSessionPaths: new Set([session.path]),
+      previewDensity: 'compact' as const,
+      favoritePaths: new Set([session.path]),
+      onSelect: vi.fn(),
+      onReorder: vi.fn(),
+      onDelete: vi.fn(async () => undefined),
+      onCopy: vi.fn(async () => undefined),
+      onRename: vi.fn(async () => undefined),
+      onOpenTaskHistory: vi.fn(),
+      getForkMessages: vi.fn().mockResolvedValue([]),
+      onFork: vi.fn().mockResolvedValue(''),
+      onToggleFavorite
+    }
+    const { container, rerender } = render(
+      <SessionItems {...props} runningSessionPaths={new Set([session.path])} />
+    )
+    const row = container.querySelector('.side-session')
+    expect(row).toHaveClass('running', 'active', 'unread')
+    expect(row?.querySelector('.side-item-label')).toHaveTextContent(session.preview!)
+    expect(screen.getByLabelText('未读会话')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '取消收藏会话' }))
+    expect(onToggleFavorite).toHaveBeenCalledWith(session.path)
+    expect(props.onSelect).not.toHaveBeenCalled()
+
+    rerender(<SessionItems {...props} runningSessionPaths={new Set()} />)
+    expect(container.querySelector('.side-session')).toBe(row)
+    expect(row).not.toHaveClass('running')
+    expect(row).toHaveClass('active', 'unread')
+    expect(row?.querySelector('.side-item-label')).toHaveTextContent(session.preview!)
+  })
+})
+
 describe('SessionItems optimistic projection', () => {
   it('shows persistence state without exposing path actions or reorder', () => {
     const onSelect = vi.fn()
