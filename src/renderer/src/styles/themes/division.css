@@ -91,6 +91,7 @@
 /* Preserve border widths/box metrics, but suppress painted borders and
    shadow-based rings throughout this theme, including native-surface styles.
    The floating composer retains its depth shadow, not a decorative ring.
+   Running session halos alone retain their soft status glow.
    Keyboard focus remains visible; system high-contrast colors retain control. */
 @media not all and (forced-colors: active) {
   :root[data-theme='division-dark'] *,
@@ -114,6 +115,10 @@
 
   :root[data-theme='division-dark'] .composer-row {
     box-shadow: var(--composer-shadow) !important;
+  }
+
+  :root[data-theme='division-dark'] .side-session.running::after {
+    box-shadow: var(--side-session-running-glow) !important;
   }
 
   /* Paint textarea focus on the rounded shell, not its inner rectangular box.

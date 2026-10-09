@@ -35,13 +35,17 @@ describe('Sidebar selection typography', () => {
     expect(indicator).not.toMatch(/width: 5px|height: 5px|right: 2px|border-radius: 50%/)
     expect(indicator).toContain('pointer-events: none')
     expect(indicator).toContain('background: var(--accent-strong)')
-    expect(indicator).toContain('animation: side-session-breathe 2.6s ease-in-out infinite')
+    const breathing = css.match(/\.side-session\.running::before,\s*\.side-session\.running::after\s*\{([^}]+)\}/)?.[1]
+    expect(breathing).toBeDefined()
+    expect(breathing).toContain('opacity: 1')
+    expect(breathing).toContain('animation: side-session-breathe 2.6s ease-in-out infinite')
+    expect(breathing).not.toMatch(/transform|box-shadow|filter|transition/)
     expect(css).toMatch(/@keyframes side-session-breathe\s*\{\s*0%, 100%\s*\{\s*opacity: 0\.4;\s*\}\s*50%\s*\{\s*opacity: 1;\s*\}\s*\}/)
     expect(css).not.toMatch(/conic-gradient|repeating-linear-gradient|background-clip|session-name-sweep|side-session-border-spin|--side-session-border-angle/)
     expect(css).not.toMatch(/\.side-session\.running\s+\.side-item-label\s*\{/)
-    expect(indicator).not.toMatch(/transform|box-shadow/)
+    expect(indicator).not.toMatch(/transform|box-shadow|filter/)
     expect(css).not.toMatch(/\.side-session\.running\s*\{[^}]*overflow:\s*hidden/)
-    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.side-session\.running::before\s*\{\s*animation: none;\s*opacity: 1;/)
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.side-session\.running::before,\s*\.side-session\.running::after\s*\{\s*animation: none;\s*opacity: 1;/)
     const forced = css.slice(css.indexOf('@media (forced-colors: active)'))
     expect(forced).toMatch(/\.side-session\.running::before\s*\{[^}]*background: none;/)
     expect(forced).toContain('-webkit-mask: none')
@@ -49,6 +53,34 @@ describe('Sidebar selection typography', () => {
     expect(forced).toContain('border: 1.5px solid Highlight')
     expect(forced).toMatch(/animation: none;\s*opacity: 1;/)
     expect(css).not.toContain('forced-color-adjust: none')
+  })
+
+  it('adds a separate transparent noninteractive outer glow only to running rows', () => {
+    const css = readFileSync('src/renderer/src/styles/refinements/project.css', 'utf8')
+    const running = css.match(/\.side-session\.running\s*\{([^}]+)\}/)?.[1]
+    const glow = css.match(/\.side-session\.running::after\s*\{([^}]+)\}/)?.[1]
+    expect(running).toContain('--side-session-running-glow: 0 0 7px 1px rgba(var(--accent-rgb), 0.32)')
+    expect(running).not.toMatch(/(?:animation|opacity|filter|text-shadow|transform|box-shadow)\s*:/)
+    expect(glow).toBeDefined()
+    expect(glow).toContain("content: ''")
+    expect(glow).toContain('position: absolute')
+    expect(glow).toContain('inset: 0')
+    expect(glow).toContain('border-radius: inherit')
+    expect(glow).toContain('pointer-events: none')
+    expect(glow).toContain('background: transparent')
+    expect(glow).toContain('box-shadow: var(--side-session-running-glow)')
+    expect(glow).not.toMatch(/mask|filter|text-shadow|transform|transition/)
+    const declarations = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    const shadows = [...declarations.matchAll(/([^{}]+)\{[^{}]*box-shadow:\s*var\(--side-session-running-glow\)[^{}]*\}/g)]
+    expect(shadows).toHaveLength(1)
+    expect(shadows[0][1].trim()).toBe('.side-session.running::after')
+    const forced = css.slice(css.indexOf('@media (forced-colors: active)'))
+    const forcedGlow = forced.match(/\.side-session\.running::after\s*\{([^}]+)\}/)?.[1]
+    expect(forcedGlow).toContain('content: none')
+    expect(forcedGlow).toContain('display: none')
+    expect(forcedGlow).toContain('box-shadow: none !important')
+    expect(forcedGlow).toContain('animation: none')
+    expect(forcedGlow).not.toContain('forced-color-adjust')
   })
 
   it('uses the selected foreground token for names without requiring selection', () => {

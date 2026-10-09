@@ -118,7 +118,7 @@
 
 - `src/renderer/src/styles.css`：样式导入顺序。
 - `src/renderer/src/styles/`：按功能拆分的 CSS；`refinements/` 为细化样式。
-- `styles/refinements/project.css`：会话运行整周圆角光环同步呼吸（减少动态效果静态可见、强制色使用系统 Highlight 静态轮廓，不旋转/扫描文字）、未读标记和项目列表细节。
+- `styles/refinements/project.css`：会话运行整周圆角光环与独立柔和光晕同步呼吸（减少动态效果静态可见、强制色关闭光晕并使用系统 Highlight 轮廓，不旋转/扫描文字）、未读标记和项目列表细节。
 - `styles/dock.css`、`styles/terminal.css`：模块化工作区、拖动反馈、分隔条及终端面板。
 - `styles/window-effects.css`：连续工作区底色与局部磨砂；悬浮输入框/统计条、侧栏底部设置/插件商店栏、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。

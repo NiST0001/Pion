@@ -224,8 +224,12 @@
   transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease, outline-color 0.12s ease;
 }
 
-/* A complete rounded running halo breathes together, without an orbiting spot.
-   Mask only this decoration, never the row's text, controls or floating menus. */
+.side-session.running {
+  --side-session-running-glow: 0 0 7px 1px rgba(var(--accent-rgb), 0.32);
+}
+
+/* A complete rounded ring and its soft outer glow breathe together.
+   Mask only the ring, not the glow, row text, controls or floating menus. */
 .side-session.running::before {
   content: '';
   position: absolute;
@@ -238,6 +242,22 @@
   -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   mask-composite: exclude;
+}
+
+.side-session.running::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: transparent;
+  box-shadow: var(--side-session-running-glow);
+}
+
+/* Both decorations appear with .running and share the same animation start.
+   Only opacity changes; shadow geometry and all row content stay steady. */
+.side-session.running::before,
+.side-session.running::after {
   opacity: 1;
   animation: side-session-breathe 2.6s ease-in-out infinite;
 }
@@ -252,7 +272,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .side-session.running::before {
+  .side-session.running::before,
+  .side-session.running::after {
     animation: none;
     opacity: 1;
   }
@@ -267,6 +288,13 @@
     border: 1.5px solid Highlight;
     animation: none;
     opacity: 1;
+  }
+
+  .side-session.running::after {
+    content: none;
+    display: none;
+    box-shadow: none !important;
+    animation: none;
   }
 }
 

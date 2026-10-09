@@ -83,6 +83,25 @@ describe('Signal Orange theme stylesheet contracts (not GUI rendering)', () => {
     expect(forcedColors).not.toContain('border-color: transparent')
   })
 
+  it('allows only the running session glow alongside the existing composer depth shadow', () => {
+    const normal = css.slice(css.indexOf('@media not all and (forced-colors: active)'), css.indexOf('@media (forced-colors: active)'))
+    const glow = normal.match(/:root\[data-theme='division-dark'\] \.side-session\.running::after\s*\{([^}]+)\}/)?.[1]
+    expect(glow).toBeDefined()
+    expect(glow).toContain('box-shadow: var(--side-session-running-glow) !important')
+    expect(normal.indexOf(glow!)).toBeGreaterThan(normal.indexOf('box-shadow: none !important'))
+    expect(glow).not.toMatch(/background|border|outline|padding|margin|display|opacity|filter|animation/)
+    const declarations = normal.replace(/\/\*[\s\S]*?\*\//g, '')
+    const shadows = [...declarations.matchAll(/([^{}]+)\{[^{}]*box-shadow:\s*([^;]+);[^{}]*\}/g)]
+    const exceptions = shadows.filter((rule) => !/^none\b/.test(rule[2].trim()))
+    expect(exceptions.map((rule) => rule[1].trim())).toEqual([
+      ":root[data-theme='division-dark'] .composer-row",
+      ":root[data-theme='division-dark'] .side-session.running::after"
+    ])
+    for (const rule of exceptions) expect(rule[2].trim()).toMatch(/!important$/)
+    const forcedColors = css.slice(css.indexOf('@media (forced-colors: active)'))
+    expect(forcedColors).not.toContain('--side-session-running-glow')
+  })
+
   it('keeps Shift-only pointer focus suppressed while preserving Tab and Shift+Tab indicators', () => {
     const normal = css.slice(css.indexOf('@media not all and (forced-colors: active)'), css.indexOf('@media (forced-colors: active)'))
     const outlines = [...normal.matchAll(/([^{}]+)\{([^{}]*outline:\s*2px solid[^{}]*)\}/g)]
