@@ -7,6 +7,7 @@ import {
 import { askUserTool } from './ask-user'
 import { applyPionNativeToolDefaults, createPionNativeExtensions, createPionNativeLoadoutBoundary } from './native-extensions'
 import { createImageGenerationTool } from './image-generation'
+import { createMcpStatusObserver, type McpStatusReadSlot } from './mcp-status-observer'
 import { createSubagentControl, createSubagentRunner } from './subagents'
 
 /** Private host arguments, not a replacement for the public pi CLI. */
@@ -33,6 +34,9 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
   const agentDir = getAgentDir()
   const sessionManager = options.sessionPath ? SessionManager.open(options.sessionPath) : SessionManager.create(root)
   if (relative(root, resolve(sessionManager.getCwd())) !== '') throw new Error('会话目录与当前项目不匹配')
+  // One actual status read across SDK replacements. A timed-out old pending
+  // keeps its slot until it really settles, without blocking ordinary startup.
+  const mcpReadSlot: McpStatusReadSlot = { busy: false }
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     // Each backend belongs to one project. Cross-project switches must go
     // through AgentBridge, which checks the target project's trust first.
@@ -43,10 +47,12 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
     const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: options.approved })
     // Capture raw modifiers before Pion supplies extras; do not read credentials.
     const loadout = createPionNativeLoadoutBoundary(settingsManager.getSettings().defaultTools)
+    const mcpStatus = createMcpStatusObserver({ slot: mcpReadSlot,
+      createContext: () => parent?.extensionRunner?.createCommandContext() })
     const services = await createAgentSessionServices({
       cwd, agentDir, settingsManager,
       modelRuntimeSignal: AbortSignal.timeout(15_000),
-      resourceLoaderOptions: { additionalExtensionPaths: options.extensions, extensionFactories: [...createPionNativeExtensions(), loadout.capture, subagents.extension, loadout.declarations] }
+      resourceLoaderOptions: { additionalExtensionPaths: options.extensions, extensionFactories: [...createPionNativeExtensions(mcpStatus), loadout.capture, subagents.extension, loadout.declarations, mcpStatus.extension] }
     })
     applyPionNativeToolDefaults(settingsManager, services.resourceLoader)
     const patterns = settingsManager.getEnabledModels()

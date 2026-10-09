@@ -26,9 +26,7 @@ function splitFixed(record: string, fixedFields: number): string[] {
   return fields
 }
 
-function fileKind(indexCode: string, worktreeCode: string, untracked = false, conflicted = false): GitFileKind {
-  if (conflicted) return 'conflicted'
-  if (untracked) return 'untracked'
+function fileKind(indexCode: string, worktreeCode: string): GitFileKind {
   const codes = `${indexCode}${worktreeCode}`
   if (codes.includes('R') || codes.includes('C')) return 'renamed'
   if (codes.includes('D')) return 'deleted'
@@ -84,35 +82,18 @@ export function parsePorcelainV2(raw: string): {
       })
       continue
     }
-    if (record.startsWith('1 ')) {
-      const fields = splitFixed(record, 8)
-      if (fields.length < 9) continue
+    if (record.startsWith('1 ') || record.startsWith('2 ')) {
+      const renamed = record.startsWith('2 ')
+      const pathField = renamed ? 9 : 8
+      const fields = splitFixed(record, pathField)
+      if (fields.length <= pathField) continue
       const xy = fields[1]
       const indexCode = xy[0] ?? '.'
       const worktreeCode = xy[1] ?? '.'
       files.push({
-        path: fields[8],
-        kind: fileKind(indexCode, worktreeCode),
-        indexCode,
-        worktreeCode,
-        staged: indexCode !== '.',
-        unstaged: worktreeCode !== '.',
-        conflicted: false,
-        binary: false
-      })
-      continue
-    }
-    if (record.startsWith('2 ')) {
-      const fields = splitFixed(record, 9)
-      if (fields.length < 10) continue
-      const oldPath = records[++index]
-      const xy = fields[1]
-      const indexCode = xy[0] ?? '.'
-      const worktreeCode = xy[1] ?? '.'
-      files.push({
-        path: fields[9],
-        oldPath,
-        kind: 'renamed',
+        path: fields[pathField],
+        ...(renamed ? { oldPath: records[++index] } : {}),
+        kind: renamed ? 'renamed' : fileKind(indexCode, worktreeCode),
         indexCode,
         worktreeCode,
         staged: indexCode !== '.',

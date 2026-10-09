@@ -11,6 +11,7 @@ import {
   getViewportHistoryPageSize,
   parseToolArgs,
   preserveTimelineToolState,
+  reconcileCompletedAssistantRows,
   reconcileNewerTimelineItems,
   uniqueTimelineItems,
   wireMessageTimestamp
@@ -57,6 +58,279 @@ describe('timeline derivation', () => {
     const second: TimelineItem = { ...first, id: 2, entryId: 'user-2' }
     expect(reconcileNewerTimelineItems([first], [second]).items).toHaveLength(2)
   })
+
+  describe('live cache and persisted message identity', () => {
+    const sdkClock = 1_780_000_000_000
+    const liveUser: Extract<TimelineItem, { kind: 'user' }> = {
+      kind: 'user', id: 1200, liveMessageId: 'backend:turn:user', messageTimestamp: sdkClock,
+      text: 'check the result', live: true
+    }
+    const liveAssistant: Extract<TimelineItem, { kind: 'assistant' }> = {
+      kind: 'assistant', id: 1201, liveMessageId: 'backend:turn:assistant', messageTimestamp: sdkClock + 1,
+      text: 'final answer', thinking: 'checked the result', streaming: false, live: true
+    }
+    // Entry append time is deliberately different from the SDK message clock.
+    const entries: WireEntry[] = [
+      { type: 'message', id: 'stored-turn-user', parentId: null,
+        timestamp: new Date(sdkClock + 30_000).toISOString(), message: {
+          role: 'user', timestamp: liveUser.messageTimestamp, content: liveUser.text
+        } },
+      { type: 'message', id: 'stored-turn-assistant', parentId: 'stored-turn-user',
+        timestamp: new Date(sdkClock + 30_001).toISOString(), message: {
+          role: 'assistant', timestamp: liveAssistant.messageTimestamp, stopReason: 'stop', content: [
+            { type: 'thinking', thinking: liveAssistant.thinking },
+            { type: 'text', text: liveAssistant.text }
+          ]
+        } }
+    ]
+    const historyReconciliations = [
+      { name: 'appended history', reconcile: (existing: TimelineItem[], incoming: TimelineItem[]) => (
+        reconcileNewerTimelineItems(existing, incoming).items
+      ) },
+      { name: 'same-scope replacement', reconcile: (existing: TimelineItem[], incoming: TimelineItem[]) => (
+        preserveTimelineToolState(existing, incoming)
+      ) }
+    ]
+    const assistantReconciliations = [
+      ...historyReconciliations,
+      { name: 'completed assistant cleanup', reconcile: (existing: TimelineItem[], incoming: TimelineItem[]) => (
+        reconcileCompletedAssistantRows([...incoming, ...existing])
+      ) }
+    ]
+
+    function assistantPage(entryIds: string[]): Array<Extract<TimelineItem, { kind: 'assistant' }>> {
+      const page = entriesToTimeline(entryIds.map((id) => ({ ...entries[1], id })))
+      expect(page).toHaveLength(entryIds.length)
+      expect(page.every((item) => item.kind === 'assistant')).toBe(true)
+      return page.filter((item): item is Extract<TimelineItem, { kind: 'assistant' }> => item.kind === 'assistant')
+    }
+
+    function expectPersistedTurn(items: TimelineItem[]): void {
+      expect(items).toEqual([
+        expect.objectContaining({ kind: 'user', id: liveUser.id, liveMessageId: liveUser.liveMessageId,
+          messageTimestamp: liveUser.messageTimestamp, text: liveUser.text,
+          entryId: entries[0].id, historyReconciled: true }),
+        expect.objectContaining({ kind: 'assistant', id: liveAssistant.id,
+          liveMessageId: liveAssistant.liveMessageId, messageTimestamp: liveAssistant.messageTimestamp,
+          text: liveAssistant.text, thinking: liveAssistant.thinking, streaming: false,
+          entryId: entries[1].id, historyReconciled: true })
+      ])
+    }
+
+    it('does not mark a same-stable-ID live cache copy as persisted history', () => {
+      const existing: TimelineItem[] = [{ ...liveUser }, { ...liveAssistant }]
+      const cache = existing.map((item) => ({ ...item, id: item.id + 100 }))
+      const restored = preserveTimelineToolState(existing, cache)
+
+      expect(restored).toHaveLength(2)
+      expect(restored.map((item) => item.id)).toEqual([liveUser.id, liveAssistant.id])
+      expect(restored.map((item) => item.historyReconciled)).not.toContain(true)
+      expect(restored).toEqual([
+        expect.objectContaining({ liveMessageId: liveUser.liveMessageId, live: true }),
+        expect.objectContaining({ liveMessageId: liveAssistant.liveMessageId, live: true, streaming: false })
+      ])
+      for (const item of restored) expect(item).not.toMatchObject({ entryId: expect.any(String) })
+
+      expectPersistedTurn(reconcileNewerTimelineItems(restored, entriesToTimeline(entries)).items)
+    })
+
+    it('keeps one mounted turn when a restored live cache is followed by its actual disk page', () => {
+      const existing: TimelineItem[] = [{ ...liveUser }, { ...liveAssistant }]
+      const restored = preserveTimelineToolState(existing, existing.map((item) => ({ ...item })))
+      const first = reconcileNewerTimelineItems(restored, entriesToTimeline(entries))
+      expectPersistedTurn(first.items)
+
+      const repeated = reconcileNewerTimelineItems(first.items, entriesToTimeline(entries))
+      expect(repeated.items).toEqual(first.items)
+      expect(repeated.appended).toEqual([])
+    })
+
+    it.each(historyReconciliations)('recovers an old cache marked reconciled without entry IDs through $name', ({ reconcile }) => {
+      const badCache: TimelineItem[] = [
+        { ...liveUser, historyReconciled: true },
+        { ...liveAssistant, historyReconciled: true }
+      ]
+      const first = reconcile(badCache, entriesToTimeline(entries))
+      expectPersistedTurn(first)
+      expect(reconcile(first, entriesToTimeline(entries))).toEqual(first)
+    })
+
+    it.each([undefined, true])('keeps a known assistant entry ID when a live-only cache has none (reconciled=%s)', (historyReconciled) => {
+      const existing: TimelineItem = { ...liveAssistant, entryId: 'known-assistant', historyReconciled }
+      const cache: TimelineItem = { ...liveAssistant, id: liveAssistant.id + 100 }
+      const restored = preserveTimelineToolState([existing], [cache])
+      expect(restored).toHaveLength(1)
+      expect(restored[0]).toMatchObject({
+        id: existing.id, entryId: 'known-assistant', liveMessageId: liveAssistant.liveMessageId,
+        text: liveAssistant.text, thinking: liveAssistant.thinking, streaming: false
+      })
+    })
+
+    it.each([undefined, true])('preserves a mounted persisted turn when both cache entries omit their entry IDs (reconciled=%s)', (historyReconciled) => {
+      const existing: Array<Extract<TimelineItem, { kind: 'user' | 'assistant' }>> = [
+        { ...liveUser, entryId: 'known-user', timestamp: entries[0].timestamp,
+          images: [{ type: 'image', mimeType: previewPart.mimeType, data: previewPart.data }], historyReconciled },
+        { ...liveAssistant, entryId: 'known-assistant', historyReconciled }
+      ]
+      const cache = existing.map(({ entryId: _entryId, ...row }) => ({
+        ...row, id: row.id + 100, historyReconciled: undefined
+      }))
+      const restored = preserveTimelineToolState(existing, cache)
+      expect(restored).toEqual(existing)
+      expect(restored.map((item) => item.historyReconciled)).toEqual([historyReconciled, historyReconciled])
+      expect(preserveTimelineToolState(restored, cache)).toEqual(existing)
+    })
+
+    it.each(historyReconciliations)('does not use a live compaction cache fingerprint as persisted entry proof through $name', ({ reconcile }) => {
+      for (const historyReconciled of [undefined, true]) {
+        const live: TimelineItem = { kind: 'compaction', id: 1203, summary: '上下文已压缩',
+          compactionFingerprint: '["summary",null,1000]', live: true, historyReconciled }
+        const cache: TimelineItem = { ...live, id: 1303 }
+        const restored = reconcile([live], [cache])
+        expect(restored).toHaveLength(1)
+        expect(restored[0]).toMatchObject({ id: live.id, live: true, compactionFingerprint: live.compactionFingerprint })
+        expect(restored[0].historyReconciled).not.toBe(true)
+        const stored: TimelineItem = { ...cache, id: 1403, entryId: 'stored-compaction',
+          live: undefined, historyReconciled: undefined }
+        expect(reconcile(restored, [stored])).toEqual([
+          expect.objectContaining({ id: live.id, entryId: 'stored-compaction', historyReconciled: true })
+        ])
+      }
+    })
+
+    it.each(assistantReconciliations)('binds a unique SDK-clock/full-body assistant without remounting through $name', ({ reconcile }) => {
+      const other: TimelineItem = { ...liveAssistant, id: 1202,
+        liveMessageId: 'backend:other-assistant', thinking: 'a different thought' }
+      for (const historyReconciled of [undefined, true]) {
+        const live: TimelineItem = { ...liveAssistant, historyReconciled }
+        const [stored] = assistantPage(['unique-assistant'])
+        const items = reconcile([other, live], [stored])
+        expect(items).toHaveLength(2)
+        expect(items.find((item) => item.id === live.id)).toMatchObject({
+          entryId: 'unique-assistant', liveMessageId: liveAssistant.liveMessageId,
+          messageTimestamp: liveAssistant.messageTimestamp, text: liveAssistant.text,
+          thinking: liveAssistant.thinking, streaming: false, historyReconciled: true
+        })
+        expect(items.find((item) => item.id === other.id)).toEqual(other)
+      }
+    })
+
+    it.each(assistantReconciliations)('does not pick the first of two equal-clock/full-body live assistants through $name', ({ reconcile }) => {
+      const first: TimelineItem = { ...liveAssistant }
+      const second: TimelineItem = { ...liveAssistant, id: 1202, liveMessageId: 'backend:other-assistant' }
+      const incoming = assistantPage(['unidentified-assistant'])
+      const items = reconcile([first, second], incoming)
+
+      expect(items).toHaveLength(3)
+      expect(items.filter((item) => item.kind === 'assistant' && item.liveMessageId)).toEqual([first, second])
+      expect(items.filter((item) => item.kind === 'assistant' && item.entryId)).toEqual(incoming)
+    })
+
+    it.each(assistantReconciliations)('does not assign one live assistant to the first of two equal-clock/full-body disk entries through $name', ({ reconcile }) => {
+      const live: TimelineItem = { ...liveAssistant }
+      const incoming = assistantPage(['assistant-copy-a', 'assistant-copy-b'])
+      const items = reconcile([live], incoming)
+
+      expect(items).toHaveLength(3)
+      expect(items.find((item) => item.id === live.id)).toEqual(live)
+      expect(items.filter((item) => item.kind === 'assistant' && item.entryId)).toEqual(incoming)
+    })
+
+    it.each(assistantReconciliations)('does not bridge conflicting known assistant entry or live IDs through $name', ({ reconcile }) => {
+      const [stored] = assistantPage(['stored-assistant'])
+      const pairs: Array<[TimelineItem, TimelineItem]> = [
+        [{ ...liveAssistant, entryId: 'different-entry' }, { ...stored, liveMessageId: liveAssistant.liveMessageId }],
+        [{ ...liveAssistant }, { ...stored, liveMessageId: 'backend:different-assistant' }],
+        [{ ...liveAssistant, entryId: 'stored-assistant' }, { ...stored, liveMessageId: 'backend:different-assistant' }]
+      ]
+      for (const [live, persisted] of pairs) {
+        const items = reconcile([live], [persisted])
+        expect(items).toHaveLength(2)
+        expect(items.find((item) => item.id === live.id)).toEqual(live)
+        expect(items.find((item) => item.id === persisted.id)).toEqual(persisted)
+      }
+    })
+
+    it.each(assistantReconciliations)('requires the actual clock and the complete final assistant body through $name', ({ reconcile }) => {
+      const live: TimelineItem = { ...liveAssistant }
+      const [stored] = assistantPage(['different-assistant'])
+      const differentMessages: TimelineItem[] = [
+        { ...stored, messageTimestamp: undefined },
+        { ...stored, messageTimestamp: sdkClock + 2 },
+        { ...stored, text: 'final answer with another suffix' },
+        { ...stored, thinking: 'a different thought' },
+        { ...stored, error: 'provider unavailable' }
+      ]
+      for (const persisted of differentMessages) {
+        const items = reconcile([live], [persisted])
+        expect(items).toHaveLength(2)
+        expect(items.find((item) => item.id === live.id)).toEqual(live)
+        expect(items.find((item) => item.id === persisted.id)).toEqual(persisted)
+      }
+    })
+
+    it.each(historyReconciliations)('does not make a colliding assistant body unique after an earlier stable-ID match through $name', ({ reconcile }) => {
+      const first: TimelineItem = { ...liveAssistant }
+      const second: TimelineItem = { ...liveAssistant, id: 1202, liveMessageId: 'backend:second-assistant' }
+      const incoming = assistantPage(['first-assistant', 'unidentified-assistant'])
+      incoming[0] = { ...incoming[0], liveMessageId: liveAssistant.liveMessageId }
+      const items = reconcile([first, second], incoming)
+      expect(items).toEqual([
+        expect.objectContaining({ id: first.id, entryId: 'first-assistant', liveMessageId: first.liveMessageId }),
+        incoming[1], second
+      ])
+    })
+
+    it.each(historyReconciliations)('does not treat a streaming cache body as a completed assistant identity through $name', ({ reconcile }) => {
+      const live: TimelineItem = { ...liveAssistant }
+      const incoming: TimelineItem = { ...liveAssistant, id: 1301, liveMessageId: undefined, streaming: true }
+      const items = reconcile([live], [incoming])
+      expect(items).toEqual([incoming, live])
+    })
+
+    it('does not drop a reconciled prefix row when its persisted ID has a conflicting private live ID', () => {
+      const rows: Array<Extract<TimelineItem, { kind: 'user' | 'assistant' }>> = [
+        { ...liveUser, entryId: 'known-user', historyReconciled: true },
+        { ...liveAssistant, entryId: 'known-assistant', historyReconciled: true }
+      ]
+      for (const row of rows) {
+        const incoming: TimelineItem = { ...row, id: row.id + 100, liveMessageId: 'backend:different-message' }
+        expect(reconcileNewerTimelineItems([row], [incoming])).toEqual({
+          items: [row, incoming], appended: [incoming]
+        })
+      }
+    })
+
+    it('does not pick the first of duplicate stable live IDs in a cache projection', () => {
+      for (const row of [liveUser, liveAssistant]) {
+        const copies = [{ ...row, id: row.id + 100 }, { ...row, id: row.id + 200 }]
+        const items = preserveTimelineToolState([row], copies)
+        expect(items).toEqual([...copies, row])
+      }
+    })
+
+    it.each(historyReconciliations)('keeps real repeated user sends with the same text and different SDK clocks through $name', ({ reconcile }) => {
+      const users: TimelineItem[] = [
+        { ...liveUser, text: 'same request' },
+        { ...liveUser, id: 1202, text: 'same request', messageTimestamp: sdkClock + 2,
+          liveMessageId: 'backend:second-user' }
+      ]
+      const repeatedEntries: WireEntry[] = [
+        { ...entries[0], id: 'first-send', message: { role: 'user', timestamp: sdkClock, content: 'same request' } },
+        { ...entries[0], id: 'second-send', parentId: 'first-send',
+          message: { role: 'user', timestamp: sdkClock + 2, content: 'same request' } }
+      ]
+      const items = reconcile(users, entriesToTimeline(repeatedEntries))
+      expect(items).toEqual([
+        expect.objectContaining({ id: liveUser.id, entryId: 'first-send',
+          liveMessageId: liveUser.liveMessageId, messageTimestamp: sdkClock, text: 'same request' }),
+        expect.objectContaining({ id: 1202, entryId: 'second-send', liveMessageId: 'backend:second-user',
+          messageTimestamp: sdkClock + 2, text: 'same request' })
+      ])
+      expect(reconcile(items, entriesToTimeline(repeatedEntries))).toEqual(items)
+    })
+  })
+
   it('retains an unpersisted partial on same-scope replacement, but a same-entry disk final is authoritative', () => {
     const draft: TimelineItem = { kind: 'assistant', id: 1999, entryId: 'same-message',
       messageTimestamp: 100, text: 'partial', thinking: 'partial thought', streaming: true, live: true }

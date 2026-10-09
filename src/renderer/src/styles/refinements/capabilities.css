@@ -299,6 +299,150 @@
   font-size: 11px;
 }
 
+/* Read-only MCP observations, never a connection control. */
+.mcp-status-refresh {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--fg-dim);
+  font-size: 11px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.mcp-status-refresh:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.mcp-status-refresh:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+html.pion-keyboard-focus .mcp-status-refresh:focus-visible {
+  outline: 1px solid var(--selected-border);
+  outline-offset: 2px;
+}
+
+.mcp-status-summary {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-tint);
+}
+
+.mcp-status-summary strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.mcp-status-summary p {
+  margin-top: 4px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.mcp-status-muted { color: var(--fg-dim); }
+.mcp-status-ok { color: var(--ok); }
+.mcp-status-waiting { color: var(--warn); }
+.mcp-status-danger { color: var(--danger); }
+
+.mcp-status-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.mcp-status-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 11px;
+}
+
+.mcp-status-table th,
+.mcp-status-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: middle;
+}
+
+.mcp-status-table thead th {
+  background: var(--bg-input);
+  color: var(--fg-faint);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mcp-status-table tbody th {
+  color: var(--fg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.mcp-status-table tbody th code { font-family: var(--mono); }
+.mcp-status-table tbody tr:last-child > * { border-bottom: none; }
+.mcp-tool-count { color: var(--fg-dim); white-space: nowrap; }
+
+.mcp-server-state,
+.mcp-exposure {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--bg-input);
+  white-space: nowrap;
+}
+
+.mcp-exposure { color: var(--fg-faint); }
+
+.mcp-status-note,
+.mcp-status-diagnostics {
+  margin-top: 14px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.mcp-status-diagnostics { color: var(--warn); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mcp-status-refresh { transition: none; }
+}
+
+@media (forced-colors: active) {
+  .mcp-status-summary,
+  .mcp-status-table-wrap,
+  .mcp-status-table th,
+  .mcp-status-table td,
+  .mcp-status-refresh { border-color: CanvasText; }
+
+  .mcp-status-summary,
+  .mcp-status-table thead th,
+  .mcp-server-state,
+  .mcp-exposure,
+  .mcp-status-refresh { background: Canvas; }
+
+  .mcp-status-summary,
+  .mcp-status-summary p,
+  .mcp-status-table th,
+  .mcp-tool-count,
+  .mcp-server-state,
+  .mcp-exposure,
+  .mcp-status-note,
+  .mcp-status-diagnostics,
+  .mcp-status-refresh { color: CanvasText; }
+
+  html.pion-keyboard-focus .mcp-status-refresh:focus-visible { outline-color: Highlight; }
+}
+
 @media (max-width: 700px) {
   .modal.capabilities-modal {
     width: 96vw;

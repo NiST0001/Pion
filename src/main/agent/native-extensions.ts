@@ -5,6 +5,7 @@ import {
   type InlineExtension, type ResourceLoader, type SettingsManager
 } from '@earendil-works/pi-coding-agent'
 import { collectToolImages } from '../../shared/tool-images'
+import type { createMcpStatusObserver } from './mcp-status-observer'
 
 export const NATIVE_SCRIPT_MAX_MODEL_CALLS = 8
 export const NATIVE_SCRIPT_DEADLINE_MS = 5 * 60 * 1000
@@ -228,11 +229,12 @@ export function createPionNativeLoadoutBoundary(entries: readonly string[] | und
 }
 
 /** Match CLI builtin identity/replacement rules; never share session-scoped MCP state. */
-export function createPionNativeExtensions(): InlineExtension[] {
+export function createPionNativeExtensions(observer?: Pick<ReturnType<typeof createMcpStatusObserver>, 'wrapNative'>): InlineExtension[] {
+  const mcp = createMcpExtension()
   return [
     { name: 'codemode', builtin: true, replaceable: true, factory: guardedNativeFactory(createCodemodeExtension({ models: true }), 'codemode') },
     { name: 'tool-search', builtin: true, replaceable: true, factory: createToolSearchExtension() },
-    { name: 'mcp', builtin: true, replaceable: true, factory: guardedNativeFactory(createMcpExtension(), 'mcp') }
+    { name: 'mcp', builtin: true, replaceable: true, factory: guardedNativeFactory(observer ? observer.wrapNative(mcp) : mcp, 'mcp') }
   ]
 }
 

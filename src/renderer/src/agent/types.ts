@@ -169,6 +169,8 @@ export interface AgentState {
   liveSessionOwnerPath?: string
   liveSessionScopeSelected?: boolean
   liveSessionBackendId?: string
+  /** Bounded replacement history for this cwd/path; never revive a retired backend. */
+  liveSessionBackendHistory?: { cwd: string; sessionPath?: string; current: string; retired: string[] }
   liveSessionRevision?: number
   /** Same-backend accepted STATE/root lifecycle authority, not display-only metadata. */
   liveSessionLifecycleRevision?: number

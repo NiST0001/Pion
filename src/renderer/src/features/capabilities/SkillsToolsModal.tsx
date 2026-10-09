@@ -7,6 +7,7 @@ import {
   Image as ImageIcon,
   ListTodo,
   Loader2,
+  Plug,
   Sparkles,
   Terminal,
   Wrench,
@@ -14,8 +15,10 @@ import {
 } from 'lucide-react'
 import type { AgentCapabilities, SkillInfo, ToolInfo } from '../../../../shared/types'
 import { IMAGE_GENERATION_TOOL_NAME } from '../../../../shared/image-generation'
+import { McpStatusPage } from './McpStatusPage'
+import type { McpStatusPageProps } from './McpStatusPage'
 
-type CapabilityPage = 'skills' | 'tools'
+type CapabilityPage = 'skills' | 'tools' | 'mcp'
 
 interface BuiltinToolInfo {
   name: string
@@ -70,22 +73,32 @@ const BUILTIN_TOOLS: BuiltinToolInfo[] = [
 
 export function SkillsToolsModal({
   open,
-  onClose
+  onClose,
+  target,
+  scope,
+  selectionRef
 }: {
   open: boolean
   onClose: () => void
-}): ReactElement | null {
+} & McpStatusPageProps): ReactElement | null {
   const [page, setPage] = useState<CapabilityPage>('skills')
+  const [wasOpen, setWasOpen] = useState(open)
   const [capabilities, setCapabilities] = useState<AgentCapabilities>(EMPTY_CAPABILITIES)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+
+  // Reset before children commit on reopen. An old MCP tab must not briefly
+  // mount/read while waiting for the open-transition effect to reset it.
+  if (wasOpen !== open) {
+    setWasOpen(open)
+    if (open) setPage('skills')
+  }
 
   // Capability discovery is intentionally tied only to an open transition.
   // Streaming agent updates rerender App frequently; an inline onClose callback
   // must never reset this page or launch another resource-loader scan.
   useEffect(() => {
     if (!open) return
-    setPage('skills')
     setCapabilities(EMPTY_CAPABILITIES)
     setError('')
     setLoading(true)
@@ -156,13 +169,23 @@ export function SkillsToolsModal({
               description="文件与命令"
               onClick={() => setPage('tools')}
             />
+            <CapabilityNavItem
+              page="mcp"
+              active={page === 'mcp'}
+              icon={<Plug size={15} />}
+              label="MCP"
+              description="服务器状态"
+              onClick={() => setPage('mcp')}
+            />
           </nav>
 
           <main className="capabilities-content">
             {page === 'skills' ? (
               <SkillsPage skills={capabilities.skills} loading={loading} error={error} />
-            ) : (
+            ) : page === 'tools' ? (
               <ToolsPage tools={capabilities.tools} loading={loading} error={error} />
+            ) : (
+              <McpStatusPage target={target} scope={scope} selectionRef={selectionRef} />
             )}
           </main>
         </div>
@@ -304,7 +327,7 @@ function ToolsPage({
 
       {nativeTools.length > 0 && (
         <div className="capabilities-loading-note">
-          <span>Pi 原生 MCP 使用 mcp.json，读取全局和受信任项目配置，支持 stdio / HTTP；工具可为 deferred（检索后调用）、direct（直接暴露）或 hidden（隐藏）。目录不报告连接状态，请通过 /mcp status 查看；RPC 文本命令支持 login、logout、reconnect，不提供自定义 TUI 管理界面。旧插件若注册 mcp 会替代原生 MCP，不应同时启用；配置不会自动迁移，插件不会自动卸载。</span>
+          <span>Pi 原生 MCP 使用 mcp.json，读取全局和受信任项目配置，支持 stdio / HTTP；工具可为 deferred（检索后调用）、direct（直接暴露）或 hidden（隐藏）。目录不报告连接状态，MCP 页查看原生状态，/mcp 为文本状态；原生 RPC 文本命令支持 login、logout、reconnect，不提供自定义 TUI 管理界面。旧插件若注册 mcp 会替代原生 MCP，不应同时启用；配置不会自动迁移，插件不会自动卸载。</span>
         </div>
       )}
 
@@ -328,28 +351,22 @@ function ToolsPage({
             description={tool.description}
           />
         ))}
-        {nativeTools.map((tool) => (
-          <CapabilityCard
-            key={`native:${tool.name}`}
-            kind="tool"
-            icon={<Wrench size={16} />}
-            name={tool.name}
-            title={tool.label || tool.name}
-            source="Pi 原生"
-            description={[tool.description, NATIVE_TOOL_NOTES[tool.name]].filter(Boolean).join(' ') || '运行时已注册的原生工具；连接与可执行状态以会话为准。'}
-          />
-        ))}
-        {pluginTools.map((tool) => (
-          <CapabilityCard
-            key={`plugin:${tool.source ?? 'unknown'}:${tool.name}`}
-            kind="tool"
-            icon={<Wrench size={16} />}
-            name={tool.name}
-            title={tool.label || tool.name}
-            source={formatCapabilitySource(tool.source)}
-            description={tool.description || '已安装插件提供的工具。'}
-          />
-        ))}
+        {[...nativeTools, ...pluginTools].map((tool) => {
+          const native = isNativeTool(tool)
+          return (
+            <CapabilityCard
+              key={native ? `native:${tool.name}` : `plugin:${tool.source ?? 'unknown'}:${tool.name}`}
+              kind="tool"
+              icon={<Wrench size={16} />}
+              name={tool.name}
+              title={tool.label || tool.name}
+              source={native ? 'Pi 原生' : formatCapabilitySource(tool.source)}
+              description={native
+                ? [tool.description, NATIVE_TOOL_NOTES[tool.name]].filter(Boolean).join(' ') || '运行时已注册的原生工具；连接与可执行状态以会话为准。'
+                : tool.description || '已安装插件提供的工具。'}
+            />
+          )
+        })}
       </div>
     </section>
   )

@@ -318,6 +318,28 @@ describe('WorkbenchDialogs composition', () => {
     expect(probes.branch.record.mock.calls.at(-1)![0]).toEqual({ ...props.branch.dialog, projectName: '当前项目' })
   })
 
+  it('forwards MCP resource scope and the live selection ref without remounting the capability host', async () => {
+    const props = openedProps(defaultProps(), ['capabilities'])
+    const target = { cwd: '/repo/selected', sessionPath: '/sessions/selected.jsonl', backendId: 'selected-backend' }
+    const selectionRef = { current: { generation: 4 } }
+    props.capabilities.dialog = { ...props.capabilities.dialog, target, scope: 'selected:4', selectionRef }
+    const { rerender } = await renderDeferred(props)
+    const input = await screen.findByRole('textbox', { name: 'capabilities draft' })
+    const passed = probes.capabilities.record.mock.calls.at(-1)![0]
+    expect(passed.target).toBe(target)
+    expect(passed.scope).toBe('selected:4')
+    expect(passed.selectionRef).toBe(selectionRef)
+    selectionRef.current.generation += 2 // A→B→A intent can invalidate readers before React commits.
+    expect(passed.selectionRef?.current.generation).toBe(6)
+    rerender(<DeferredHost {...props} capabilities={{ ...props.capabilities,
+      dialog: { ...props.capabilities.dialog, scope: 'selected:6' }
+    }} />)
+    expect(screen.getByRole('textbox', { name: 'capabilities draft' })).toBe(input)
+    expect(probes.capabilities.mount).toHaveBeenCalledTimes(1)
+    expect(probes.capabilities.record.mock.calls.at(-1)![0].scope).toBe('selected:6')
+    expect(probes.capabilities.record.mock.calls.at(-1)![0].selectionRef).toBe(selectionRef)
+  })
+
   it.each([
     ['rollback', '撤销本轮修改', '确认撤销', '发送前已有的暂存', 'accent'],
     ['planModeExit', '确认进入构建模式', '切换到构建模式', '仍需发送下一条执行请求', 'accent'],

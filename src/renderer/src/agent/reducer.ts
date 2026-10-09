@@ -103,6 +103,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
         busy,
         compacting,
         liveSessionLifecycleRevision: projectable ? live.revision : state.liveSessionLifecycleRevision,
+        liveSessionBackendHistory: projectable ? rememberLiveBackend(state, live) : state.liveSessionBackendHistory,
         compactionEventState,
         yolo: incoming?.yolo ?? false
       }
@@ -261,11 +262,22 @@ export function reducer(state: AgentState, action: Action): AgentState {
             && row.messageTimestamp === item.messageTimestamp))
         const sourceCopies = bridge ? state.timeline.filter((row) => row.kind === 'assistant'
           && item.kind === 'assistant' && row.messageTimestamp === item.messageTimestamp) : candidates
-        return candidates.length === 1 && sourceCopies.length === 1 && cachedCopies.length === 1
-          ? { ...candidates[0], ...(item.kind === 'user' && candidates[0].kind === 'user'
-            ? { ...((candidates[0].entryId ?? item.entryId) ? { entryId: candidates[0].entryId ?? item.entryId } : {}),
-              images: candidates[0].images?.length ? candidates[0].images : item.images } : {}),
-            historical: item.historical, noReveal: item.noReveal } : item
+        if (candidates.length !== 1 || sourceCopies.length !== 1 || cachedCopies.length !== 1) return item
+        const current = candidates[0]
+        const replacement = { ...current,
+          ...((item.kind === 'user' || item.kind === 'assistant') && (current.kind === 'user' || current.kind === 'assistant')
+            ? { entryId: current.entryId ?? item.entryId, liveMessageId: current.liveMessageId ?? item.liveMessageId } : {}),
+          ...(item.kind === 'user' && current.kind === 'user'
+            ? { images: current.images?.length ? current.images : item.images } : {}),
+          historical: item.historical, noReveal: item.noReveal }
+        const fields = cachedSnapshotFields(state, current)
+        if (replacement.kind === 'assistant' && item.kind === 'assistant') {
+          if (fields.has('text') && item.text.length > replacement.text.length) replacement.text = item.text
+          if (fields.has('thinking') && item.thinking.length > replacement.thinking.length) replacement.thinking = item.thinking
+          if (fields.has('error') && (item.error?.length ?? 0) > (replacement.error?.length ?? 0)) replacement.error = item.error
+        }
+        if (replacement.kind === 'user' && item.kind === 'user' && fields.has('text') && item.text.length > replacement.text.length) replacement.text = item.text
+        return replacement
       }) : action.items
       const merged = preserve ? preserveTimelineToolState(state.timeline, incoming,
         state.status.phase !== 'stopped' && state.status.phase !== 'error'
@@ -355,6 +367,8 @@ export function reducer(state: AgentState, action: Action): AgentState {
         liveSessionScopeSelected: true,
         historyRevealRestorePending: Boolean(action.sessionPath),
         liveSessionBackendId: undefined,
+        liveSessionBackendHistory: state.liveSessionBackendHistory?.sessionPath === action.sessionPath
+          ? state.liveSessionBackendHistory : undefined,
         liveSessionRevision: undefined,
         liveSessionLifecycleRevision: undefined,
         liveSessionTurnIds: undefined,
@@ -381,6 +395,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
           ? dropStreamingTails(state.timeline) : state.timeline,
         liveSessionOwnerPath: live.sessionPath ?? state.liveSessionOwnerPath,
         liveSessionBackendId: live.backendId,
+        liveSessionBackendHistory: rememberLiveBackend(state, live),
         liveSessionRevision: live.revision,
         liveSessionLifecycleRevision: state.liveSessionBackendId === live.backendId
           ? state.liveSessionLifecycleRevision : undefined
@@ -407,11 +422,22 @@ export function reducer(state: AgentState, action: Action): AgentState {
   }
 }
 
+/** Remember only real replacements in the same cwd/path, including a queued clear. */
+function rememberLiveBackend(state: AgentState, live: LiveSessionState | Omit<LiveSessionState, 'events' | 'truncated'>): AgentState['liveSessionBackendHistory'] {
+  const previous = state.liveSessionBackendHistory
+  const sameScope = previous?.cwd === live.cwd && previous.sessionPath === live.sessionPath
+  if (!sameScope) return { cwd: live.cwd, sessionPath: live.sessionPath, current: live.backendId, retired: [] }
+  if (previous.current === live.backendId) return previous
+  return { ...previous, current: live.backendId, retired: [...previous.retired, previous.current].slice(-16) }
+}
+
 /** Unknown SDK IDs are allowed within the selected cwd, never across workspaces. */
 function liveScopeMatches(
   state: AgentState, live: Omit<LiveSessionState, 'events' | 'truncated'>, path?: string
 ): boolean {
   if (state.status.cwd !== live.cwd) return false
+  const known = state.liveSessionBackendHistory
+  if (known?.cwd === live.cwd && known.sessionPath === live.sessionPath && known.retired.includes(live.backendId)) return false
   const selected = state.liveSessionScopeSelected ? state.liveSessionOwnerPath : state.session?.sessionFile
   if (selected && live.sessionPath && selected !== live.sessionPath) return false
   return !path || !live.sessionPath || path === live.sessionPath
@@ -429,6 +455,59 @@ function liveMessageIdentity(message: WireMessage | undefined): { liveMessageId?
     ...(typeof liveMessageId === 'string' && liveMessageId.length > 0 && liveMessageId.length <= 512 ? { liveMessageId } : {}),
     ...(typeof entryId === 'string' && entryId.length > 0 && entryId.length <= 512 ? { entryId } : {})
   }
+}
+
+function identifiedAssistant(
+  items: TimelineItem[], identity: { liveMessageId?: string; entryId?: string }
+): Extract<TimelineItem, { kind: 'assistant' }> | undefined {
+  const candidates = items.filter((row): row is Extract<TimelineItem, { kind: 'assistant' }> => row.kind === 'assistant'
+    && !(identity.liveMessageId && row.liveMessageId && identity.liveMessageId !== row.liveMessageId)
+    && !(identity.entryId && row.entryId && identity.entryId !== row.entryId))
+  const live = identity.liveMessageId ? candidates.filter((row) => row.liveMessageId === identity.liveMessageId) : []
+  const matches = live.length > 0 ? live : identity.entryId ? candidates.filter((row) => row.entryId === identity.entryId) : []
+  return matches.length === 1 ? matches[0] : undefined
+}
+
+function uniqueStreamingAssistant(items: TimelineItem[], timestamp?: number): Extract<TimelineItem, { kind: 'assistant' }> | undefined {
+  const streaming = items.filter((row): row is Extract<TimelineItem, { kind: 'assistant' }> => row.kind === 'assistant' && row.streaming)
+  // An anonymous late final with a different known clock cannot close the
+  // current draft. Missing clocks remain eligible only when truly unique.
+  const candidates = timestamp === undefined ? streaming
+    : streaming.filter((row) => row.messageTimestamp === undefined || row.messageTimestamp === timestamp)
+  return candidates.length === 1 ? candidates[0] : undefined
+}
+
+function readSnapshotFields(payload: unknown): Set<string> {
+  const value = payload && typeof payload === 'object'
+    ? (payload as Record<string, unknown>)._pionLiveTruncatedFields : undefined
+  return new Set(Array.isArray(value) ? value.filter((field) =>
+    typeof field === 'string' && ['text', 'thinking', 'error', 'diff', 'outputText'].includes(field)) : [])
+}
+
+/** Only the exact accepted snapshot may explain why its current row is short. */
+function cachedSnapshotFields(state: AgentState, row: TimelineItem): Set<string> {
+  const live = state.session?.liveState
+  if (!live || live.backendId !== state.liveSessionBackendId || live.revision !== state.liveSessionRevision
+    || live.cwd !== state.status.cwd || live.sessionPath !== state.liveSessionOwnerPath
+    || (row.kind !== 'user' && row.kind !== 'assistant')) return new Set()
+  const messages = live.events.flatMap((input) => {
+    const event = input as WireEvent
+    if (event.type !== 'message_start' && event.type !== 'message_end') return []
+    if (!event.message || event.message.role !== row.kind) return []
+    const identity = liveMessageIdentity(event.message)
+    const matches = row.liveMessageId ? identity.liveMessageId === row.liveMessageId
+      : !identity.liveMessageId && row.messageTimestamp !== undefined && wireMessageTimestamp(event.message) === row.messageTimestamp
+    return matches ? [{ type: event.type, message: event.message }] : []
+  })
+  if (messages.filter((event) => event.type === 'message_start').length !== 1) return new Set()
+  return readSnapshotFields(messages.at(-1)?.message)
+}
+
+function sameStrongMessageIdentity(a: TimelineItem, b: TimelineItem): boolean {
+  return (a.kind === 'user' || a.kind === 'assistant') && (b.kind === 'user' || b.kind === 'assistant')
+    && sameLiveIdentity(a, b)
+    && Boolean((a.entryId && b.entryId && a.entryId === b.entryId)
+      || (a.liveMessageId && b.liveMessageId && a.liveMessageId === b.liveMessageId))
 }
 
 function sameLiveIdentity(a: TimelineItem, b: TimelineItem): boolean {
@@ -462,12 +541,7 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
   let replay = { ...state, timeline: [] as TimelineItem[] }
   const tombstones: { item: TimelineItem; fields: Set<string> }[] = []
   const truncatedFields = new Map<number, Set<string>>()
-  const readFields = (payload: unknown): Set<string> => {
-    const value = payload && typeof payload === 'object'
-      ? (payload as Record<string, unknown>)._pionLiveTruncatedFields : undefined
-    return new Set(Array.isArray(value) ? value.filter((field) =>
-      typeof field === 'string' && ['text', 'thinking', 'error', 'diff', 'outputText'].includes(field)) : [])
-  }
+  const readFields = readSnapshotFields
   const currentTools = new Map(state.timeline.flatMap((row) => row.kind === 'tool' ? [[row.tool.id, row] as const] : []))
   const finalTools = new Map<string, { payload: ToolResultPayload; isError: boolean }>()
   for (const input of live.events) {
@@ -559,12 +633,15 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
   const matched = new Set<number>()
   const incoming = replay.timeline.map((source) => {
     const item = revealHistory ? { ...source, historical: true, noReveal: false } : source
-    const candidates = existing.filter((row) => !matched.has(row.id) && sameLiveIdentity(row, item))
+    const compatible = existing.filter((row) => !matched.has(row.id) && sameLiveIdentity(row, item))
+    const strong = compatible.filter((row) => sameStrongMessageIdentity(row, item))
+    const candidates = strong.length > 0 ? strong : compatible
     const active = candidates.filter((row) => (row.kind === 'assistant' && row.streaming)
       || state.liveSessionTurnIds?.includes(row.id))
+    const matches = strong.length > 0 ? sameStrongMessageIdentity : sameLiveIdentity
     const ambiguousUser = item.kind === 'user'
-      && (candidates.length > 1 || replay.timeline.filter((row) => sameLiveIdentity(row, item)).length !== 1
-        || candidates.some((candidate) => replay.timeline.filter((row) => sameLiveIdentity(candidate, row)).length > 1))
+      && (candidates.length > 1 || replay.timeline.filter((row) => matches(row, item)).length !== 1
+        || candidates.some((candidate) => replay.timeline.filter((row) => matches(candidate, row)).length > 1))
     const identified = ambiguousUser ? undefined
       : active.length === 1 ? active[0] : candidates.length === 1 ? candidates[0] : undefined
     const current = identified
@@ -632,7 +709,9 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
   const replacements = new Map(incoming.filter((row) => matched.has(row.id)).map((row) => [row.id, row]))
   const retained = existing.map((row) => replacements.get(row.id) ?? row)
   const added = incoming.filter((row) => !matched.has(row.id))
-  const reconciled = reconcileNewerTimelineItems(retained, added).items
+  // A final snapshot can finish a draft whose start clock differed from the
+  // stored final. Fold only the now-proven unique clock/full-body counterpart.
+  const reconciled = reconcileCompletedAssistantRows(reconcileNewerTimelineItems(retained, added).items)
   // Snapshot rows have no persisted page positions: keep all already mounted
   // rows in place, and append only genuinely new turn rows in replay order.
   const retainedOrder = new Map(retained.map((row, index) => [row.id, index]))
@@ -717,12 +796,9 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
           messageTimestamp: wireMessageTimestamp(message),
           text: messageText(message), images: messageImages(message), live: true
         }
-        const candidates = state.timeline.filter((item) => sameLiveIdentity(item, row)
-          && (item.kind === 'user' && (item.entryId || row.entryId
-            || (item.liveMessageId && item.liveMessageId === row.liveMessageId)
-            || state.liveSessionTurnIds?.includes(item.id))))
-        // A repeated start can follow STATE or the first persisted page. Never
-        // guess between multiple matching rows or discard a different entry ID.
+        const candidates = state.timeline.filter((item) => sameStrongMessageIdentity(item, row))
+        // A new send must not steal an older history row's entry ID, even if
+        // the SDK clock/text collide. Repeated starts need a real shared ID.
         const current = candidates.length === 1 ? candidates[0] : undefined
         if (current?.kind === 'user') {
           const truncated = Array.isArray(message._pionLiveTruncatedFields) && message._pionLiveTruncatedFields.includes('text')
@@ -736,22 +812,17 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
         return { ...state, timeline: [...state.timeline, row] }
       }
       if (message?.role === 'assistant') {
-        return {
-          ...state,
-          timeline: [
-            ...state.timeline,
-            {
-              kind: 'assistant',
-              id: nextTimelineId(),
-              ...liveMessageIdentity(message),
-              messageTimestamp: wireMessageTimestamp(message),
-              text: '',
-              thinking: '',
-              streaming: true,
-              live: true
-            }
-          ]
-        }
+        const identity = liveMessageIdentity(message)
+        const existing = identifiedAssistant(state.timeline, identity)
+        // A replayed start must not create a second draft or erase a mounted
+        // final. Clock/text alone do not prove that this is a repeated start.
+        if (existing) return { ...state, timeline: state.timeline.map((row) => row === existing
+          ? { ...existing, entryId: existing.entryId ?? identity.entryId,
+            liveMessageId: existing.liveMessageId ?? identity.liveMessageId } : row) }
+        return { ...state, timeline: [...state.timeline, {
+          kind: 'assistant', id: nextTimelineId(), ...identity,
+          messageTimestamp: wireMessageTimestamp(message), text: '', thinking: '', streaming: true, live: true
+        }] }
       }
       return state
     }
@@ -759,8 +830,13 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
     case 'message_update': {
       const sub = event.assistantMessageEvent
       if (!sub) return state
+      const identity = liveMessageIdentity({ role: 'assistant',
+        _pionLiveMessageId: (input as Record<string, unknown>)._pionLiveMessageId })
+      const target = identity.liveMessageId ? identifiedAssistant(state.timeline, identity)
+        : uniqueStreamingAssistant(state.timeline)
+      if (!target?.streaming) return state
       const timeline = state.timeline.map((item) => {
-        if (item.kind !== 'assistant' || !item.streaming) return item
+        if (item !== target) return item
         if (sub.type === 'text_delta' && typeof sub.delta === 'string') {
           return { ...item, text: item.text + sub.delta }
         }
@@ -812,11 +888,17 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
           ? { ...current, ...identity, messageTimestamp: wireMessageTimestamp(message) ?? current.messageTimestamp } : item) }
       }
       if (message?.role !== 'assistant') return state
+      const identity = liveMessageIdentity(message)
+      const timestamp = wireMessageTimestamp(message)
+      const target = identity.liveMessageId || identity.entryId
+        ? identifiedAssistant(state.timeline, identity)
+        : uniqueStreamingAssistant(state.timeline, timestamp)
+      if (!target) return state
       const text = messageText(message)
       const thinking = messageThinking(message)
       const error = assistantErrorText(message)
       const timeline = state.timeline.flatMap((item) => {
-        if (item.kind !== 'assistant' || !item.streaming) return [item]
+        if (item !== target) return [item]
         // Extensions may replace a nonempty draft with an empty final message.
         // Empty text/thinking is authoritative too, not a missing update.
         const nextText = text
@@ -827,7 +909,9 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
         if (nextText === '' && nextThinking === '' && !nextError) return []
         const nextItem: Extract<TimelineItem, { kind: 'assistant' }> = {
           ...item,
-          messageTimestamp: wireMessageTimestamp(message) ?? item.messageTimestamp,
+          entryId: identity.entryId ?? item.entryId,
+          liveMessageId: identity.liveMessageId ?? item.liveMessageId,
+          messageTimestamp: timestamp ?? item.messageTimestamp,
           text: nextText,
           thinking: nextThinking,
           streaming: false

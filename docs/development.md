@@ -116,7 +116,9 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 实时助手错误以最终 `message_end` 为准：临时错误可被成功或中止终态清除，显式错误没有诊断时仍显示失败提示，默认用户中止不显示红色错误。助手错误在历史回放中保留；压缩失败在实时会话中单独标注，不从 `agent_end` 重复追加。
 
-较新历史页在 reducer 当前事件顺序上归并，避免最终错误与分页返回竞态导致重复。已知持久化身份优先；未知终态使用 SDK 时间戳及内容一对一匹配，未结束的助手仅允许无歧义时间戳匹配。归并保留消息和工具详情的 React key，按持久化页面顺序放置匹配行，未覆盖的实时行仍保持尾部顺序，不把历史追加当作实时跟随。成功压缩按 SDK 摘要、保留边界和压缩前 token 数匹配；历史 wire 保留这些元数据，兼容 retain-none 的自指边界，不新增 IPC 频道或改变调用校验。
+较新历史页在 reducer 当前事件顺序上归并，避免最终错误与分页返回竞态导致重复。已知持久化/私有 live 身份优先且不得冲突；未知终态仅以双方唯一的实际 SDK 消息时钟和完整终态内容桥接，未结束的助手仅允许无歧义的实际消息时钟匹配。真实 entry 已证明属于另一行时先排除它，不按循环中剩余候选猜测。同文甚至同毫秒的真实重复发送仍需保留。
+
+缓存与 live 快照互并不等于已对齐磁盘：没有真实 entry ID 时不登记历史对齐，也兼容旧缓存的错误标记；否则后续分页会追加同一轮副本。当前快照先到、缓存后到时保留已知助手 entry ID，仅从完整缓存补齐快照明确标记截断的字段；全局 truncated 不是任意字段缩短的证明，真正空 final 仍权威。带身份的 start/delta/end 只认领唯一对应消息；用户新 start 不凭时钟/文字接管旧撤销 ID。完整 STATE 更新草稿后，按上述严格规则收敛已分裂的助手副本。归并保留消息和工具详情的 React key，按持久化页面顺序放置匹配行，未覆盖的实时行仍保持尾部顺序，不把历史追加当作实时跟随。成功压缩按 SDK 摘要、保留边界和压缩前 token 数匹配；历史 wire 保留这些元数据，兼容 retain-none 的自指边界，不新增 IPC 频道或改变调用校验。
 
 ## pi SDK 兼容与缓存预热
 
@@ -131,6 +133,18 @@ Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP�
 原生 MCP 使用用户 `~/.pi/agent/mcp.json` 与项目 `.pi/mcp.json`，配置采用 canonical `mcpServers` 结构。项目配置只在用户信任项目后生效，并受用户全局服务器配置基线约束；Pion 不自动迁移凭据、删除旧插件或改写用户配置。RPC 下 `/mcp` 提供文字状态及 login、logout、reconnect 操作，不承诺 CLI 自定义 TUI 在 GUI 中可用。尚未进行真实 MCP 服务器验证，卸载旧插件前应逐项复核配置兼容性及所用服务器，不能承诺所有插件均可移除。
 
 启用的服务器会在会话启动阶段、工具调用之前后台连接：stdio 可启动子进程并继承完整环境，`!command` 可执行命令，HTTP 可触发 OAuth。工具调用权限闸门不覆盖这些启动副作用，也不是 OS 沙箱；仅隐藏/禁用工具曝光不停止既有连接，服务器配置 `enabled: false` 才停止连接。启用配置前应先审查服务器、命令及环境暴露风险。
+
+#### MCP 只读状态列表
+
+“技能与工具 → MCP”查看所选现有后端的状态、登记工具数和曝光方式。刷新只读主进程缓存，不创建后端或 manager，不发 prompt、调用模型、启动/重连服务器或认证；服务器原有的启动副作用仍按上一节处理。旧插件接管 `/mcp`、原生未启用、没有后端、等待/超时及格式不支持均单独显示，不从工具目录、注册或历史推断连接。工具数来自 `connection.tools.length`，不是当前模式可见或获准数量；`starting` / `disabled` 是原生格式的派生显示，不是额外的连接状态。
+
+SDK 没有公开结构化状态 getter。`agent/mcp-status-observer.ts` 仅适配已核对的 SDK 1.0.4：捕获真正 builtin 的空参数 handler，检查成功的原生启动和 `getCommands()` 的 builtin 来源，并使用所属 SDK `extensionRunner.createCommandContext()` 的真实 RPC 上下文。局部采集只允许一次 info notify，未知访问或被吞掉的禁止访问均 fail-closed，不执行旧插件同名 handler。每 3 秒更新，2 秒 deadline 只关闭采集；实际 pending 未收口前，同 RPC owner 跨 SDK 替换保持一个槽，不排队。关闭/替换使迟到结果失效，不声称取消了原生连接等待。
+
+`shared/mcp.ts` 按 SDK 文字格式作白名单投影：最多 128 台服务器、64 KiB 单行私有通知；只保留名称、状态、曝光和 connected 的工具数。原始错误、配置尾部及其中的路径、URL、headers、命令参数不进入状态列表；未知格式整份转为未知。限制只覆盖 Pion 投影，不限制 SDK 构造原始状态字符串的开销。`__pion_mcp_status_v1` 是私有传输标记，不是插件身份或认证边界。
+
+私有 widget 在 `AgentBridge` 的 live/正文/任务/计费及普通扩展 UI 之前消费。`mcp-status-bridge.ts` 绑定捕获的 client、后端池身份、cwd/path 和主窗口 owner；typed IPC 另校验主帧，读取不登记会话变更。Main 维护独立单调 revision、有限 retired-runtime fence、私有单调收件时间和过期锁存，12 秒没有新观察就隐藏旧列表，墙上时钟回拨不能复活缓存。公开 `receivedAt` 只是收件时间，不是连接探测。
+
+`McpStatusPage.tsx` 仅在页面打开且可见时订阅并每 3 秒读缓存，推送优先于旧读取；scope/后端及同步 selection generation 拒绝迟到结果。实际 IPC 槽跨卸载保留至 Promise 真正收口；页面另外以单调 deadline 隐藏过期列表，因此挂起读取不会永久保留 connected，相同 revision/receivedAt 的缓存也不能续期。关闭、隐藏、切 tab 清理页面计时器/订阅，不关闭服务器。模拟回归不证明真实服务器兼容或可卸载全部旧插件。
 
 #### 原生脚本、费用与结果投影
 
@@ -240,6 +254,8 @@ src/
 │   │   ├── provider-auth-ui.ts   # 提供商认证交互适配
 │   │   ├── runtime-host.ts       # 所属后端 SDK 运行时与内置工具注入
 │   │   ├── native-extensions.ts  # MCP/codemode/tool-search factories、预算与结果投影
+│   │   ├── mcp-status-observer.ts # 已核对 SDK 的原生只读采集与私有通知
+│   │   ├── mcp-status-bridge.ts   # 所属后端状态缓存、单调过期与只读投影
 │   │   ├── image-generation.ts   # 尺寸/质量请求、参考图编辑与无覆盖保存/预览
 │   │   ├── image-inputs.ts       # 只读参考图快照、预算与跨实例真实操作背压
 │   │   ├── codex-image-transport.ts # Codex 订阅 JSON generations/edits 与 OAuth

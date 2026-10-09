@@ -84,6 +84,7 @@ export const IPC = {
   AgentAddModelProvider: 'pion:agent-add-model-provider',
   AgentSkills: 'pion:agent-skills',
   AgentCapabilities: 'pion:agent-capabilities',
+  AgentMcpStatus: 'pion:agent-mcp-status',
   AgentSetModel: 'pion:agent-set-model',
   AgentThinkingLevels: 'pion:agent-thinking-levels',
   AgentSetThinking: 'pion:agent-set-thinking',
@@ -157,6 +158,7 @@ export const IPC = {
 export const IPC_EVENTS = {
   AgentEvent: 'pion:agent-event',
   AgentStatus: 'pion:agent-status',
+  AgentMcpStatus: 'pion:agent-mcp-status',
   AgentRunCheckpoint: 'pion:agent-run-checkpoint',
   AgentRunTelemetry: 'pion:agent-run-telemetry',
   AgentState: 'pion:agent-state',

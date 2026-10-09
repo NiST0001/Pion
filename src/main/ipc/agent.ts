@@ -2,6 +2,7 @@ import type { IpcMain } from 'electron'
 import type { AgentBridge } from '../agent/agent-bridge'
 import type { ProjectStore } from '../projects'
 import { IPC } from '../../shared/ipc'
+import type { McpStatusTarget } from '../../shared/mcp'
 import type {
   AddModelProviderInput,
   ExtensionUiResponse,
@@ -146,6 +147,10 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   )
   ipcMain.handle(IPC.AgentSkills, () => bridge.getSkills())
   ipcMain.handle(IPC.AgentCapabilities, () => bridge.getCapabilities())
+  ipcMain.handle(IPC.AgentMcpStatus, (event, target: McpStatusTarget = {}) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取 MCP 状态')
+    return bridge.getMcpStatus(target, event.sender.id)
+  })
   ipcMain.handle(IPC.AgentSetModel, (_event, provider: string, modelId: string) =>
     bridge.setModel(provider, modelId)
   )

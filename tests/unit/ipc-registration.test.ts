@@ -8,6 +8,7 @@ import { registerAgentIpc } from '../../src/main/ipc/agent'
 import { registerGitIpc } from '../../src/main/ipc/git'
 import { registerWindowIpc } from '../../src/main/ipc/window'
 import { IPC } from '../../src/shared/ipc'
+import type { McpStatusTarget } from '../../src/shared/mcp'
 import type { AddModelProviderInput, GitSelectionRequest, ImageContent, MessageRevertRequest, RunTelemetryQuery } from '../../src/shared/types'
 
 type InvokeHandler = Parameters<IpcMain['handle']>[1]
@@ -164,7 +165,7 @@ describe('agent IPC registration', () => {
     const h = agentHarness()
     expect([...h.handlers.keys()].sort()).toEqual([...new Set([
       ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
-      IPC.AgentRevertMessage
+      IPC.AgentRevertMessage, IPC.AgentMcpStatus
     ])].sort())
     expect(h.listeners.size).toBe(0)
     expect(h.withSessionOperation).not.toHaveBeenCalled()
@@ -366,6 +367,31 @@ describe('agent IPC registration', () => {
     expect(h.withSessionOperation).not.toHaveBeenCalled()
   })
 
+  it.each([
+    [{ cwd, sessionPath, backendId: 'backend-id' }, 41], [{}, 99], [undefined, 41]
+  ] as Array<[McpStatusTarget | undefined, number]>)('reads MCP status for target %s and owner %s without reserving a mutation', (target, owner) => {
+    const result = { availability: 'native', phase: 'ready', servers: [], diagnosticsOmitted: false, revision: 1, receivedAt: 123 }
+    const getMcpStatus = vi.fn().mockReturnValue(result)
+    const h = agentHarness({ getMcpStatus })
+    h.withSessionOperation.mockRejectedValue(new Error('a mutation would be blocked'))
+
+    expect(h.invoke(IPC.AgentMcpStatus, mainEvent(owner), target)).toBe(result)
+    expect(getMcpStatus).toHaveBeenCalledExactlyOnceWith(target ?? {}, owner)
+    expect(getMcpStatus.mock.contexts[0]).toBe(h.bridge)
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+    const error = new Error('MCP reader owner rejected')
+    getMcpStatus.mockImplementationOnce(() => { throw error })
+    expect(() => h.invoke(IPC.AgentMcpStatus, mainEvent(owner), target)).toThrow(error)
+  })
+
+  it('rejects iframe MCP reads before reaching the bridge or reserving a mutation', () => {
+    const getMcpStatus = vi.fn()
+    const h = agentHarness({ getMcpStatus })
+    expect(() => h.invoke(IPC.AgentMcpStatus, mainEvent(41, true), { cwd, sessionPath })).toThrow('只允许主窗口读取 MCP 状态')
+    expect(getMcpStatus).not.toHaveBeenCalled()
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+  })
+
   it('rejects iframe undo synchronously before reaching the bridge or reserving a mutation', () => {
     const revertMessage = vi.fn()
     const h = agentHarness({ revertMessage })
@@ -552,7 +578,7 @@ it('composes the three registrars without duplicate channels', () => {
   })
   const expected = new Set([
     ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
-    IPC.AgentRevertMessage,
+    IPC.AgentRevertMessage, IPC.AgentMcpStatus,
     ...gitRoutes.map(([channel]) => channel), ...effectRoutes.map(([channel]) => channel),
     ...terminalRoutes.map(([channel]) => channel), IPC.WindowState
   ])

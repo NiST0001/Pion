@@ -25,6 +25,7 @@
     "playwright.config.ts",
     "src/shared/**/*.ts",
     "src/main/**/*.ts",
+    "src/preload/**/*.ts",
     "src/renderer/src/**/*.ts",
     "src/renderer/src/**/*.tsx"
   ]

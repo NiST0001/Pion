@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
+import type { McpStatusSnapshot, McpStatusTarget } from '../shared/mcp'
 import type {
   AgentCapabilities,
   AgentMode,
@@ -171,6 +172,7 @@ const api: PionApi = {
   addModelProvider: (input) => ipcRenderer.invoke(IPC.AgentAddModelProvider, input),
   getSkills: () => ipcRenderer.invoke(IPC.AgentSkills) as Promise<SkillInfo[]>,
   getCapabilities: () => ipcRenderer.invoke(IPC.AgentCapabilities) as Promise<AgentCapabilities>,
+  getMcpStatus: (target: McpStatusTarget) => ipcRenderer.invoke(IPC.AgentMcpStatus, target) as Promise<McpStatusSnapshot>,
   setModel: (provider, modelId) => ipcRenderer.invoke(IPC.AgentSetModel, provider, modelId),
   getThinkingLevels: () => ipcRenderer.invoke(IPC.AgentThinkingLevels),
   setThinkingLevel: (level) => ipcRenderer.invoke(IPC.AgentSetThinking, level),
@@ -253,6 +255,7 @@ const api: PionApi = {
   // events
   onEvent: (listener) => subscribe<WireEventInput>(IPC_EVENTS.AgentEvent, listener),
   onStatus: (listener) => subscribe<AgentStatus>(IPC_EVENTS.AgentStatus, listener),
+  onMcpStatus: (listener) => subscribe<McpStatusSnapshot>(IPC_EVENTS.AgentMcpStatus, listener),
   onRunCheckpoint: (listener) =>
     subscribe<RunCheckpointStatus | null>(IPC_EVENTS.AgentRunCheckpoint, listener),
   onRunTelemetry: (listener) =>

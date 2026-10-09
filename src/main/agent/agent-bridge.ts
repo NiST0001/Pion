@@ -4,6 +4,8 @@ import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
 import { subagentSettingsFilePath } from '../subagent-settings'
 import { DEFAULT_SUBAGENTS_ENABLED } from '../../shared/subagents'
+import { IPC_EVENTS } from '../../shared/ipc'
+import type { McpStatusSnapshot, McpStatusTarget } from '../../shared/mcp'
 import {
   ProjectTrustStore,
   RpcClient,
@@ -83,6 +85,15 @@ import { revertSessionMessage } from './message-revert'
 import { stopForHistory } from './stop-for-history'
 import { applyBackendEvent } from './backend-events'
 import { LiveSessionProjection } from './live-session-state'
+import {
+  cacheMcpStatusWidget,
+  isMcpStatusWidget,
+  mcpBackendScope,
+  projectMcpStatusTarget,
+  readCachedMcpStatus,
+  unknownMcpStatus,
+  waitingMcpStatus
+} from './mcp-status-bridge'
 import { PendingRequestStore } from './pending-requests'
 import { projectQueueSnapshot } from './queue-projection'
 import { ProviderAuthUi } from './provider-auth-ui'
@@ -367,6 +378,54 @@ export class AgentBridge {
 
   getStatus(): AgentStatus {
     return this.status
+  }
+
+  /** Main-owned cache only: never initialize a backend or ask the SDK for state. */
+  getMcpStatus(target: McpStatusTarget = {}, ownerId: number): McpStatusSnapshot {
+    const win = this.win
+    if (!win || win.webContents.id !== ownerId) throw new Error('只允许所属主窗口读取 MCP 状态')
+    const request = projectMcpStatusTarget(target)
+    if (!request) return unknownMcpStatus('scope-mismatch')
+    const key = this.activeKey
+    const cwd = this.activeCwd
+    const sessionPath = this.activeSessionPath
+    // Capture only the selected record; target fields must not index the pool.
+    const backend = key ? this.backendPool.get(key) : undefined
+    const client = backend?.client
+    const backendId = backend?.liveState?.backendId
+    if ((request.cwd !== undefined && request.cwd !== cwd)
+      || (request.sessionPath !== undefined && request.sessionPath !== sessionPath)
+      || (request.backendId !== undefined && backend && request.backendId !== backendId)) {
+      return unknownMcpStatus('scope-mismatch', request)
+    }
+    const selectedScope: McpStatusTarget = {
+      ...(cwd !== undefined ? { cwd } : {}), ...(sessionPath !== undefined ? { sessionPath } : {})
+    }
+    if (!backend) return unknownMcpStatus(this.stopping || this.providerReloading ? 'backend-stopped' : 'no-backend', selectedScope)
+    if (backend.key !== key || backend.cwd !== cwd || backend.sessionPath !== sessionPath
+      || this.activeKey !== key || this.activeCwd !== cwd || this.activeSessionPath !== sessionPath
+      || this.backendPool.get(backend.key) !== backend || backend.client !== client
+      || backend.liveState?.backendId !== backendId || this.win !== win) {
+      return unknownMcpStatus('scope-mismatch', request)
+    }
+    const scope = mcpBackendScope(backend)
+    const cache = backend.mcpStatus?.snapshot
+    if (this.stopping || this.providerReloading || backend.historyMutation || backend.historyStopFailed
+      || (sessionPath && this.quarantinedSessionPaths?.has(sessionPath)) || backend.phase === 'error') {
+      return unknownMcpStatus('backend-stopped', scope, cache?.revision, cache?.receivedAt)
+    }
+    if (backend.phase !== 'running') return waitingMcpStatus(scope, cache?.revision, cache?.receivedAt)
+    return readCachedMcpStatus(backend)
+  }
+
+  private pushMcpStatus(backend: BackendRecord): void {
+    const win = this.win
+    if (!win || this.stopping || this.providerReloading || backend.historyMutation || backend.historyStopFailed
+      || (backend.sessionPath && this.quarantinedSessionPaths?.has(backend.sessionPath))
+      || backend.phase !== 'running' || this.activeKey !== backend.key
+      || this.activeCwd !== backend.cwd || this.activeSessionPath !== backend.sessionPath
+      || this.backendPool.get(backend.key) !== backend) return
+    win.webContents.send(IPC_EVENTS.AgentMcpStatus, this.getMcpStatus(mcpBackendScope(backend), win.webContents.id))
   }
 
   getRunningSessionPaths(): string[] {
@@ -1963,9 +2022,18 @@ export class AgentBridge {
   }
 
   private attachBackendEvents(backend: BackendRecord): void {
-    backend.client.onEvent((event) => {
+    const client = backend.client
+    client.onEvent((event) => {
       if (this.stopping || backend.historyMutation || backend.historyStopFailed
-        || this.backendPool.get(backend.key) !== backend) return
+        || backend.client !== client || this.backendPool.get(backend.key) !== backend) return
+      // Private notices (including malformed/nested ones) never reach root
+      // lifecycle, chat/live revision, billing, tasks or generic extension UI.
+      if (isMcpStatusWidget(event)) {
+        if (backend.phase === 'error') return
+        backend.liveState ??= new LiveSessionProjection()
+        if (cacheMcpStatusWidget(backend, event)) this.pushMcpStatus(backend)
+        return
+      }
       const type = (event as { type?: string }).type
       // Nested billing has private receipts, never independent renderer rows
       // or root lifecycle events. SDK codemode usage covers models.*, not children.

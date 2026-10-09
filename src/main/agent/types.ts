@@ -11,6 +11,7 @@ import type {
 import type { GitRunCheckpoint } from '../checkpoints'
 import type { RunOperation } from '../../shared/operations'
 import type { LiveSessionProjection } from './live-session-state'
+import type { McpStatusSnapshot } from '../../shared/mcp'
 
 export interface PushedTree {
   tree: TreeNodeLite[]
@@ -52,9 +53,24 @@ export interface QueuedBackendMessage {
   images: ImageContent[]
 }
 
+export interface BackendMcpStatusCache {
+  /** A replaced transport must not expose its predecessor's cached rows. */
+  client: RpcClient
+  runtimeId?: string
+  runtimeRevision?: number
+  /** Bounded SDK owner replacement fence, independent of the main revision. */
+  retiredRuntimeIds: string[]
+  /** Private monotonic receipt time; wall-clock changes cannot renew cache TTL. */
+  observedAt: number
+  expired?: boolean
+  snapshot: McpStatusSnapshot
+}
+
 export interface BackendRecord {
   /** Bounded current-root-turn projection, isolated to this backend instance. */
   liveState?: LiveSessionProjection
+  /** Private observations only; never part of the chat/live projection or billing. */
+  mcpStatus?: BackendMcpStatusCache
   key: string
   cwd: string
   sessionPath?: string

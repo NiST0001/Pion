@@ -86,6 +86,9 @@ export function App(): ReactElement {
   const [operationsPanel, setOperationsPanel] = useState<OperationsPanelKind | null>(null)
   const resourceCwd = selectedSession?.cwd ?? state.status.cwd
   const resourceSessionPath = selectedSession?.path ?? state.session?.sessionFile
+  const mcpBackendId = resourceCwd && state.status.cwd === resourceCwd
+    && state.liveSessionOwnerPath === resourceSessionPath ? state.liveSessionBackendId : undefined
+  const mcpScope = JSON.stringify([resourceCwd, resourceSessionPath, selectionRef.current.generation, mcpBackendId])
   const resourceKey = resourceCwd
     ? `${resourceCwd}\u0000${resourceSessionPath ?? 'new'}`
     : ''
@@ -1165,7 +1168,17 @@ export function App(): ReactElement {
         }}
         capabilities={{
           mounted: capabilitiesMounted,
-          dialog: { open: capabilitiesOpen, onClose: closeCapabilities }
+          dialog: {
+            open: capabilitiesOpen,
+            onClose: closeCapabilities,
+            target: {
+              cwd: resourceCwd,
+              sessionPath: resourceSessionPath,
+              ...(mcpBackendId ? { backendId: mcpBackendId } : {})
+            },
+            scope: mcpScope,
+            selectionRef
+          }
         }}
         pluginStore={{
           mounted: pluginStoreMounted,

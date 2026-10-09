@@ -5,6 +5,7 @@
  */
 import type { SubagentSettings } from './subagents'
 import type { ThemeId } from './theme'
+import type { McpStatusSnapshot, McpStatusTarget } from './mcp'
 import type {
   AddModelProviderInput,
   AgentCapabilities,
@@ -205,6 +206,8 @@ export interface PionApi {
   addModelProvider(input: AddModelProviderInput): Promise<ModelOption[]>
   getSkills(): Promise<SkillInfo[]>
   getCapabilities(): Promise<AgentCapabilities>
+  /** Read observations from the selected, already-existing backend only. */
+  getMcpStatus(target: McpStatusTarget): Promise<McpStatusSnapshot>
   getCommands(): Promise<SlashCommandInfo[]>
   getPluginCatalog(): Promise<PluginCatalogItem[]>
   getInstalledPlugins(): Promise<string[]>
@@ -289,6 +292,8 @@ export interface PionApi {
   onEvent(listener: (event: WireEventInput) => void): () => void
   /** Subscribe to lifecycle status changes; returns an unsubscribe function. */
   onStatus(listener: (status: AgentStatus) => void): () => void
+  /** Private MCP observations; not chat events or active tool availability. */
+  onMcpStatus(listener: (snapshot: McpStatusSnapshot) => void): () => void
   /** Subscribe to run-checkpoint changes for the selected session. */
   onRunCheckpoint(listener: (checkpoint: RunCheckpointStatus | null) => void): () => void
   /** Subscribe to throttled main-process run telemetry updates. */

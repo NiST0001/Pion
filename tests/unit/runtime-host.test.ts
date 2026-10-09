@@ -48,7 +48,7 @@ it('injects a compiled SDK tool, preserves trust gating, and recreates tools for
     expect.objectContaining({ name: 'codemode', builtin: true, replaceable: true }),
     expect.objectContaining({ name: 'tool-search', builtin: true, replaceable: true }),
     expect.objectContaining({ name: 'mcp', builtin: true, replaceable: true }),
-    expect.any(Function), expect.any(Function), expect.any(Function)
+    expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function)
   ] } }))
   const [factory, target] = mocks.runtime.mock.calls[0]
   await factory({ ...target, sessionStartEvent: { reason: 'new' } })

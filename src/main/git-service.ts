@@ -111,18 +111,7 @@ export class GitService {
       if (scope === 'staged') throw new Error('未跟踪文件尚未暂存')
       patch = await this.untrackedPatch(snapshot.root, path)
     } else {
-      const args = [
-        'diff',
-        ...stageLabel(scope),
-        '--no-ext-diff',
-        '--no-textconv',
-        '--binary',
-        '--full-index',
-        '--unified=3',
-        '--',
-        path
-      ]
-      patch = (await runGitBuffer(snapshot.root, args)).toString('utf8')
+      patch = await this.rawDiff(snapshot.root, path, scope, false)
     }
     const parsed = parseUnifiedDiff(patch, snapshot.snapshotId, path, scope)
     parsed.oldPath = file.oldPath

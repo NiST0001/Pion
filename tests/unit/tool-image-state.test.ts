@@ -472,7 +472,7 @@ describe('tool image state', () => {
     expect(toolRow(final).tool.images).toBe(persisted.tool.images)
   })
 
-  it.each(['clear', 'cwd', 'sessionId', 'sessionPath'] as const)('does not preserve matching call IDs across a queued %s scope change', (change) => {
+  it.each(['clear', 'cwd', 'sessionId', 'sessionPath'] as const)('rejects an obsolete page after a queued %s change; a fresh scope cannot inherit its preview', (change) => {
     const row: TimelineItem = { kind: 'tool', id: 150, tool: applyToolResult(tool, finalMessage, false) }
     const original: AgentState = {
       ...initialState, status: { phase: 'running', cwd: '/a' },
@@ -485,7 +485,14 @@ describe('tool image state', () => {
         : reducer(original, { type: 'session', session: { ...original.session!,
             ...(change === 'sessionId' ? { sessionId: 'b' } : { sessionFile: '/b.jsonl' }) } })
     const incoming: TimelineItem = { kind: 'tool', id: 151, historical: true, tool: { ...tool, status: 'done', live: undefined } }
-    const final = reducer(changed, { type: 'loadEntries', items: [incoming], preserveToolState: scope })
+    const obsolete = reducer(changed, { type: 'loadEntries', items: [incoming], preserveToolState: scope })
+    expect(obsolete).toBe(changed)
+    // The real selection pipeline clears the old projection before accepting
+    // the new window. Only that selection's fresh scope may paint the page.
+    const selected = reducer(changed, { type: 'clearTimeline', sessionPath: changed.session?.sessionFile })
+    const currentScope = { revision: selected.timelineScopeRevision, cwd: selected.status.cwd,
+      sessionId: selected.session?.sessionId, sessionPath: selected.liveSessionOwnerPath }
+    const final = reducer(selected, { type: 'loadEntries', items: [incoming], preserveToolState: currentScope })
     expect(final.timeline).toEqual([incoming])
     expect(toolRow(final).tool.resultReceived).toBeUndefined()
     expect(toolRow(final).tool.images).toBeUndefined()

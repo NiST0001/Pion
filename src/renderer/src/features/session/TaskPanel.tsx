@@ -3,33 +3,7 @@ import type { CSSProperties, ReactElement } from 'react'
 import { Check, CircleDashed, ListTodo, Loader2 } from 'lucide-react'
 import type { AgentTodo } from '../../agent/types'
 import { hasIncompleteTasks } from '../../../../shared/task-history'
-
-const TASK_PANEL_STATE_PREFIX = 'pion:session-task-panel-state:'
-
-function taskPanelStateKey(sessionKey: string): string {
-  return `${TASK_PANEL_STATE_PREFIX}${encodeURIComponent(sessionKey)}`
-}
-
-function loadExpanded(sessionKey: string): boolean {
-  if (typeof window === 'undefined') return false
-  try {
-    const raw = window.localStorage.getItem(taskPanelStateKey(sessionKey))
-    if (raw === null) return false
-    const saved = JSON.parse(raw)
-    return typeof saved === 'boolean' ? saved : false
-  } catch {
-    return false
-  }
-}
-
-function saveExpanded(sessionKey: string, expanded: boolean): void {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.setItem(taskPanelStateKey(sessionKey), JSON.stringify(expanded))
-  } catch {
-    // Panel state persistence is best effort and should never block the chat UI.
-  }
-}
+import { loadPanelExpanded, savePanelExpanded } from '../../utils/sessionPanelPreferences'
 
 /** The current goal, docked above the composer. Keep completed rows in mixed
  * plans, but hide the panel once every remaining task is completed. */
@@ -42,7 +16,7 @@ export function TaskPanel({
   agentTodos?: AgentTodo[] | null
   agentBusy?: boolean
 }): ReactElement | null {
-  const [expanded, setExpanded] = useState(() => loadExpanded(sessionKey))
+  const [expanded, setExpanded] = useState(() => loadPanelExpanded('task', sessionKey))
   const todos = (agentTodos ?? []).filter((todo) => todo.status !== 'deleted')
   const completedCount = todos.filter((todo) => todo.status === 'completed').length
   const caption = completedCount > 0
@@ -54,7 +28,7 @@ export function TaskPanel({
   } as CSSProperties
 
   useEffect(() => {
-    saveExpanded(sessionKey, expanded)
+    savePanelExpanded('task', sessionKey, expanded)
   }, [sessionKey, expanded])
 
   if (!hasIncompleteTasks(todos)) return null

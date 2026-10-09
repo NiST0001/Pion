@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { ToolCallItem } from '../../src/renderer/src/features/chat/ToolCallItem'
 import type { ToolItem } from '../../src/renderer/src/agent/types'
+import type { ToolInfo } from '../../src/shared/types'
 import { applyToolResult, parseToolArgs } from '../../src/renderer/src/agent/timeline'
 import { collectToolImages } from '../../src/shared/tool-images'
 import { CODEX_IMAGE_REQUEST_ALIAS, IMAGE_GENERATION_TOOL_NAME } from '../../src/shared/image-generation'
@@ -491,26 +492,108 @@ describe('ToolCallItem', () => {
     expect(code).not.toHaveTextContent('已安装插件')
     expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('全局和受信任项目')
     expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('stdio / HTTP')
-    expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('/mcp status')
+    expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('MCP 页查看原生状态，/mcp 为文本状态')
+    expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).not.toHaveTextContent('/mcp status')
     expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('login、logout、reconnect')
     expect(screen.getByText(/Pi 原生 MCP 使用 mcp.json/)).toHaveTextContent('配置不会自动迁移，插件不会自动卸载')
     expect(screen.getByText('MCP read').closest('article')).not.toHaveTextContent(/ready|已连接/)
     expect(code?.querySelector('button, input, select')).toBeNull()
   })
 
-  it('does not advertise absent native capabilities or relabel same-name plugin tools as native', async () => {
+  it('keeps built-ins before native and plugin cards with their existing label, source and description fallbacks', async () => {
     vi.stubGlobal('pion', { getCapabilities: vi.fn().mockResolvedValue({ skills: [], tools: [
-      { name: 'codemode', label: 'Plugin code', description: 'Plugin supplied code tool', source: 'npm:example-plugin' }
+      { name: 'codemode', label: 'Plugin code', description: 'Plugin-only description', source: 'npm:example-plugin' },
+      { name: 'native_empty', source: 'builtin' },
+      { name: 'plugin_empty', label: '', description: '', source: 'auto' },
+      { name: 'tool_search', label: '', description: '', source: 'builtin' },
+      { name: 'codemode', label: 'Native code', description: 'Execute JavaScript', source: 'builtin' },
+      { name: 'unowned_plugin' }
     ] }) })
-    render(<SkillsToolsModal open onClose={vi.fn()} />)
+    const { container } = render(<SkillsToolsModal open onClose={vi.fn()} />)
     await act(async () => undefined)
     fireEvent.click(screen.getByRole('button', { name: /工具.*文件与命令/ }))
-    const plugin = screen.getByText('Plugin code').closest('article')
-    expect(plugin).toHaveTextContent('example-plugin')
-    expect(plugin).not.toHaveTextContent('Pi 原生')
-    expect(screen.queryByText(/Pi 原生 MCP 使用 mcp.json/)).not.toBeInTheDocument()
-    expect(screen.queryByText('tool_search')).not.toBeInTheDocument()
+    const cards = Array.from(container.querySelectorAll('.capability-card-tool'))
+    expect(cards.map((card) => card.querySelector('code')?.textContent)).toEqual([
+      'read', 'write', 'edit', 'bash', 'pion_task', 'pion_ask_user', IMAGE_GENERATION_TOOL_NAME, 'pion_subagents',
+      'native_empty', 'tool_search', 'codemode', 'codemode', 'plugin_empty', 'unowned_plugin'
+    ])
+    expect(cards.map((card) => card.querySelector('.capability-card-source')?.textContent)).toEqual([
+      'Pi 内置', 'Pi 内置', 'Pi 内置', 'Pi 内置', 'Pion 内置', 'Pion 内置', 'Pion 内置', 'Pion 内置',
+      'Pi 原生', 'Pi 原生', 'Pi 原生', 'example-plugin', '自动发现', undefined
+    ])
+    expect(screen.getByText('14 项工具')).toBeInTheDocument()
+    expect(cards[8].querySelector('strong')).toHaveTextContent('native_empty')
+    expect(cards[8].querySelector('p')).toHaveTextContent('运行时已注册的原生工具；连接与可执行状态以会话为准。')
+    expect(cards[9].querySelector('strong')).toHaveTextContent('tool_search')
+    expect(cards[9].querySelector('p')).toHaveTextContent('原生延迟工具检索；使用 query 搜索、limit 限制结果数。')
+    expect(cards[10].querySelector('p')).toHaveTextContent(/^Execute JavaScript 原生 JavaScript 工具编排/)
+    expect(cards[11].querySelector('p')).toHaveTextContent('Plugin-only description')
+    expect(cards[12].querySelector('strong')).toHaveTextContent('plugin_empty')
+    expect(cards[12].querySelector('p')).toHaveTextContent('已安装插件提供的工具。')
+    expect(cards[13].querySelector('strong')).toHaveTextContent('unowned_plugin')
+    expect(cards[13].querySelector('p')).toHaveTextContent('已安装插件提供的工具。')
+    for (const card of cards.slice(8)) expect(card.querySelector('.capability-card-icon svg')).toHaveClass('lucide-wrench')
   })
+
+  it('preserves separate native and plugin-source card nodes when same-name tools reorder or disappear', async () => {
+    const alpha: ToolInfo = { name: 'codemode', label: 'Plugin alpha', source: 'npm:alpha' }
+    const native: ToolInfo = { name: 'codemode', label: 'Native code', source: 'builtin' }
+    const beta: ToolInfo = { name: 'codemode', label: 'Plugin beta', source: 'npm:beta' }
+    const tools = [alpha, native, beta]
+    const getCapabilities = vi.fn().mockResolvedValue({ skills: [], tools })
+    vi.stubGlobal('pion', { getCapabilities })
+    const { container, rerender } = render(<SkillsToolsModal open onClose={vi.fn()} />)
+    await act(async () => undefined)
+    fireEvent.click(screen.getByRole('button', { name: /工具.*文件与命令/ }))
+    const builtinCard = screen.getByText('读取文件').closest('article')
+    const nativeCard = screen.getByText('Native code').closest('article')
+    const alphaCard = screen.getByText('Plugin alpha').closest('article')
+    const betaCard = screen.getByText('Plugin beta').closest('article')
+    expect(new Set([nativeCard, alphaCard, betaCard]).size).toBe(3)
+    expect(alphaCard).toHaveTextContent('alpha')
+    expect(betaCard).toHaveTextContent('beta')
+    // Update only the in-memory loader fixture; reopening would remount the page
+    // and could not verify the cards' key-based reconciliation.
+    tools.splice(0, tools.length, beta, native, alpha)
+    rerender(<SkillsToolsModal open onClose={vi.fn()} />)
+    expect(Array.from(container.querySelectorAll('.capability-card-tool')).slice(8)).toEqual([
+      nativeCard, betaCard, alphaCard
+    ])
+    expect(screen.getByText('读取文件').closest('article')).toBe(builtinCard)
+    expect(screen.getByText('Native code').closest('article')).toBe(nativeCard)
+    expect(screen.getByText('Plugin alpha').closest('article')).toBe(alphaCard)
+    expect(screen.getByText('Plugin beta').closest('article')).toBe(betaCard)
+    const replacement: ToolInfo = { ...beta, source: 'npm:gamma' }
+    tools.splice(0, tools.length, replacement, native)
+    rerender(<SkillsToolsModal open onClose={vi.fn()} />)
+    expect(screen.getByText('Plugin beta').closest('article')).not.toBe(betaCard)
+    expect(screen.getByText('Plugin beta').closest('article')).toHaveTextContent('gamma')
+    expect(screen.getByText('Native code').closest('article')).toBe(nativeCard)
+    expect(screen.getByText('读取文件').closest('article')).toBe(builtinCard)
+    expect(screen.queryByText('Plugin alpha')).not.toBeInTheDocument()
+    expect(alphaCard).not.toBeInTheDocument()
+    expect(betaCard).not.toBeInTheDocument()
+    expect(getCapabilities).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['codemode', 'mcp', 'tool_search', 'mcp__server__read'])(
+    'does not advertise absent native capabilities or relabel same-name plugin tools as native: %s', async (name) => {
+      vi.stubGlobal('pion', { getCapabilities: vi.fn().mockResolvedValue({ skills: [], tools: [
+        { name, label: 'Plugin tool', description: 'Plugin supplied tool', source: 'npm:example-plugin' }
+      ] }) })
+      render(<SkillsToolsModal open onClose={vi.fn()} />)
+      await act(async () => undefined)
+      fireEvent.click(screen.getByRole('button', { name: /工具.*文件与命令/ }))
+      const plugin = screen.getByText('Plugin tool').closest('article')
+      expect(plugin).toHaveTextContent('example-plugin')
+      expect(plugin).toHaveTextContent('Plugin supplied tool')
+      expect(plugin).not.toHaveTextContent('Pi 原生')
+      expect(plugin).not.toHaveTextContent('models 模型目录')
+      expect(plugin).not.toHaveTextContent('原生延迟工具检索')
+      expect(screen.queryByText(/Pi 原生 MCP 使用 mcp.json/)).not.toBeInTheDocument()
+      expect(screen.queryAllByText('tool_search')).toHaveLength(name === 'tool_search' ? 1 : 0)
+    }
+  )
 
   it('keeps paged history outside the live reveal path', () => {
     const { container } = render(<ToolCallItem tool={liveTool} historical />)

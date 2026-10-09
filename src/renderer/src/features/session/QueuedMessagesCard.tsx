@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import { Clock3, MessageSquare, Pencil, Send, Trash2, Zap } from 'lucide-react'
-
-const QUEUE_PANEL_STATE_PREFIX = 'pion:session-queue-panel-state:'
+import { loadPanelExpanded, savePanelExpanded } from '../../utils/sessionPanelPreferences'
 
 type QueueKind = 'steering' | 'followUp'
 
@@ -10,31 +9,6 @@ interface QueueItem {
   kind: QueueKind
   text: string
   index: number
-}
-
-function queuePanelStateKey(sessionKey: string): string {
-  return `${QUEUE_PANEL_STATE_PREFIX}${encodeURIComponent(sessionKey)}`
-}
-
-function loadExpanded(sessionKey: string): boolean {
-  if (typeof window === 'undefined') return true
-  try {
-    const raw = window.localStorage.getItem(queuePanelStateKey(sessionKey))
-    if (raw === null) return true
-    const saved = JSON.parse(raw)
-    return typeof saved === 'boolean' ? saved : true
-  } catch {
-    return true
-  }
-}
-
-function saveExpanded(sessionKey: string, expanded: boolean): void {
-  if (typeof window === 'undefined') return
-  try {
-    window.localStorage.setItem(queuePanelStateKey(sessionKey), JSON.stringify(expanded))
-  } catch {
-    // Queue panel state persistence is best effort and should never block the chat UI.
-  }
 }
 
 function displayText(text: string): string {
@@ -67,7 +41,7 @@ export function QueuedMessagesCard({
     ...steering.map((text, index) => ({ kind: 'steering' as const, text, index })),
     ...followUp.map((text, index) => ({ kind: 'followUp' as const, text, index }))
   ]
-  const [expanded, setExpanded] = useState(() => loadExpanded(sessionKey))
+  const [expanded, setExpanded] = useState(() => loadPanelExpanded('queue', sessionKey))
   const [sendingKey, setSendingKey] = useState<string | null>(null)
   const expandedHeight = Math.min(265, Math.max(102, 52 + items.length * 34))
   const panelStyle = {
@@ -82,7 +56,7 @@ export function QueuedMessagesCard({
       : '等待本轮完成'
 
   useEffect(() => {
-    saveExpanded(sessionKey, expanded)
+    savePanelExpanded('queue', sessionKey, expanded)
   }, [sessionKey, expanded])
 
   const handleSendItem = async (item: QueueItem): Promise<void> => {

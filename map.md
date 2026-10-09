@@ -7,7 +7,7 @@
 | 路径 | 用途 |
 | --- | --- |
 | src/main/index.ts | 服务实例、Electron 窗口与应用生命周期、IPC 注册装配及尚未拆出的全局设置/验证/工作流/项目列表等路由、系统通知 |
-| src/main/ipc/agent.ts | Agent 生命周期/会话/历史/模型、权限与扩展 UI、项目信任及分支路由；显式接入同一 bridge，保留启动项目更新、子代理/消息撤销主帧校验，异步会话操作通过 bridge 预留撤销互斥门控 |
+| src/main/ipc/agent.ts | Agent 生命周期/会话/历史/模型、权限与扩展 UI、项目信任及分支路由；显式接入同一 bridge，保留启动项目更新、子代理/消息撤销及只读 MCP 状态的主帧/owner 校验，异步会话操作通过 bridge 预留撤销互斥门控 |
 | src/main/ipc/git.ts | Git 工作区路由注册，透传快照 ID、差异 scope、选择与冲突内容，不新建 GitService |
 | src/main/ipc/window.ts | 窗口控制、原生外观及终端路由，注入窗口查找与所属服务，保留主帧检查及 owner ID 转发 |
 | src/preload/index.ts | 暴露 window.pion 的类型化桥接 |
@@ -16,6 +16,7 @@
 | src/shared/types.ts | 共享类型入口；历史用户索引另带可选的实际消息时钟，与 entry 追加时间分开，提供共享归一化；历史分页响应另带所选分支的最新任务快照及压缩边界元数据 |
 | src/shared/task-history.ts | 原生自定义任务快照/旧版工具结果校验；新原生目标按 planId 跨轮归档，旧记录保持用户轮次投影；共享未完成状态判定，区分有效空快照与错误/缺失结果 |
 | src/shared/image-generation.ts | 生图工具身份、官方请求别名与实验 2.5 Flare/Sunburst 白名单；size/quality 与有界引用路径准入（字面 @）；v2 必需请求操作/尺寸/质量/引用数及实际 PNG 保存元数据，实际版本未知；只读 v1/v2 投影不补造旧设置默认值 |
+| src/shared/mcp.ts | MCP 只读状态类型、SDK 格式/私有单行协议的有界白名单、状态安全复制；连接状态与登记工具数不推断曝光/执行权限，不返回原始配置或诊断 |
 | src/shared/tool-images.ts | 跨进程工具预览的严格有界 base64、静态 PNG/JPEG 结构/尺寸、PNG 压缩文本/ICC 拒绝、稳定位置及提示；结构辅助函数也为输入/输出原图提供像素准入，允许压缩 PNG metadata 的调用方须另外执行有界 inflate 完整性校验；不等同于真实解码 |
 | src/shared/operations.ts | 运行/恢复数据契约，以及主进程与 renderer 共用的统计候选筛选、执行状态判定和排序 |
 | src/shared/theme.ts | 内置主题 ID（含 division-dark）、默认主题与跨进程校验 |
@@ -43,6 +44,8 @@
 | src/main/agent/wire.ts | SDK 条目映射、所选分支祖先链与模式推导、沿当前叶节点恢复最新任务快照；保留压缩边界及 token 数供实时/历史归并 |
 | src/main/agent-runtime.ts、src/main/agent/runtime-host.ts、src/main/agent/runtime-lifecycle.ts | 编译后的 SDK RPC 子进程入口、私有启动参数、项目隔离/信任与会话替换时重建内置工具；启动失败/返回先等待 owner 清理再退出；生图工具捕获所属 backend 的 SDK ModelRuntime，执行获准后才解析 Codex OAuth/刷新 |
 | src/main/agent/native-extensions.ts | CLI 同源 MCP/codemode/tool-search 的 builtin/replaceable factories，运行时与能力扫描共用；原生默认工具仅未显式选择时临时添加，尊重禁用/替换/noExtensions；显式工具集合以初始 SDK 集合和正负匹配规则持续限制直接及嵌套执行，迟到发现不扩大边界；codemode models:true、每脚本模型调用预算与主机期限/父中止、原 SDK usage 保留，有界图片结果 fail-closed 投影并清除 structuredContent，不承诺任意文字/base64 脱敏或请求实际停止 |
+| src/main/agent/mcp-status-observer.ts | 已核对 SDK 版本的 builtin:mcp 空参数 RPC handler 采集；真实 command context、成功原生启动/命令来源双门，每次仅一次 info notify、未知/被吞禁止访问 fail-closed；周期通知、generation/关闭失效、实际 pending 跨 SDK 替换单槽，不创建 manager/连接或调用模型 |
+| src/main/agent/mcp-status-bridge.ts | 私有 widget 消费/白名单缓存与目标选择 fence；捕获 client、cwd/path/backend、主进程单调 revision 和有限 retired-runtime 身份，单调收件 TTL/过期锁存；getter 只读现有后端缓存、超时未知，不污染 live/正文/任务/计费 |
 | src/main/agent/image-generation.ts | SDK 单张文字生图/参考图编辑工具：size/quality 请求及 ≤5 个项目相对 PNG/JPEG 输入，前置拒绝非法/未知参数（含 mask/input_fidelity），显式不同于输入的 PNG 新路径；调用原生读取器后请求订阅服务，v2 请求设置与经输出 PNG 校验的保存尺寸分离，不返回输入字节/metadata/路径数组；原有目录/身份检查、私有同目录 wx 暂存和 hard-link no-replace 发布，不删最终目标，失败保留完整恢复文件，清理失败报告残留；预览真实解码跨实例单槽，提交后失败不回滚 |
 | src/main/agent/image-inputs.ts | 原生只读参考图读取：严格 O_RDONLY/O_NOFOLLOW/O_NONBLOCK，不支持即失败；绑定捕获的真实 worktree、root/父目录 BigInt 身份及路径/FD 纳秒时间快照复查，分块/EOF 拒绝成长截断；8 MiB/张、16 MiB/合计、4096/边、1600 万累计像素，PNG inflate 前累计准入，PNG 有界完整性/JPEG 结构检查；跨实例真实操作单槽持有至收口，取消仅停止等待，late FD 关闭、close reject 锁存进程隔离至 backend 进程重建，不重试；非 OS 沙箱或硬链接来源证明 |
 | src/main/agent/codex-image-transport.ts | 独立 Codex 订阅 JSON Images API：空引用 generations、非空 images/edits 的 data URL；OAuth 前型号/size/quality/私有输入快照与累计预算校验，原文件 metadata 随字节上传；复用所属 SDK OAuth，无 API-key/付费回退；单张 base64 PNG、有界请求/响应/输出/期限、取消、脱敏诊断（编辑仅公开错误码）及不自动重试/降级/丢弃设置；回显型号/质量非实际证明，图片用量不充当聊天 token 计费 |
@@ -74,8 +77,8 @@
 | 路径 | 用途 |
 | --- | --- |
 | src/renderer/src/agent/types.ts、reducer.ts | UI 状态和事件归约；timelineReady 独立记录正文是否已被所选作用域接受，不能从 loading 结束或空 STATE 推断；独立任务快照、结果有界去重、恢复请求与实时 revision 保护；以最终消息收口模型错误并显示实时压缩失败，空最终 text/thinking 清除旧流式草稿；工具增量仅处理文字，最终消息优先投影有界图片及生图请求/保存设置，相同有效预览的重复结果不重解码，设置变化仍更新，迟到执行结果不回退终态 |
-| src/renderer/src/agent/reducer.ts | 实时事件与选中会话显示状态；带 cwd/path/backend/revision 的后台显示快照只归并当前作用域；区分显示版本与生命周期权威，同版本可补齐显示但不复活已结束运行；保留运行中工具、行身份/预览及权威空 final，不重放生命周期、任务或计费用量 |
-| src/renderer/src/agent/timeline.ts | 会话条目转时间线、缓存和分页类型；缓存单独保留任务快照，不能以当前页有无任务记录替代；历史回放保留助手错误诊断；按持久化身份、稳定 live 消息身份及 SDK 消息时间戳/终态内容归并实时行与分页副本；用户时间戳/内容歧义不猜测，保留真实重复发送及已有撤销 ID，保留组件身份及页面顺序，未覆盖的实时行仍留在尾部；最终结果/回放共用图片预览及生图请求型号/操作/设置/引用数与保存尺寸投影，不保留引用路径数组/输入字节，不从旧参数补造最终默认设置，设置-only 更新复用有效预览；同 scope 替换保留工具终态及已挂载消息 key/撤销身份，旧分页及 result-only 页面补完已有调用，不创建孤立结果行 |
+| src/renderer/src/agent/reducer.ts | 实时事件与选中会话显示状态；带 cwd/path/backend/revision 的后台显示快照只归并当前作用域；区分显示版本与生命周期权威，同版本可补齐显示但不复活已结束运行；有界记住同目录/路径的已替代后端，拒绝迟到复活；消息增量/end 按唯一真实身份路由，缓存补齐已知 entry ID、仅填明确截断字段，最终快照收敛已分裂助手副本；保留运行中工具、行身份/预览及权威空 final，不重放生命周期、任务或计费用量 |
+| src/renderer/src/agent/timeline.ts | 会话条目转时间线、缓存和分页类型；缓存单独保留任务快照，不能以当前页有无任务记录替代；历史回放保留助手错误诊断；按持久化身份、稳定 live 消息身份及双方唯一的 SDK 消息时间戳/完整终态内容归并实时行与分页副本；缓存/live 互并缺少真实 entry ID 不误登记历史对齐，兼容旧误标；先排除冲突的已知身份再判断唯一性，不用已匹配后的剩余项猜测；用户时间戳/内容歧义不猜测，保留真实重复发送及已有撤销 ID，保留组件身份及页面顺序，未覆盖的实时行仍留在尾部；最终结果/回放共用图片预览及生图请求型号/操作/设置/引用数与保存尺寸投影，不保留引用路径数组/输入字节，不从旧参数补造最终默认设置，设置-only 更新复用有效预览；同 scope 替换保留工具终态及已挂载消息 key/撤销身份，旧分页及 result-only 页面补完已有调用，不创建孤立结果行 |
 | src/renderer/src/agent/modelError.ts | 对常见模型/API 额度、认证、限流、上下文、服务及网络错误做保守分类，生成简短中文提示并原样保留技术详情 |
 | src/renderer/src/agent/sessionFavorites.ts、sessionOrder.ts | 收藏与排序 |
 | src/renderer/src/hooks/useAgent.ts | Agent hooks 汇总、启动及模型刷新 |
@@ -90,6 +93,7 @@
 | src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1 缓存迁移；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
 | src/renderer/src/hooks/useRunTelemetry.ts、useRunRecovery.ts | 运行统计与恢复；统计排除未派发队列，执行中优先，按实际派发/启动时间排序，保留有界 revision 防止迟到快照复活已退回队列的记录 |
 | src/renderer/src/hooks/useSessionResourceStage.ts | 会话首次就绪后按阶段启动次级资源；同会话历史加载不中断阶段和实时订阅 |
+| src/renderer/src/utils/sessionPanelPreferences.ts | 任务/队列面板共用折叠偏好读写，兼容各自已有键名、会话编码和不同默认值；只接受 JSON boolean，编码/存储异常不阻断 UI |
 | src/renderer/src/hooks/useGitWorkspace.ts | Git UI 数据与操作 |
 | src/renderer/src/hooks/useWindowEffects.ts | 原生外观状态订阅、过期快照保护、设置操作及根元素透明标志 |
 
@@ -109,7 +113,7 @@
   - `ModelsPage.tsx`、`SessionPage.tsx`、`SecurityPage.tsx`：模型与提供商、会话行为与工具、安全信任与权限页面；新增页面通过受控 props 回调操作，不反向依赖弹窗。
   - `AppearancePage.tsx`、`AboutPage.tsx`、`DiagnosticsPage.tsx`：外观、版本与更新日志、会话状态与 stderr 页面；`SettingsInfoRow.tsx` 为关于/诊断共用的信息行。
   - `ReleaseNotes.tsx` 在关于 Pion 页展示可展开的更新日志；`WindowEffectsSettings.tsx` 提供简洁的“毛玻璃”开关，仅在重启、不可用或透明回退等必要状态下提示；外观页保留原四套主题并提供“信号橙”战术风格主题，即时切换，不额外渲染实时预览；`SubagentSettings.tsx` 在会话页提供子代理全局数量/超时/轮数/结果长度配置，保存后下一批生效。
-- `capabilities/`：技能工具列表与插件商店；`SkillsToolsModal.tsx` 将 Pion 内置任务/提问/子代理/生图与插件工具区分展示；生图卡片说明 size/quality 请求、≤5 个 PNG/JPEG 参考图编辑及另存新路径、原文件/metadata 上传、read + network + write、服务兼容性/精确尺寸未保证、mask 不支持、实验型号/实际版本未知、Codex 登录和账号额度及计划模式不可用。
+- `capabilities/`：技能工具列表、MCP 只读状态与插件商店；`McpStatusPage.tsx` 查看当前后端的状态/登记工具数/曝光，只读缓存刷新、可见时订阅与轮询；关闭/隐藏清理，选择 generation 与 scope 拒迟到结果，实际 IPC 跨卸载单槽、独立单调过期防止挂起读取或重复缓存保留旧连接；旧插件/禁用/未知不推测可用性。`SkillsToolsModal.tsx` 将 Pion 内置任务/提问/子代理/生图与插件工具区分展示；生图卡片说明 size/quality 请求、≤5 个 PNG/JPEG 参考图编辑及另存新路径、原文件/metadata 上传、read + network + write、服务兼容性/精确尺寸未保证、mask 不支持、实验型号/实际版本未知、Codex 登录和账号额度及计划模式不可用。
 - `chrome/`：窗口标题栏等外壳组件；`DockHeader.tsx` 提供简洁拖动标题、带目标/方向图标的自定义布局菜单和隐藏按钮。
 - `terminal/TerminalPanel.tsx`：按需加载的 xterm.js 终端，保持 PTY 连接、可见尺寸适配、主题同步及结束确认。
 - `common/`：通用对话框、空状态和扩展 UI；`AnimatedDisclosure.tsx` 按需挂载详情，提供可反转的短收起过渡，结束后释放 DOM，兼容减少动态效果。
@@ -133,8 +137,13 @@
 
 以下为测试源码职责，实际验证范围以对应执行记录为准，不把文件清单当成全部通过的证明。
 
+- `tests/unit/mcp-status.test.ts`：SDK 文字格式、诊断不透明尾部、大小/数量边界、状态/工具数、私有单行 JSON、白名单及安全复制，不读取真实配置。
+- `tests/unit/mcp-status-observer.test.ts`：模拟原生工厂/实际合同上下文、成功启动与命令来源门、SDK 版本门、唯一空参数及只读采集、吞掉禁止访问仍 fail-closed；周期/scope/revision、超时仅停止采集、实际 pending 跨替换单槽至收口、迟到回调与关闭优先失效；副作用 actors/计费保持不变，不运行真实 MCP 生命周期。
+- `tests/unit/mcp-status-bridge.test.ts`：私有通知在正文/计费/普通 UI 前消费、cache getter 不调用 SDK/创建后端、owner/目标/backend/client/SDK-runtime fence、单调过期与墙上时钟回拨、白名单复制，以及 preload 专用请求/推送订阅。
+- `tests/renderer/McpStatusPage.test.tsx`：状态/曝光/数量和安全文案、缓存读取与 push 优先、A→B→A generation/后端替换、关闭/隐藏/切 tab、实际 IPC 槽至收口、挂起读取下独立过期和同缓存不续期；不启动 Electron/SDK/服务器。
 - `tests/unit/session-list-cache.test.ts`：列表在途去重、并发/容量、软/硬失效、持续输出和迟到扫描防护；`worktree-session-isolation.test.ts` 补充 manager 签名复用，`agent-bridge-send-queue.test.ts` 补充状态等待期限及私有缓存回归。
 - `tests/unit/live-session-state.test.ts`：后台当前轮快照、字段级截断/预算、最终空消息及工具终态、安全图片预览与生图元数据、实例身份及序列化界限；bridge 的后台切回及迟到状态竞态覆盖于 `agent-bridge-send-queue.test.ts`。
+- `tests/unit/session-restore-identity.test.ts`：真实投影与独立 RPC JSON 克隆、普通消息结束后落盘且没有虚构 entry_appended，STATE/cache/disk 顺序、重复恢复/分页、助手 ID 保留与迟到结束路由、同文真实重发/相同 SDK 时钟、终态变钟后的分裂收敛、明确截断字段与缓存补齐，以及 cwd/path/backend 替换隔离。`timeline.test.ts` 补充旧误标、双侧唯一及冲突/歧义保护。
 - `tests/unit/`：后端策略、队列、运行记录、迁移和 reducer 等逻辑测试；`agent-compaction-state.test.ts` 覆盖压缩生命周期、迟到快照与会话切换重置；`compaction-context-usage.test.ts` 覆盖手动/自动压缩后的用量作废、失败保留和新响应用量更新；`model-error.test.ts` 与 `agent-error-state.test.ts` 覆盖模型/API 错误分类、实时最终消息收口、默认中止过滤、压缩失败及普通/retain-none 压缩的 wire 归并。
 - `tests/unit/session-tasks.test.ts`：缺少工具开始行仍接收任务、重复结果去重、空快照/错误区分、分页及异步恢复保护、分支祖先链和独立缓存。
 - `tests/unit/codex-image-transport.test.ts`：模拟订阅 generations/edits JSON（PNG/JPEG data URL）、size/quality 原样转发及空引用分流、私有字节/设置快照与 metadata 上传、每张/累计字节和 PNG inflate 前累计像素准入；官方默认/实验 2.5 型号转发、非法/未知参数（含 mask/input_fidelity）在 OAuth/网络前拒绝、不降级/重试/丢设置、不信任版本/质量回显、所属 runtime OAuth/刷新、拒绝 API-key/重定向/外部 URL、有界响应/输出/期限、额度/权益与编辑错误回显保护；不请求真实服务。
@@ -148,6 +157,7 @@
 - `tests/unit/tool-permission-policy.test.ts`：策略/worktree 继承；无引用 network + write、有引用增加 read 且文字授权不能覆盖读取；每个输入风险、字面 @、全部最大有界路径/角色与 metadata 上传说明、无效/超限参数不遍历或回显、请求设置校验与短型号/实验提示；既有检查点、待确认期间各策略 deny 优先及旧项目授权保护、拒绝/取消/无 UI 不执行；子代理沿原有写工具门控，不新增生图权限。
 - `tests/fixtures/static-png.ts`：无 I/O、确定性的静态 RGB PNG 内存 fixture，独立 CRC 与有界尺寸/压缩数据，供传输、保存和完整性测试使用。
 - `tests/renderer/`：React 组件及 hooks 测试。
+  - `sessionRestoreIdentity.test.tsx`：实际历史 hook/订阅/reducer 及消息组件的 A→B→A 恢复；STATE/cache 先后、真实跳转中窗后的 loadNewer 分页、重复 STATE/磁盘页、后台同文重发及相同 SDK 时钟；核对行数、真实 entry ID、React key/DOM 节点保留，不作为真实 GUI 或旧源码失败的证明。
   - `sessionTasks.test.tsx`：任务记录在历史页之外的恢复、跳转保留面板节点、请求期间实时清空、跨会话迟到结果、缓存无需重绘时恢复快照，以及复制/分叉/删除的任务作用域重置和取消保留。
   - `conversationFollow.test.tsx`：用户离开/接近/回到末尾时的新输出行为、无 scroll 事件时恢复跟随、连续手势和延迟布局；程序化定位不代表用户恢复跟随。
   - `ChatTimeline.test.tsx`：空历史的未接收/加载/失败/成功空分支区分、显式重新加载及失败时保留已显示消息。
@@ -160,6 +170,7 @@
   - `RunMetricsStrip.test.tsx`：统计摘要、有限窗口累计口径、上下文待更新、详情浮层开关与外部点击/Escape 收起。
   - `AnimatedDisclosure.test.tsx`、`ToolCallItem.test.tsx`：详情按需挂载、收起清理、快速反向、减少动态效果与工具文字渐入/字符回收后不重建正文；图片固定框/失败/按需释放、内容位置及组件身份、加载不滚动、与文字动画/长 diff 分页兼容；生图请求/实际保存尺寸与预览分离、质量/版本回显不采信、旧设置不补默认、设置-only 更新复用有效预览且最终元数据可移除，以及参考图上传/权限/不支持 mask/兼容性未知的能力卡片文案。
   - `ComposerSupportPanels.test.tsx`：任务/排队槽位切换时保留 DOM、草稿和挂载状态。
+  - `sessionPanelPreferences.test.tsx`：旧偏好键/不同默认值、命名空间与会话隔离、非 boolean/损坏值、编码及存储异常、无 window，以及面板切换/重新挂载时的偏好与 DOM 保留。
   - `HistoryNavigator.test.tsx`：跳转条交互，实时索引增加时保留手动浏览的范围；无匹配活动 ID 不回退最后项、重复文本的明确跳转保持独立。
   - `loadingScroll.test.tsx`：详情反复展开/动画折叠后回收高度且钳制不恢复跟随、保留无关加载占位、初次加载可滚入空白、部分渲染不缩短滚动范围、首个 scroll 前手势生效、会话切换/空加载的程序化 scroll 不锁住占位、分页保留消息屏幕位置及加载中的向上滚动、占位不遮蔽分页位移、补偿不连锁分页、跳转短页前释放旧空白范围且滚至末尾不回拉，以及用户取消待执行跳转。
   - `liveHistoryIndex.test.tsx`：忙碌时按落盘/完成事件更新索引、在途事件补刷新、过滤 token 增量、读取失败保留与会话隔离。
@@ -183,7 +194,7 @@
 - `tests/unit/provider-auth.test.ts`：提供商认证交互、按需 global-only 设备 ID、flush/错误处理及不向 legacy/API-key 流程生成设备 ID；提交后取消及叠加保存失败仍保留脱敏取消/可能已提交的提示，不回滚用户凭据。
 - `tests/unit/message-revert.test.ts`、`stop-for-history.test.ts`、`agent-bridge-message-revert.test.ts`：SDK 持久分支、首条/元数据/压缩/图片、损坏或不支持内容拒绝、真实退出与超时隔离、会话/owner/队列/在途门控、退出后分支校验、重启失败保留结果及沿分支分页/索引/任务；计划扩展关闭时不重复落盘由 `plan-mode.test.ts` 覆盖。
 - `tests/renderer/messageRevertHistory.test.tsx`、`messageRevertInteraction.test.tsx`、`messageRevertNavigation.test.tsx`、`messageRevertSend.test.tsx`：逻辑会话/首次实时归属、元数据叶节点刷新、旧缓存和请求隔离、确认/取消/重复点击、草稿及附件保护、重启错误下恢复、撤销释放旧阅读范围，以及真实 Composer 到发送/排队的原文与图片透传。
-- `tests/unit/ipc-registration.test.ts`：模拟 IPC/服务检查领域路由集合及组合去重、参数/返回/错误与 this 接收者、启动项目更新顺序、YOLO 严格转换、子代理/消息撤销主帧与 owner、异步变更预留、窗口控制与终端转发；不启动真实 Electron、Agent 或 Git。
+- `tests/unit/ipc-registration.test.ts`：模拟 IPC/服务检查领域路由集合及组合去重、参数/返回/错误与 this 接收者、启动项目更新顺序、YOLO 严格转换、子代理/消息撤销及只读 MCP 状态的主帧与 owner、异步变更预留、窗口控制与终端转发；不启动真实 Electron、Agent 或 Git。
 - `tests/unit/terminal-service.test.ts`：项目终端复用、窗口归属校验、有界输出、并发打开和关闭清理（使用模拟 PTY）。
 - `tests/unit/window-effects.test.ts`、`window-effects-settings.test.ts`：模拟原生 API 的平台选择、Linux 重启边界、窗口归属、高对比度/失败回退及偏好持久化；不替代平台真机验证。
 - `tests/unit/subagents.test.ts`、`subagent-runner.test.ts`、`subagents-bridge.test.ts`、`subagent-permissions.test.ts`：默认开启、显式关闭门控、主动委派提示与原始约束保留、动态批次宽度/单子代理上限及四子代理同时启动、工具不可用/配置失败/读取期间关闭的提示隔离、每批配置快照与下一批变更、配置读取期间的批次锁、有界并发/超时/轮数/摘要长度、继承工具与权限拒绝、串行写入、会话归属及迟到请求、子模型计费去重与权限交互取消。
@@ -192,6 +203,7 @@
 - `tests/unit/runtime-lifecycle.test.ts`：RPC 启动失败及正常返回等待 owner dispose，保留主诊断并区分清理失败；创建失败不清理不存在的 runtime，不连接真实 MCP。
 - `tests/unit/native-extensions.test.ts`：模拟原生 builtin/replaceable 注册、旧插件替换、禁用/noExtensions、信任决策与临时默认工具；能力扫描仅注册、不连接；脚本模型预算、主机期限/父中止、方法 receiver 与原 usage 保留；codemode/MCP/resource 图片 fail-closed 投影及文字/详情边界，不验证真实服务器或 API。
 - `tests/unit/ask-user.test.ts`、`runtime-host.test.ts`：内置提问选择/自定义回答、取消/无 UI/中止、回答长度上限，以及 SDK 工具注入、启动参数、跨项目隔离与每个 backend 的 Codex OAuth 延迟解析/独立捕获；`plan-mode.test.ts` 覆盖 SDK 提问工具的计划模式白名单、生图隐藏/执行拦截及显式工具子集/空集/分支恢复。
+- `tests/unit/git-service.test.ts`：NUL 分隔的普通/重命名/复制路径、XY 标志和对象形状、畸形记录不吞下一条；隔离临时仓库验证两种 diff scope、未跟踪分流、重命名元数据及暂存/撤销选择等操作。
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
 - `tests/unit/review-file-tree.test.ts`：审查树目录优先排序、嵌套计数、原文件元数据与统计保留，以及既有父目录路径处理。
 - `tests/unit/projects.test.ts`：模拟主项目/worktree 登记、历史只读分组、名称与排序保留、缺失目录/非 Git 回退、显式移除元数据及异步变更/窗口推送竞态。
