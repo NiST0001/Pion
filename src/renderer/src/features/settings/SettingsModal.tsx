@@ -34,6 +34,7 @@ import type { ThemeId } from '../../utils/theme'
 export interface SettingsActions {
   setModel(provider: string, modelId: string): Promise<void>
   listModelProviders(): Promise<ModelProviderInfo[]>
+  setModelProviderEnabled?(providerId: string, enabled: boolean): Promise<ModelProviderInfo[]>
   loginModelProvider(providerId: string, authType: ModelProviderAuthType): Promise<ModelProviderInfo[]>
   logoutModelProvider(providerId: string): Promise<ModelProviderInfo[]>
   cancelModelProviderAuth(): Promise<void>
@@ -299,6 +300,7 @@ export function SettingsModal({
                 providerAuthState={modelProviderAuthState}
                 onSelect={(provider, modelId) => void handleModelSelect(provider, modelId)}
                 onListProviders={actions.listModelProviders}
+                onSetProviderEnabled={actions.setModelProviderEnabled}
                 onLoginProvider={actions.loginModelProvider}
                 onLogoutProvider={actions.logoutModelProvider}
                 onCancelProviderAuth={actions.cancelModelProviderAuth}

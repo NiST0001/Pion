@@ -42,12 +42,92 @@ it('coalesces full snapshots with one timer, strips unknown fields and honors em
   expect(h.packets).toHaveLength(1)
   vi.advanceTimersByTime(100)
   expect(h.last().rows.map((row) => row.text)).toEqual(['draft 999', 'thought'])
+  expect(h.last().rows.map((row) => row.state)).toEqual(['running', 'running'])
   expect(JSON.stringify(h.last())).not.toContain('secret')
   h.observer.event(message('message_end', ''))
   h.observer.finish('completed')
   expect(h.last().rows.map((row) => row.text)).toEqual(['', ''])
+  expect(h.last().rows.map((row) => row.state)).toEqual(['completed', 'completed'])
   expect(h.last().status).toBe('completed')
   expect(vi.getTimerCount()).toBe(0)
+})
+
+it.each([['short', 'brief'], ['', '']])('keeps shorter final fields %j authoritative on the same completed rows', async (text, thinking) => {
+  vi.useFakeTimers()
+  const h = await setup()
+  h.observer.event({ type: 'message_start', message: { role: 'assistant' } })
+  vi.advanceTimersByTime(100)
+  expect(h.last().rows).toEqual([])
+  h.observer.event(message('message_update', 'long draft text', 'long draft thinking'))
+  vi.advanceTimersByTime(100)
+  expect(h.last().rows).toEqual([
+    { id: 'message-1-text', kind: 'assistant', text: 'long draft text', state: 'running' },
+    { id: 'message-1-thinking', kind: 'thinking', text: 'long draft thinking', state: 'running' }
+  ])
+  h.observer.event(message('message_end', text, thinking))
+  vi.advanceTimersByTime(100)
+  expect(h.last().rows).toEqual([
+    { id: 'message-1-text', kind: 'assistant', text, state: 'completed' },
+    { id: 'message-1-thinking', kind: 'thinking', text: thinking, state: 'completed' }
+  ])
+  expect(h.last().status).toBe('starting') // Message end does not claim child settlement.
+  h.observer.finish('completed')
+})
+
+it('does not graft the final assistant after a tool onto the previous assistant message', async () => {
+  vi.useFakeTimers()
+  const h = await setup()
+  h.observer.running()
+  h.observer.event({ type: 'message_start', message: { role: 'assistant', id: 'secret-sdk-id' } })
+  h.observer.event(message('message_update', 'before tool', 'first thought'))
+  h.observer.event(message('message_end', 'before tool', 'first thought'))
+  h.observer.event({ type: 'tool_execution_end', toolCallId: 'call', toolName: 'read',
+    result: { content: [{ type: 'text', text: 'tool result' }] } })
+  h.observer.event({ type: 'message_start', message: { role: 'assistant', id: 'secret-final-id' } })
+  h.observer.event(message('message_update', 'final draft', 'final thought'))
+  vi.advanceTimersByTime(100)
+  expect(h.last().rows).toEqual([
+    { id: 'message-1-text', kind: 'assistant', text: 'before tool', state: 'completed' },
+    { id: 'message-1-thinking', kind: 'thinking', text: 'first thought', state: 'completed' },
+    { id: 'tool-2', kind: 'tool', text: 'tool result', toolName: 'read', state: 'completed' },
+    { id: 'message-3-text', kind: 'assistant', text: 'final draft', state: 'running' },
+    { id: 'message-3-thinking', kind: 'thinking', text: 'final thought', state: 'running' }
+  ])
+  h.observer.event(message('message_end', 'final', ''))
+  h.observer.finish('completed')
+  expect(h.last().rows.slice(-2)).toEqual([
+    { id: 'message-3-text', kind: 'assistant', text: 'final', state: 'completed' },
+    { id: 'message-3-thinking', kind: 'thinking', text: '', state: 'completed' }
+  ])
+  expect(JSON.stringify(h.last())).not.toContain('secret')
+  const count = h.packets.length
+  h.observer.event(message('message_update', 'late draft', 'late thought'))
+  h.observer.running()
+  vi.advanceTimersByTime(100)
+  expect(h.packets).toHaveLength(count)
+  expect(h.last().status).toBe('completed')
+})
+
+it.each(['aborted', 'failed'] as const)('keeps interrupted draft state without inventing message completion at child %s', async (status) => {
+  vi.useFakeTimers()
+  const h = await setup()
+  h.observer.running()
+  h.observer.event(message('message_update', 'unfinished', 'unfinished thought'))
+  h.observer.cancelling()
+  h.observer.running()
+  expect(h.last().status).toBe('cancelling')
+  h.observer.finish(status)
+  expect(h.last()).toMatchObject({ status, rows: [
+    { kind: 'assistant', text: 'unfinished', state: 'running' },
+    { kind: 'thinking', text: 'unfinished thought', state: 'running' }
+  ] })
+  const count = h.packets.length
+  h.observer.event(message('message_end', 'late final'))
+  h.observer.running()
+  h.observer.finish('completed')
+  vi.advanceTimersByTime(100)
+  expect(h.packets).toHaveLength(count)
+  expect(h.last().status).toBe(status)
 })
 
 it('only projects tool text and never args, details, structured content, image or usage payloads', async () => {
@@ -126,9 +206,19 @@ it('publishes store-accepted packets at identity/tool/text bounds without trunca
     expect(observer).toBeDefined()
     for (let n = 0; n < 220; n++) observer.event({ type: 'tool_execution_end', toolCallId: `${n}`,
       toolName: 'x'.repeat(256), result: { content: [{ type: 'text', text: 'a'.repeat(8192) }] } })
+    observer.event(message('message_update', '\u0000'.repeat(8192), '\u0000'.repeat(8192)))
+    observer.cancelling() // Immediate full draft packet exercises running row states and escaped bounds.
+    observer.event(message('message_end', 'final', ''))
     observer.finish('completed')
     expect(received.length).toBeGreaterThanOrEqual(2)
-    for (const { notice, snapshot } of received) expect(snapshot).toMatchObject({ revision: notice.revision, rows: notice.rows })
+    for (const { notice, snapshot } of received) {
+      expect(JSON.stringify(notice).length).toBeLessThanOrEqual(128 * 1024)
+      expect(notice.rows.reduce((n, row) => n + row.id.length + row.kind.length + row.text.length
+        + (row.toolName?.length ?? 0) + (row.state?.length ?? 0), 0)).toBeLessThanOrEqual(64 * 1024)
+      expect(snapshot).toMatchObject({ revision: notice.revision, rows: notice.rows })
+    }
+    expect(received.at(-2)!.notice.rows.slice(-2).map((row) => row.state)).toEqual(['running', 'running'])
+    expect(last!.rows.slice(-2).map((row) => row.state)).toEqual(['completed', 'completed'])
     expect(last).toMatchObject({ cwd, parentSessionPath: path, nonce, parentSessionId: parent, parentToolCallId: call })
     expect(last!.rows.length).toBeGreaterThan(0)
     expect(last!.rows.reduce((n, row) => n + row.id.length + row.text.length + (row.toolName?.length ?? 0), 0)).toBeLessThanOrEqual(65536)

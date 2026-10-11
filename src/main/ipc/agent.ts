@@ -145,6 +145,11 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   })
   ipcMain.handle(IPC.AgentModels, () => bridge.getModels())
   ipcMain.handle(IPC.AgentModelProviders, () => bridge.getModelProviders())
+  // Shell display preference only; never a backend/provider-auth mutation.
+  ipcMain.handle(IPC.AgentSetModelProviderEnabled, (event, providerId: string, enabled: boolean) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口设置提供商显示')
+    return bridge.setModelProviderEnabled(providerId, enabled, event.sender.id)
+  })
   ipcMain.handle(
     IPC.AgentLoginModelProvider,
     (_event, providerId: string, authType: ModelProviderAuthType) =>

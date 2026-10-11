@@ -161,6 +161,7 @@ const api: PionApi = {
   getSubagentSettings: () => ipcRenderer.invoke(IPC.GetSubagentSettings),
   setSubagentSettings: (settings) => ipcRenderer.invoke(IPC.SetSubagentSettings, settings),
   getAvailableModels: () => ipcRenderer.invoke(IPC.AgentModels),
+  setModelProviderEnabled: (providerId, enabled) => ipcRenderer.invoke(IPC.AgentSetModelProviderEnabled, providerId, enabled) as Promise<ModelProviderInfo[]>,
   listModelProviders: () =>
     ipcRenderer.invoke(IPC.AgentModelProviders) as Promise<ModelProviderInfo[]>,
   loginModelProvider: (providerId, authType: ModelProviderAuthType) =>

@@ -92,6 +92,81 @@ describe('useSubagentSessions memory projection', () => {
     expect(f.mocks.getSubagentSession).toHaveBeenCalledTimes(2)
     expect(result.current.selected).toEqual(detail(newer))
   })
+  it('keeps the accepted body revision during refresh and immediately applies terminal metadata without reviving a run', async () => {
+    const f = fixture()
+    const original = child()
+    const refresh = deferred<SubagentSessionSnapshot | null>()
+    const terminalRead = deferred<SubagentSessionSnapshot | null>()
+    f.mocks.getSubagentSession.mockResolvedValueOnce(detail(original))
+      .mockImplementationOnce(() => refresh.promise).mockImplementationOnce(() => terminalRead.promise)
+    const { result } = renderHook(() => useSubagentSessions(f.api))
+    await act(async () => { f.push({ revision: 1, sessions: [original] }); result.current.open(original) })
+    const rows = result.current.selected!.rows
+    const newer = { ...original, revision: 2, name: 'new header', truncated: true }
+    act(() => f.push({ revision: 2, sessions: [newer] }))
+    expect(result.current.loading).toBe(true)
+    expect(result.current.selected).toMatchObject({ revision: 1, name: 'new header', truncated: true, status: 'running' })
+    expect(result.current.selected!.rows).toBe(rows)
+    const completed = { ...newer, revision: 3, status: 'completed' as const, retentionRemainingMs: 1000 }
+    act(() => f.push({ revision: 3, sessions: [completed] }))
+    expect(result.current.selected).toMatchObject({ revision: 1, status: 'completed' })
+    expect(result.current.selected!.rows).toBe(rows)
+    // Adding a revision to an old snapshot must not make its stale status/name
+    // binding acceptable. The actual pending slot remains occupied until here.
+    await act(async () => refresh.resolve({ ...detail(newer), revision: 3 }))
+    expect(result.current.selected!.rows).toBe(rows)
+    expect(result.current.selected!.status).toBe('completed')
+    expect(f.mocks.getSubagentSession).toHaveBeenCalledTimes(3)
+    act(() => f.push({ revision: 4, sessions: [{ ...newer, revision: 4 }] }))
+    expect(result.current.sessions[0].status).toBe('completed')
+    expect(result.current.selected!.status).toBe('completed')
+    await act(async () => terminalRead.resolve(detail(completed)))
+    expect(result.current.selected).toMatchObject({ revision: 3, status: 'completed' })
+  })
+  it('replaces retained rows only after a matching new detail and rejects a forged revision with stale binding', async () => {
+    const f = fixture()
+    const original = child()
+    const pending = deferred<SubagentSessionSnapshot | null>()
+    f.mocks.getSubagentSession.mockResolvedValueOnce(detail(original)).mockImplementationOnce(() => pending.promise)
+    const { result } = renderHook(() => useSubagentSessions(f.api))
+    await act(async () => { f.push({ revision: 1, sessions: [original] }); result.current.open(original) })
+    const rows = result.current.selected!.rows
+    const newer = { ...original, revision: 2, name: 'new header' }
+    act(() => f.push({ revision: 2, sessions: [newer] }))
+    await act(async () => pending.resolve({ ...detail(original), revision: 2 }))
+    expect(result.current.selected!.revision).toBe(1)
+    expect(result.current.selected!.rows).toBe(rows)
+    f.mocks.getSubagentSession.mockResolvedValue(detail(newer))
+    act(() => f.push({ revision: 3, sessions: [newer] }))
+    await act(async () => {})
+    expect(result.current.selected).toEqual(detail(newer))
+    expect(result.current.selected!.rows).not.toBe(rows)
+  })
+  it('keeps safe rows through first parent-path binding but clears them on known path or source changes', async () => {
+    const f = fixture()
+    const original = { ...child(), parentSessionPath: undefined }
+    f.mocks.getSubagentSession.mockResolvedValueOnce(detail(original))
+      .mockImplementation(() => new Promise(() => {}))
+    const { result } = renderHook(() => useSubagentSessions(f.api))
+    await act(async () => { f.push({ revision: 1, sessions: [original] }); result.current.open(original) })
+    const rows = result.current.selected!.rows
+    const bound = { ...original, parentSessionPath: '/persisted.jsonl', revision: 2 }
+    act(() => f.push({ revision: 2, sessions: [bound] }))
+    expect(result.current.selected!.rows).toBe(rows)
+    expect(result.current.selected).toMatchObject({ revision: 1, parentSessionPath: '/persisted.jsonl' })
+    act(() => f.push({ revision: 3, sessions: [{ ...bound, parentSessionPath: '/different.jsonl', revision: 3 }] }))
+    expect(result.current.selected).toBeNull()
+  })
+  it.each(['runtimeId', 'cwd', 'parentToolCallId', 'parentSessionId', 'backendId'] as const)('clears accepted rows when %s changes', async (field) => {
+    const f = fixture()
+    f.mocks.getSubagentSession.mockImplementationOnce(async () => detail(child()))
+      .mockImplementation(() => new Promise(() => {}))
+    const { result } = renderHook(() => useSubagentSessions(f.api))
+    await act(async () => { f.push({ revision: 1, sessions: [child()] }); result.current.open(child()) })
+    expect(result.current.selected).not.toBeNull()
+    act(() => f.push({ revision: 2, sessions: [{ ...child(), [field]: 'changed', revision: 2 }] }))
+    expect(result.current.selected).toBeNull()
+  })
   it('unrelated list revisions do not starve pending detail', async () => {
     const f = fixture()
     const pending = deferred<SubagentSessionSnapshot | null>()

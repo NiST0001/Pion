@@ -231,8 +231,9 @@ export function createSubagentSessionPublisher(options: {
               if (!assistantId) assistantId = `message-${++sequence}`
               // SDK update.message is the complete current draft; no raw event,
               // signatures, images, system prompt or usage crosses this boundary.
-              row(`${assistantId}-text`, 'assistant', textContent(message.content, 'text'))
-              row(`${assistantId}-thinking`, 'thinking', textContent(message.content, 'thinking'))
+              const state = event.type === 'message_end' ? 'completed' : 'running'
+              row(`${assistantId}-text`, 'assistant', textContent(message.content, 'text'), { state })
+              row(`${assistantId}-thinking`, 'thinking', textContent(message.content, 'thinking'), { state })
               // Empty final fields are authoritative, not a request to keep drafts.
               if (event.type === 'message_end') assistantId = ''
               schedule()

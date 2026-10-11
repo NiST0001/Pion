@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactElement } from 'react'
 import {
   Bot,
@@ -52,6 +52,7 @@ export function ModelsPage({
   providerAuthState,
   onSelect,
   onListProviders,
+  onSetProviderEnabled,
   onLoginProvider,
   onLogoutProvider,
   onCancelProviderAuth,
@@ -68,6 +69,7 @@ export function ModelsPage({
   providerAuthState: ModelProviderAuthState | null
   onSelect: (provider: string, modelId: string) => void
   onListProviders: () => Promise<ModelProviderInfo[]>
+  onSetProviderEnabled?: (providerId: string, enabled: boolean) => Promise<ModelProviderInfo[]>
   onLoginProvider: (providerId: string, authType: ModelProviderAuthType) => Promise<ModelProviderInfo[]>
   onLogoutProvider: (providerId: string) => Promise<ModelProviderInfo[]>
   onCancelProviderAuth: () => Promise<void>
@@ -83,36 +85,54 @@ export function ModelsPage({
   const [providerActionKey, setProviderActionKey] = useState('')
   const [providerQuery, setProviderQuery] = useState('')
 
+  const mounted = useRef(false)
+  const catalogRevision = useRef(0)
+  const actionPending = useRef(false)
+  const catalogOwner = useRef({ onListProviders, onSetProviderEnabled })
+  if (catalogOwner.current.onListProviders !== onListProviders
+    || catalogOwner.current.onSetProviderEnabled !== onSetProviderEnabled) {
+    catalogOwner.current = { onListProviders, onSetProviderEnabled }
+    // Fence old results immediately, even while an action still holds the gate.
+    ++catalogRevision.current
+  }
+
   const loadProviderCatalog = async (): Promise<void> => {
+    if (actionPending.current) return
+    const owner = catalogOwner.current
+    const revision = ++catalogRevision.current
     setProviderCatalogLoading(true)
     setProviderCatalogError('')
     try {
-      setProviderCatalog(await onListProviders())
+      const providers = await owner.onListProviders()
+      if (mounted.current && owner === catalogOwner.current && revision === catalogRevision.current) {
+        setProviderCatalog(providers)
+      }
     } catch (loadError) {
-      setProviderCatalogError(loadError instanceof Error ? loadError.message : String(loadError))
+      if (mounted.current && owner === catalogOwner.current && revision === catalogRevision.current) {
+        setProviderCatalogError(loadError instanceof Error ? loadError.message : String(loadError))
+      }
     } finally {
-      setProviderCatalogLoading(false)
+      if (mounted.current && owner === catalogOwner.current && revision === catalogRevision.current) {
+        setProviderCatalogLoading(false)
+      }
     }
   }
 
   useEffect(() => {
-    let active = true
-    setProviderCatalogLoading(true)
-    setProviderCatalogError('')
-    void onListProviders()
-      .then((providers) => {
-        if (active) setProviderCatalog(providers)
-      })
-      .catch((loadError: unknown) => {
-        if (active) setProviderCatalogError(loadError instanceof Error ? loadError.message : String(loadError))
-      })
-      .finally(() => {
-        if (active) setProviderCatalogLoading(false)
-      })
+    mounted.current = true
     return () => {
-      active = false
+      mounted.current = false
+      ++catalogRevision.current
     }
-  }, [onListProviders])
+  }, [])
+
+  useEffect(() => {
+    setProviderCatalog([])
+    setProviderCatalogError('')
+    setProviderCatalogLoading(true)
+    void loadProviderCatalog()
+    return () => { ++catalogRevision.current }
+  }, [onListProviders, onSetProviderEnabled])
 
   const toggleProvider = (provider: string): void => {
     setExpandedProviders((current) => {
@@ -129,33 +149,56 @@ export function ModelsPage({
     void loadProviderCatalog()
   }
 
-  const handleProviderLogin = async (
-    providerId: string,
-    authType: ModelProviderAuthType
+  const runProviderAction = async (
+    key: string,
+    action: () => Promise<ModelProviderInfo[] | void>,
+    visibility?: { id: string; enabled: boolean }
   ): Promise<void> => {
-    const key = `${providerId}:${authType}`
+    if (actionPending.current) {
+      if (key === 'add') throw new Error('请等待提供商操作完成。')
+      return
+    }
+    actionPending.current = true
+    const owner = catalogOwner.current
+    const revision = ++catalogRevision.current
+    setProviderCatalogLoading(false)
     setProviderActionKey(key)
     setProviderCatalogError('')
     try {
-      setProviderCatalog(await onLoginProvider(providerId, authType))
-    } catch (loginError) {
-      setProviderCatalogError(loginError instanceof Error ? loginError.message : String(loginError))
+      const providers = await action()
+      if (mounted.current && owner === catalogOwner.current && revision === catalogRevision.current) {
+        if (providers) setProviderCatalog(providers.map((provider) =>
+          visibility && provider.id === visibility.id && provider.enabled === undefined
+            ? { ...provider, enabled: visibility.enabled }
+            : provider))
+      }
+    } catch (actionError) {
+      if (mounted.current && owner === catalogOwner.current && revision === catalogRevision.current) {
+        setProviderCatalogError(actionError instanceof Error ? actionError.message : String(actionError))
+      }
+      if (key === 'add') throw actionError
     } finally {
-      setProviderActionKey('')
+      // Only actual settlement releases the gate; owner changes cannot do so.
+      actionPending.current = false
+      if (mounted.current) {
+        setProviderActionKey('')
+        if (owner !== catalogOwner.current) void loadProviderCatalog()
+      }
     }
   }
 
-  const handleProviderLogout = async (providerId: string): Promise<void> => {
-    const key = `${providerId}:logout`
-    setProviderActionKey(key)
-    setProviderCatalogError('')
-    try {
-      setProviderCatalog(await onLogoutProvider(providerId))
-    } catch (logoutError) {
-      setProviderCatalogError(logoutError instanceof Error ? logoutError.message : String(logoutError))
-    } finally {
-      setProviderActionKey('')
-    }
+  const handleProviderLogin = (providerId: string, authType: ModelProviderAuthType): Promise<void> =>
+    runProviderAction(`${providerId}:${authType}`, () => onLoginProvider(providerId, authType))
+
+  const handleProviderLogout = (providerId: string): Promise<void> =>
+    runProviderAction(`${providerId}:logout`, () => onLogoutProvider(providerId))
+
+  const handleProviderVisibility = (provider: ModelProviderInfo): void => {
+    if (!onSetProviderEnabled || visibilityBusy) return
+    const enabled = provider.enabled === false
+    void runProviderAction(`${provider.id}:visibility`, () => onSetProviderEnabled(provider.id, enabled), {
+      id: provider.id, enabled
+    })
   }
 
   const normalizedQuery = providerQuery.trim().toLowerCase()
@@ -169,6 +212,16 @@ export function ModelsPage({
   const authInProgress = providerAuthState?.phase === 'starting'
     || providerAuthState?.phase === 'waiting'
   const providerActionBusy = agentBusy || busyKey !== '' || providerActionKey !== '' || authInProgress
+  const visibilityBusy = busyKey !== '' || providerActionKey !== '' || authInProgress
+  const availableGroups = groups.filter((group) => !providerCatalog.some(
+    (provider) => provider.id === group.provider && provider.enabled === false
+  ))
+  const availableModelCount = availableGroups.length === groups.length
+    ? models.length : availableGroups.reduce((total, group) => total + group.models.length, 0)
+  const displayProviders = providerCatalog.filter((provider) => provider.configured
+    || provider.enabled === false
+    || groups.some((group) => group.provider === provider.id)
+    || session?.provider === provider.id)
 
   return (
     <section className="settings-page models-page">
@@ -190,6 +243,23 @@ export function ModelsPage({
         {activeModel?.reasoning && <span className="model-badge">推理</span>}
       </div>
       {error && <div className="settings-inline-error">{error}</div>}
+      {providerCatalogError && <div className="provider-add-error" role="alert">{providerCatalogError}</div>}
+      {displayProviders.length > 0 && (
+        <div className="provider-visibility-section">
+          <div className="settings-section-title">提供商显示</div>
+          <p>关闭仅隐藏模型，已有会话不受影响。</p>
+          {displayProviders.map((provider) => (
+            <div className="provider-visibility-row" key={provider.id}>
+              <span className="provider-directory-identity">
+                <strong>{provider.name}</strong><code>{provider.id}</code>
+              </span>
+              <ProviderVisibilitySwitch provider={provider}
+                disabled={!onSetProviderEnabled || visibilityBusy}
+                onToggle={() => handleProviderVisibility(provider)} />
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="provider-list-heading">
         <div className="settings-section-title provider-list-title">提供商与认证</div>
@@ -261,7 +331,6 @@ export function ModelsPage({
                 onCancel={onCancelProviderAuth}
                 onOpenUrl={onOpenProviderAuthUrl}
               />
-              {providerCatalogError && <div className="provider-add-error" role="alert">{providerCatalogError}</div>}
 
               {providerCatalogLoading && providerCatalog.length === 0 ? (
                 <div className="provider-directory-empty"><Loader2 size={14} className="spin" />正在读取 Pi 提供商...</div>
@@ -277,6 +346,8 @@ export function ModelsPage({
                       disabled={providerActionBusy}
                       onLogin={(authType) => void handleProviderLogin(provider.id, authType)}
                       onLogout={() => void handleProviderLogout(provider.id)}
+                      visibilityDisabled={!onSetProviderEnabled || visibilityBusy}
+                      onToggleVisibility={() => handleProviderVisibility(provider)}
                     />
                   ))}
                 </div>
@@ -286,7 +357,7 @@ export function ModelsPage({
             <AddProviderForm
               disabled={providerActionBusy}
               onCancel={() => setAddingProvider(false)}
-              onSubmit={onAddProvider}
+              onSubmit={(input) => runProviderAction('add', () => onAddProvider(input))}
               onAdded={handleProviderAdded}
             />
           )}
@@ -294,13 +365,13 @@ export function ModelsPage({
       )}
 
       <div className="settings-section-title provider-models-title">
-        当前可用模型 · {groups.length} 个提供商 · {models.length} 个模型
+        当前可用模型 · {availableGroups.length} 个提供商 · {availableModelCount} 个模型
       </div>
-      {groups.length === 0 ? (
+      {availableGroups.length === 0 ? (
         <div className="models-empty">暂无可用模型，请从上方登录提供商或检查 Pi 配置。</div>
       ) : (
         <div className="provider-list">
-          {groups.map((group) => {
+          {availableGroups.map((group) => {
             const expanded = expandedProviders.has(group.provider)
             return (
               <div className="provider-card" key={group.provider}>
@@ -402,13 +473,17 @@ function ProviderDirectoryRow({
   busyKey,
   disabled,
   onLogin,
-  onLogout
+  onLogout,
+  visibilityDisabled,
+  onToggleVisibility
 }: {
   provider: ModelProviderInfo
   busyKey: string
   disabled: boolean
   onLogin: (authType: ModelProviderAuthType) => void
   onLogout: () => void
+  visibilityDisabled: boolean
+  onToggleVisibility: () => void
 }): ReactElement {
   return (
     <div className="provider-directory-row">
@@ -418,6 +493,7 @@ function ProviderDirectoryRow({
         <code>{provider.id}</code>
         <small>{provider.modelCount} 个模型 · {providerStatusLabel(provider)}</small>
       </span>
+      <ProviderVisibilitySwitch provider={provider} disabled={visibilityDisabled} onToggle={onToggleVisibility} />
       <span className="provider-directory-actions">
         {provider.authMethods.map((method) => {
           const key = `${provider.id}:${method.type}`
@@ -457,6 +533,25 @@ function ProviderDirectoryRow({
         )}
       </span>
     </div>
+  )
+}
+
+function ProviderVisibilitySwitch({ provider, disabled, onToggle }: {
+  provider: ModelProviderInfo
+  disabled: boolean
+  onToggle: () => void
+}): ReactElement {
+  const enabled = provider.enabled !== false
+  return (
+    <span className="provider-visibility-control">
+      <span>{enabled ? '模型显示' : '已隐藏'}</span>
+      <button type="button" role="switch" className={`toggle${enabled ? ' on' : ''}`}
+        aria-label={`显示 ${provider.name} 的模型`} aria-checked={enabled} disabled={disabled}
+        title="关闭仅隐藏此提供商的模型；已有会话不受影响，不退出登录或删除配置。"
+        onClick={onToggle}>
+        <span className="toggle-knob" />
+      </button>
+    </span>
   )
 }
 

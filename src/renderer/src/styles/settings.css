@@ -887,3 +887,33 @@
   }
 }
 
+.provider-visibility-section {
+  margin: 18px 0;
+}
+
+.provider-visibility-section > p {
+  margin: 0 0 10px;
+  color: var(--fg-muted);
+  font-size: 11.5px;
+}
+
+.provider-visibility-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  margin-bottom: 4px;
+}
+
+.provider-visibility-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+

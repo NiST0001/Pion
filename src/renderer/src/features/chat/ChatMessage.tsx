@@ -18,6 +18,7 @@ import {
 import { Markdown } from './Markdown'
 
 interface ChatMessageProps {
+  readOnly?: boolean
   item: Extract<TimelineItem, { kind: 'assistant' | 'user' }>
   onFork?: (entryId: string) => void
   canFork: boolean
@@ -45,6 +46,7 @@ const ModelErrorAnnouncement = memo(function ModelErrorAnnouncement({ text }: { 
 
 export const ChatMessage = memo(function ChatMessage({
   item,
+  readOnly = false,
   onFork,
   canFork,
   canRevert,
@@ -92,7 +94,7 @@ export const ChatMessage = memo(function ChatMessage({
   }, [errorMessage, thinking])
 
   if (item.kind === 'user') {
-    const entryId = item.entryId
+    const entryId = readOnly ? undefined : item.entryId
     // A live user can be persisted before its SDK entry ID reaches the UI.
     // These are display-only locators, never fork/undo identities. In
     // particular, item.timestamp is the entry's separate append-time clock.
@@ -119,7 +121,7 @@ export const ChatMessage = memo(function ChatMessage({
               {item.text}
             </div>
           )}
-          {item.images && item.images.length > 0 && (
+          {!readOnly && item.images && item.images.length > 0 && (
             <div className="message-images" aria-label="消息中的图像">
               {item.images.map((image, index) => (
                 <img
@@ -202,6 +204,7 @@ export const ChatMessage = memo(function ChatMessage({
           <div data-live-output="assistant-text">
             <Markdown
               text={text}
+              readOnly={readOnly}
               revealMode={revealSuppressed ? undefined : liveStreamingReveal ? 'live' : item.historical ? 'history' : undefined}
             />
           </div>

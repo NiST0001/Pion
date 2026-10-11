@@ -17,6 +17,7 @@ import { bindBrowserSecurity } from './browser-security'
 import { WindowEffectsService } from './window-effects'
 import { assertSubagentSettingsOwner, SubagentSettingsStore } from './subagent-settings'
 import { assertThemeSettingsOwner, ThemeSettingsStore } from './theme-settings'
+import { ProviderVisibilityStore } from './provider-visibility'
 import { registerAgentIpc } from './ipc/agent'
 import { registerGitIpc } from './ipc/git'
 import { registerWindowIpc } from './ipc/window'
@@ -42,7 +43,8 @@ const windowEffects = new WindowEffectsService(appSettings, {
   sessionType: process.env.XDG_SESSION_TYPE, desktop: process.env.XDG_CURRENT_DESKTOP,
   hasDisplay: Boolean(process.env.DISPLAY), hasWaylandDisplay: Boolean(process.env.WAYLAND_DISPLAY)
 }, () => nativeTheme.shouldUseHighContrastColors)
-const bridge = new AgentBridge(runStore, appSettings)
+const providerVisibility = new ProviderVisibilityStore(join(app.getPath('userData'), 'pion-provider-visibility.json'))
+const bridge = new AgentBridge(runStore, appSettings, undefined, undefined, providerVisibility)
 const verification = new VerificationService(join(app.getPath('userData'), 'pion-verification.json'))
 const workflowPermissionStore = new ToolPermissionStore()
 const workflows = new WorkflowManager({

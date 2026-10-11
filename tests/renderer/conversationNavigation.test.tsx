@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, render, renderHook } from '@testing-library/react'
+import { useRef } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useConversationNavigation } from '../../src/renderer/src/hooks/useConversationNavigation'
 import type { TimelineItem } from '../../src/renderer/src/agent/types'
@@ -66,6 +67,109 @@ function markerFixture() {
 }
 
 describe('conversation navigation', () => {
+  it.each(['wheel', 'touch', 'PageUp'] as const)('binds a conditionally mounted viewport and pauses on %s before any scroll event', (gesture) => {
+    const frames = new Map<number, FrameRequestCallback>()
+    let frameId = 0
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.set(++frameId, callback); return frameId })
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id) })
+    const observers: { callback: () => void; observe: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }[] = []
+    vi.stubGlobal('ResizeObserver', class {
+      observe = vi.fn()
+      disconnect = vi.fn()
+      constructor(callback: () => void) { observers.push({ callback, observe: this.observe, disconnect: this.disconnect }) }
+    })
+    const addWindow = vi.spyOn(window, 'addEventListener')
+    const removeWindow = vi.spyOn(window, 'removeEventListener')
+    const loadOlder = vi.fn(async () => {})
+    const loadNewer = vi.fn(async () => {})
+    let height = 3000
+    let writes = 0
+    const timeline: TimelineItem[] = [{ kind: 'user', id: 1, text: 'child prompt' }]
+    function Viewport({ active, items }: { active: boolean; items: TimelineItem[] }) {
+      const scrollRef = useRef<HTMLDivElement | null>(null)
+      const navigation = useConversationNavigation({
+        scrollRef, viewportActive: active, timeline: items, timelineMutation: 'append', busy: true,
+        historyJump: null, sessionPath: '/child', loadOlder, loadNewer
+      })
+      return active ? <div data-testid="viewport" ref={(element) => {
+        scrollRef.current = element
+        if (!element || Object.hasOwn(element, 'scrollHeight')) return
+        let top = 0
+        Object.defineProperties(element, {
+          scrollHeight: { get: () => height }, clientHeight: { value: 400 },
+          scrollTop: { get: () => top, set: (value: number) => { writes++; top = Math.max(0, Math.min(height - 400, value)) } }
+        })
+      }} onScroll={navigation.handleTimelineScroll}>
+        <div ref={(surface) => {
+          navigation.scrollSurfaceRef.current = surface
+          if (surface) surface.getBoundingClientRect = () => ({ height } as DOMRect)
+        }}><div className="timeline" ref={(content) => {
+          if (content) Object.defineProperty(content, 'offsetHeight', { configurable: true, get: () => height })
+        }} /></div>
+      </div> : null
+    }
+    const view = render(<Viewport active={false} items={timeline} />)
+    expect(observers).toHaveLength(0)
+    expect(addWindow.mock.calls.filter(([name]) => name === 'resize')).toHaveLength(0)
+    view.rerender(<Viewport active items={timeline} />)
+    let element = view.getByTestId('viewport')
+    expect(element.scrollTop).toBe(2600)
+    expect(observers.some((observer) => observer.observe.mock.calls.some(([target]) => target === element))).toBe(true)
+    const pause = () => act(() => {
+      if (gesture === 'wheel') element.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }))
+      else if (gesture === 'PageUp') element.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }))
+      else {
+        const touch = new Event('touchstart', { bubbles: true })
+        Object.defineProperty(touch, 'touches', { value: [{ clientY: 200 }] })
+        element.dispatchEvent(touch)
+      }
+    })
+    pause()
+    // The input itself pauses following; no scroll event (or offset change)
+    // is needed before the next streaming append/resize delivery.
+    const stoppedWrites = writes
+    height = 3400
+    const appended: TimelineItem[] = [...timeline, { kind: 'assistant', id: 2, text: 'streaming', thinking: '', streaming: true }]
+    view.rerender(<Viewport active items={appended} />)
+    act(() => observers.at(-1)!.callback())
+    expect(writes).toBe(stoppedWrites)
+    expect(element.scrollTop).toBe(2600)
+    // Explicit bottom navigation, unlike layout, resumes the existing intent.
+    act(() => element.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })))
+    expect(element.scrollTop).toBe(3000)
+    height = 3600
+    view.rerender(<Viewport active items={[...appended, { kind: 'user', id: 3, text: 'more' }]} />)
+    expect(element.scrollTop).toBe(3200)
+    pause()
+    const removeElement = vi.spyOn(element, 'removeEventListener')
+    const activeObservers = observers.filter((observer) => observer.disconnect.mock.calls.length === 0)
+    view.rerender(<Viewport active={false} items={appended} />)
+    expect(view.queryByTestId('viewport')).toBeNull()
+    for (const name of ['wheel', 'touchstart', 'touchmove', 'pointermove', 'pointerdown', 'keydown']) {
+      expect(removeElement.mock.calls.some(([type]) => type === name)).toBe(true)
+    }
+    expect(activeObservers.every((observer) => observer.disconnect.mock.calls.length > 0)).toBe(true)
+    expect(removeWindow.mock.calls.some(([name]) => name === 'resize')).toBe(true)
+    expect(frames.size).toBe(0)
+    const closedWrites = writes
+    view.rerender(<Viewport active items={appended} />)
+    element = view.getByTestId('viewport')
+    // Reactivating isn't a new session or a request to follow the latest turn.
+    expect(writes).toBe(closedWrites)
+    expect(element.scrollTop).toBe(0)
+    act(() => element.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })))
+    expect(element.scrollTop).toBe(3200)
+    pause()
+    const reopenedWrites = writes
+    height = 3800
+    view.rerender(<Viewport active items={[...appended, { kind: 'user', id: 4, text: 'last' }]} />)
+    expect(writes).toBe(reopenedWrites)
+    expect(loadOlder).not.toHaveBeenCalled()
+    expect(loadNewer).not.toHaveBeenCalled()
+    view.unmount()
+    expect(frames.size).toBe(0)
+  })
+
   it('tracks the real mounted live turn without an entry ID, including a late same-session index and running response', () => {
     const f = markerFixture()
     const content = f.element.querySelector<HTMLElement>('.timeline')!

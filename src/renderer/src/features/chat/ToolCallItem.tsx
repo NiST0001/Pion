@@ -50,10 +50,10 @@ function truncate(text: string, max: number): string {
 // Mount only inside the disclosure and memoize actual body inputs separately
 // from header/status updates. Closed details do no body segmentation or
 // diff-row parsing; the header's full-diff counts are cached separately.
-const ToolDetails = memo(function ToolDetails({ toolId, name, diff, command, outputText, writeContent, images, imageNotice, imageModelInfo, imageSettingsInfo, mode }: {
+const ToolDetails = memo(function ToolDetails({ toolId, name, diff, command, outputText, writeContent, images, imageNotice, imageModelInfo, imageSettingsInfo, mode, readOnly }: {
   toolId: string; name: string; diff?: string; command?: string; outputText?: string; writeContent?: string
   images?: ToolItem['images']; imageNotice?: string; imageModelInfo?: ToolItem['imageModelInfo']
-  imageSettingsInfo?: ToolItem['imageSettingsInfo']; mode?: TextRevealMode
+  imageSettingsInfo?: ToolItem['imageSettingsInfo']; mode?: TextRevealMode; readOnly?: boolean
 }) {
   const text = (value: string) => mode ? <ReviewRevealText text={value} mode={mode} /> : value
   return <div className="tool-body" data-live-output="tool-body">
@@ -83,14 +83,14 @@ const ToolDetails = memo(function ToolDetails({ toolId, name, diff, command, out
     )}
     {outputText && !diff && <pre className="tool-output">{text(truncate(outputText, 4000))}</pre>}
     {name === 'write' && writeContent && <pre className="tool-output">{text(truncate(writeContent, 4000))}</pre>}
-    <ToolResultImages toolId={toolId} images={images} notice={imageNotice} />
+    {!readOnly && <ToolResultImages toolId={toolId} images={images} notice={imageNotice} />}
     {!diff && !outputText && !writeContent && !images?.length && !imageNotice && (
       <div className="tool-empty"><FolderOpen size={13} />{text('无输出')}</div>
     )}
   </div>
 })
 
-export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noReveal }: { tool: ToolItem; historical?: boolean; noReveal?: boolean }): ReactElement {
+export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noReveal, readOnly = false }: { tool: ToolItem; historical?: boolean; noReveal?: boolean; readOnly?: boolean }): ReactElement {
   const [open, setOpen] = useState(false)
   const revealSuppressed = noReveal === true
   const isEdit = tool.name === 'edit' && Boolean(tool.diff)
@@ -145,7 +145,7 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
             <span className="stat-del">−{stats.deletions}</span>
           </span>
         )}
-        {Boolean(tool.images?.length) && <span className="tool-image-count">{tool.images?.length} 张图片</span>}
+        {!readOnly && Boolean(tool.images?.length) && <span className="tool-image-count">{tool.images?.length} 张图片</span>}
         {tool.status === 'running' && (
           <span className="tool-running-label">
             执行中…
@@ -156,7 +156,8 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
       <AnimatedDisclosure open={open}>
         <ToolDetails toolId={tool.id} name={tool.name} diff={tool.diff} command={tool.command}
           outputText={tool.outputText} writeContent={tool.writeContent}
-          images={tool.images} imageNotice={tool.imageNotice} imageModelInfo={tool.imageModelInfo}
+          readOnly={readOnly} images={readOnly ? undefined : tool.images}
+          imageNotice={readOnly ? undefined : tool.imageNotice} imageModelInfo={tool.imageModelInfo}
           imageSettingsInfo={tool.imageSettingsInfo}
           mode={revealSuppressed ? undefined : historical ? 'history' : liveOutput ? 'live' : undefined} />
       </AnimatedDisclosure>

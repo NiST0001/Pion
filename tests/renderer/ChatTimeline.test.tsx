@@ -34,6 +34,75 @@ function emptyTimelineProps(): ChatTimelineProps {
 describe('ChatTimeline empty history state', () => {
   afterEach(cleanup)
 
+  it('uses ordinary message and tool cards in read-only mode without mutation controls or tool media', () => {
+    const props = emptyTimelineProps()
+    props.timeline = [
+      { kind: 'user', id: 1, entryId: 'unexpected-persistent-id', text: '子任务', historical: true },
+      { kind: 'assistant', id: 2, text: '**子任务回复**', thinking: '子任务思考', streaming: false, historical: true },
+      { kind: 'tool', id: 3, historical: true, tool: { id: 'child-tool', name: 'read',
+        status: 'done', isError: false, path: 'file.ts', outputText: '工具输出',
+        images: [{ type: 'image', mimeType: 'image/png', data: 'AAAA', width: 1, height: 1, partIndex: 0 }] } }
+    ]
+    props.latestRunChanges = [{ path: '/project/file.ts', kind: 'edit', additions: 1, deletions: 0 }]
+    props.workspaceChanges = true
+    props.canFork = true
+    props.canRevert = true
+    props.onRevert = vi.fn()
+    const view = render(<ChatTimeline {...props} readOnly agentActivity workingStatus={{ label: '子任务运行中' }} />)
+    expect(view.container.querySelector('.chat-scroll .timeline .bubble-user')).toHaveTextContent('子任务')
+    expect(view.container.querySelector('.bubble-assistant .markdown strong')).toHaveTextContent('子任务回复')
+    expect(view.container.querySelector('.thinking pre')).toHaveTextContent('子任务思考')
+    expect(view.getByRole('status')).toHaveTextContent('子任务运行中')
+    expect(view.queryByRole('button', { name: '分叉' })).not.toBeInTheDocument()
+    expect(view.queryByRole('button', { name: '撤销' })).not.toBeInTheDocument()
+    expect(view.queryByRole('button', { name: '撤销本轮' })).not.toBeInTheDocument()
+    const toolHeader = view.getByRole('button', { name: '展开读取工具详情' })
+    fireEvent.click(toolHeader)
+    expect(view.container.querySelector('.tool-body .tool-output')).toHaveTextContent('工具输出')
+    expect(view.container.querySelector('img, .tool-result-images, [data-entry-id]')).toBeNull()
+    for (const callback of [props.onFork, props.onRevert, props.onUndo, props.onReview, props.onSelectChange]) {
+      expect(callback).not.toHaveBeenCalled()
+    }
+
+    view.rerender(<ChatTimeline {...props} />)
+    expect(view.getByRole('button', { name: '收起读取工具详情' })).toBe(toolHeader)
+    expect(view.getByRole('img', { name: '工具结果预览 1' })).toHaveAttribute('src', 'data:image/png;base64,AAAA')
+    expect(view.getByRole('button', { name: '分叉' })).toBeInTheDocument()
+    expect(view.getByRole('button', { name: '撤销' })).toBeInTheDocument()
+  })
+
+  it('keeps a hidden timeline mounted, inert and geometrically present with its own scroll ref', () => {
+    const props = emptyTimelineProps()
+    props.timeline = [{ kind: 'user', id: 1, text: '保留父会话' }]
+    const surfaceRef = createRef<HTMLDivElement>()
+    const view = render(<ChatTimeline {...props} scrollSurfaceRef={surfaceRef} className="parent-timeline" />)
+    const main = props.scrollRef.current
+    const surface = surfaceRef.current
+    const bubble = view.container.querySelector('.bubble-user')
+    view.rerender(<ChatTimeline {...props} scrollSurfaceRef={surfaceRef} className="parent-timeline" hidden />)
+    expect(props.scrollRef.current).toBe(main)
+    expect(surfaceRef.current).toBe(surface)
+    expect(view.container.querySelector('.bubble-user')).toBe(bubble)
+    expect(main).toHaveClass('chat-scroll', 'parent-timeline')
+    expect(main).toHaveAttribute('aria-hidden', 'true')
+    expect(main).toHaveAttribute('inert')
+    expect(main).toHaveStyle({ visibility: 'hidden' })
+    expect(main?.style.display).not.toBe('none')
+    view.rerender(<ChatTimeline {...props} scrollSurfaceRef={surfaceRef} />)
+    expect(props.scrollRef.current).toBe(main)
+    expect(view.container.querySelector('.bubble-user')).toBe(bubble)
+    expect(main).not.toHaveAttribute('aria-hidden')
+    expect(main).not.toHaveAttribute('inert')
+  })
+
+  it('does not expose ordinary history reload actions for a read-only transcript', () => {
+    const onReloadHistory = vi.fn()
+    const view = render(<ChatTimeline {...emptyTimelineProps()} readOnly timelineError="读取失败" onReloadHistory={onReloadHistory} />)
+    expect(view.getByRole('heading', { name: '会话历史未加载完成' })).toBeInTheDocument()
+    expect(view.queryByRole('button', { name: '重新加载' })).not.toBeInTheDocument()
+    expect(onReloadHistory).not.toHaveBeenCalled()
+  })
+
   it('keeps a successful empty branch or new conversation ready despite other sessions', () => {
     const view = render(<ChatTimeline {...emptyTimelineProps()} />)
     expect(view.getByRole('heading', { name: 'Pion 已就绪' })).toBeInTheDocument()

@@ -23,6 +23,8 @@ Windows 和 Linux 安装包在 [Releases](https://github.com/NiST0001/Pion/relea
 
 打开后，先在设置里配置模型，再选择项目。已有的 pi 用户配置可以继续使用。
 
+提供商的“模型显示”开关可隐藏或恢复模型列表，关闭不会退出登录，也不影响已有会话继续使用。
+
 - **Enter**：发送消息，运行中追加引导。
 - **Tab**：排队发送。
 - **Shift+Enter**：换行。

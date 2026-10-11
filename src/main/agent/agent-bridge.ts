@@ -104,6 +104,7 @@ import { projectQueueSnapshot } from './queue-projection'
 import { ProviderAuthUi } from './provider-auth-ui'
 import type { SessionModelPreferenceStore } from '../app-settings'
 import { ProviderConfigStore } from '../provider-config'
+import type { ProviderVisibilityStore } from '../provider-visibility'
 import { ProviderAuthService } from '../provider-auth'
 import { loadAgentCapabilities } from './capabilities'
 import { restoreSessionModelPreference } from './session-preferences'
@@ -403,7 +404,8 @@ export class AgentBridge {
     private readonly runStore: RunStore,
     private readonly sessionModelPreferences?: SessionModelPreferenceStore,
     private readonly providerConfigStore = new ProviderConfigStore(getAgentDir()),
-    private readonly providerAuthService = new ProviderAuthService()
+    private readonly providerAuthService = new ProviderAuthService(),
+    private readonly providerVisibility?: ProviderVisibilityStore
   ) {
     this.pendingRequests = new PendingRequestStore({
       pushToolPermissionRequests: () => this.pushToolPermissionRequests(),
@@ -3628,27 +3630,52 @@ export class AgentBridge {
 
   private async readBackendModels(backend: BackendRecord): Promise<ModelOption[]> {
     const models = await backend.client.getAvailableModels()
-    return models.map((model) => ({
+    const options = models.map((model) => ({
       provider: model.provider,
       id: model.id,
       contextWindow: model.contextWindow,
       reasoning: model.reasoning
     }))
+    return options
   }
 
   async getModels(): Promise<ModelOption[]> {
     const backend = await this.waitForActiveBackend()
     if (!backend) return []
+    let models: ModelOption[]
     try {
-      return await this.readBackendModels(backend)
+      models = await this.readBackendModels(backend)
     } catch {
       return []
     }
+    // A malformed shell preference is not evidence that the SDK has no models.
+    // Surface the read error without replacing configuration or active models.
+    return this.providerVisibility ? this.providerVisibility.filterModels(models) : models
   }
 
-  getModelProviders(): Promise<ModelProviderInfo[]> {
+  async getModelProviders(): Promise<ModelProviderInfo[]> {
     if (!this.providerMutationInFlight) this.providerAuthService.invalidate()
-    return this.providerAuthService.listProviders()
+    const providers = await this.providerAuthService.listProviders()
+    return this.providerVisibility ? this.providerVisibility.projectProviders(providers) : providers
+  }
+
+  async setModelProviderEnabled(providerId: string, enabled: boolean, ownerId: number): Promise<ModelProviderInfo[]> {
+    const assertOwner = (): void => {
+      if (!this.win || this.win.webContents.id !== ownerId || this.win.isDestroyed?.() || this.win.webContents.isDestroyed?.()) {
+        throw new Error('只允许所属主窗口设置提供商显示')
+      }
+    }
+    assertOwner()
+    if (typeof providerId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}(?![\s\S])/.test(providerId)
+      || typeof enabled !== 'boolean') throw new Error('提供商显示设置无效')
+    if (!this.providerVisibility) throw new Error('提供商显示设置未接入')
+    const providers = await this.getModelProviders()
+    assertOwner()
+    if (!providers.some((provider) => provider.id === providerId)) throw new Error('提供商不存在')
+    // No provider mutation/reload, SDK enablement, credential change or model fallback.
+    await this.providerVisibility.setEnabled(providerId, enabled)
+    assertOwner()
+    return this.getModelProviders()
   }
 
   private beginProviderMutation(): void {
@@ -3679,7 +3706,7 @@ export class AgentBridge {
       const backend = await this.ensureActiveBackend()
       const models = await this.readBackendModels(backend)
       await this.pushSessionInfo()
-      return models
+      return this.providerVisibility ? await this.providerVisibility.filterModels(models) : models
     } finally {
       this.providerReloading = false
     }

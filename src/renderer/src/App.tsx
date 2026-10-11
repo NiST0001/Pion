@@ -4,7 +4,7 @@ import { flushSync } from 'react-dom'
 import { Settings, Store, PanelLeft, PanelRight, TerminalSquare, Globe, RotateCcw, PanelsTopLeft } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
 import { useSubagentSessions } from './hooks/useSubagentSessions'
-import { SubagentSessionPane } from './features/session/SubagentSessionPane'
+import { createSubagentTimelineProjector } from './agent/subagentTimeline'
 import { useMessageRevert } from './hooks/useMessageRevert'
 import { useRunTelemetry } from './hooks/useRunTelemetry'
 import { useRunRecovery } from './hooks/useRunRecovery'
@@ -81,10 +81,28 @@ const PION_LOCAL_SLASH_COMMANDS: SlashCommandInfo[] = [
   { name: 'agents', description: '打开隔离多 Agent 工作流面板', source: 'pion' }
 ]
 const LOCAL_SLASH_COMMAND_NAMES = PION_LOCAL_SLASH_COMMANDS.map((command) => command.name)
+const noChildPaging = async (): Promise<void> => {}
 
 export function App(): ReactElement {
   const { state, actions, selectionRef, hasBridge } = useAgent()
   const childSessions = useSubagentSessions(window.pion, hasBridge)
+  const viewingChild = Boolean(childSessions.selectedTarget)
+  const childSummary = childSessions.selected ?? childSessions.sessions.find((item) =>
+    item.id === childSessions.selectedTarget?.id && item.backendId === childSessions.selectedTarget?.backendId)
+  const childProjector = useMemo(() => createSubagentTimelineProjector(),
+    [childSessions.selectedTarget?.backendId, childSessions.selectedTarget?.id])
+  const childTimeline = useMemo(() => childProjector.project(childSessions.selected), [childProjector, childSessions.selected])
+  const childBusy = Boolean(childSummary && ['starting', 'running', 'cancelling'].includes(childSummary.status))
+  const childScrollRef = useRef<HTMLDivElement>(null)
+  const { handleTimelineScroll: handleChildScroll, scrollSurfaceRef: childSurfaceRef } = useConversationNavigation({
+    scrollRef: childScrollRef, timeline: childTimeline, timelineMutation: 'append',
+    busy: childBusy, timelineLoading: childSessions.loading, viewportActive: viewingChild,
+    projectCwd: childSummary?.cwd,
+    // Display selection scope only, never an SDK session path or disk locator.
+    sessionPath: childSessions.selectedTarget
+      ? JSON.stringify([childSessions.selectedTarget.backendId, childSessions.selectedTarget.id]) : undefined,
+    historyJump: null, loadOlder: noChildPaging, loadNewer: noChildPaging
+  })
   useWindowEffects(true)
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
   const [operationsPanel, setOperationsPanel] = useState<OperationsPanelKind | null>(null)
@@ -368,12 +386,13 @@ export function App(): ReactElement {
 
   const handleSelectProject = useCallback(
     async (cwd: string) => {
+      childSessions.close()
       sessionSelectionId.current += 1
       setSelectedSession(null)
       if (cwd === state.status.cwd) return
       await actions.start(cwd)
     },
-    [actions, state.status.cwd]
+    [actions, state.status.cwd, childSessions.close]
   )
 
   const activateProject = useCallback(
@@ -408,6 +427,7 @@ export function App(): ReactElement {
     async (cwd?: string) => {
       if (newSessionInFlight.current) return
       newSessionInFlight.current = true
+      childSessions.close()
       try {
         const targetCwd = cwd ?? state.status.cwd
         sessionSelectionId.current += 1
@@ -427,7 +447,7 @@ export function App(): ReactElement {
         newSessionInFlight.current = false
       }
     },
-    [actions, activateProject, state.status.cwd]
+    [actions, activateProject, state.status.cwd, childSessions.close]
   )
 
   const handleNewBranch = useCallback((cwd: string) => {
@@ -476,6 +496,13 @@ export function App(): ReactElement {
 
   const handleSelectSession = useCallback(
     async (cwd: string, path: string) => {
+      // Selecting the already active parent is a view change, not an SDK switch.
+      const wasViewingChild = viewingChild
+      childSessions.close()
+      if (wasViewingChild && cwd === state.status.cwd && path === state.session?.sessionFile) {
+        setSelectedSession(null)
+        return
+      }
       if (
         cwd === state.status.cwd &&
         path === state.session?.sessionFile &&
@@ -514,7 +541,7 @@ export function App(): ReactElement {
         console.error('[pion] 切换会话失败', error)
       }
     },
-    [actions, capturedReviewChange, reviewPath, selectedSession, selectionRef, state.session?.sessionFile, state.status.cwd, state.status.phase, state.timelineError, state.timelineReady, state.timelineLoading]
+    [actions, capturedReviewChange, reviewPath, selectedSession, selectionRef, state.session?.sessionFile, state.status.cwd, state.status.phase, state.timelineError, state.timelineReady, state.timelineLoading, childSessions.close, viewingChild]
   )
 
   const handleDeleteSession = useCallback(
@@ -577,6 +604,7 @@ export function App(): ReactElement {
     text: string,
     images: ImageContent[]
   ): Promise<void> => {
+    if (viewingChild) return
     const localMatch = text.trim().match(/^\/(verify|agents|plan|yolo)(?:\s+([\s\S]*))?$/i)
     const match = localMatch ?? (images.length === 0
       ? text.trim().match(/^\/(compact|new|name|clone)(?:\s+([\s\S]*))?$/i)
@@ -632,7 +660,8 @@ export function App(): ReactElement {
     state.mode,
     state.session?.sessionFile,
     state.status.cwd,
-    state.yolo
+    state.yolo,
+    viewingChild
   ])
 
   const composerCommands = useMemo(() => {
@@ -763,7 +792,7 @@ export function App(): ReactElement {
   }, [actions, gitWorkspace, state.busy, state.runCheckpoint])
 
   const activeCwd = selectedSession?.cwd ?? state.status.cwd
-  const activePath = selectedSession?.path ?? state.session?.sessionFile
+  const activePath = viewingChild ? undefined : selectedSession?.path ?? state.session?.sessionFile
   const historyNavigatorVisible = (state.historyIndex?.landmarks.length ?? 0) >= 2
 
   if (!hasBridge) {
@@ -865,6 +894,7 @@ export function App(): ReactElement {
               onRenameBranch={handleRenameBranch}
               onDeleteBranch={handleDeleteBranch}
               subagentSessions={childSessions.sessions}
+              selectedSubagent={childSessions.selectedTarget}
               onViewSubagent={childSessions.open}
               onReorder={(cwd, paths) => actions.reorderSessions(cwd, paths)}
               onSelectSession={(cwd, path) => void handleSelectSession(cwd, path)}
@@ -900,14 +930,14 @@ export function App(): ReactElement {
 
         <div className="main" {...dock.panelProps('chat')}>
           {dockHeader('chat')}
-          {state.status.phase === 'error' && (
+          {!viewingChild && state.status.phase === 'error' && (
             <div className="banner banner-error">
               <span>agent 启动失败：{state.status.error}</span>
             </div>
           )}
-          {state.timelineError && (
+          {(viewingChild ? childSessions.error : state.timelineError) && (
             <div className="banner banner-error session-load-error">
-              <span>{state.timelineError}</span>
+              <span>{viewingChild ? childSessions.error : state.timelineError}</span>
             </div>
           )}
 
@@ -928,7 +958,9 @@ export function App(): ReactElement {
             onRestoreCheckpoint={(runId) => void runRecovery.restoreCheckpoint(runId)}
           />
 
-          <div ref={conversationShellRef} className={`conversation-shell${historyNavigatorVisible ? ' has-history-navigator' : ''}${(hasTaskPanel || hasQueuedMessages) ? ' has-composer-panels' : ''}`}>
+          <div ref={conversationShellRef} className={`conversation-shell${viewingChild ? ' is-subagent-view' : ''}${historyNavigatorVisible ? ' has-history-navigator' : ''}${(hasTaskPanel || hasQueuedMessages) ? ' has-composer-panels' : ''}`}>
+            <div className="parent-conversation-chrome" aria-hidden={viewingChild || undefined} inert={viewingChild || undefined}
+              style={viewingChild ? { visibility: 'hidden' } : undefined}>
             <RunMetricsStrip
               run={displayedRun}
               sessionTotals={sessionTotals}
@@ -943,14 +975,21 @@ export function App(): ReactElement {
               maxVisible={historyNavMaxVisible}
               onJump={(landmark) => void actions.jumpToHistoryLandmark(landmark)}
             />
+            </div>
             <div className="chat-stage">
-              {childSessions.selectedTarget && <SubagentSessionPane
-                snapshot={childSessions.selected}
-                loading={childSessions.loading}
-                error={childSessions.error}
-                onClose={childSessions.close}
+              {viewingChild && <ChatTimeline
+                readOnly className="child-chat-scroll"
+                scrollRef={childScrollRef} scrollSurfaceRef={childSurfaceRef} onScroll={handleChildScroll}
+                timeline={childTimeline} timelineLoading={childSessions.loading} timelineReady={!childSessions.loading}
+                historySelected timelineError={childSessions.error} busy={childBusy} starting={false}
+                notice={childSessions.selected?.truncated ? '较早或过长的内容已省略。' : undefined}
+                cwd={childSummary?.cwd} hasSessions canFork={false} onFork={() => {}}
+                agentActivity={childBusy} workingStatus={{ label: childSummary?.status === 'cancelling' ? '停止中' : '运行中' }}
+                latestRunChanges={[]} runCheckpoint={null} rollbackBusy={false} rollbackError=""
+                onUndo={() => {}} onReview={() => {}} onSelectChange={() => {}}
               />}
               <ChatTimeline
+                hidden={viewingChild}
                 scrollRef={scrollRef}
                 scrollSurfaceRef={scrollSurfaceRef}
                 onScroll={handleTimelineScroll}
@@ -999,7 +1038,8 @@ export function App(): ReactElement {
             )}
           </div>
 
-          <div className="composer-dock">
+          <div className="composer-dock" aria-hidden={viewingChild || undefined} inert={viewingChild || undefined}
+            style={viewingChild ? { visibility: 'hidden' } : undefined}>
             <ComposerSupportPanels hasTasks={hasTaskPanel} agentTodos={agentTodos} hasQueue={hasQueuedMessages}
               task={<TaskPanel
                   key={taskSessionKey}
@@ -1029,7 +1069,7 @@ export function App(): ReactElement {
             />
             <Composer
               busy={state.busy}
-              disabled={!state.status.cwd || messageRevert.draftFrozen}
+              disabled={viewingChild || !state.status.cwd || messageRevert.draftFrozen}
               sendDisabled={state.status.phase === 'starting' || state.status.phase === 'error' || projectTrust?.decision === 'ask'}
               prefill={prefill}
               restoreDraft={messageRevert.restoreDraft}
@@ -1272,6 +1312,7 @@ export function App(): ReactElement {
             actions: {
               setModel: actions.setModel,
               listModelProviders: actions.listModelProviders,
+              setModelProviderEnabled: actions.setModelProviderEnabled,
               loginModelProvider: actions.loginModelProvider,
               logoutModelProvider: actions.logoutModelProvider,
               cancelModelProviderAuth: actions.cancelModelProviderAuth,

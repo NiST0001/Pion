@@ -34,6 +34,13 @@ export function useAgentModelActions({
     return api.listModelProviders()
   }, [api])
 
+  const setModelProviderEnabled = useCallback(async (providerId: string, enabled: boolean): Promise<ModelProviderInfo[]> => {
+    if (!api) throw new Error('preload 桥未加载')
+    const providers = await api.setModelProviderEnabled(providerId, enabled)
+    await refreshModels()
+    return providers
+  }, [api, refreshModels])
+
   const loginModelProvider = useCallback(async (
     providerId: string,
     authType: ModelProviderAuthType
@@ -105,6 +112,7 @@ export function useAgentModelActions({
     setSubagentsMode,
     setModel,
     listModelProviders,
+    setModelProviderEnabled,
     loginModelProvider,
     logoutModelProvider,
     cancelModelProviderAuth,

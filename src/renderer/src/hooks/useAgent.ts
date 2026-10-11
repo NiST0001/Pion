@@ -171,6 +171,7 @@ export function useAgent() {
   const {
     setModel,
     listModelProviders,
+    setModelProviderEnabled,
     loginModelProvider,
     logoutModelProvider,
     cancelModelProviderAuth,
@@ -269,7 +270,8 @@ export function useAgent() {
       setSteeringMode,
       setFollowUpMode,
       setSubagentsMode,
-      deleteBranch
+      deleteBranch,
+      setModelProviderEnabled
     }),
     [
       revertMessage,
@@ -319,7 +321,8 @@ export function useAgent() {
       setSteeringMode,
       setFollowUpMode,
       setSubagentsMode,
-      deleteBranch
+      deleteBranch,
+      setModelProviderEnabled
     ]
   )
 

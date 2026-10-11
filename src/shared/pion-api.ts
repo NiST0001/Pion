@@ -197,6 +197,8 @@ export interface PionApi {
   getAvailableModels(): Promise<ModelOption[]>
   /** Complete provider directory and non-secret auth status from Pi ModelRuntime. */
   listModelProviders(): Promise<ModelProviderInfo[]>
+  /** Only hide/show picker models; preserve SDK configuration, credentials and active sessions. */
+  setModelProviderEnabled(providerId: string, enabled: boolean): Promise<ModelProviderInfo[]>
   loginModelProvider(
     providerId: string,
     authType: ModelProviderAuthType

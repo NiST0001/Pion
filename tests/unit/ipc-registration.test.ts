@@ -234,7 +234,7 @@ describe('agent IPC registration', () => {
     expect([...h.handlers.keys()].sort()).toEqual([...new Set([
       ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
       IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete,
-      IPC.AgentSubagentSessions, IPC.AgentSubagentSession
+      IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled
     ])].sort())
     expect(h.listeners.size).toBe(0)
     expect(h.withSessionOperation).not.toHaveBeenCalled()
@@ -354,6 +354,32 @@ describe('agent IPC registration', () => {
     const error = new Error('bridge owner/session/input validation rejected')
     bridge.setSubagentsMode.mockRejectedValueOnce(error)
     await expect(h.invoke(IPC.AgentSetSubagents, mainEvent(owner), enabled, sessionId)).rejects.toBe(error)
+  })
+
+  it.each([true, false, 'false', 0, null, undefined])('forwards provider display input %s unchanged with owner and no session reservation', async (enabled) => {
+    const result = [{ id: 'provider', enabled: false }]
+    const setModelProviderEnabled = vi.fn().mockReturnValue(result)
+    const h = agentHarness({ setModelProviderEnabled })
+    h.withSessionOperation.mockRejectedValue(new Error('backend mutation is busy'))
+    expect(h.invoke(IPC.AgentSetModelProviderEnabled, mainEvent(73), 'provider', enabled)).toBe(result)
+    expect(setModelProviderEnabled).toHaveBeenCalledExactlyOnceWith('provider', enabled, 73)
+    expect(setModelProviderEnabled.mock.contexts[0]).toBe(h.bridge)
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+    expect(h.projects.touchCanonical).not.toHaveBeenCalled()
+    expect(h.pushProjects).not.toHaveBeenCalled()
+    const error = new Error('display preference rejected')
+    setModelProviderEnabled.mockImplementationOnce(() => { throw error })
+    expect(() => h.invoke(IPC.AgentSetModelProviderEnabled, mainEvent(73), 'provider', enabled)).toThrow(error)
+    setModelProviderEnabled.mockRejectedValueOnce(error)
+    await expect(h.invoke(IPC.AgentSetModelProviderEnabled, mainEvent(73), 'provider', enabled)).rejects.toBe(error)
+  })
+
+  it('rejects iframe provider display writes before bridge validation or saving', () => {
+    const setModelProviderEnabled = vi.fn()
+    const h = agentHarness({ setModelProviderEnabled })
+    expect(() => h.invoke(IPC.AgentSetModelProviderEnabled, mainEvent(73, true), 'provider', false)).toThrow('只允许主窗口设置提供商显示')
+    expect(setModelProviderEnabled).not.toHaveBeenCalled()
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
   })
 
   it('rejects iframe subagent toggles before reaching the bridge operation', async () => {
@@ -716,7 +742,7 @@ it('composes the three registrars without duplicate channels', () => {
   const expected = new Set([
     ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
     IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete,
-    IPC.AgentSubagentSessions, IPC.AgentSubagentSession,
+    IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled,
     ...gitRoutes.map(([channel]) => channel), ...effectRoutes.map(([channel]) => channel),
     ...terminalRoutes.map(([channel]) => channel), IPC.WindowState
   ])

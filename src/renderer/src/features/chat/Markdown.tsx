@@ -313,11 +313,21 @@ const MARKDOWN_COMPONENTS: Components = {
   )
 }
 
+// Preserve all formatting/reveal components, but never mount URL-bearing
+// elements for private, text-only transcripts. Raw HTML is skipped below.
+const READ_ONLY_MARKDOWN_COMPONENTS: Components = {
+  ...MARKDOWN_COMPONENTS,
+  a: ({ children }) => <span>{children}</span>,
+  img: ({ alt }) => <span>{alt ?? ''}</span>
+}
+
 export const Markdown = memo(function Markdown({
   text,
+  readOnly = false,
   revealMode
 }: {
   text: string
+  readOnly?: boolean
   revealMode?: TextRevealMode
 }): React.ReactElement {
   // Live mode additionally fades newly streamed characters, but only inside
@@ -338,7 +348,8 @@ export const Markdown = memo(function Markdown({
         rehypePlugins={revealMode
           ? [rehypeHighlight, rehypeLineReveal(revealMode, liveTail)]
           : [rehypeHighlight]}
-        components={MARKDOWN_COMPONENTS}
+        components={readOnly ? READ_ONLY_MARKDOWN_COMPONENTS : MARKDOWN_COMPONENTS}
+        skipHtml={readOnly}
       >
         {text}
       </ReactMarkdown>

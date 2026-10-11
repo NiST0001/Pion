@@ -413,6 +413,242 @@ describe('SettingsModal page state and callbacks', () => {
   })
 })
 
+describe('SettingsModal provider visibility', () => {
+  const provider: ModelProviderInfo = {
+    id: 'openai-codex', name: 'OpenAI Codex', modelCount: 7, configured: true,
+    configuredSource: 'stored', storedCredentialType: 'oauth',
+    authMethods: [{ type: 'oauth', name: 'ChatGPT', interactive: true }]
+  }
+  const visibilitySwitch = () => screen.getByRole('switch', { name: '显示 OpenAI Codex 的模型' })
+
+  it('forwards visibility booleans during streaming without changing models, auth or configuration', async () => {
+    const actions = settingsActions(undefined, [provider])
+    actions.setModelProviderEnabled = vi.fn(async (_id: string, enabled: boolean) => [{ ...provider, enabled }])
+    const { rerender, props } = renderSettings(actions, true)
+    expect(await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' })).toHaveAttribute('aria-checked', 'true')
+    expect(visibilitySwitch()).toBeEnabled()
+    fireEvent.click(visibilitySwitch())
+    await waitFor(() => expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'false'))
+    expect(actions.setModelProviderEnabled).toHaveBeenCalledExactlyOnceWith('openai-codex', false)
+    rerender(<SettingsModal {...props} models={[]} />)
+    expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'false')
+    fireEvent.click(visibilitySwitch())
+    await waitFor(() => expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'true'))
+    expect(actions.setModelProviderEnabled).toHaveBeenLastCalledWith('openai-codex', true)
+    expect(actions.setModel).not.toHaveBeenCalled()
+    expect(actions.loginModelProvider).not.toHaveBeenCalled()
+    expect(actions.logoutModelProvider).not.toHaveBeenCalled()
+    expect(actions.addModelProvider).not.toHaveBeenCalled()
+  })
+
+  it('keeps hidden providers reachable outside the add panel and omits unconfigured catalog entries', async () => {
+    const actions = settingsActions(undefined, [
+      { ...provider, configured: false, enabled: false },
+      { ...provider, id: 'unused', name: 'Unused', configured: false }
+    ])
+    actions.setModelProviderEnabled = vi.fn(async () => [provider])
+    renderSettings(actions)
+    expect(await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' })).toHaveAttribute('aria-checked', 'false')
+    expect(screen.queryByRole('switch', { name: '显示 Unused 的模型' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Pi 提供商目录')).not.toBeInTheDocument()
+    fireEvent.click(visibilitySwitch())
+    await waitFor(() => expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'true'))
+  })
+
+  it('disables unsupported callbacks and switches during authentication', async () => {
+    const actions = settingsActions(undefined, [provider])
+    const { rerender, props } = renderSettings(actions)
+    expect(await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' })).toBeDisabled()
+    actions.setModelProviderEnabled = vi.fn(async () => [provider])
+    rerender(<SettingsModal {...props} modelProviderAuthState={{
+      operationId: 'login', providerId: provider.id, providerName: provider.name,
+      authType: 'oauth', phase: 'waiting', message: '等待登录', startedAt: 1
+    }} />)
+    expect(await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' })).toBeDisabled()
+    fireEvent.click(visibilitySwitch())
+    expect(actions.setModelProviderEnabled).not.toHaveBeenCalled()
+  })
+
+  it('retains confirmed state on failure and gates repeated pending toggles', async () => {
+    const pending = deferred<ModelProviderInfo[]>()
+    const actions = settingsActions(undefined, [provider])
+    actions.setModelProviderEnabled = vi.fn(() => pending.promise)
+    renderSettings(actions)
+    await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' })
+    fireEvent.click(visibilitySwitch())
+    fireEvent.click(visibilitySwitch())
+    expect(visibilitySwitch()).toBeDisabled()
+    expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'true')
+    expect(actions.setModelProviderEnabled).toHaveBeenCalledTimes(1)
+    await act(async () => { pending.reject(new Error('显示设置保存失败')) })
+    expect(screen.getByRole('alert')).toHaveTextContent('显示设置保存失败')
+    expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'true')
+    expect(visibilitySwitch()).toBeEnabled()
+  })
+
+  it('rejects older catalog results after a visibility save and preserves focused add drafts', async () => {
+    const oldCatalog = deferred<ModelProviderInfo[]>()
+    const actions = settingsActions(undefined, [provider])
+    actions.setModelProviderEnabled = vi.fn(async () => [{ ...provider, enabled: false }])
+    actions.listModelProviders = vi.fn()
+      .mockResolvedValueOnce([provider])
+      .mockImplementation(() => oldCatalog.promise)
+    const { rerender, props } = renderSettings(actions)
+    await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' })
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    fireEvent.click(screen.getByRole('tab', { name: /自定义 API/ }))
+    const draft = screen.getByRole('textbox', { name: /提供商 ID/ })
+    fireEvent.change(draft, { target: { value: 'draft-provider' } })
+    draft.focus()
+    rerender(<SettingsModal {...props} actions={{ ...actions }} />)
+    expect(screen.getByRole('textbox', { name: /提供商 ID/ })).toBe(draft)
+    expect(draft).toHaveFocus()
+    fireEvent.click(visibilitySwitch())
+    await waitFor(() => expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'false'))
+    await act(async () => { oldCatalog.resolve([provider]); await oldCatalog.promise })
+    expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'false')
+    expect(draft).toHaveValue('draft-provider')
+    expect(screen.getByText('添加自定义提供商')).toBeInTheDocument()
+  })
+
+  it.each([
+    { returnedEnabled: undefined, checked: 'false' },
+    { returnedEnabled: true, checked: 'true' },
+    { returnedEnabled: false, checked: 'false' }
+  ])('uses toggle intent only for missing enabled flags ($returnedEnabled)', async ({ returnedEnabled, checked }) => {
+    const actions = settingsActions(undefined, [{ ...provider, enabled: true }])
+    actions.setModelProviderEnabled = vi.fn(async () => [{ ...provider, enabled: returnedEnabled }])
+    renderSettings(actions)
+    fireEvent.click(await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' }))
+    await waitFor(() => expect(visibilitySwitch()).toBeEnabled())
+    expect(visibilitySwitch()).toHaveAttribute('aria-checked', checked)
+    expect(actions.setModelProviderEnabled).toHaveBeenCalledExactlyOnceWith(provider.id, false)
+  })
+
+  it('lets a fresh explicit catalog flag override a previous toggle', async () => {
+    const actions = settingsActions(undefined, [{ ...provider, enabled: true }])
+    actions.setModelProviderEnabled = vi.fn(async () => [{ ...provider, enabled: false }])
+    renderSettings(actions)
+    fireEvent.click(await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' }))
+    await waitFor(() => expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'false'))
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    await waitFor(() => {
+      for (const control of screen.getAllByRole('switch', { name: '显示 OpenAI Codex 的模型' })) {
+        expect(control).toHaveAttribute('aria-checked', 'true')
+      }
+    })
+    expect(actions.listModelProviders).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps authentication catalogs authoritative after a visibility save', async () => {
+    const actions = settingsActions(undefined, [{ ...provider, enabled: true }])
+    actions.setModelProviderEnabled = vi.fn(async () => [{ ...provider, enabled: false }])
+    actions.logoutModelProvider = vi.fn(async () => [{ ...provider, enabled: true }])
+    actions.loginModelProvider = vi.fn(async () => [{ ...provider, enabled: false }])
+    renderSettings(actions)
+    fireEvent.click(await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' }))
+    await waitFor(() => expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'false'))
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+    fireEvent.click(screen.getByRole('button', { name: '退出 OpenAI Codex' }))
+    await waitFor(() => expect(screen.getAllByRole('switch', { name: '显示 OpenAI Codex 的模型' })[0]).toHaveAttribute('aria-checked', 'true'))
+    fireEvent.click(screen.getByRole('button', { name: '重新登录' }))
+    await waitFor(() => expect(screen.getAllByRole('switch', { name: '显示 OpenAI Codex 的模型' })[0]).toHaveAttribute('aria-checked', 'false'))
+  })
+
+  it.each([
+    { changedOwner: 'list', reject: false },
+    { changedOwner: 'visibility', reject: false },
+    { changedOwner: 'list', reject: true }
+  ])('fences pending results and retains the action gate for $changedOwner owner (reject=$reject)', async ({ changedOwner, reject }) => {
+    const pending = deferred<ModelProviderInfo[]>()
+    const latestCatalog = deferred<ModelProviderInfo[]>()
+    const actions = settingsActions(undefined, [{ ...provider, enabled: true }])
+    actions.setModelProviderEnabled = vi.fn(() => pending.promise)
+    const { rerender, props } = renderSettings(actions)
+    const control = await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' })
+    // Same-event pointer repeats must also meet the ref gate, not just disabled DOM.
+    act(() => {
+      fireEvent.click(control)
+      fireEvent.click(control)
+    })
+    expect(actions.setModelProviderEnabled).toHaveBeenCalledTimes(1)
+    const latestList = vi.fn(() => latestCatalog.promise)
+    const latestVisibility = vi.fn(async () => [{ ...provider, enabled: true }])
+    const nextActions = changedOwner === 'list'
+      ? { ...actions, listModelProviders: latestList }
+      : { ...actions, setModelProviderEnabled: latestVisibility }
+    if (changedOwner === 'visibility') {
+      vi.mocked(actions.listModelProviders).mockImplementation(() => latestCatalog.promise)
+    }
+    rerender(<SettingsModal {...props} actions={nextActions} />)
+    expect(screen.queryByRole('switch', { name: '显示 OpenAI Codex 的模型' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '添加提供商' })).toBeDisabled()
+    expect(latestList).not.toHaveBeenCalled()
+    expect(actions.listModelProviders).toHaveBeenCalledTimes(1)
+    // More parent renders cannot release a still-unsettled action.
+    rerender(<SettingsModal {...props} actions={{ ...nextActions }} models={[]} />)
+    expect(latestVisibility).not.toHaveBeenCalled()
+    await act(async () => {
+      if (reject) {
+        pending.reject(new Error('旧 owner 迟到失败'))
+        await pending.promise.catch(() => undefined)
+      } else {
+        pending.resolve([{ ...provider, enabled: false }])
+        await pending.promise
+      }
+    })
+    expect(screen.queryByText('旧 owner 迟到失败')).not.toBeInTheDocument()
+    await waitFor(() => expect(nextActions.listModelProviders).toHaveBeenCalledTimes(changedOwner === 'list' ? 1 : 2))
+    expect(screen.queryByRole('switch', { name: '显示 OpenAI Codex 的模型' })).not.toBeInTheDocument()
+    await act(async () => { latestCatalog.resolve([{ ...provider, enabled: true }]); await latestCatalog.promise })
+    expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'true')
+    expect(visibilitySwitch()).toBeEnabled()
+    expect(latestVisibility).not.toHaveBeenCalled()
+  })
+
+  it('clears old errors and reloads owners without replacing the focused custom form', async () => {
+    const actions = settingsActions(undefined, [provider])
+    actions.setModelProviderEnabled = vi.fn(async () => { throw new Error('旧 owner 保存失败') })
+    const { rerender, props } = renderSettings(actions)
+    fireEvent.click(await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' }))
+    await screen.findByText('旧 owner 保存失败')
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+    fireEvent.click(screen.getByRole('tab', { name: /自定义 API/ }))
+    const draft = screen.getByRole('textbox', { name: /提供商 ID/ })
+    fireEvent.change(draft, { target: { value: 'owner-draft' } })
+    draft.focus()
+    const newCatalog = deferred<ModelProviderInfo[]>()
+    const nextActions = { ...actions, listModelProviders: vi.fn(() => newCatalog.promise) }
+    rerender(<SettingsModal {...props} actions={nextActions} />)
+    expect(screen.queryByText('旧 owner 保存失败')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: /提供商 ID/ })).toBe(draft)
+    expect(draft).toHaveFocus()
+    expect(draft).toHaveValue('owner-draft')
+    await act(async () => { newCatalog.resolve([{ ...provider, enabled: false }]); await newCatalog.promise })
+    rerender(<SettingsModal {...props} actions={{ ...nextActions }} models={[]} />)
+    expect(nextActions.listModelProviders).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('textbox', { name: /提供商 ID/ })).toBe(draft)
+    expect(draft).toHaveFocus()
+    expect(draft).toHaveValue('owner-draft')
+    expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'false')
+  })
+
+  it('also exposes the switch as a sibling of directory authentication buttons', async () => {
+    const actions = settingsActions(undefined, [{ ...provider, configured: false }])
+    actions.setModelProviderEnabled = vi.fn(async () => [{ ...provider, configured: false, enabled: false }])
+    renderSettings(actions)
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+    const control = await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' })
+    expect(control.closest('button')?.parentElement?.closest('button')).toBeNull()
+    fireEvent.click(control)
+    await waitFor(() => expect(actions.setModelProviderEnabled).toHaveBeenCalledExactlyOnceWith(provider.id, false))
+    expect(actions.loginModelProvider).not.toHaveBeenCalled()
+    expect(actions.logoutModelProvider).not.toHaveBeenCalled()
+  })
+})
+
 describe('SettingsModal provider setup', () => {
   it('adds a compatible provider from the models page', async () => {
     const addModelProvider = vi.fn(async () => undefined)

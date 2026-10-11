@@ -1,0 +1,438 @@
+// @vitest-environment jsdom
+import '@testing-library/jest-dom/vitest'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { initialState, type AgentState } from '../../src/renderer/src/agent/types'
+import type { SessionMeta } from '../../src/shared/types'
+import type { SubagentSessionList, SubagentSessionSnapshot, SubagentSessionSummary } from '../../src/shared/subagent-sessions'
+import type { PionApi } from '../../src/shared/pion-api'
+
+// This renders the real App, Sidebar/SessionItems, ChatTimeline/ChatMessage,
+// Markdown, tool cards, Composer and both conversation-navigation instances.
+// Only the backend owner and unrelated resource hooks/dialogs are substituted.
+// The real readonly observer uses an entirely in-memory, mocked IPC API below;
+// no SDK, network, filesystem or existing user configuration is consulted.
+const owner = { value: null as unknown }
+let App: typeof import('../../src/renderer/src/App').App
+
+// Keep registrations suite-local: coverage/all imports multiple suites in one
+// isolate, so hoisted mocks would replace the real hooks in unrelated tests.
+const mockModules = [
+  '../../src/renderer/src/hooks/useAgent',
+  '../../src/renderer/src/hooks/useWindowEffects',
+  '../../src/renderer/src/hooks/useSessionResourceStage',
+  '../../src/renderer/src/hooks/useRunTelemetry',
+  '../../src/renderer/src/hooks/useRunRecovery',
+  '../../src/renderer/src/hooks/useVerification',
+  '../../src/renderer/src/hooks/useWorkflows',
+  '../../src/renderer/src/hooks/useGitWorkspace',
+  '../../src/renderer/src/hooks/usePanelLayout',
+  '../../src/renderer/src/hooks/useDockLayout',
+  '../../src/renderer/src/hooks/useAppInteractionState',
+  '../../src/renderer/src/hooks/useMessageRevert',
+  '../../src/renderer/src/hooks/useSessionModes',
+  '../../src/renderer/src/app/WorkbenchDialogs',
+  '../../src/renderer/src/features/chrome/TitleBar',
+  '../../src/renderer/src/features/chrome/DockHeader',
+  '../../src/renderer/src/features/operations/ToolPermissionModal',
+  '../../src/renderer/src/features/operations/RunMetricsStrip',
+  '../../src/renderer/src/features/session/HistoryNavigator',
+  '../../src/renderer/src/features/operations/RunRecoveryBanner'
+] as const
+
+const cwd = '/project'
+const parentPath = '/parent.jsonl'
+const otherPath = '/other.jsonl'
+const summary: SubagentSessionSummary = {
+  id: 'child', backendId: 'backend', runtimeId: 'runtime', parentToolCallId: 'delegation',
+  parentSessionId: 'parent', parentSessionPath: parentPath, cwd,
+  name: '代码检查', status: 'completed', revision: 1, truncated: false
+}
+const snapshot: SubagentSessionSnapshot = {
+  ...summary,
+  rows: [
+    { id: 'message-1-thinking', kind: 'thinking', text: '检查边界与竞态' },
+    { id: 'message-1-text', kind: 'assistant', text: '**普通回复**\n\n- 检查完成\n\n![不可加载图片](https://example.test/private.png)\n\n[不可访问链接](https://example.test)' },
+    { id: 'tool-2', kind: 'tool', toolName: 'read', text: '读取工具的纯文字结果', state: 'completed' }
+  ]
+}
+function session(path: string, name: string): SessionMeta {
+  return { path, id: path, name, projectCwd: cwd, timestamp: '2026-01-01T00:00:00Z',
+    mtime: 1, preview: name, messageCount: 1 }
+}
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+function setup(phase: AgentState['status']['phase'] = 'running') {
+  const sessions = [session(parentPath, '父任务'), session(otherPath, '另一个普通会话')]
+  const state: AgentState = {
+    ...initialState, status: { phase, cwd },
+    session: { sessionId: 'parent', sessionFile: parentPath, sessionName: '父任务', isStreaming: false, messageCount: 1 },
+    timelineReady: true, liveSessionOwnerPath: parentPath,
+    timeline: [{ kind: 'user', id: 101, text: '父历史消息', entryId: 'parent-entry' }],
+    sessions, sessionsByProject: { [cwd]: sessions }, projects: [{ cwd, name: '项目', addedAt: 1, lastUsedAt: 1 }],
+    tasks: [{ id: '1', title: '父目标', status: 'in_progress' }],
+    queued: { steering: 0, followUp: 1 },
+    queuedMessages: { steering: [], followUp: ['父排队消息'], nativeFollowUpCount: 0 }
+  }
+  const actions = {
+    bootstrap: vi.fn(async () => {}), switchSession: vi.fn(async () => ({ cancelled: false })),
+    start: vi.fn(async () => {}), reloadTimeline: vi.fn(async () => {}),
+    loadOlder: vi.fn(async () => {}), loadNewer: vi.fn(async () => {}), hasNewerHistory: vi.fn(() => false),
+    send: vi.fn(async () => {}), queue: vi.fn(async () => {}), abort: vi.fn(async () => {}),
+    setModel: vi.fn(), setThinkingLevel: vi.fn(), setSubagentsMode: vi.fn()
+  }
+  owner.value = { state, actions, selectionRef: { current: { generation: 1, ownerPath: parentPath } }, hasBridge: true }
+  let listener: ((list: SubagentSessionList) => void) | undefined
+  const apiMocks = {
+    listSubagentSessions: vi.fn(async (): Promise<SubagentSessionList> => ({ revision: 1, sessions: [summary] })),
+    getSubagentSession: vi.fn(async (): Promise<SubagentSessionSnapshot | null> => snapshot),
+    onSubagentSessions: vi.fn((callback: (list: SubagentSessionList) => void) => { listener = callback; return vi.fn() })
+  }
+  // Every window.pion method is an in-memory mock, including accidental calls
+  // outside the expected three observer methods. No real preload is retained.
+  const fallback = new Map<PropertyKey, ReturnType<typeof vi.fn>>()
+  const api = new Proxy(apiMocks, { get(target, key) {
+    if (key in target) return target[key as keyof typeof target]
+    if (!fallback.has(key)) fallback.set(key, vi.fn(async () => undefined))
+    return fallback.get(key)
+  } }) as unknown as PionApi
+  vi.stubGlobal('pion', api)
+  return { state, actions, apiMocks, fallback, push: (list: SubagentSessionList) => listener?.(list) }
+}
+
+async function paint() { await act(async () => {}) }
+function row(container: HTMLElement, path: string) {
+  const element = container.querySelector<HTMLElement>(`[data-session-path="${path}"]`)
+  expect(element).not.toBeNull()
+  return element!
+}
+function childScroll(container: HTMLElement) {
+  const element = container.querySelector<HTMLElement>('.child-chat-scroll')
+  expect(element).not.toBeNull()
+  return element!
+}
+function expectNoParentBackendAction(actions: ReturnType<typeof setup>['actions']) {
+  expect(actions.switchSession).not.toHaveBeenCalled()
+  expect(actions.start).not.toHaveBeenCalled()
+  expect(actions.reloadTimeline).not.toHaveBeenCalled()
+  expect(actions.send).not.toHaveBeenCalled()
+}
+
+describe('App readonly subagent conversation in the ordinary chat surface', () => {
+  beforeAll(async () => {
+    vi.resetModules()
+    vi.doMock('../../src/renderer/src/hooks/useAgent', () => ({ useAgent: () => owner.value }))
+    vi.doMock('../../src/renderer/src/hooks/useWindowEffects', () => ({ useWindowEffects: vi.fn() }))
+    vi.doMock('../../src/renderer/src/hooks/useSessionResourceStage', () => ({ useSessionResourceStage: () => 0 }))
+    vi.doMock('../../src/renderer/src/hooks/useRunTelemetry', () => ({ useRunTelemetry: () => ({ runs: [], activeRun: null, latestRun: null }) }))
+    vi.doMock('../../src/renderer/src/hooks/useRunRecovery', () => ({ useRunRecovery: () => ({ candidates: [] }) }))
+    vi.doMock('../../src/renderer/src/hooks/useVerification', () => ({ useVerification: () => ({}) }))
+    vi.doMock('../../src/renderer/src/hooks/useWorkflows', () => ({ useWorkflows: () => ({ workflows: [] }) }))
+    vi.doMock('../../src/renderer/src/hooks/useGitWorkspace', () => ({ useGitWorkspace: () => ({ snapshot: null }) }))
+    vi.doMock('../../src/renderer/src/hooks/usePanelLayout', () => ({ usePanelLayout: () => ({
+      maximized: false, sidebarOpen: true, reviewOpen: false, setSidebarOpen: vi.fn(), setReviewOpen: vi.fn()
+    }) }))
+    vi.doMock('../../src/renderer/src/hooks/useDockLayout', () => ({ useDockLayout: () => ({
+      rootRef: { current: null }, panelProps: () => ({}), dragProps: () => ({}), dividers: [],
+      movePanel: vi.fn(), reset: vi.fn(), clearDrop: vi.fn()
+    }) }))
+    vi.doMock('../../src/renderer/src/hooks/useAppInteractionState', () => ({ useAppInteractionState: () => ({
+      projectTrust: null, toolPermissionRequests: [], extensionUiRequests: []
+    }) }))
+    vi.doMock('../../src/renderer/src/hooks/useMessageRevert', () => ({ useMessageRevert: () => ({
+      draftFrozen: false, canRevert: false
+    }) }))
+    vi.doMock('../../src/renderer/src/hooks/useSessionModes', () => ({ useSessionModes: () => ({
+      handleModeChange: vi.fn(), requestYoloMode: vi.fn()
+    }) }))
+    vi.doMock('../../src/renderer/src/app/WorkbenchDialogs', () => ({ WorkbenchDialogs: () => null }))
+    vi.doMock('../../src/renderer/src/features/chrome/TitleBar', () => ({ TitleBar: () => null }))
+    vi.doMock('../../src/renderer/src/features/chrome/DockHeader', () => ({ DockHeader: () => null }))
+    vi.doMock('../../src/renderer/src/features/operations/ToolPermissionModal', () => ({ ToolPermissionModal: () => null }))
+    // Sentinels expose parent-only controls without live telemetry/history;
+    // actual task/queue/Composer controls and ordinary navigation stay real.
+    vi.doMock('../../src/renderer/src/features/operations/RunMetricsStrip', () => ({
+      RunMetricsStrip: () => <div data-testid="parent-metrics">父统计</div>
+    }))
+    vi.doMock('../../src/renderer/src/features/session/HistoryNavigator', () => ({
+      HistoryNavigator: () => <nav data-testid="parent-history">父历史导航</nav>
+    }))
+    vi.doMock('../../src/renderer/src/features/operations/RunRecoveryBanner', () => ({ RunRecoveryBanner: () => null }))
+    ;({ App } = await import('../../src/renderer/src/App'))
+  })
+  afterAll(() => {
+    for (const module of mockModules) vi.doUnmock(module)
+    vi.resetModules()
+  })
+  beforeEach(() => {
+    localStorage.clear()
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+    // JSDOM has no layout; navigation still owns real independent refs/listeners.
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+    vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} })
+  })
+  afterEach(() => {
+    cleanup()
+    owner.value = null
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+    localStorage.clear()
+  })
+
+  it('opens from the real session list and uses ordinary bubbles, Markdown, thinking and tool cards', async () => {
+    const f = setup()
+    const view = render(<App />)
+    await paint()
+    // Ordinary parent history may fill on its initial mount; child selection
+    // and child scrolling must not cause any additional parent page requests.
+    const olderCalls = f.actions.loadOlder.mock.calls.length
+    const newerCalls = f.actions.loadNewer.mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
+    await paint()
+    const child = childScroll(view.container)
+    expect(child).toHaveClass('chat-scroll')
+    const parent = view.container.querySelector<HTMLElement>('.chat-scroll:not(.child-chat-scroll)')!
+    expect(child).not.toBe(parent)
+    parent.scrollTop = 75
+    child.scrollTop = 10
+    fireEvent.scroll(child)
+    expect(parent.scrollTop).toBe(75)
+    expect(f.actions.loadOlder).toHaveBeenCalledTimes(olderCalls)
+    expect(f.actions.loadNewer).toHaveBeenCalledTimes(newerCalls)
+    expect(child.querySelector('.timeline .bubble-assistant .markdown strong')).toHaveTextContent('普通回复')
+    expect(child.querySelector('.markdown li')).toHaveTextContent('检查完成')
+    const thinking = child.querySelector<HTMLDetailsElement>('details.thinking')!
+    expect(thinking).not.toHaveAttribute('open')
+    expect(thinking.querySelector('pre')).toHaveTextContent('检查边界与竞态')
+    // JSDOM does not implement summary's native default action; toggle the
+    // actual ordinary details element, rather than faking a child-only widget.
+    thinking.open = true
+    fireEvent(thinking, new Event('toggle'))
+    expect(thinking).toHaveAttribute('open')
+    const tool = within(child).getByRole('button', { name: '展开读取工具详情' })
+    fireEvent.click(tool)
+    expect(child.querySelector('.tool-body .tool-output')).toHaveTextContent('读取工具的纯文字结果')
+    expect(child.querySelector('img,a,iframe,textarea,[data-entry-id],.message-actions')).toBeNull()
+    expect(screen.queryByRole('button', { name: /返回父/ })).not.toBeInTheDocument()
+    expect(view.container.querySelector('.subagent-session-pane')).toBeNull()
+    expect(f.apiMocks.getSubagentSession).toHaveBeenCalledWith('child', 'backend')
+    expectNoParentBackendAction(f.actions)
+    expect(f.fallback.size).toBe(0)
+  })
+
+  it('preserves ordinary message/tool/thinking DOM across delayed body refresh and stops streaming on a terminal summary', async () => {
+    const f = setup()
+    const running = { ...summary, status: 'running' as const }
+    const initial: SubagentSessionSnapshot = { ...running, rows: [
+      snapshot.rows[2],
+      { id: 'message-3-thinking', kind: 'thinking', text: '已有思考', state: 'running' },
+      { id: 'message-3-text', kind: 'assistant', text: '已有回复', state: 'running' }
+    ] }
+    f.apiMocks.listSubagentSessions.mockResolvedValue({ revision: 1, sessions: [running] })
+    f.apiMocks.getSubagentSession.mockResolvedValueOnce(initial)
+    const view = render(<App />)
+    await paint()
+    fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
+    await paint()
+    const child = childScroll(view.container)
+    const bubble = child.querySelector('.bubble-assistant')!
+    const thinking = child.querySelector<HTMLDetailsElement>('details.thinking')!
+    thinking.open = true
+    fireEvent(thinking, new Event('toggle'))
+    fireEvent.click(within(child).getByRole('button', { name: '展开读取工具详情' }))
+    const toolBody = child.querySelector('.tool-body')!
+    expect(child.querySelector('.row-assistant')).toHaveClass('streaming-reveal')
+
+    const pending = deferred<SubagentSessionSnapshot | null>()
+    f.apiMocks.getSubagentSession.mockImplementationOnce(() => pending.promise)
+    const next = { ...running, revision: 2 }
+    act(() => f.push({ revision: 2, sessions: [next] }))
+    expect(child.querySelector('.bubble-assistant')).toBe(bubble)
+    expect(child.querySelector('details.thinking')).toBe(thinking)
+    expect(thinking).toHaveAttribute('open')
+    expect(child.querySelector('.tool-body')).toBe(toolBody)
+    expect(bubble).toHaveTextContent('已有回复')
+    expect(child.querySelector('.row-assistant')).toHaveClass('streaming-reveal')
+    await act(async () => pending.resolve({ ...initial, ...next, rows: [
+      initial.rows[0], { ...initial.rows[1], text: '已有思考新增思考' },
+      { ...initial.rows[2], text: '已有回复新增后缀' }
+    ] }))
+    expect(child.querySelector('.bubble-assistant')).toBe(bubble)
+    expect(thinking).toHaveAttribute('open')
+    expect(child.querySelector('.tool-body')).toBe(toolBody)
+    expect(bubble).toHaveTextContent('已有回复新增后缀')
+    expect(thinking.querySelector('pre')).toHaveTextContent('已有思考新增思考')
+    expect([...thinking.querySelectorAll('[data-screen-reveal-character]')].map((node) => node.textContent).join('')).toBe('新增思考')
+
+    const oldPending = deferred<SubagentSessionSnapshot | null>()
+    const terminalPending = deferred<SubagentSessionSnapshot | null>()
+    f.apiMocks.getSubagentSession.mockImplementationOnce(() => oldPending.promise)
+      .mockImplementationOnce(() => terminalPending.promise)
+    act(() => f.push({ revision: 3, sessions: [{ ...running, revision: 3 }] }))
+    const completed = { ...running, revision: 4, status: 'completed' as const, retentionRemainingMs: 1000 }
+    act(() => f.push({ revision: 4, sessions: [completed] }))
+    expect(child.querySelector('.bubble-assistant')).toBe(bubble)
+    expect(child.querySelector('.row-assistant')).not.toHaveClass('streaming-reveal')
+    expect(thinking).toHaveAttribute('open')
+    expect(child.querySelector('.tool-body')).toBe(toolBody)
+    expect(bubble).toHaveTextContent('已有回复新增后缀')
+    await act(async () => oldPending.resolve({ ...initial, revision: 4 }))
+    expect(child.querySelector('.row-assistant')).not.toHaveClass('streaming-reveal')
+    expect(bubble).toHaveTextContent('已有回复新增后缀')
+    await act(async () => terminalPending.resolve({ ...initial, ...completed }))
+    expect(child.querySelector('.bubble-assistant')).toBe(bubble)
+    expect(thinking).toHaveAttribute('open')
+    expect(child.querySelector('.tool-body')).toBe(toolBody)
+    expectNoParentBackendAction(f.actions)
+    expect(f.fallback.size).toBe(0)
+  })
+
+  it('binds manual-reading input after opening and reopening the conditional child viewport', async () => {
+    const f = setup()
+    const view = render(<App />)
+    await paint()
+    for (const revision of [2, 3]) {
+      fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
+      await paint()
+      const child = childScroll(view.container)
+      let height = 1200
+      Object.defineProperties(child, {
+        clientHeight: { configurable: true, value: 240 },
+        scrollHeight: { configurable: true, get: () => height }
+      })
+      child.scrollTop = 960
+      fireEvent.wheel(child, { deltaY: -80 })
+      child.scrollTop = 400
+      fireEvent.scroll(child)
+      const latest = { ...summary, revision }
+      f.apiMocks.getSubagentSession.mockResolvedValue({ ...snapshot, ...latest,
+        rows: snapshot.rows.map((item) => item.kind === 'assistant'
+          ? { ...item, text: `${item.text}\n新增输出 ${revision}` } : item) })
+      height = 1500
+      act(() => f.push({ revision, sessions: [latest] }))
+      await paint()
+      expect(child.scrollTop).toBe(400)
+      fireEvent.click(row(view.container, parentPath))
+      await paint()
+      expect(view.container.querySelector('.child-chat-scroll')).toBeNull()
+    }
+    expectNoParentBackendAction(f.actions)
+  })
+
+  it.each(['running', 'ready'] as const)('keeps parent timeline and Composer draft mounted and returns by the same parent row (%s backend)', async (phase) => {
+    const f = setup(phase)
+    const view = render(<App />)
+    await paint()
+    const parentTimeline = view.container.querySelector<HTMLElement>('.chat-scroll')!
+    const parentBubble = parentTimeline.querySelector('.bubble-user')
+    const input = view.container.querySelector<HTMLTextAreaElement>('.composer textarea')!
+    fireEvent.change(input, { target: { value: '尚未发送的父草稿' } })
+    const composer = input.closest('.composer')
+    const originalTimeline = f.state.timeline
+    expect(screen.getByTestId('parent-metrics')).toBeVisible()
+    expect(screen.getByTestId('parent-history')).toBeVisible()
+    expect(view.container.querySelector('.task-panel-agent')).not.toBeNull()
+    expect(view.container.querySelector('.queue-panel')).not.toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
+    await paint()
+    expect(view.container.querySelector('.chat-scroll:not(.child-chat-scroll)')).toBe(parentTimeline)
+    expect(parentTimeline.querySelector('.bubble-user')).toBe(parentBubble)
+    expect(parentTimeline).toHaveAttribute('inert')
+    expect(parentTimeline).toHaveAttribute('aria-hidden', 'true')
+    expect(parentTimeline).toHaveStyle({ visibility: 'hidden' })
+    expect(view.container.querySelector('.composer textarea')).toBe(input)
+    expect(input).toHaveValue('尚未发送的父草稿')
+    expect(input.closest('[inert]')).not.toBeNull()
+    expect(input.closest('[aria-hidden="true"]')).not.toBeNull()
+    expect(composer).not.toBeVisible()
+    for (const selector of ['[data-testid="parent-metrics"]', '[data-testid="parent-history"]', '.task-panel-agent', '.queue-panel', '.composer-inline-controls']) {
+      const element = view.container.querySelector(selector)
+      if (element) expect(element).not.toBeVisible()
+    }
+    expect(screen.queryByRole('button', { name: /返回父/ })).not.toBeInTheDocument()
+
+    fireEvent.click(row(view.container, parentPath))
+    await paint()
+    expect(view.container.querySelector('.child-chat-scroll')).toBeNull()
+    expect(parentTimeline).not.toHaveAttribute('inert')
+    expect(parentTimeline).not.toHaveAttribute('aria-hidden')
+    expect(view.container.querySelector('.composer')).toBe(composer)
+    expect(view.container.querySelector('.composer textarea')).toBe(input)
+    expect(input).toHaveValue('尚未发送的父草稿')
+    expect(input).toBeVisible()
+    expect(screen.getByTestId('parent-metrics')).toBeVisible()
+    expect(screen.getByTestId('parent-history')).toBeVisible()
+    expect(f.state.timeline).toBe(originalTimeline)
+    expectNoParentBackendAction(f.actions)
+  })
+
+  it('closes child viewing before switching to another ordinary session, without starting or reloading a project', async () => {
+    const f = setup()
+    const view = render(<App />)
+    await paint()
+    fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
+    await paint()
+    expect(childScroll(view.container)).toBeInTheDocument()
+    fireEvent.click(row(view.container, otherPath))
+    await paint()
+    expect(view.container.querySelector('.child-chat-scroll')).toBeNull()
+    expect(view.container.querySelector('.composer textarea')).toBeVisible()
+    expect(f.actions.switchSession).toHaveBeenCalledExactlyOnceWith(otherPath, cwd)
+    expect(f.actions.start).not.toHaveBeenCalled()
+    expect(f.actions.reloadTimeline).not.toHaveBeenCalled()
+    expect(f.state.timeline).toEqual([{ kind: 'user', id: 101, text: '父历史消息', entryId: 'parent-entry' }])
+  })
+
+  it('a pending child response cannot re-open viewing or contaminate parent history after a parent-row click', async () => {
+    const f = setup()
+    const pending = deferred<SubagentSessionSnapshot | null>()
+    f.apiMocks.getSubagentSession.mockImplementationOnce(() => pending.promise)
+    const view = render(<App />)
+    await paint()
+    const parentBubble = view.container.querySelector('.bubble-user')
+    fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
+    expect(childScroll(view.container)).toBeInTheDocument()
+    expect(view.container.querySelector('.composer textarea')!.closest('[inert]')).not.toBeNull()
+    fireEvent.click(row(view.container, parentPath))
+    await act(async () => pending.resolve(snapshot))
+    expect(view.container.querySelector('.child-chat-scroll')).toBeNull()
+    expect(view.container.querySelector('.bubble-user')).toBe(parentBubble)
+    expect(view.container.querySelector('.composer textarea')).toBeVisible()
+    expect(screen.queryByText('普通回复')).not.toBeInTheDocument()
+    expectNoParentBackendAction(f.actions)
+  })
+
+  it('expires pending readonly viewing automatically and rejects late details/repeated list resurrection', async () => {
+    vi.useFakeTimers()
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => now)
+    const f = setup()
+    const terminal = { ...summary, retentionRemainingMs: 1000 }
+    const pending = deferred<SubagentSessionSnapshot | null>()
+    f.apiMocks.listSubagentSessions.mockResolvedValue({ revision: 1, sessions: [terminal] })
+    f.apiMocks.getSubagentSession.mockImplementationOnce(() => pending.promise)
+    const view = render(<App />)
+    await paint()
+    const input = view.container.querySelector<HTMLTextAreaElement>('.composer textarea')!
+    fireEvent.change(input, { target: { value: '过期后保留的草稿' } })
+    fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
+    expect(childScroll(view.container)).toBeInTheDocument()
+    now = 1001
+    act(() => vi.advanceTimersByTime(1000))
+    expect(view.container.querySelector('.child-chat-scroll')).toBeNull()
+    expect(input).toBeVisible()
+    expect(input).toHaveValue('过期后保留的草稿')
+    await act(async () => pending.resolve({ ...snapshot, retentionRemainingMs: 1000 }))
+    act(() => f.push({ revision: 2, sessions: [terminal] }))
+    expect(view.container.querySelector('.child-chat-scroll')).toBeNull()
+    expect(screen.queryByRole('button', { name: /查看子会话 代码检查/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /返回父/ })).not.toBeInTheDocument()
+    expect(screen.getByText('父历史消息')).toBeInTheDocument()
+    expectNoParentBackendAction(f.actions)
+  })
+})

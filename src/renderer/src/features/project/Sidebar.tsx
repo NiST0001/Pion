@@ -211,6 +211,7 @@ interface ProjectBranchView {
 
 export function ProjectList({
   subagentSessions,
+  selectedSubagent,
   onViewSubagent,
   projects,
   sessionsByProject,
@@ -241,6 +242,7 @@ export function ProjectList({
 }: {
   subagentSessions?: readonly SubagentSessionSummary[]
   onViewSubagent?: (summary: SubagentSessionSummary) => void
+  selectedSubagent?: Pick<SubagentSessionSummary, 'id' | 'backendId'> | null
   projects: ProjectMeta[]
   sessionsByProject: Record<string, SessionMeta[]>
   branchesByProject: Record<string, BranchInfo[]>
@@ -304,6 +306,7 @@ export function ProjectList({
         allKeys={projects.map((project) => project.cwd)} getKey={({ project }) => project.cwd}>
       {({ project, branches }) => (
         <ProjectFolder
+          selectedSubagent={selectedSubagent}
           subagentSessions={subagentSessions}
           onViewSubagent={onViewSubagent}
           key={project.cwd}
@@ -341,6 +344,7 @@ export function ProjectList({
 
 function ProjectBranch({
   subagentSessions,
+  selectedSubagent,
   onViewSubagent,
   branch,
   sessions,
@@ -365,6 +369,7 @@ function ProjectBranch({
 }: {
   subagentSessions?: readonly SubagentSessionSummary[]
   onViewSubagent?: (summary: SubagentSessionSummary) => void
+  selectedSubagent?: Pick<SubagentSessionSummary, 'id' | 'backendId'> | null
   branch: BranchInfo
   sessions: SessionMeta[]
   allSessions: SessionMeta[]
@@ -563,6 +568,7 @@ function ProjectBranch({
             <div className="project-folder-empty">暂无会话</div>
           ) : (
             <SessionItems
+              selectedSubagent={selectedSubagent}
               subagentSessions={subagentSessions}
               onViewSubagent={onViewSubagent}
               sessions={sessions}
@@ -590,6 +596,7 @@ function ProjectBranch({
 
 function ProjectFolder({
   subagentSessions,
+  selectedSubagent,
   onViewSubagent,
   project,
   branches,
@@ -619,6 +626,7 @@ function ProjectFolder({
 }: {
   subagentSessions?: readonly SubagentSessionSummary[]
   onViewSubagent?: (summary: SubagentSessionSummary) => void
+  selectedSubagent?: Pick<SubagentSessionSummary, 'id' | 'backendId'> | null
   project: ProjectMeta
   branches: ProjectBranchView[]
   activeCwd?: string
@@ -705,6 +713,7 @@ function ProjectFolder({
             allKeys={branches.map(({ branch }) => branch.cwd)} getKey={({ branch }) => branch.cwd}>
           {({ branch, sessions, allSessions }) => (
             <ProjectBranch
+              selectedSubagent={selectedSubagent}
               subagentSessions={subagentSessions}
               onViewSubagent={onViewSubagent}
               key={branch.cwd}

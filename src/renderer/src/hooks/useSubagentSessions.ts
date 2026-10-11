@@ -11,6 +11,13 @@ const bindingOf = (summary: SubagentSessionSummary): string => JSON.stringify([
   summary.parentSessionId, summary.parentSessionPath, summary.name, summary.status, summary.truncated
 ])
 const versionOf = (summary: SubagentSessionSummary): string => JSON.stringify([bindingOf(summary), summary.revision])
+// A missing display path may be filled after first persistence. A known path
+// must never move, and none of the source identities may change underneath rows.
+const sameScope = (previous: SubagentSessionSummary, next: SubagentSessionSummary): boolean =>
+  previous.id === next.id && previous.backendId === next.backendId && previous.runtimeId === next.runtimeId
+  && previous.parentToolCallId === next.parentToolCallId && previous.cwd === next.cwd
+  && previous.parentSessionId === next.parentSessionId
+  && (!previous.parentSessionPath || previous.parentSessionPath === next.parentSessionPath)
 
 /** Only observes the host's memory store; never selects or starts an SDK session. */
 export function useSubagentSessions(api: PionApi | undefined, enabled = true) {
@@ -133,7 +140,7 @@ export function useSubagentSessions(api: PionApi | undefined, enabled = true) {
         setSelected((previous) => previous && previous.revision > snapshot.revision ? previous : snapshot)
         setError('')
       }, () => {
-        if (active && collecting && requestGeneration === generation.current) setError('子会话读取失败，请稍后重试或返回父会话。')
+        if (active && collecting && requestGeneration === generation.current) setError('子会话读取失败，请在会话列表重新选择。')
       }).finally(() => {
         if (slot.current === promise) slot.current = null
         if (active && collecting && requestGeneration === generation.current) setLoading(false)
@@ -150,14 +157,35 @@ export function useSubagentSessions(api: PionApi | undefined, enabled = true) {
       listRevision.current = list.revision
       const incomingKeys = new Set(list.sessions.map(keyOf))
       for (const item of summaries.current) if (!incomingKeys.has(keyOf(item))) rememberExpired(keyOf(item))
-      summaries.current = list.sessions.filter(accept)
+      summaries.current = list.sessions.map((item) => {
+        const old = summaries.current.find((candidate) => keyOf(candidate) === keyOf(item))
+        // Global list order cannot revive an older child run after a terminal
+        // binding, even while a real detail request is still outstanding.
+        return old && sameScope(old, item) && (item.revision < old.revision
+          || (terminal(old.status) && !terminal(item.status))) ? old : item
+      }).filter(accept)
       setSessions(summaries.current)
       const next = target.current && summaries.current.find((item) => keyOf(item) === keyOf(target.current!))
       if (target.current && !next) close()
-      else if (previous && next && versionOf(previous) !== versionOf(next)) {
-        generation.current += 1
-        setSelected(null)
-        setLoading(true)
+      else if (previous && next) {
+        const changed = versionOf(previous) !== versionOf(next)
+        if (changed) generation.current += 1
+        if (!sameScope(previous, next)) {
+          setSelected(null)
+          setLoading(true)
+        } else {
+          // Keep the accepted bounded body and its own revision until a detail
+          // matching the latest request/status binding arrives. Metadata may
+          // advance immediately (especially terminal status stopping streaming)
+          // without pretending these rows were read at the new revision.
+          setSelected((body) => body && sameScope(body, next) ? {
+            ...next, revision: body.revision, rows: body.rows,
+            retentionRemainingMs: deadlines.current.has(keyOf(next))
+              ? Math.max(0, deadlines.current.get(keyOf(next))! - performance.now())
+              : next.retentionRemainingMs
+          } : null)
+          if (changed) setLoading(true)
+        }
       }
       fetchDetail()
     }

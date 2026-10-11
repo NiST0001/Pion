@@ -481,6 +481,8 @@ export interface ModelProviderAuthMethod {
 
 /** Non-secret provider/auth metadata read from Pi's ModelRuntime. */
 export interface ModelProviderInfo {
+  /** Pion model-list visibility only; absent means visible. Not SDK/auth enablement. */
+  enabled?: boolean
   id: string
   name: string
   modelCount: number

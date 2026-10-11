@@ -78,6 +78,7 @@ export const IPC = {
   SetSubagentSettings: 'pion:set-subagent-settings',
   AgentModels: 'pion:agent-models',
   AgentModelProviders: 'pion:agent-model-providers',
+  AgentSetModelProviderEnabled: 'pion:agent-set-model-provider-enabled',
   AgentLoginModelProvider: 'pion:agent-login-model-provider',
   AgentLogoutModelProvider: 'pion:agent-logout-model-provider',
   AgentModelProviderAuthState: 'pion:agent-model-provider-auth-state',

@@ -17,6 +17,10 @@
   grid-area: 1 / 1;
   min-width: 0;
 }
+.conversation-shell > .parent-conversation-chrome { display: contents; }
+.conversation-shell > .parent-conversation-chrome > .run-metrics-strip {
+  grid-area: 1 / 1; min-width: 0; align-self: start; z-index: 19;
+}
 .conversation-shell > .run-metrics-strip { align-self: start; z-index: 19; }
 .conversation-shell > .composer-dock { align-self: end; }
 
@@ -35,6 +39,15 @@
   overflow-anchor: none;
 }
 
+/* The selected child uses the ordinary timeline, not a popup/card. Keep the
+   parent's measured viewport mounted so its reading position/draft survive. */
+.chat-stage > .child-chat-scroll {
+  position: absolute; inset: 0;
+  --conversation-top-clearance: 0px;
+  --conversation-bottom-clearance: 0px;
+  --conversation-tail-gap: 16px;
+}
+.conversation-shell.has-history-navigator .chat-scroll.child-chat-scroll { padding-left: 18px; }
 .chat-scroll-surface { min-height: 100%; display: flow-root; overflow-anchor: none; }
 .chat-scroll-surface > .empty-state {
   height: max(0px, calc(var(--chat-viewport-height, 100%) - var(--conversation-top-clearance, 0px) - var(--conversation-bottom-clearance, 0px) - var(--conversation-head-gap, 38px) - var(--conversation-tail-gap, 16px)));

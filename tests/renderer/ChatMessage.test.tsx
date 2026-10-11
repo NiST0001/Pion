@@ -33,6 +33,52 @@ describe('ChatMessage', () => {
     vi.useRealTimers()
   })
 
+  it('keeps ordinary user bubbles but fails closed on actions and attachments in read-only mode', () => {
+    const onFork = vi.fn(), onRevert = vi.fn()
+    const item = { ...persistedUserMessage, images: [{ type: 'image' as const, mimeType: 'image/png', data: 'AAAA' }] }
+    const props = { item, canFork: true, canRevert: true, onFork, onRevert }
+    const view = render(<ChatMessage {...props} readOnly />)
+    const bubble = view.container.querySelector('.bubble-user')
+    expect(bubble).toHaveTextContent(item.text)
+    expect(bubble).toHaveClass('screen-text-reveal-line-history')
+    expect(view.container.querySelector('[data-entry-id], img, .message-actions')).toBeNull()
+    expect(onFork).not.toHaveBeenCalled()
+    expect(onRevert).not.toHaveBeenCalled()
+
+    view.rerender(<ChatMessage {...props} />)
+    expect(view.container.querySelector('.bubble-user')).toBe(bubble)
+    expect(view.getByRole('img')).toHaveAttribute('src', 'data:image/png;base64,AAAA')
+    fireEvent.click(view.getByRole('button', { name: '分叉' }))
+    fireEvent.click(view.getByRole('button', { name: '撤销' }))
+    expect(onFork).toHaveBeenCalledExactlyOnceWith(item.entryId)
+    expect(onRevert).toHaveBeenCalledExactlyOnceWith(item.entryId)
+  })
+
+  it('renders read-only Markdown, thinking, code and tables without navigable links or media', () => {
+    const item = { kind: 'assistant' as const, id: 40, streaming: false, historical: true,
+      thinking: '先分析现有实现', text: '**普通格式** [链接](https://example.test) ![图片描述](https://example.test/image.png)\n\n'
+        + 'https://example.test/auto\n\n```ts\nconst answer = 42\n```\n\n| 列 |\n| --- |\n| 数据 |\n\n'
+        + '<img src="https://example.test/raw.png" />\n<video src="https://example.test/v" />\n'
+        + '<audio src="https://example.test/a" />\n<iframe src="https://example.test/f" />\n'
+        + '<script>alert(1)</script>' }
+    const view = render(<ChatMessage item={item} canFork readOnly />)
+    expect(view.container.querySelector('.bubble-assistant')).toHaveClass('screen-text-reveal-line-history')
+    expect(view.container.querySelector('.thinking summary')).toHaveTextContent('思考过程')
+    expect(view.container.querySelector('.thinking pre')).toHaveTextContent(item.thinking)
+    expect(view.container.querySelector('.markdown strong')).toHaveTextContent('普通格式')
+    expect(view.container.querySelector('.markdown')).toHaveTextContent('链接')
+    expect(view.container.querySelector('.markdown')).toHaveTextContent('图片描述')
+    expect(view.container.querySelector('.code-block pre code')).toHaveTextContent('const answer = 42')
+    expect(view.container.querySelector('table td')).toHaveTextContent('数据')
+    expect(view.container.querySelector('.markdown .screen-text-reveal-line-history')).not.toBeNull()
+    expect(view.container.querySelector('img, a, video, audio, iframe, script, [href], [src]')).toBeNull()
+    expect(view.container.querySelector('.markdown')).not.toHaveTextContent('alert(1)')
+
+    view.rerender(<ChatMessage item={{ ...item, text: '[普通链接](https://example.test) ![普通图片](https://example.test/image.png)' }} canFork={false} />)
+    expect(view.getByRole('link', { name: '普通链接' })).toHaveAttribute('href', 'https://example.test')
+    expect(view.getByRole('img', { name: '普通图片' })).toHaveAttribute('src', 'https://example.test/image.png')
+  })
+
   it('exposes live user locators without inventing an entry ID and keeps them stable on a late real attachment', () => {
     const message = { role: 'user' as const, timestamp: '1767225600000',
       _pionLiveMessageId: 'fixture-backend:1', content: '当前用户轮次' }
