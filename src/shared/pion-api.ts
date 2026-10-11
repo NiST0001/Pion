@@ -3,6 +3,8 @@
  * from the data contracts makes the IPC facade easy to audit without moving
  * the existing `shared/types` import path used by the application.
  */
+import type { BranchDeleteRequest, BranchDeleteResult } from './branches'
+import type { SubagentSessionList, SubagentSessionSnapshot } from './subagent-sessions'
 import type { SubagentSettings } from './subagents'
 import type { ThemeId } from './theme'
 import type { McpStatusSnapshot, McpStatusTarget } from './mcp'
@@ -220,6 +222,9 @@ export interface PionApi {
   getTheme(): Promise<ThemeId | null>
   setTheme(theme: ThemeId): Promise<ThemeId>
   /** Global defaults; each backend snapshots them at the next child batch. */
+  listSubagentSessions(): Promise<SubagentSessionList>
+  getSubagentSession(id: string, backendId: string): Promise<SubagentSessionSnapshot | null>
+  onSubagentSessions(listener: (list: SubagentSessionList) => void): () => void
   getSubagentSettings(): Promise<SubagentSettings>
   setSubagentSettings(settings: SubagentSettings): Promise<SubagentSettings>
   setModel(provider: string, modelId: string): Promise<void>
@@ -260,6 +265,7 @@ export interface PionApi {
   /** Save or clear native Pi project-resource trust and reload matching backends. */
   setProjectTrust(cwd: string, decision: boolean | null): Promise<ProjectTrustInfo>
   listBranches(cwd: string): Promise<BranchInfo[]>
+  deleteBranch(request: BranchDeleteRequest): Promise<BranchDeleteResult>
   createBranch(cwd: string, name: string): Promise<BranchInfo>
   renameBranch(cwd: string, oldName: string, newName: string): Promise<BranchInfo>
   addProject(cwd: string): Promise<ProjectMeta[]>

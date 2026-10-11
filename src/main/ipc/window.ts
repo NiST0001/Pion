@@ -8,9 +8,10 @@ interface WindowIpcDependencies {
   windowFromWebContents: (sender: WebContents) => BrowserWindow | null
   windowEffects: WindowEffectsService
   terminals: TerminalService
+  reserveMutation?: <T>(operation: () => Promise<T>) => Promise<T>
 }
 
-export function registerWindowIpc({ ipcMain, windowFromWebContents, windowEffects, terminals }: WindowIpcDependencies): void {
+export function registerWindowIpc({ ipcMain, windowFromWebContents, windowEffects, terminals, reserveMutation }: WindowIpcDependencies): void {
   const appearanceOwner = (event: IpcMainInvokeEvent): number => {
     if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口操作外观')
     return event.sender.id
@@ -21,7 +22,11 @@ export function registerWindowIpc({ ipcMain, windowFromWebContents, windowEffect
     if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口操作终端')
     return event.sender.id
   }
-  ipcMain.handle(IPC.TerminalOpen, (event, cwd: string, cols: number, rows: number) => terminals.open(terminalOwner(event), cwd, cols, rows))
+  ipcMain.handle(IPC.TerminalOpen, (event, cwd: string, cols: number, rows: number) => {
+    const owner = terminalOwner(event)
+    const open = () => terminals.open(owner, cwd, cols, rows)
+    return reserveMutation ? reserveMutation(open) : open()
+  })
   ipcMain.handle(IPC.TerminalWrite, (event, id: string, data: string) => terminals.write(terminalOwner(event), id, data))
   ipcMain.handle(IPC.TerminalResize, (event, id: string, cols: number, rows: number) => terminals.resize(terminalOwner(event), id, cols, rows))
   ipcMain.handle(IPC.TerminalClose, (event, id: string) => terminals.close(terminalOwner(event), id))

@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
+import type { SubagentSessionList, SubagentSessionSnapshot } from '../shared/subagent-sessions'
+import type { BranchDeleteResult } from '../shared/branches'
 import type { McpStatusSnapshot, McpStatusTarget } from '../shared/mcp'
 import type {
   AgentCapabilities,
@@ -172,6 +174,9 @@ const api: PionApi = {
   addModelProvider: (input) => ipcRenderer.invoke(IPC.AgentAddModelProvider, input),
   getSkills: () => ipcRenderer.invoke(IPC.AgentSkills) as Promise<SkillInfo[]>,
   getCapabilities: () => ipcRenderer.invoke(IPC.AgentCapabilities) as Promise<AgentCapabilities>,
+  listSubagentSessions: () => ipcRenderer.invoke(IPC.AgentSubagentSessions) as Promise<SubagentSessionList>,
+  getSubagentSession: (id, backendId) => ipcRenderer.invoke(IPC.AgentSubagentSession, id, backendId) as Promise<SubagentSessionSnapshot | null>,
+  onSubagentSessions: (listener) => subscribe<SubagentSessionList>(IPC_EVENTS.SubagentSessions, listener),
   getMcpStatus: (target: McpStatusTarget) => ipcRenderer.invoke(IPC.AgentMcpStatus, target) as Promise<McpStatusSnapshot>,
   setModel: (provider, modelId) => ipcRenderer.invoke(IPC.AgentSetModel, provider, modelId),
   getThinkingLevels: () => ipcRenderer.invoke(IPC.AgentThinkingLevels),
@@ -218,6 +223,7 @@ const api: PionApi = {
   setProjectTrust: (cwd, decision) =>
     ipcRenderer.invoke(IPC.ProjectTrustSet, cwd, decision) as Promise<ProjectTrustInfo>,
   listBranches: (cwd) => ipcRenderer.invoke(IPC.BranchesList, cwd) as Promise<BranchInfo[]>,
+  deleteBranch: (request) => ipcRenderer.invoke(IPC.BranchDelete, request) as Promise<BranchDeleteResult>,
   createBranch: (cwd, name) => ipcRenderer.invoke(IPC.BranchCreate, cwd, name) as Promise<BranchInfo>,
   renameBranch: (cwd, oldName, newName) =>
     ipcRenderer.invoke(IPC.BranchRename, cwd, oldName, newName) as Promise<BranchInfo>,

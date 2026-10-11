@@ -249,6 +249,7 @@ export type Action =
   | { type: 'optimisticSession'; session: SessionMeta }
   | { type: 'removeOptimisticSession'; cwd: string; id: string }
   | { type: 'branches'; cwd: string; branches: BranchInfo[] }
+  | { type: 'branchRemoved'; projectCwd: string; cwd: string }
   | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
   | { type: 'historyIndex'; index: SessionHistoryIndex | null }
   | { type: 'historyJump'; entryId: string; nonce: number }

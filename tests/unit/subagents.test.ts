@@ -3,12 +3,13 @@ import type { ExtensionAPI, ExtensionToolContext } from '@earendil-works/pi-codi
 import { createSubagentControl, type SubagentResult } from '../../src/main/agent/subagents'
 
 import { DEFAULT_SUBAGENT_SETTINGS, type SubagentSettings } from '../../src/shared/subagents'
+import { createSubagentSessionPublisher, type SubagentSessionObserver, type SubagentSessionPublisher } from '../../src/main/agent/subagent-session-observer'
 
 const context = { tools: [], executeTool: vi.fn(async () => { throw new Error('Unexpected tool delegation') }) } as unknown as ExtensionToolContext
 afterEach(() => vi.useRealTimers())
 function setup(run: Parameters<typeof createSubagentControl>[0] = async (task) => ({ name: task.name, status: 'completed', text: 'done' }),
-  getSettings: () => SubagentSettings | Promise<SubagentSettings> = () => ({ ...DEFAULT_SUBAGENT_SETTINGS })) {
-  const control = createSubagentControl(run, getSettings)
+  getSettings: () => SubagentSettings | Promise<SubagentSettings> = () => ({ ...DEFAULT_SUBAGENT_SETTINGS }), publisher?: SubagentSessionPublisher) {
+  const control = createSubagentControl(run, getSettings, publisher)
   const handlers = new Map<string, (...args: any[]) => any>()
   const commands = new Map<string, { handler: (args: string, ctx: { isIdle: () => boolean }) => Promise<void> }>()
   let tools = ['read', 'bash']
@@ -25,6 +26,133 @@ function setup(run: Parameters<typeof createSubagentControl>[0] = async (task) =
     execute: (signal?: AbortSignal) => control.tool.execute('batch', { tasks: [{ name: 'one', task: 'inspect' }, { name: 'two', task: 'edit another file' }] }, signal, undefined, context)
   }
 }
+
+it('only opts into the fifth runner argument through the host publisher and keeps transcript out of tool results', async () => {
+  const observer = { event: vi.fn(), running: vi.fn(), cancelling: vi.fn(), finish: vi.fn() }
+  const publisher = { reserve: vi.fn(async () => true), begin: vi.fn(() => observer), halt: vi.fn() }
+  const run = vi.fn(async (task: { name: string }, _signal: AbortSignal, _progress: (text: string) => void,
+    _settings?: Readonly<SubagentSettings>, display?: SubagentSessionObserver) => {
+    display?.event({ privateTranscript: 'private-only-text' })
+    return { name: task.name, status: 'completed' as const, text: 'summary' }
+  })
+  const h = setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS }), publisher)
+  const result = await h.execute()
+  expect(publisher.reserve).toHaveBeenCalledOnce()
+  expect(publisher.reserve).toHaveBeenCalledWith('batch', 2, expect.any(AbortSignal))
+  expect(publisher.reserve.mock.invocationCallOrder[0]).toBeLessThan(publisher.begin.mock.invocationCallOrder[0])
+  expect(publisher.begin).toHaveBeenCalledWith({ name: 'one', task: 'inspect' }, 'batch')
+  expect(run.mock.calls.every((call) => call.length === 5 && call[4] === observer)).toBe(true)
+  expect(JSON.stringify(result)).not.toContain('private-only-text')
+  h.handlers.get('session_shutdown')!()
+  expect(publisher.halt).toHaveBeenCalledOnce()
+  run.mockClear()
+  await setup(run).execute()
+  expect(run.mock.calls.every((call) => call.length === 4)).toBe(true)
+})
+
+it.each(['missing', 'throwing', 'invalid-identity'])('fails explicitly before model work when publisher admission is %s', async (mode) => {
+  const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: 'done' }))
+  const publisher = mode === 'invalid-identity'
+    ? createSubagentSessionPublisher({ nonce: 'n'.repeat(257), createContext: () => undefined })
+    : { reserve: vi.fn(async () => true), begin: vi.fn(() => { if (mode === 'throwing') throw new Error('display unavailable'); return undefined }), halt: vi.fn() }
+  const h = setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS }), publisher)
+  const update = vi.fn()
+  const result = await h.control.tool.execute('batch', { tasks: [{ name: 'one', task: 'inspect' }] }, undefined, update, context)
+  expect(run).not.toHaveBeenCalled()
+  expect(result.details).toEqual({ results: [{ name: 'one', status: 'failed', text: '临时子会话不可用，未启动子代理' }] })
+  expect(update.mock.calls.some(([value]) => value.content[0].text.includes('临时子会话不可用，未启动子代理'))).toBe(true)
+  expect(result.usage?.totalTokens).toBe(0)
+})
+
+it('keeps admitted sibling summaries and usage when another child has no display slot', async () => {
+  const observer = { event: vi.fn(), running: vi.fn(), cancelling: vi.fn(), finish: vi.fn() }
+  const publisher = { reserve: vi.fn(async () => true), begin: vi.fn().mockReturnValueOnce(observer).mockReturnValue(undefined), halt: vi.fn() }
+  const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: 'existing-summary',
+    usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } }))
+  const h = setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS }), publisher)
+  const result = await h.execute()
+  expect(run).toHaveBeenCalledOnce()
+  expect(result.content[0]).toMatchObject({ text: expect.stringContaining('existing-summary') })
+  expect((result.details as { results: SubagentResult[] }).results.map((r) => r.status)).toEqual(['completed', 'failed'])
+  expect(result.usage?.totalTokens).toBe(3)
+})
+
+it.each(['denied', 'undefined', 'timeout', 'abort'])('does not begin or run any child when the real publisher ACK is %s', async (mode) => {
+  vi.useFakeTimers()
+  const createSession = vi.fn()
+  const run = vi.fn(async (task: { name: string }) => {
+    createSession()
+    return { name: task.name, status: 'completed' as const, text: 'unexpected' }
+  })
+  let reply: ((value: string | undefined) => void) | undefined
+  const input = vi.fn(() => mode === 'denied' ? Promise.resolve('denied') : mode === 'undefined' ? Promise.resolve(undefined)
+    : new Promise<string | undefined>((resolve) => { reply = resolve }))
+  const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => undefined },
+    ui: { input, setWidget: vi.fn() } }
+  const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
+  const begin = vi.spyOn(publisher, 'begin')
+  const h = setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS }), publisher)
+  const controller = new AbortController()
+  const operation = h.execute(controller.signal)
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(begin).not.toHaveBeenCalled()
+  expect(run).not.toHaveBeenCalled()
+  if (mode === 'timeout') await vi.advanceTimersByTimeAsync(5000)
+  if (mode === 'abort') controller.abort()
+  const result = await operation
+  expect(input).toHaveBeenCalledOnce()
+  expect(begin).not.toHaveBeenCalled()
+  expect(ctx.ui.setWidget).not.toHaveBeenCalled()
+  expect(createSession).not.toHaveBeenCalled()
+  expect(run).not.toHaveBeenCalled()
+  expect((result.details as { results: SubagentResult[] }).results.map((r) => r.status)).toEqual(['failed', 'failed'])
+  expect(result.usage?.totalTokens).toBe(0)
+  reply?.('reserved')
+  await Promise.resolve()
+  expect(publisher.begin({ name: 'late' }, 'batch')).toBeUndefined()
+  // Batch finally removes timers/listeners and releases the sequential gate.
+  expect(vi.getTimerCount()).toBe(0)
+  input.mockImplementation(() => Promise.resolve('denied'))
+  await h.execute()
+  expect(input).toHaveBeenCalledTimes(2)
+})
+
+it('awaits one whole-batch reservation before the first begin/run and fails closed for old begin-only mocks', async () => {
+  let acknowledge!: (value: boolean) => void
+  const observer = { event: vi.fn(), running: vi.fn(), cancelling: vi.fn(), finish: vi.fn() }
+  const publisher = { reserve: vi.fn(() => new Promise<boolean>((resolve) => { acknowledge = resolve })),
+    begin: vi.fn(() => observer), halt: vi.fn() }
+  const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: 'summary' }))
+  const h = setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS }), publisher)
+  const operation = h.execute()
+  await Promise.resolve()
+  expect(publisher.reserve).toHaveBeenCalledWith('batch', 2, expect.any(AbortSignal))
+  expect(publisher.begin).not.toHaveBeenCalled()
+  expect(run).not.toHaveBeenCalled()
+  acknowledge(true)
+  await operation
+  expect(publisher.reserve).toHaveBeenCalledOnce()
+  expect(publisher.begin).toHaveBeenCalledTimes(2)
+  expect(run).toHaveBeenCalledTimes(2)
+  const old = { begin: vi.fn(() => observer), halt: vi.fn() } as unknown as SubagentSessionPublisher
+  run.mockClear()
+  const result = await setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS }), old).execute()
+  expect(old.begin).not.toHaveBeenCalled()
+  expect(run).not.toHaveBeenCalled()
+  expect(result.usage?.totalTokens).toBe(0)
+})
+
+it('validates settings and batch width before requesting display admission', async () => {
+  const publisher = { reserve: vi.fn(async () => true), begin: vi.fn(), halt: vi.fn() }
+  const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: 'done' }))
+  await expect(setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 0 }), publisher).execute()).rejects.toThrow()
+  await expect(setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 1 }), publisher).execute()).rejects.toThrow('每批最多 1')
+  expect(publisher.reserve).not.toHaveBeenCalled()
+  expect(publisher.begin).not.toHaveBeenCalled()
+  expect(run).not.toHaveBeenCalled()
+})
 
 it('defaults on and still gates execution after the user explicitly turns it off', async () => {
   const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: 'done' }))

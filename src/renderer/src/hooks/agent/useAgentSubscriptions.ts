@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { Dispatch, MutableRefObject } from 'react'
 import type { PionApi } from '../../../../shared/types'
 import type { Action, AgentState } from '../../agent/types'
+import { beginBranchQuery, isCurrentBranchQuery } from '../../agent/branchListRevision'
 
 // Progressive sidebar reads: a slow worktree must not hold every other row.
 // The deadline bounds waiting, not the lifetime of the underlying IPC request.
@@ -114,8 +115,13 @@ export function useAgentSubscriptions({
     if (!api || projects.length === 0) return
     let cancelled = false
     void loadSidebarRows(projects.map((project) => project.cwd),
-      (cwd) => api.listBranches(cwd),
-      (cwd, branches) => dispatch({ type: 'branches', cwd, branches }),
+      async (cwd) => {
+        const token = beginBranchQuery(api, cwd)
+        return { token, branches: await api.listBranches(cwd) }
+      },
+      (cwd, { token, branches }) => {
+        if (isCurrentBranchQuery(api, cwd, token)) dispatch({ type: 'branches', cwd, branches })
+      },
       () => cancelled)
     return () => {
       cancelled = true

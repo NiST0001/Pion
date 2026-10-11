@@ -180,6 +180,13 @@ export class RunStore {
       && (run.state === 'queued' || ACTIVE_STATES.has(run.state)))
   }
 
+  /** Destructive worktree gates use the complete ledger, not a display limit. */
+  hasUnsettledCwdRuns(cwd: string): boolean {
+    const target = resolve(cwd)
+    return [...this.runs.values()].some((run) => run.cwd === target
+      && (run.state === 'queued' || ACTIVE_STATES.has(run.state)))
+  }
+
   update(id: string, mutate: (run: RunOperation) => void): RunOperation | null {
     const run = this.runs.get(id)
     if (!run) return null

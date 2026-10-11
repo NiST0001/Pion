@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   WorkflowManager,
   type WorkflowVerificationRunner,
@@ -10,7 +10,7 @@ import {
   type WorkflowWorkerResult,
   type WorkflowWorkerRunner
 } from '../../src/main/workflow-manager'
-import type { WorkflowState } from '../../src/shared/workflows'
+import type { WorkflowSnapshot, WorkflowState } from '../../src/shared/workflows'
 
 const roots: string[] = []
 
@@ -109,6 +109,102 @@ afterEach(async () => {
 })
 
 describe('WorkflowManager', () => {
+  function isolatedManager() {
+    const workflows = new WorkflowManager({
+      filePath: join(tmpdir(), 'unused-workflow.json'),
+      worktreeRoot: join(tmpdir(), 'unused-worktrees'),
+      permissionExtensionPath: async () => 'unused',
+      verification: new FakeVerification(), workerRunner: new FakeWorkers()
+    })
+    const internal = workflows as unknown as {
+      workflows: Map<string, WorkflowSnapshot>
+      changed(workflow: WorkflowSnapshot): Promise<void>
+      launch(workflow: WorkflowSnapshot, operation: () => Promise<void>): void
+    }
+    vi.spyOn(internal, 'changed').mockResolvedValue(undefined)
+    return { workflows, internal }
+  }
+
+  function snapshot(id: string, state: WorkflowState = 'awaiting_start'): WorkflowSnapshot {
+    return { version: 1, id, cwd: '/project', goal: 'goal', state,
+      createdAt: 1, updatedAt: 1, revision: 0, workers: [], worktrees: {},
+      repairAttempts: 0, maxRepairAttempts: 2 }
+  }
+
+  it.each(['completed', 'failed', 'cancelled'] as const)('does not release a %s workflow worktree without real exit evidence', (state) => {
+    const { workflows, internal } = isolatedManager()
+    const value = snapshot('retained-worker', state)
+    value.worktrees = { implementer: '/linked/feature' }
+    internal.workflows.set(value.id, value)
+    expect(() => workflows.assertWorktreeDeletionIdle('/linked/feature')).toThrow(/工作流管理/)
+    expect(() => workflows.assertWorktreeDeletionIdle('/linked')).toThrow(/工作流管理/)
+    expect(() => workflows.assertWorktreeDeletionIdle('/linked/feature/subdir')).toThrow(/工作流管理/)
+    expect(() => workflows.assertWorktreeDeletionIdle('/linked/feature-other')).not.toThrow()
+  })
+
+  it('checks retained worker paths even without a worktrees map entry', () => {
+    const { workflows, internal } = isolatedManager()
+    const value = snapshot('retained-worker', 'completed')
+    value.workers = [{ id: 'worker', role: 'implementer', kind: 'agent', status: 'completed',
+      worktreePath: '/linked/feature', outputTail: '', outputTruncated: false,
+      permission: { read: true, write: true, shell: true, network: false, external: false, note: 'mock' } }]
+    internal.workflows.set(value.id, value)
+    expect(() => workflows.assertWorktreeDeletionIdle('/linked/feature')).toThrow(/工作流管理/)
+  })
+
+  it('guards every mutation entry before discovery, workers or commands', async () => {
+    const { workflows } = isolatedManager()
+    workflows.setMutationGuard(() => { throw new Error('deletion active') })
+    await expect(workflows.create({ cwd: '/project', goal: 'goal' })).rejects.toThrow('deletion active')
+    for (const action of ['start', 'approvePlan', 'repair', 'waiveTests', 'resume', 'merge', 'cleanup'] as const) {
+      await expect(workflows[action]('missing')).rejects.toThrow('deletion active')
+    }
+    expect(() => workflows.assertWorktreeDeletionIdle('/project')).not.toThrow()
+  })
+
+  it('checks all private snapshots rather than the bounded display list', () => {
+    const { workflows, internal } = isolatedManager()
+    internal.workflows.set('old', snapshot('old', 'planning'))
+    for (let index = 0; index < 35; index += 1) {
+      internal.workflows.set(`new-${index}`, { ...snapshot(`new-${index}`), updatedAt: index + 2 })
+    }
+    expect(workflows.list().some((value) => value.id === 'old')).toBe(false)
+    expect(() => workflows.assertWorktreeDeletionIdle('/unrelated')).toThrow(/工作流/)
+  })
+
+  it('keeps cancelled background operations reserved until their real promises settle', async () => {
+    const { workflows, internal } = isolatedManager()
+    const value = snapshot('pending-worker', 'planning')
+    internal.workflows.set(value.id, value)
+    let finish!: () => void
+    internal.launch(value, () => new Promise<void>((done) => { finish = done }))
+    await Promise.resolve()
+    await workflows.cancel(value.id)
+    expect(workflows.get(value.id)?.state).toBe('cancelled')
+    expect(() => workflows.assertWorktreeDeletionIdle('/project')).toThrow(/工作流/)
+    finish()
+    await vi.waitFor(() => expect(() => workflows.assertWorktreeDeletionIdle('/project')).not.toThrow())
+  })
+
+  it('reserves startup persistence and rechecks the guard before launch', async () => {
+    const { workflows, internal } = isolatedManager()
+    const value = snapshot('pending-start')
+    internal.workflows.set(value.id, value)
+    let finish!: () => void
+    vi.mocked(internal.changed).mockImplementationOnce(() => new Promise<void>((done) => { finish = done }))
+    let blocked = false
+    workflows.setMutationGuard(() => { if (blocked) throw new Error('deletion active') })
+    const starting = workflows.start(value.id)
+    // Test the reservation independently of the snapshot's running-state gate.
+    value.state = 'cancelled'
+    expect(() => workflows.assertWorktreeDeletionIdle('/project')).toThrow(/工作流/)
+    blocked = true
+    finish()
+    await starting
+    await vi.waitFor(() => expect(() => workflows.assertWorktreeDeletionIdle('/project')).not.toThrow())
+    expect(value.worktrees).toEqual({})
+  })
+
   it('plans, implements, reviews, tests, and fast-forward merges only after approval', async () => {
     const root = await repository()
     const workflows = await manager(root, new FakeVerification())

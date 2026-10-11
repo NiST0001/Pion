@@ -1,8 +1,10 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { flushSync } from 'react-dom'
-import { Settings, Store, PanelLeft, PanelRight, TerminalSquare, RotateCcw, PanelsTopLeft } from 'lucide-react'
+import { Settings, Store, PanelLeft, PanelRight, TerminalSquare, Globe, RotateCcw, PanelsTopLeft } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
+import { useSubagentSessions } from './hooks/useSubagentSessions'
+import { SubagentSessionPane } from './features/session/SubagentSessionPane'
 import { useMessageRevert } from './hooks/useMessageRevert'
 import { useRunTelemetry } from './hooks/useRunTelemetry'
 import { useRunRecovery } from './hooks/useRunRecovery'
@@ -70,6 +72,7 @@ import type { PendingReviewSelection } from './utils/reviewPaths'
 import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
 
 const TerminalPanel = lazy(() => import('./features/terminal/TerminalPanel').then((module) => ({ default: module.TerminalPanel })))
+const BrowserPanel = lazy(() => import('./features/browser/BrowserPanel').then((module) => ({ default: module.BrowserPanel })))
 
 const PION_LOCAL_SLASH_COMMANDS: SlashCommandInfo[] = [
   { name: 'plan', description: '切换 Pion 只读计划模式，不直接执行实现', source: 'pion' },
@@ -81,6 +84,7 @@ const LOCAL_SLASH_COMMAND_NAMES = PION_LOCAL_SLASH_COMMANDS.map((command) => com
 
 export function App(): ReactElement {
   const { state, actions, selectionRef, hasBridge } = useAgent()
+  const childSessions = useSubagentSessions(window.pion, hasBridge)
   useWindowEffects(true)
   const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
   const [operationsPanel, setOperationsPanel] = useState<OperationsPanelKind | null>(null)
@@ -166,6 +170,7 @@ export function App(): ReactElement {
   const [rollbackConfirmOpen, setRollbackConfirmOpen] = useState(false)
   const [rollbackBusy, setRollbackBusy] = useState(false)
   const [rollbackError, setRollbackError] = useState('')
+  const [branchNotice, setBranchNotice] = useState('')
   const [migrationTarget, setMigrationTarget] = useState<string | null>(null)
   const [migrationBusy, setMigrationBusy] = useState(false)
   const [migrationError, setMigrationError] = useState('')
@@ -178,7 +183,9 @@ export function App(): ReactElement {
   } = usePanelLayout(hasBridge)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [terminalCwd, setTerminalCwd] = useState<string>()
-  const dockVisible = { projects: sidebarOpen, chat: true, review: reviewOpen, terminal: terminalOpen }
+  const [browserOpen, setBrowserOpen] = useState(false)
+  const [browserMounted, setBrowserMounted] = useState(false)
+  const dockVisible = { projects: sidebarOpen, chat: true, review: reviewOpen, terminal: terminalOpen, browser: browserOpen }
   const dock = useDockLayout(dockVisible)
   const dockHeader = (panel: DockPanel, onClose?: () => void) => (
     <DockHeader panel={panel} targets={DOCK_PANELS.filter((target) => dockVisible[target])}
@@ -440,6 +447,17 @@ export function App(): ReactElement {
     async (cwd: string, branch: BranchInfo, name: string): Promise<void> => {
       if (!branch.gitBranch) throw new Error('该工作区没有可重命名的本地 Git 分支')
       await actions.renameBranch(branch.cwd, branch.gitBranch, name, cwd)
+    },
+    [actions]
+  )
+
+  const handleDeleteBranch = useCallback(
+    async (cwd: string, branch: BranchInfo): Promise<void> => {
+      setBranchNotice('')
+      const result = await actions.deleteBranch(cwd, branch)
+      if (result.warning || !result.branchDeleted) {
+        setBranchNotice(result.warning || '工作树已移除，但分支未确认删除，请检查 Git 分支列表。')
+      }
     },
     [actions]
   )
@@ -791,6 +809,10 @@ export function App(): ReactElement {
           if (terminalOpen && terminalCwd === resourceCwd) setTerminalOpen(false)
           else { setTerminalCwd(resourceCwd); setTerminalOpen(true) }
         }}><TerminalSquare size={13} />终端</button>
+        <button type="button" aria-pressed={browserOpen} onClick={() => {
+          setBrowserMounted(true)
+          setBrowserOpen((open) => !open)
+        }}><Globe size={13} />浏览器</button>
         <span className="dock-toolbar-spacer" />
         <button type="button" className="dock-reset" aria-label="重置布局" title="恢复默认布局" onClick={dock.reset}><RotateCcw size={13} /></button>
       </div>
@@ -841,6 +863,9 @@ export function App(): ReactElement {
               onNewSession={(cwd) => void handleNewSession(cwd)}
               onNewBranch={(cwd) => void handleNewBranch(cwd)}
               onRenameBranch={handleRenameBranch}
+              onDeleteBranch={handleDeleteBranch}
+              subagentSessions={childSessions.sessions}
+              onViewSubagent={childSessions.open}
               onReorder={(cwd, paths) => actions.reorderSessions(cwd, paths)}
               onSelectSession={(cwd, path) => void handleSelectSession(cwd, path)}
               onDelete={handleDeleteSession}
@@ -853,6 +878,10 @@ export function App(): ReactElement {
               onToggleFavorite={handleToggleFavorite}
             />
           </div>
+          {branchNotice && <div className="banner" role="status">
+            <span>{branchNotice}</span>
+            <button type="button" onClick={() => setBranchNotice('')} aria-label="关闭分支操作提示">关闭</button>
+          </div>}
           <div className="sidebar-footer">
             <button className="sidebar-settings" onClick={() => setSettingsOpen(true)}>
               <Settings size={14} />
@@ -915,6 +944,12 @@ export function App(): ReactElement {
               onJump={(landmark) => void actions.jumpToHistoryLandmark(landmark)}
             />
             <div className="chat-stage">
+              {childSessions.selectedTarget && <SubagentSessionPane
+                snapshot={childSessions.selected}
+                loading={childSessions.loading}
+                error={childSessions.error}
+                onClose={childSessions.close}
+              />}
               <ChatTimeline
                 scrollRef={scrollRef}
                 scrollSurfaceRef={scrollSurfaceRef}
@@ -1089,6 +1124,10 @@ export function App(): ReactElement {
         <div className="dock-terminal" {...dock.panelProps('terminal')}>
           {dockHeader('terminal', () => setTerminalOpen(false))}
           {terminalCwd && <Suspense fallback={<div className="side-empty">终端加载中…</div>}><TerminalPanel cwd={terminalCwd} visible={terminalOpen} /></Suspense>}
+        </div>
+        <div className="dock-browser" {...dock.panelProps('browser')}>
+          {dockHeader('browser', () => setBrowserOpen(false))}
+          {browserMounted && <Suspense fallback={<div className="side-empty">浏览器加载中…</div>}><BrowserPanel visible={browserOpen} /></Suspense>}
         </div>
         {dock.dividers.map((divider, index) => <div key={divider.path} className={`dock-divider dock-divider-${divider.axis}`}
           role="separator" aria-label={`调整分栏 ${index + 1}`} {...dock.dividerProps(divider)} />)}

@@ -69,6 +69,8 @@ export interface BackendMcpStatusCache {
 export interface BackendRecord {
   /** Bounded current-root-turn projection, isolated to this backend instance. */
   liveState?: LiveSessionProjection
+  /** Private display routing nonce; not authentication against same-process extensions. */
+  subagentViewNonce?: string
   /** Private observations only; never part of the chat/live projection or billing. */
   mcpStatus?: BackendMcpStatusCache
   key: string

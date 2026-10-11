@@ -1,6 +1,6 @@
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
 import { subagentSettingsFilePath } from '../subagent-settings'
 import { DEFAULT_SUBAGENTS_ENABLED } from '../../shared/subagents'
@@ -83,8 +83,13 @@ import { BackendPool } from './backend-pool'
 import { SessionListCache } from './session-list-cache'
 import { revertSessionMessage } from './message-revert'
 import { stopForHistory } from './stop-for-history'
+import { prepareWorktreeBranchDeletion } from '../git/branch-delete'
+import type { BranchDeleteRequest, BranchDeleteResult } from '../../shared/branches'
 import { applyBackendEvent } from './backend-events'
 import { LiveSessionProjection } from './live-session-state'
+import { SubagentSessionStore } from './subagent-session-store'
+import { SUBAGENT_SESSION_WIDGET_KEY, SUBAGENT_SESSION_ADMISSION_TITLE } from '../../shared/subagent-sessions'
+import type { SubagentSessionAdmission, SubagentSessionList, SubagentSessionSnapshot } from '../../shared/subagent-sessions'
 import {
   cacheMcpStatusWidget,
   isMcpStatusWidget,
@@ -160,6 +165,92 @@ import {
  */
 export class AgentBridge {
   private readonly backendPool = new BackendPool()
+  private subagentSessionStore?: SubagentSessionStore
+  private hiddenSubagentBackends?: Set<string>
+  private deletedSubagentParentPaths?: Set<string>
+  private subagentVisibilityRevision?: number
+
+  private subagentSessions(): SubagentSessionStore {
+    return this.subagentSessionStore ??= new SubagentSessionStore(() => this.pushSubagentSessions())
+  }
+
+  private visibleSubagentSessions(): SubagentSessionList {
+    const list = this.subagentSessionStore?.list() ?? { revision: 0, sessions: [] }
+    // Fences need survive only while their retained records do; no unbounded
+    // accumulation across completed/expired branches or deleted parents.
+    const backendIds = new Set(list.sessions.map((session) => session.backendId))
+    const paths = new Set(list.sessions.map((session) => session.parentSessionPath))
+    for (const id of this.hiddenSubagentBackends ?? []) if (!backendIds.has(id)) this.hiddenSubagentBackends?.delete(id)
+    for (const path of this.deletedSubagentParentPaths ?? []) if (!paths.has(path)) this.deletedSubagentParentPaths?.delete(path)
+    return { ...list, revision: list.revision + (this.subagentVisibilityRevision ?? 0),
+      sessions: list.sessions.filter((session) => !this.hiddenSubagentBackends?.has(session.backendId)
+        && !(session.parentSessionPath && this.deletedSubagentParentPaths?.has(session.parentSessionPath))) }
+  }
+
+  private pushSubagentSessions(): void {
+    const win = this.win
+    if (!win || win.isDestroyed?.() || win.webContents.isDestroyed?.()) return
+    win.webContents.send(IPC_EVENTS.SubagentSessions, this.visibleSubagentSessions())
+  }
+
+  private assertSubagentOwner(ownerId: number): void {
+    const win = this.win
+    if (!win || win.webContents.id !== ownerId || win.isDestroyed?.() || win.webContents.isDestroyed?.()) {
+      throw new Error('只允许所属主窗口读取子会话')
+    }
+  }
+
+  getSubagentSessions(ownerId: number): SubagentSessionList {
+    this.assertSubagentOwner(ownerId)
+    return this.visibleSubagentSessions()
+  }
+
+  getSubagentSession(id: string, backendId: string, ownerId: number): SubagentSessionSnapshot | null {
+    this.assertSubagentOwner(ownerId)
+    const valid = (value: unknown): value is string => typeof value === 'string' && value.length > 0
+      && value.length <= 256 && !value.includes('\0')
+    if (!valid(id) || !valid(backendId)) throw new Error('子会话标识无效')
+    // Share the list's expiry and visibility fence before reading details; a
+    // retained record must not be readable when its parent branch is hidden.
+    if (!this.visibleSubagentSessions().sessions.some((session) => session.id === id && session.backendId === backendId)) return null
+    return this.subagentSessionStore?.get(id, backendId) ?? null
+  }
+
+  /** Application shutdown only; logical project/session stops retain completed views. */
+  disposeSubagentSessions(): void {
+    this.subagentSessionStore?.dispose()
+    this.subagentSessionStore = undefined
+    this.hiddenSubagentBackends?.clear()
+    this.deletedSubagentParentPaths?.clear()
+  }
+
+  private markSubagentBackendGone(backend: BackendRecord, exitConfirmed: boolean): void {
+    const id = backend.liveState?.backendId
+    if (id) this.subagentSessionStore?.markBackendGone(id, exitConfirmed)
+  }
+
+  private observeSubagentProcessExit(backend: BackendRecord): void {
+    // Private adapter reviewed against pinned SDK 1.0.4, like stop-for-history.
+    // Missing/changed internals or a null handle do not establish actual exit.
+    const client = backend.client
+    if (!Object.prototype.hasOwnProperty.call(client, 'process')) return
+    const child = (client as unknown as { process: unknown }).process
+    if (!child || typeof child !== 'object') return
+    const process = child as Partial<Pick<import('node:child_process').ChildProcess, 'exitCode' | 'signalCode' | 'once' | 'removeListener'>>
+    if (typeof process.once !== 'function' || typeof process.removeListener !== 'function'
+      || (process.exitCode !== null && !Number.isInteger(process.exitCode))
+      || (process.signalCode !== null && (typeof process.signalCode !== 'string' || !process.signalCode))) return
+    const id = backend.liveState?.backendId
+    if (!id) return
+    // Capture the incarnation, not pool key/current client: eviction/replacement
+    // cannot transfer a late exit observation to a new backend.
+    const exited = () => this.subagentSessionStore?.markBackendGone(id, true)
+    process.once('exit', exited)
+    if (process.exitCode != null || process.signalCode != null) {
+      process.removeListener('exit', exited)
+      exited()
+    }
+  }
   private stopping = false
   private readonly backendKeysBySessionPath = new Map<string, string>()
   /** Only failed paths, latched for this bridge's lifetime; pool eviction/stop is not exit proof. */
@@ -295,6 +386,8 @@ export class AgentBridge {
     }
     this.unmarkDirectSteering(backend, message, marker)
   }
+  private branchDeletionInFlight = false
+  private unconfirmedStoppedWorktreeCwds = new Set<string>()
   private messageRevertInFlight = false
   private sessionOperationsInFlight = 0
   private historyRevision = 0
@@ -329,7 +422,13 @@ export class AgentBridge {
     return this.activeKey ? this.backendPool.get(this.activeKey) ?? null : null
   }
 
+  /** Synchronous service guard; reservations/actual pending slots cover awaited work. */
+  assertWorktreeMutationAvailable(): void {
+    this.assertHistoryAvailable()
+  }
+
   private assertHistoryAvailable(): void {
+    if (this.branchDeletionInFlight) throw new Error('正在删除分支，请稍后重试')
     if (this.messageRevertInFlight) throw new Error('正在撤销消息，请稍后重试')
   }
 
@@ -1573,6 +1672,7 @@ export class AgentBridge {
 
   /** Select a workspace; an individual session backend loads when selected. */
   async start(cwd: string): Promise<void> {
+    this.assertHistoryAvailable()
     this.stopping = false
     this.sessionSelectionGeneration += 1
     const normalizedCwd = resolve(cwd)
@@ -2021,11 +2121,64 @@ export class AgentBridge {
     this.pushQueueSnapshot(backend)
   }
 
+  private hasSubagentSourceReceipt(backend: BackendRecord, parentToolCallId: string, running = true): boolean {
+    const receipt = backend.nativeToolReceipts?.get(parentToolCallId)
+    const run = receipt && this.runStore.get(receipt.runId)
+    return !!receipt && receipt.name === 'pion_subagents' && (!running || receipt.state === 'running')
+      && !!backend.usageBackendId && receipt.backendId === backend.usageBackendId
+      && run?.usageBackendId === backend.usageBackendId && run.cwd === backend.cwd
+      && (run.state === 'dispatching' || run.state === 'running' || run.state === 'ending')
+      && (!backend.sessionPath || run.sessionPath === backend.sessionPath)
+  }
+
+  /** Private capacity ACK only. Same-process plugins are not an OS trust boundary. */
+  private handleSubagentAdmission(backend: BackendRecord, client: RpcClient, event: unknown): void {
+    const request = event as { type?: unknown; method?: unknown; id?: unknown; placeholder?: unknown; parentToolCallId?: unknown }
+    const bounded = (value: unknown, max: number): value is string => typeof value === 'string'
+      && value.length > 0 && value.length <= max && !value.includes('\0')
+    let admission: SubagentSessionAdmission | undefined
+    if (backend.phase !== 'error' && request.type === 'extension_ui_request' && request.method === 'input'
+      && request.parentToolCallId === undefined && bounded(request.id, 256)
+      && typeof request.placeholder === 'string' && request.placeholder.length <= 4096) {
+      try {
+        const value: unknown = JSON.parse(request.placeholder)
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const parsed = value as Record<string, unknown>
+          if (Object.keys(parsed).every((key) => ['version', 'nonce', 'runtimeId', 'parentToolCallId', 'count'].includes(key))
+            && parsed.version === 1 && bounded(parsed.nonce, 256) && parsed.nonce === backend.subagentViewNonce
+            && bounded(parsed.runtimeId, 256) && bounded(parsed.parentToolCallId, 256)
+            && Number.isSafeInteger(parsed.count) && (parsed.count as number) >= 1 && (parsed.count as number) <= 8) {
+            admission = { version: 1, nonce: parsed.nonce, runtimeId: parsed.runtimeId,
+              parentToolCallId: parsed.parentToolCallId, count: parsed.count as number }
+          }
+        }
+      } catch { /* Reserved malformed input must never become a generic UI prompt. */ }
+    }
+    const backendId = backend.liveState?.backendId
+    // Check source before constructing the store or consuming any capacity.
+    const ok = !!admission && !!backendId && this.hasSubagentSourceReceipt(backend, admission.parentToolCallId)
+      && this.subagentSessions().reserveBatch({ backendId, nonce: admission.nonce, cwd: backend.cwd,
+        parentSessionPath: backend.sessionPath }, admission, (id) => this.hasSubagentSourceReceipt(backend, id))
+    if (bounded(request.id, 256)) this.respondToExtensionUi(client, request.id, { value: ok ? 'reserved' : 'denied' })
+  }
+
   private attachBackendEvents(backend: BackendRecord): void {
     const client = backend.client
     client.onEvent((event) => {
       if (this.stopping || backend.historyMutation || backend.historyStopFailed
         || backend.client !== client || this.backendPool.get(backend.key) !== backend) return
+      if ((event as { title?: unknown }).title === SUBAGENT_SESSION_ADMISSION_TITLE) {
+        this.handleSubagentAdmission(backend, client, event)
+        return // Always private, including malformed method/type and nested packets.
+      }
+      if ((event as { widgetKey?: unknown }).widgetKey === SUBAGENT_SESSION_WIDGET_KEY) {
+        if (backend.phase === 'error') return
+        const backendId = backend.liveState?.backendId
+        if (backendId && backend.subagentViewNonce) this.subagentSessions().consume({
+          backendId, nonce: backend.subagentViewNonce, cwd: backend.cwd, parentSessionPath: backend.sessionPath
+        }, event, (parentToolCallId) => this.hasSubagentSourceReceipt(backend, parentToolCallId))
+        return // Reserved malformed/private input is swallowed even without a scope.
+      }
       // Private notices (including malformed/nested ones) never reach root
       // lifecycle, chat/live revision, billing, tasks or generic extension UI.
       if (isMcpStatusWidget(event)) {
@@ -2038,6 +2191,15 @@ export class AgentBridge {
       // Nested billing has private receipts, never independent renderer rows
       // or root lifecycle events. SDK codemode usage covers models.*, not children.
       const parentToolCallId = (event as { parentToolCallId?: unknown }).parentToolCallId
+      const completedTool = event as { toolCallId?: unknown; toolName?: unknown }
+      if (type === 'tool_execution_end' && completedTool.toolName === 'pion_subagents'
+        && typeof completedTool.toolCallId === 'string'
+        && this.hasSubagentSourceReceipt(backend, completedTool.toolCallId, false)
+        && backend.nativeToolReceipts?.get(completedTool.toolCallId)?.parentId === parentToolCallId) {
+        // Release only unused slots; the runner has already awaited child abort/finals.
+        const backendId = backend.liveState?.backendId
+        if (backendId) this.subagentSessionStore?.releaseBatch(backendId, completedTool.toolCallId)
+      }
       if (typeof parentToolCallId === 'string' && parentToolCallId.length > 0) {
         this.trackBackendEvent(backend, event, type)
         return
@@ -2170,12 +2332,14 @@ export class AgentBridge {
     const cliPath = pionRuntimePath()
     const args = await this.backendArgs(cwd, sessionPath)
     this.assertSessionNotQuarantined(sessionPath)
+    const subagentViewNonce = randomUUID()
     const client = new RpcClient({
       cliPath,
       cwd,
       args,
       env: { PION_TOOL_PERMISSION_CONFIG: this.toolPermissionStore.filePath,
-        PION_SUBAGENT_SETTINGS_FILE: subagentSettingsFilePath() }
+        PION_SUBAGENT_SETTINGS_FILE: subagentSettingsFilePath(),
+        PION_SUBAGENT_VIEW_NONCE: subagentViewNonce }
     })
     const backend = {
       key,
@@ -2183,6 +2347,7 @@ export class AgentBridge {
       sessionPath,
       client,
       liveState: new LiveSessionProjection(),
+      subagentViewNonce,
       phase: 'starting' as BackendPhase,
       busy: false,
       compacting: false,
@@ -2201,6 +2366,7 @@ export class AgentBridge {
 
     const startPromise = client.start()
       .then(async () => {
+        this.observeSubagentProcessExit(backend)
         // RpcClient.start() only waits 100 ms. The permission and plan
         // extensions can make cold startup longer, so require one successful
         // RPC round trip before exposing this backend as ready.
@@ -2213,7 +2379,11 @@ export class AgentBridge {
         void this.refreshSidebarSessions(false)
       })
       .catch((error: unknown) => {
+        // Startup failure can discard a live child handle without exit proof.
+        this.unconfirmedStoppedWorktreeCwds ??= new Set<string>()
+        this.unconfirmedStoppedWorktreeCwds.add(resolve(cwd))
         backend.phase = 'error'
+        this.markSubagentBackendGone(backend, false)
         this.clearBackendToolPermissionRequests(key)
         this.clearBackendExtensionUiRequests(key)
         this.backendPool.delete(key)
@@ -2316,6 +2486,7 @@ export class AgentBridge {
     if (!sessionPath) return
     const normalizedPath = resolve(sessionPath)
     backend.sessionPath = normalizedPath
+    if (backend.liveState) this.subagentSessionStore?.bindParent(backend.liveState.backendId, normalizedPath)
     this.updateRunSession(backend, normalizedPath, state.sessionId)
     // Parsed history is refreshed by its file signature or explicit history mutations,
     // not by every lifecycle get_state response for the same persisted path.
@@ -2363,6 +2534,7 @@ export class AgentBridge {
     const pendingStarts = this.backendPool.pendingStarts()
     await Promise.allSettled(pendingStarts)
     const backends = [...this.backendPool.values()]
+    for (const backend of backends) this.markSubagentBackendGone(backend, false)
     await Promise.all(backends.map((backend) => this.interruptBackendRuns(
       backend,
       'Pion 已退出；本轮及未发送的排队消息都未自动重放。'
@@ -2376,7 +2548,9 @@ export class AgentBridge {
     this.activeKey = null
     this.activeCwd = undefined
     this.activeSessionPath = undefined
-    await Promise.all(backends.map(async ({ client, historyStopFailed }) => {
+    await Promise.all(backends.map(async ({ client, cwd, historyStopFailed }) => {
+      this.unconfirmedStoppedWorktreeCwds ??= new Set<string>()
+      this.unconfirmedStoppedWorktreeCwds.add(resolve(cwd))
       if (historyStopFailed) return // a null-handle retry cannot establish exit
       try {
         await client.stop()
@@ -2489,6 +2663,7 @@ export class AgentBridge {
     cwd: string,
     message: string
   ): Promise<RunOperation | null> {
+    this.assertHistoryAvailable()
     if (this.providerMutationInFlight || this.messageRevertInFlight) return null
     if (!sessionPath) return null
     const target = resolve(sessionPath)
@@ -2509,7 +2684,7 @@ export class AgentBridge {
     }
     const lease = this.reserveDispatch(backend)
     const state = await backend.client.getState()
-    if (!lease.owns() || this.messageRevertInFlight || backend.historyStopFailed
+    if (!lease.owns() || this.branchDeletionInFlight || this.messageRevertInFlight || backend.historyStopFailed
       || state.isStreaming || state.isCompacting || backend.busy || backend.compacting) return null
     // Reserve the backend while preparing the checkpoint and sending the
     // repair prompt; verification callbacks may otherwise race each other.
@@ -2549,6 +2724,7 @@ export class AgentBridge {
   // ---------------------------------------------------------------- sessions
 
   async newSession(): Promise<void> {
+    this.assertHistoryAvailable()
     if (this.newSessionInFlight) return this.newSessionInFlight
     const operation = this.createNewSession()
     this.newSessionInFlight = operation
@@ -2697,6 +2873,166 @@ export class AgentBridge {
     return { text: result.text, cancelled: false }
   }
 
+  /** Holds a global host-operation gate; not an OS sandbox for external writers. */
+  async deleteBranch(
+    request: BranchDeleteRequest, ownerId: number, assertExternalIdle: () => void | Promise<void>
+  ): Promise<BranchDeleteResult> {
+    this.assertHistoryAvailable()
+    if (!request || typeof request.projectCwd !== 'string' || !request.projectCwd
+      || typeof request.cwd !== 'string' || !request.cwd || typeof request.name !== 'string' || !request.name
+      || request.projectCwd.length > 4096 || request.cwd.length > 4096 || request.name.length > 512
+      || request.projectCwd.includes('\0') || request.cwd.includes('\0') || request.name.includes('\0')
+      || typeof assertExternalIdle !== 'function') throw new Error('无效的分支删除参数')
+    for (const cwd of [request.cwd, request.projectCwd]) {
+      if (!isAbsolute(cwd) || resolve(cwd) !== cwd
+        || cwd.split(/[\\/]/).some((part) => part.toLowerCase() === '.git')) {
+        throw new Error('工作树路径无效')
+      }
+    }
+    const target = request.cwd
+    const project = request.projectCwd
+    const generation = this.sessionSelectionGeneration
+    const reserved = new Set<BackendRecord>()
+    const assertOwner = (): void => {
+      if (!this.win || this.win.webContents.id !== ownerId || this.stopping
+        || (typeof this.win.isDestroyed === 'function' && this.win.isDestroyed())
+        || (typeof this.win.webContents.isDestroyed === 'function' && this.win.webContents.isDestroyed())
+        || generation !== this.sessionSelectionGeneration) throw new Error('窗口或会话已变化，未继续删除分支')
+      if (target === project) throw new Error('不能删除主工作树')
+      if (resolve(this.activeCwd ?? this.status.cwd ?? project) === target
+        || (this.getActiveBackend() && resolve(this.getActiveBackend()!.cwd) === target)) {
+        throw new Error('请先切换到主工作树再删除')
+      }
+    }
+    const assertIdle = (): void => {
+      assertOwner()
+      if (this.unconfirmedStoppedWorktreeCwds?.has(target)) {
+        throw new Error('旧Agent退出未确认，请重启Pion后再删除')
+      }
+      if (this.messageRevertInFlight || this.providerMutationInFlight || this.providerReloading
+        || this.newSessionInFlight || this.sessionOperationsInFlight > 0 || this.backendPool.pendingStartCount > 0) {
+        throw new Error('请等待会话操作完成后再删除分支')
+      }
+      // Reject other active backends too: this global gate must not invalidate a live dispatch lease.
+      for (const backend of this.backendPool.values()) {
+        if (backend.historyStopFailed && resolve(backend.cwd) === target) {
+          throw new Error('旧Agent退出未确认，请重启Pion后再删除')
+        }
+        if (backend.phase === 'starting' || (backend.busy && !reserved.has(backend))
+          || backend.compacting || backend.awaitingRetry || backend.activeRunId
+          || backend.pendingRunIds.length > 0 || (backend.localFollowUps?.length ?? 0) > 0
+          || (backend.companionRunIds?.length ?? 0) > 0 || (backend.directSteering?.length ?? 0) > 0
+          || (backend.rawQueue?.steering.length ?? 0) > 0 || (backend.rawQueue?.followUp.length ?? 0) > 0
+          || backend.localQueueDispatching || backend.localQueueDispatchPromise || backend.runCompletionPromise
+          || backend.checkpointCreatePromise || backend.checkpointRefreshPromise || backend.subagentsModePending
+          || (backend.sessionPath && this.runStore.hasUnsettledSessionRuns(backend.sessionPath))) {
+          throw new Error('请等待所有运行、压缩及收尾完成，并清空排队消息后再删除分支')
+        }
+      }
+      // Consult the full ledger, not the bounded UI/statistics list.
+      if (this.runStore.hasUnsettledCwdRuns(target)
+        || this.getPendingToolPermissionRequests().length > 0 || this.getPendingExtensionUiRequests().length > 0) {
+        throw new Error('无法确认运行记录及待处理请求全部空闲，不能删除分支')
+      }
+    }
+    const lifecycleCwds = (): string[] => [
+      ...[...this.backendPool.values()].map((backend) => backend.cwd),
+      ...(this.unconfirmedStoppedWorktreeCwds ?? []),
+      ...[this.activeCwd, this.status.cwd].filter((cwd): cwd is string => typeof cwd === 'string'),
+      process.cwd()
+    ]
+    const assertCanonicalIdle = async (): Promise<void> => {
+      assertIdle()
+      const paths = lifecycleCwds()
+      for (const cwd of paths) {
+        if (!isAbsolute(cwd) || resolve(cwd) !== cwd) throw new Error('Agent 工作目录不是规范路径，不能删除分支')
+        let canonical: string
+        try { canonical = await realpath(cwd) } catch {
+          throw new Error('无法确认 Agent 工作目录，请重启Pion后再删除')
+        }
+        if (canonical !== cwd) throw new Error('Agent 工作目录包含别名或符号链接，不能删除分支')
+        assertIdle()
+        const current = lifecycleCwds()
+        if (current.length !== paths.length || current.some((path, index) => path !== paths[index])) {
+          throw new Error('Agent 工作目录已变化，不能删除分支')
+        }
+      }
+      assertIdle()
+    }
+    const assertDeletionIdle = async (): Promise<void> => {
+      await assertCanonicalIdle()
+      await assertExternalIdle()
+      await assertCanonicalIdle()
+    }
+    assertIdle()
+    this.branchDeletionInFlight = true
+    this.historyRevision += 1
+    try {
+      await assertDeletionIdle()
+      // Capture Git/filesystem identities before querying or stopping any backend.
+      const commit = await prepareWorktreeBranchDeletion(project, target, request.name, assertDeletionIdle)
+      await assertDeletionIdle()
+      const targets = [...this.backendPool.values()].filter((backend) => backend.cwd === target)
+      for (const backend of targets) {
+        if (backend.phase !== 'running') throw new Error('目标 Agent 未就绪，不能删除分支')
+        this.assertSessionNotQuarantined(backend.sessionPath)
+        reserved.add(backend)
+        backend.historyMutation = true
+        backend.busy = true
+      }
+      for (const backend of targets) {
+        await assertDeletionIdle()
+        const state = await backend.client.getState()
+        await assertDeletionIdle()
+        if (state.isStreaming || state.isCompacting || state.pendingMessageCount > 0) {
+          throw new Error('目标 Agent 仍在运行或有排队消息，不能删除分支')
+        }
+      }
+      for (const backend of targets) {
+        await assertDeletionIdle()
+        try {
+          if ((backend.client as unknown as { process?: unknown }).process === null) {
+            throw new Error('旧Agent退出未确认，请重启Pion后再删除')
+          }
+          this.markSubagentBackendGone(backend, false)
+          await stopForHistory(backend.client)
+          this.markSubagentBackendGone(backend, true) // guarded non-null real writer barrier above
+        } catch (error) {
+          backend.historyStopFailed = true
+          backend.phase = 'error'
+          this.unconfirmedStoppedWorktreeCwds ??= new Set<string>()
+          this.unconfirmedStoppedWorktreeCwds.add(target)
+          if (backend.sessionPath) {
+            this.quarantinedSessionPaths ??= new Set<string>()
+            this.quarantinedSessionPaths.add(resolve(backend.sessionPath))
+          }
+          throw error
+        }
+        // Remove records only after real process exit, even if owner changed while waiting.
+        this.clearBackendToolPermissionRequests(backend.key)
+        this.clearBackendExtensionUiRequests(backend.key)
+        if (this.backendPool.get(backend.key) === backend) this.backendPool.delete(backend.key)
+        if (backend.sessionPath) {
+          const path = resolve(backend.sessionPath)
+          if (this.backendKeysBySessionPath.get(path) === backend.key) this.backendKeysBySessionPath.delete(path)
+          this.sessionManagers.delete(path)
+          this.sessionManagerSignatures.delete(path)
+        }
+        await assertDeletionIdle()
+      }
+      const result = await commit()
+      // A partial Git result is authoritative; do not disguise a completed removal as a failed operation.
+      return result
+    } finally {
+      for (const backend of reserved) {
+        backend.historyMutation = false
+        backend.busy = false
+      }
+      this.branchDeletionInFlight = false
+      this.historyRevision += 1
+    }
+  }
+
   /** Rewind conversation only, with exactly one writer and a durable SDK branch marker. */
   async revertMessage(request: MessageRevertRequest, ownerId: number): Promise<MessageRevertResult> {
     if (!this.win || this.win.webContents.id !== ownerId) throw new Error('只允许所属主窗口撤销消息')
@@ -2750,6 +3086,7 @@ export class AgentBridge {
       // RpcClient.stop() alone can resolve before SIGKILL has actually exited.
       // Do not use a second SessionManager writer until this stronger barrier.
       stoppingWriter = true
+      this.markSubagentBackendGone(backend, false)
       await stopForHistory(backend.client)
       writerStopped = true
       this.clearBackendToolPermissionRequests(backend.key)
@@ -2762,6 +3099,18 @@ export class AgentBridge {
       // Synchronous revalidation + append: no selection/other host mutation can
       // interleave between the final identity check and the durable commit.
       const result = revertSessionMessage(request)
+      // The same persisted parent can have retained children from several
+      // process incarnations. Hide every existing incarnation only after the
+      // durable commit, not the parent path: a new backend's children belong
+      // to the new branch and must remain visible.
+      const retained = this.subagentSessionStore?.list().sessions ?? []
+      this.hiddenSubagentBackends ??= new Set()
+      for (const session of retained) {
+        if (session.parentSessionPath === target) this.hiddenSubagentBackends.add(session.backendId)
+      }
+      if (backend.liveState) this.hiddenSubagentBackends.add(backend.liveState.backendId)
+      this.subagentVisibilityRevision = (this.subagentVisibilityRevision ?? 0) + 1
+      this.pushSubagentSessions()
       // The commit is already durable; metadata or display refresh failure
       // must not turn it into failed undo and discard the restored draft.
       try {
@@ -2809,6 +3158,10 @@ export class AgentBridge {
 
   /** Select a session and load its backend once, reusing it on later visits. */
   async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
+    // Ordinary IPC switches are reserved by withSessionOperation. Keep the
+    // existing selection fence for a lifecycle switch already admitted before
+    // undo, while the destructive Git transaction rejects every direct switch.
+    if (this.branchDeletionInFlight) throw new Error('正在删除分支，请稍后重试')
     const generation = ++this.sessionSelectionGeneration
     const target = await this.resolveListedSession(sessionPath)
     if (generation !== this.sessionSelectionGeneration) return { cancelled: true }
@@ -2882,6 +3235,7 @@ export class AgentBridge {
       backend,
       'Agent 后端已停止；本轮及未发送的排队消息未自动重放。'
     )
+    this.markSubagentBackendGone(backend, false)
     this.clearBackendToolPermissionRequests(key)
     this.clearBackendExtensionUiRequests(key)
     this.backendPool.delete(key)
@@ -2889,6 +3243,8 @@ export class AgentBridge {
     if (backend.sessionPath && this.backendKeysBySessionPath.get(resolve(backend.sessionPath)) === key) {
       this.backendKeysBySessionPath.delete(resolve(backend.sessionPath))
     }
+    this.unconfirmedStoppedWorktreeCwds ??= new Set<string>()
+    this.unconfirmedStoppedWorktreeCwds.add(resolve(backend.cwd))
     try {
       await backend.client.stop()
     } catch {
@@ -2904,6 +3260,10 @@ export class AgentBridge {
 
     this.assertSessionNotQuarantined(target)
     await unlink(target)
+    this.deletedSubagentParentPaths ??= new Set()
+    this.deletedSubagentParentPaths.add(target)
+    this.subagentVisibilityRevision = (this.subagentVisibilityRevision ?? 0) + 1
+    this.pushSubagentSessions()
     const ownerCwd = this.sessionManagers.get(target)?.getCwd()
     if (ownerCwd) this.sessionListCache?.invalidate(ownerCwd)
     const wasUnread = this.unreadSessionPaths.delete(target)

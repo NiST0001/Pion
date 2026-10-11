@@ -153,6 +153,43 @@ export class WorkflowManager {
   private readonly projectTrusted: (cwd: string) => boolean
   private readonly workflows = new Map<string, WorkflowSnapshot>()
   private readonly operations = new Set<string>()
+  private pendingMutations = 0
+  private mutationGuard?: () => void
+
+  setMutationGuard(guard: () => void): void { this.mutationGuard = guard }
+
+  assertWorktreeDeletionIdle(cwd: string): void {
+    const target = resolve(cwd)
+    // Worker RPC stop is not an OS-exit barrier. Never release registered
+    // workflow worktrees merely because a snapshot says completed/cancelled.
+    const related = (directory: string): boolean => {
+      const path = resolve(directory)
+      return path === target || path.startsWith(`${target}${sep}`) || target.startsWith(`${path}${sep}`)
+    }
+    if ([...this.workflows.values()].some((workflow) =>
+      Object.values(workflow.worktrees).some(related)
+      || workflow.workers.some((worker) => Boolean(worker.worktreePath && related(worker.worktreePath))))) {
+      throw new Error('此目录由工作流管理，不能通过分支菜单删除')
+    }
+    if (this.pendingMutations || this.operations.size
+      || [...this.workflows.values()].some((workflow) => isWorkflowRunning(workflow.state)
+        || workflow.state === 'waiting_permission'
+        || workflow.workers.some((worker) => worker.status === 'running'))) {
+      throw new Error('工作流操作尚未结束，不能删除工作树')
+    }
+  }
+
+  private async mutate<T>(operation: () => Promise<T>): Promise<T> {
+    this.mutationGuard?.()
+    this.pendingMutations += 1
+    try { return await operation() }
+    finally { this.pendingMutations -= 1 }
+  }
+
+  private git(cwd: string, args: string[], allowFailure = false): Promise<string> {
+    this.mutationGuard?.()
+    return git(cwd, args, allowFailure)
+  }
   private win: BrowserWindow | null = null
   private loaded = false
   private writeQueue: Promise<void> = Promise.resolve()
@@ -214,10 +251,15 @@ export class WorkflowManager {
   }
 
   async create(request: CreateWorkflowRequest): Promise<WorkflowSnapshot> {
+    return this.mutate(() => this.createReserved(request))
+  }
+
+  private async createReserved(request: CreateWorkflowRequest): Promise<WorkflowSnapshot> {
     const goal = request.goal.trim()
     if (!goal) throw new Error('请输入多 Agent 工作流目标')
     if (goal.length > MAX_GOAL) throw new Error(`工作流目标不能超过 ${MAX_GOAL} 个字符`)
-    const root = resolve(await git(resolve(request.cwd), ['rev-parse', '--show-toplevel']))
+    const root = resolve(await this.git(resolve(request.cwd), ['rev-parse', '--show-toplevel']))
+    this.mutationGuard?.()
     const now = Date.now()
     const workflow: WorkflowSnapshot = {
       version: 1,
@@ -239,6 +281,10 @@ export class WorkflowManager {
   }
 
   async start(id: string): Promise<WorkflowSnapshot> {
+    return this.mutate(() => this.startReserved(id))
+  }
+
+  private async startReserved(id: string): Promise<WorkflowSnapshot> {
     const workflow = this.require(id)
     if (workflow.state !== 'awaiting_start' && workflow.state !== 'draft') {
       throw new Error('此工作流当前不能启动')
@@ -255,6 +301,10 @@ export class WorkflowManager {
   }
 
   async approvePlan(id: string): Promise<WorkflowSnapshot> {
+    return this.mutate(() => this.approvePlanReserved(id))
+  }
+
+  private async approvePlanReserved(id: string): Promise<WorkflowSnapshot> {
     const workflow = this.require(id)
     if (workflow.state !== 'awaiting_plan' || !workflow.plan) throw new Error('没有可批准的计划')
     this.ensureIdle(workflow)
@@ -266,6 +316,10 @@ export class WorkflowManager {
   }
 
   async repair(id: string): Promise<WorkflowSnapshot> {
+    return this.mutate(() => this.repairReserved(id))
+  }
+
+  private async repairReserved(id: string): Promise<WorkflowSnapshot> {
     const workflow = this.require(id)
     if (workflow.state !== 'blocked') throw new Error('只有被阻塞的工作流可以修复')
     if (workflow.repairAttempts >= workflow.maxRepairAttempts) throw new Error('此工作流已达到自动修复上限')
@@ -280,6 +334,10 @@ export class WorkflowManager {
   }
 
   async waiveTests(id: string): Promise<WorkflowSnapshot> {
+    return this.mutate(() => this.waiveTestsReserved(id))
+  }
+
+  private async waiveTestsReserved(id: string): Promise<WorkflowSnapshot> {
     const workflow = this.require(id)
     if (workflow.state !== 'blocked' || workflow.blockedReason !== 'no-verification') {
       throw new Error('当前工作流没有可豁免的缺失验证')
@@ -299,6 +357,10 @@ export class WorkflowManager {
   }
 
   async resume(id: string): Promise<WorkflowSnapshot> {
+    return this.mutate(() => this.resumeReserved(id))
+  }
+
+  private async resumeReserved(id: string): Promise<WorkflowSnapshot> {
     const workflow = this.require(id)
     if (workflow.state !== 'interrupted') throw new Error('此工作流不处于中断状态')
     this.ensureIdle(workflow)
@@ -309,7 +371,7 @@ export class WorkflowManager {
       await this.changed(workflow)
       this.launch(workflow, () => this.plan(workflow))
     } else if (previous === 'merging') {
-      const head = await git(workflow.cwd, ['rev-parse', 'HEAD'])
+      const head = await this.git(workflow.cwd, ['rev-parse', 'HEAD'])
       workflow.state = head === workflow.candidateOid ? 'completed' : 'awaiting_merge'
       if (head === workflow.candidateOid) workflow.mergeOid = head
       await this.changed(workflow)
@@ -349,6 +411,10 @@ export class WorkflowManager {
   }
 
   async merge(id: string): Promise<WorkflowSnapshot> {
+    return this.mutate(() => this.mergeReserved(id))
+  }
+
+  private async mergeReserved(id: string): Promise<WorkflowSnapshot> {
     const workflow = this.require(id)
     if (workflow.state !== 'awaiting_merge') throw new Error('工作流尚未到达可合并状态')
     if (!workflow.baseOid || !workflow.candidateOid || !workflow.candidateBranch || !workflow.targetBranch) {
@@ -364,10 +430,10 @@ export class WorkflowManager {
     await this.changed(workflow)
     try {
       const [branch, head, dirty, candidate] = await Promise.all([
-        git(workflow.cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
-        git(workflow.cwd, ['rev-parse', 'HEAD']),
-        git(workflow.cwd, ['status', '--porcelain=v1', '--untracked-files=all']),
-        git(workflow.cwd, ['rev-parse', workflow.candidateBranch])
+        this.git(workflow.cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
+        this.git(workflow.cwd, ['rev-parse', 'HEAD']),
+        this.git(workflow.cwd, ['status', '--porcelain=v1', '--untracked-files=all']),
+        this.git(workflow.cwd, ['rev-parse', workflow.candidateBranch])
       ])
       if (branch !== workflow.targetBranch || head !== workflow.baseOid || dirty) {
         workflow.state = 'stale'
@@ -381,8 +447,8 @@ export class WorkflowManager {
         await this.changed(workflow)
         return clone(workflow)
       }
-      await git(workflow.cwd, ['merge', '--ff-only', workflow.candidateBranch])
-      workflow.mergeOid = await git(workflow.cwd, ['rev-parse', 'HEAD'])
+      await this.git(workflow.cwd, ['merge', '--ff-only', workflow.candidateBranch])
+      workflow.mergeOid = await this.git(workflow.cwd, ['rev-parse', 'HEAD'])
       workflow.state = 'completed'
       await this.changed(workflow)
       return clone(workflow)
@@ -395,6 +461,10 @@ export class WorkflowManager {
   }
 
   async cleanup(id: string): Promise<WorkflowSnapshot> {
+    return this.mutate(() => this.cleanupReserved(id))
+  }
+
+  private async cleanupReserved(id: string): Promise<WorkflowSnapshot> {
     const workflow = this.require(id)
     if (isWorkflowRunning(workflow.state) || workflow.state === 'merging' || workflow.state === 'cancelling') {
       throw new Error('运行中的工作流不能清理，请先取消')
@@ -402,12 +472,13 @@ export class WorkflowManager {
     this.ensureIdle(workflow)
     for (const path of Object.values(workflow.worktrees)) {
       if (!path || !managedPath(this.worktreeRoot, path)) continue
-      await git(workflow.cwd, ['worktree', 'remove', '--force', path], true)
+      await this.git(workflow.cwd, ['worktree', 'remove', '--force', path], true)
+      this.mutationGuard?.()
       await rm(path, { recursive: true, force: true }).catch(() => undefined)
     }
-    await git(workflow.cwd, ['worktree', 'prune'], true)
+    await this.git(workflow.cwd, ['worktree', 'prune'], true)
     if (workflow.candidateBranch) {
-      await git(workflow.cwd, ['branch', '-D', workflow.candidateBranch], true)
+      await this.git(workflow.cwd, ['branch', '-D', workflow.candidateBranch], true)
     }
     workflow.worktrees = {}
     workflow.cleanupCompletedAt = Date.now()
@@ -458,7 +529,11 @@ export class WorkflowManager {
 
   private launch(workflow: WorkflowSnapshot, operation: () => Promise<void>): void {
     this.operations.add(workflow.id)
-    void operation()
+    void Promise.resolve().then(() => {
+      if (this.wasStopped(workflow)) return
+      this.mutationGuard?.()
+      return operation()
+    })
       .catch(async (error) => {
         if (workflow.state === 'cancelled' || workflow.state === 'cancelling' || workflow.state === 'interrupted') return
         workflow.state = 'failed'
@@ -488,28 +563,31 @@ export class WorkflowManager {
   }
 
   private async prepare(workflow: WorkflowSnapshot): Promise<void> {
-    const root = resolve(await git(workflow.cwd, ['rev-parse', '--show-toplevel']))
+    const root = resolve(await this.git(workflow.cwd, ['rev-parse', '--show-toplevel']))
     workflow.cwd = root
     if (!workflow.baseOid) {
-      const dirty = await git(root, ['status', '--porcelain=v1', '--untracked-files=all'])
+      const dirty = await this.git(root, ['status', '--porcelain=v1', '--untracked-files=all'])
       if (dirty) throw new Error('启动多 Agent 工作流前，目标 Git 工作区必须干净')
-      workflow.baseOid = await git(root, ['rev-parse', 'HEAD'])
-      workflow.targetBranch = await git(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+      workflow.baseOid = await this.git(root, ['rev-parse', 'HEAD'])
+      workflow.targetBranch = await this.git(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
       if (!workflow.targetBranch) throw new Error('目标工作区处于 detached HEAD，无法安全合并')
       workflow.candidateBranch = `pion/${workflow.id.slice(0, 8)}/candidate`
     }
 
     const baseDir = join(this.worktreeRoot, workflow.id)
+    this.mutationGuard?.()
     await mkdir(baseDir, { recursive: true })
     const planner = workflow.worktrees.planner ?? join(baseDir, 'planner')
     const implementer = workflow.worktrees.implementer ?? join(baseDir, 'implementer')
     if (!(await exists(join(planner, '.git')))) {
+      this.mutationGuard?.()
       await rm(planner, { recursive: true, force: true })
-      await git(root, ['worktree', 'add', '--detach', planner, workflow.baseOid])
+      await this.git(root, ['worktree', 'add', '--detach', planner, workflow.baseOid])
     }
     if (!(await exists(join(implementer, '.git')))) {
+      this.mutationGuard?.()
       await rm(implementer, { recursive: true, force: true })
-      await git(root, ['worktree', 'add', '-b', workflow.candidateBranch!, implementer, workflow.baseOid])
+      await this.git(root, ['worktree', 'add', '-b', workflow.candidateBranch!, implementer, workflow.baseOid])
     }
     workflow.worktrees.planner = planner
     workflow.worktrees.implementer = implementer
@@ -537,12 +615,12 @@ export class WorkflowManager {
 
     workflow.state = 'integrating'
     await this.changed(workflow)
-    const dirty = await git(implementer, ['status', '--porcelain=v1', '--untracked-files=all'])
+    const dirty = await this.git(implementer, ['status', '--porcelain=v1', '--untracked-files=all'])
     if (dirty) {
-      await git(implementer, ['add', '--all'])
-      await git(implementer, ['commit', '-m', `Pion workflow ${workflow.id.slice(0, 8)} implementation`])
+      await this.git(implementer, ['add', '--all'])
+      await this.git(implementer, ['commit', '-m', `Pion workflow ${workflow.id.slice(0, 8)} implementation`])
     }
-    workflow.candidateOid = await git(implementer, ['rev-parse', 'HEAD'])
+    workflow.candidateOid = await this.git(implementer, ['rev-parse', 'HEAD'])
     if (this.wasStopped(workflow)) return
     if (workflow.candidateOid === workflow.baseOid) {
       workflow.state = 'blocked'
@@ -563,8 +641,8 @@ export class WorkflowManager {
     workflow.blockedReason = undefined
     await this.changed(workflow)
     const reviewer = await this.recreateDetachedWorktree(workflow, 'reviewer', workflow.candidateOid)
-    const stat = await git(workflow.cwd, ['diff', '--stat', `${workflow.baseOid}..${workflow.candidateOid}`])
-    const diff = await git(workflow.cwd, ['diff', '--no-ext-diff', '--unified=3', `${workflow.baseOid}..${workflow.candidateOid}`])
+    const stat = await this.git(workflow.cwd, ['diff', '--stat', `${workflow.baseOid}..${workflow.candidateOid}`])
+    const diff = await this.git(workflow.cwd, ['diff', '--no-ext-diff', '--unified=3', `${workflow.baseOid}..${workflow.candidateOid}`])
     const boundedDiff = diff.length > MAX_PROMPT_CONTEXT ? `${diff.slice(0, MAX_PROMPT_CONTEXT)}\n…差异已截断` : diff
     const output = await this.runAgent(workflow, 'reviewer', reviewer, [
       '你是 Pion 多 Agent 工作流中的 Reviewer。只读审查，不修改文件、不运行 Shell、不委派其他 Agent。',
@@ -599,6 +677,7 @@ export class WorkflowManager {
     const worker = this.newWorker('tester', 'command', tester)
     workflow.workers.push(worker)
     await this.changed(workflow)
+    this.mutationGuard?.()
     const result = await this.verification.run(tester, (message, runId) => {
       if (runId) workflow.verification = { runId, state: 'running', summary: message }
       this.appendWorkerOutput(worker, message)
@@ -642,6 +721,7 @@ export class WorkflowManager {
     workflow.workers.push(worker)
     await this.changed(workflow)
     try {
+      this.mutationGuard?.()
       const result = await this.runner.run({
         id: worker.id,
         workflowId: workflow.id,
@@ -702,10 +782,11 @@ export class WorkflowManager {
   ): Promise<string> {
     const path = join(this.worktreeRoot, workflow.id, role)
     if (await exists(path)) {
-      await git(workflow.cwd, ['worktree', 'remove', '--force', path], true)
+      await this.git(workflow.cwd, ['worktree', 'remove', '--force', path], true)
+      this.mutationGuard?.()
       await rm(path, { recursive: true, force: true })
     }
-    await git(workflow.cwd, ['worktree', 'add', '--detach', path, oid])
+    await this.git(workflow.cwd, ['worktree', 'add', '--detach', path, oid])
     workflow.worktrees[role] = path
     await this.writePermissionConfig(workflow)
     await this.changed(workflow)
@@ -726,7 +807,9 @@ export class WorkflowManager {
       }
     }
     const path = join(this.worktreeRoot, workflow.id, 'permissions.json')
+    this.mutationGuard?.()
     await mkdir(dirname(path), { recursive: true })
+    this.mutationGuard?.()
     await writeFile(path, `${JSON.stringify({ version: 1, projects }, null, 2)}\n`, 'utf8')
   }
 

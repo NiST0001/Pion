@@ -2,6 +2,7 @@ import type { IpcMain } from 'electron'
 import type { AgentBridge } from '../agent/agent-bridge'
 import type { ProjectStore } from '../projects'
 import { IPC } from '../../shared/ipc'
+import type { BranchDeleteRequest } from '../../shared/branches'
 import type { McpStatusTarget } from '../../shared/mcp'
 import type {
   AddModelProviderInput,
@@ -19,6 +20,7 @@ interface AgentIpcDependencies {
   bridge: AgentBridge
   projects: Pick<ProjectStore, 'touchCanonical'>
   pushProjects: () => Promise<void>
+  assertWorktreeDeletionIdle?: (cwd: string) => void | Promise<void>
 }
 
 // Reserve asynchronous mutations from IPC entry, including the gap before a
@@ -33,10 +35,16 @@ const SESSION_OPERATIONS = new Set<string>([
   IPC.AgentAddModelProvider, IPC.AgentSetModel, IPC.AgentSetThinking, IPC.AgentSetAutoCompaction,
   IPC.AgentSetAutoRetry, IPC.AgentCompact, IPC.AgentExportHtml, IPC.AgentRenameSession,
   IPC.AgentSetSteeringMode, IPC.AgentSetFollowUpMode, IPC.ProjectTrustSet,
-  IPC.ToolPermissionResolve, IPC.ExtensionUiResolve
+  IPC.ToolPermissionResolve, IPC.ExtensionUiResolve, IPC.BranchCreate, IPC.BranchRename
 ])
 
-export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects }: AgentIpcDependencies): void {
+export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects, assertWorktreeDeletionIdle }: AgentIpcDependencies): void {
+  // A destructive operation uses its own exclusive gate, not its own reservation count.
+  host.handle(IPC.BranchDelete, (event, request: BranchDeleteRequest) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口删除分支')
+    if (!assertWorktreeDeletionIdle) throw new Error('工作树删除安全检查未接入')
+    return bridge.deleteBranch(request, event.sender.id, () => assertWorktreeDeletionIdle(request.cwd))
+  })
   const ipcMain: Pick<IpcMain, 'handle'> = {
     handle: (channel, listener) => host.handle(channel, SESSION_OPERATIONS.has(channel)
       ? (event, ...args) => bridge.withSessionOperation(() => listener(event, ...args))
@@ -109,6 +117,14 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   ipcMain.handle(IPC.AgentTaskHistory, (_event, sessionPath: string) =>
     bridge.getSessionTaskHistory(sessionPath)
   )
+  ipcMain.handle(IPC.AgentSubagentSessions, (event) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取子会话')
+    return bridge.getSubagentSessions(event.sender.id)
+  })
+  ipcMain.handle(IPC.AgentSubagentSession, (event, id: string, backendId: string) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取子会话')
+    return bridge.getSubagentSession(id, backendId, event.sender.id)
+  })
   ipcMain.handle(IPC.AgentRunningSessions, () => bridge.getRunningSessionPaths())
   ipcMain.handle(IPC.AgentUnreadSessions, () => bridge.getUnreadSessionPaths())
   ipcMain.handle(

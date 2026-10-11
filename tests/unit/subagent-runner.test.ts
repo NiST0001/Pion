@@ -2,6 +2,7 @@ import { beforeEach, expect, it, vi } from 'vitest'
 import { SettingsManager, type AgentSession, type AgentSessionEvent, type ModelRuntime, type SessionEntry } from '@earendil-works/pi-coding-agent'
 import { createSubagentRunner } from '../../src/main/agent/subagents'
 import { DEFAULT_SUBAGENT_SETTINGS } from '../../src/shared/subagents'
+import type { SubagentSessionObserver } from '../../src/main/agent/subagent-session-observer'
 
 const mocks = vi.hoisted(() => ({ create: vi.fn(), loader: vi.fn() }))
 vi.mock('@earendil-works/pi-coding-agent', async (original) => ({
@@ -51,6 +52,7 @@ it('uses the parent model, only inherited built-ins and live permission hooks', 
   const h = setup()
   await h.run({ name: 'worker', task: 'edit' }, new AbortController().signal, () => {})
   expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ model: { provider: 'fixture', id: 'fixture' }, tools: ['write'] }))
+  expect(mocks.create.mock.calls[0][0].sessionManager.getSessionFile()).toBeUndefined()
   expect(mocks.loader).toHaveBeenCalledWith(expect.objectContaining({ noExtensions: true, noSkills: true, noPromptTemplates: true }))
   const prompt = mocks.loader.mock.calls[0][0].systemPromptOverride()
   expect(prompt).toMatch(/^Inherited project rules\n/)
@@ -175,6 +177,83 @@ it('bounds the independent usage-entry dedupe window', async () => {
   } }))
   const result = await h.run({ name: 'worker', task: 'inspect' }, new AbortController().signal, () => {})
   expect(result.usage?.totalTokens).toBe(4098 * 10)
+})
+
+function displayObserver(): SubagentSessionObserver {
+  return { event: vi.fn(), running: vi.fn(), cancelling: vi.fn(), finish: vi.fn() }
+}
+
+it('subscribes before prompt and finishes the private display only after actual shutdown and disposal', async () => {
+  const h = setup()
+  const observer = displayObserver()
+  let notify!: (event: AgentSessionEvent) => void
+  let release!: () => void
+  const dispose = vi.fn(() => expect(observer.finish).not.toHaveBeenCalled())
+  mocks.create.mockImplementationOnce(async () => ({ session: {
+    agent: {}, messages: [], getLastAssistantText: () => 'summary', dispose,
+    subscribe: (listener: typeof notify) => { notify = listener; return () => {} },
+    prompt: async () => { expect(notify).toBeTypeOf('function'); notify({ type: 'turn_start' }) },
+    abort: () => new Promise<void>((resolve) => { release = resolve })
+  } }))
+  const pending = h.run({ name: 'worker', task: 'inspect' }, new AbortController().signal, () => {}, DEFAULT_SUBAGENT_SETTINGS, observer)
+  await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+  expect(observer.event).toHaveBeenCalledWith({ type: 'turn_start' })
+  expect(observer.finish).not.toHaveBeenCalled()
+  release()
+  await pending
+  expect(dispose).toHaveBeenCalledOnce()
+  expect(observer.finish).toHaveBeenCalledWith('completed')
+})
+
+it.each(['missing-model', 'loader/create-failure'] as const)('records a failed accepted child on %s', async (failure) => {
+  const h = setup()
+  const observer = displayObserver()
+  if (failure === 'missing-model') Object.assign(h.parent, { model: undefined })
+  else mocks.create.mockRejectedValueOnce(new Error('provider setup failed'))
+  await expect(h.run({ name: 'worker', task: 'inspect' }, new AbortController().signal, () => {}, DEFAULT_SUBAGENT_SETTINGS, observer)).rejects.toThrow()
+  expect(observer.finish).toHaveBeenCalledWith('failed')
+  expect(observer.event).not.toHaveBeenCalled()
+})
+
+it('does not turn a settled abort into terminal state while the actual prompt is still pending', async () => {
+  const h = setup()
+  const observer = displayObserver()
+  const controller = new AbortController()
+  let release!: () => void
+  const abort = vi.fn(async () => {})
+  mocks.create.mockImplementationOnce(async () => ({ session: {
+    agent: {}, messages: [], getLastAssistantText: () => '', dispose: h.dispose,
+    subscribe: () => () => {}, abort,
+    prompt: () => new Promise<void>((resolve) => { release = resolve })
+  } }))
+  const pending = h.run({ name: 'worker', task: 'inspect' }, controller.signal, () => {}, DEFAULT_SUBAGENT_SETTINGS, observer)
+  await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+  controller.abort()
+  await Promise.resolve()
+  expect(abort).toHaveBeenCalledOnce()
+  expect(observer.cancelling).toHaveBeenCalled()
+  expect(observer.finish).not.toHaveBeenCalled()
+  expect(h.dispose).not.toHaveBeenCalled()
+  release()
+  await pending
+  expect(h.dispose).toHaveBeenCalledOnce()
+  expect(observer.finish).toHaveBeenCalledWith('aborted')
+})
+
+it('abort rejection keeps display cancelling without falsely starting terminal retention', async () => {
+  const h = setup()
+  const observer = displayObserver()
+  const controller = new AbortController()
+  mocks.create.mockImplementationOnce(async () => ({ session: {
+    agent: {}, messages: [], getLastAssistantText: () => '', dispose: h.dispose,
+    subscribe: () => () => {},
+    prompt: async () => { controller.abort() },
+    abort: async () => { throw new Error('abort not settled') }
+  } }))
+  const result = await h.run({ name: 'worker', task: 'inspect' }, controller.signal, () => {}, DEFAULT_SUBAGENT_SETTINGS, observer)
+  expect(result.status).toBe('aborted')
+  expect(observer.cancelling).toHaveBeenCalled()
+  expect(observer.finish).not.toHaveBeenCalled()
 })
 
 it('namespaces child tool IDs and serializes sibling writes', async () => {

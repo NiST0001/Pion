@@ -164,6 +164,7 @@ export function useAgent() {
     addProject,
     createBranch,
     renameBranch,
+    deleteBranch,
     removeProject,
     setProjectTrust
   } = useAgentProjectActions({ api, dispatch, refreshModels })
@@ -267,7 +268,8 @@ export function useAgent() {
       migrateSessionToProject,
       setSteeringMode,
       setFollowUpMode,
-      setSubagentsMode
+      setSubagentsMode,
+      deleteBranch
     }),
     [
       revertMessage,
@@ -316,7 +318,8 @@ export function useAgent() {
       migrateSessionToProject,
       setSteeringMode,
       setFollowUpMode,
-      setSubagentsMode
+      setSubagentsMode,
+      deleteBranch
     ]
   )
 

@@ -171,6 +171,11 @@ export function reducer(state: AgentState, action: Action): AgentState {
         sessionsByProject: { ...state.sessionsByProject, [action.cwd]: sessions }
       }
     }
+    case 'branchRemoved':
+      // Remove only the list projection. Session files/history and other worktrees stay intact.
+      return { ...state, branchesByProject: { ...state.branchesByProject,
+        [action.projectCwd]: (state.branchesByProject[action.projectCwd] ?? []).filter((branch) => branch.cwd !== action.cwd)
+      } }
     case 'branches':
       return { ...state, branchesByProject: { ...state.branchesByProject, [action.cwd]: action.branches } }
     case 'reorderSessions': {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   ChevronDown,
@@ -7,6 +7,7 @@ import {
   FolderPlus,
   GitBranch,
   MessageSquarePlus,
+  MoreHorizontal,
   PencilLine,
   Search,
   Trash2,
@@ -18,9 +19,11 @@ import type {
   ProjectMeta,
   SessionMeta
 } from '../../../../shared/types'
+import type { SubagentSessionSummary } from '../../../../shared/subagent-sessions'
 import { SessionItems, sessionMatchesQuery } from '../session/SessionList'
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { TextInputDialog } from '../common/TextInputDialog'
+import { ConfirmDialog } from '../common/ConfirmDialog'
 import { SortableSidebarGroup } from './SortableSidebarGroup'
 
 // ---------------------------------------------------------------------------
@@ -207,6 +210,8 @@ interface ProjectBranchView {
 }
 
 export function ProjectList({
+  subagentSessions,
+  onViewSubagent,
   projects,
   sessionsByProject,
   branchesByProject,
@@ -222,6 +227,7 @@ export function ProjectList({
   onNewSession,
   onNewBranch,
   onRenameBranch,
+  onDeleteBranch,
   onReorder,
   onSelectSession,
   onDelete,
@@ -233,6 +239,8 @@ export function ProjectList({
   favoritePaths,
   onToggleFavorite
 }: {
+  subagentSessions?: readonly SubagentSessionSummary[]
+  onViewSubagent?: (summary: SubagentSessionSummary) => void
   projects: ProjectMeta[]
   sessionsByProject: Record<string, SessionMeta[]>
   branchesByProject: Record<string, BranchInfo[]>
@@ -248,6 +256,7 @@ export function ProjectList({
   onNewSession: (cwd: string) => void
   onNewBranch: (cwd: string) => void
   onRenameBranch: (cwd: string, branch: BranchInfo, name: string) => Promise<void>
+  onDeleteBranch?: (projectCwd: string, branch: BranchInfo) => Promise<void>
   onReorder: (cwd: string, paths: string[]) => void
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
@@ -295,6 +304,8 @@ export function ProjectList({
         allKeys={projects.map((project) => project.cwd)} getKey={({ project }) => project.cwd}>
       {({ project, branches }) => (
         <ProjectFolder
+          subagentSessions={subagentSessions}
+          onViewSubagent={onViewSubagent}
           key={project.cwd}
           project={project}
           branches={branches}
@@ -310,6 +321,7 @@ export function ProjectList({
           onNewSession={onNewSession}
           onNewBranch={onNewBranch}
           onRenameBranch={onRenameBranch}
+          onDeleteBranch={onDeleteBranch}
           onReorder={onReorder}
           onSelectSession={onSelectSession}
           onDelete={onDelete}
@@ -328,6 +340,8 @@ export function ProjectList({
 }
 
 function ProjectBranch({
+  subagentSessions,
+  onViewSubagent,
   branch,
   sessions,
   allSessions,
@@ -337,6 +351,7 @@ function ProjectBranch({
   previewDensity,
   onNewSession,
   onRenameBranch,
+  onDeleteBranch,
   onReorder,
   onSelectSession,
   onDelete,
@@ -348,6 +363,8 @@ function ProjectBranch({
   favoritePaths,
   onToggleFavorite
 }: {
+  subagentSessions?: readonly SubagentSessionSummary[]
+  onViewSubagent?: (summary: SubagentSessionSummary) => void
   branch: BranchInfo
   sessions: SessionMeta[]
   allSessions: SessionMeta[]
@@ -357,6 +374,7 @@ function ProjectBranch({
   previewDensity: SessionPreviewDensity
   onNewSession: (cwd: string) => void
   onRenameBranch: (branch: BranchInfo, name: string) => Promise<void>
+  onDeleteBranch?: (branch: BranchInfo) => Promise<void>
   onReorder: (cwd: string, paths: string[]) => void
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
@@ -372,9 +390,55 @@ function ProjectBranch({
   const [renameOpen, setRenameOpen] = useState(false)
   const [renameBusy, setRenameBusy] = useState(false)
   const [renameError, setRenameError] = useState('')
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+  const operationRef = useRef(false)
+  const hasRunningSession = allSessions.some((session) => runningSessionPaths.has(session.path))
+  const deleteDisabledReason = branch.isMain ? '主工作树不能删除'
+    : !branch.gitBranch ? '此目录没有可删除的 Git 分支'
+      : !onDeleteBranch ? '删除分支不可用'
+        : hasRunningSession ? '此分支有运行中的会话，请先停止' : ''
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const onPointerDown = (event: PointerEvent): void => {
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target)) setMenuOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      setMenuOpen(false)
+      menuRef.current?.querySelector<HTMLButtonElement>('.project-branch-actions')?.focus()
+    }
+    window.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [menuOpen])
+
+  const handleDelete = async (): Promise<void> => {
+    if (!deleteOpen || operationRef.current || deleteDisabledReason || !onDeleteBranch) return
+    operationRef.current = true
+    setDeleteBusy(true)
+    setDeleteError('')
+    try {
+      await onDeleteBranch(branch)
+      setDeleteOpen(false)
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : String(error))
+    } finally {
+      operationRef.current = false
+      setDeleteBusy(false)
+    }
+  }
 
   const handleRename = async (name: string): Promise<void> => {
-    if (!branch.gitBranch || renameBusy) return
+    if (!branch.gitBranch || operationRef.current) return
+    operationRef.current = true
     setRenameBusy(true)
     setRenameError('')
     try {
@@ -383,6 +447,7 @@ function ProjectBranch({
     } catch (error) {
       setRenameError(error instanceof Error ? error.message : String(error))
     } finally {
+      operationRef.current = false
       setRenameBusy(false)
     }
   }
@@ -419,21 +484,32 @@ function ProjectBranch({
         <GitBranch size={13} className="project-branch-icon" />
         <span className="project-branch-name">{branch.name}</span>
         <span className="project-branch-count">{sessions.length}</span>
-        {branch.gitBranch && (
-          <button
-            type="button"
-            className="project-branch-rename"
-            title={`重命名 ${branch.name} 分支`}
-            aria-label={`重命名 ${branch.name} 分支`}
-            onClick={(event) => {
-              event.stopPropagation()
-              setRenameError('')
-              setRenameOpen(true)
-            }}
-          >
-            <PencilLine size={12} />
+        <div ref={menuRef} className="project-branch-action-anchor" onClick={(event) => event.stopPropagation()}
+          onDragStart={(event) => { event.preventDefault(); event.stopPropagation() }}>
+          <button type="button" className="project-branch-rename project-branch-actions"
+            title={`分支操作 ${branch.name}`} aria-label={`分支操作 ${branch.name}`}
+            aria-haspopup="menu" aria-expanded={menuOpen} disabled={renameOpen || deleteOpen || renameBusy || deleteBusy}
+            onClick={() => setMenuOpen((value) => !value)}>
+            <MoreHorizontal size={13} />
           </button>
-        )}
+          {menuOpen && (
+            <div className="project-branch-menu" role="menu" aria-label={`${branch.name} 分支操作`}>
+              {branch.gitBranch && (
+                <button type="button" role="menuitem" className="context-menu-item"
+                  aria-label={`重命名 ${branch.name} 分支`}
+                  onClick={() => { setMenuOpen(false); setRenameError(''); setRenameOpen(true) }}>
+                  <PencilLine size={12} /><span>重命名分支</span>
+                </button>
+              )}
+              <button type="button" role="menuitem" className="context-menu-item context-menu-danger"
+                disabled={Boolean(deleteDisabledReason)} title={deleteDisabledReason || '删除本地分支及对应工作树'}
+                onClick={() => { setMenuOpen(false); setDeleteError(''); setDeleteOpen(true) }}>
+                <Trash2 size={12} /><span>删除分支</span>
+              </button>
+              {deleteDisabledReason && <div className="project-branch-menu-hint">{deleteDisabledReason}</div>}
+            </div>
+          )}
+        </div>
         <button
           type="button"
           className="project-branch-new"
@@ -458,9 +534,27 @@ function ProjectBranch({
         error={renameError}
         onConfirm={(name) => void handleRename(name)}
         onCancel={() => {
-          if (renameBusy) return
+          if (operationRef.current) return
           setRenameOpen(false)
           setRenameError('')
+        }}
+      />
+      <ConfirmDialog
+        open={deleteOpen}
+        title="删除 Git 分支"
+        message={<>删除本地分支 <strong>“{branch.gitBranch || branch.name}”</strong> 及对应工作树？</>}
+        detail={<>
+          <div>工作树目录：{branch.cwd}</div>
+          <div>目录将被移除，无法撤销；会话历史会保留。未合并分支、有未提交更改或运行中会话时禁止删除。</div>
+          {(deleteError || deleteDisabledReason) && <div role="alert" className="context-menu-error">{deleteError || deleteDisabledReason}</div>}
+        </>}
+        confirmLabel="删除分支和工作树"
+        busy={deleteBusy}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => {
+          if (operationRef.current) return
+          setDeleteOpen(false)
+          setDeleteError('')
         }}
       />
       {open && (
@@ -469,6 +563,8 @@ function ProjectBranch({
             <div className="project-folder-empty">暂无会话</div>
           ) : (
             <SessionItems
+              subagentSessions={subagentSessions}
+              onViewSubagent={onViewSubagent}
               sessions={sessions}
               activePath={activePath}
               runningSessionPaths={runningSessionPaths}
@@ -493,6 +589,8 @@ function ProjectBranch({
 }
 
 function ProjectFolder({
+  subagentSessions,
+  onViewSubagent,
   project,
   branches,
   activeCwd,
@@ -507,6 +605,7 @@ function ProjectFolder({
   onNewSession,
   onNewBranch,
   onRenameBranch,
+  onDeleteBranch,
   onReorder,
   onSelectSession,
   onDelete,
@@ -518,6 +617,8 @@ function ProjectFolder({
   favoritePaths,
   onToggleFavorite
 }: {
+  subagentSessions?: readonly SubagentSessionSummary[]
+  onViewSubagent?: (summary: SubagentSessionSummary) => void
   project: ProjectMeta
   branches: ProjectBranchView[]
   activeCwd?: string
@@ -532,6 +633,7 @@ function ProjectFolder({
   onNewSession: (cwd: string) => void
   onNewBranch: (cwd: string) => void
   onRenameBranch: (cwd: string, branch: BranchInfo, name: string) => Promise<void>
+  onDeleteBranch?: (projectCwd: string, branch: BranchInfo) => Promise<void>
   onReorder: (cwd: string, paths: string[]) => void
   onSelectSession: (cwd: string, path: string) => void
   onDelete: (cwd: string, path: string) => Promise<void>
@@ -603,6 +705,8 @@ function ProjectFolder({
             allKeys={branches.map(({ branch }) => branch.cwd)} getKey={({ branch }) => branch.cwd}>
           {({ branch, sessions, allSessions }) => (
             <ProjectBranch
+              subagentSessions={subagentSessions}
+              onViewSubagent={onViewSubagent}
               key={branch.cwd}
               branch={branch}
               sessions={sessions}
@@ -613,6 +717,7 @@ function ProjectFolder({
               previewDensity={previewDensity}
               onNewSession={onNewSession}
               onRenameBranch={(branch, name) => onRenameBranch(project.cwd, branch, name)}
+              onDeleteBranch={onDeleteBranch ? (branch) => onDeleteBranch(project.cwd, branch) : undefined}
               onReorder={onReorder}
               onSelectSession={onSelectSession}
               onDelete={onDelete}

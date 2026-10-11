@@ -13,6 +13,7 @@ import { PluginManager } from './plugin-manager'
 import { ProjectStore } from './projects'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
 import { TerminalService } from './terminal-service'
+import { bindBrowserSecurity } from './browser-security'
 import { WindowEffectsService } from './window-effects'
 import { assertSubagentSettingsOwner, SubagentSettingsStore } from './subagent-settings'
 import { assertThemeSettingsOwner, ThemeSettingsStore } from './theme-settings'
@@ -51,6 +52,9 @@ const workflows = new WorkflowManager({
   verification: new VerificationWorkflowRunner(verification),
   projectTrusted: (cwd) => bridge.getProjectTrust(cwd).decision === 'trusted'
 })
+terminals.setMutationGuard(() => bridge.assertWorktreeMutationAvailable())
+workflows.setMutationGuard(() => bridge.assertWorktreeMutationAvailable())
+verification.setMutationGuard(() => bridge.assertWorktreeMutationAvailable())
 const git = new GitService()
 const plugins = new PluginManager()
 const projects = new ProjectStore()
@@ -138,6 +142,7 @@ function createWindow(): void {
     }
   })
 
+  bindBrowserSecurity(win)
   const ownerId = win.webContents.id
   mainWindowId = ownerId
   const push = (list: ProjectMeta[]): void => {
@@ -209,9 +214,16 @@ function registerIpc(): void {
     ipcMain,
     windowFromWebContents: (sender) => BrowserWindow.fromWebContents(sender),
     windowEffects,
-    terminals
+    terminals,
+    reserveMutation: (operation) => bridge.withSessionOperation(operation)
   })
-  registerAgentIpc({ ipcMain, bridge, projects, pushProjects })
+  registerAgentIpc({ ipcMain, bridge, projects, pushProjects,
+    assertWorktreeDeletionIdle: (cwd) => {
+      terminals.assertWorktreeDeletionIdle(cwd)
+      workflows.assertWorktreeDeletionIdle(cwd)
+      verification.assertWorktreeDeletionIdle(cwd)
+    }
+  })
   registerGitIpc({ ipcMain, git })
 
   // automatic verification --------------------------------------------------
@@ -223,9 +235,9 @@ function registerIpc(): void {
   )
   ipcMain.handle(
     IPC.VerificationStart,
-    (_event, cwd: string, options?: StartVerificationOptions) => verification.start(cwd, options)
+    (_event, cwd: string, options?: StartVerificationOptions) => bridge.withSessionOperation(() => verification.start(cwd, options))
   )
-  ipcMain.handle(IPC.VerificationRerun, (_event, runId: string) => verification.rerun(runId))
+  ipcMain.handle(IPC.VerificationRerun, (_event, runId: string) => bridge.withSessionOperation(() => verification.rerun(runId)))
   ipcMain.handle(IPC.VerificationCancel, (_event, runId: string) => verification.cancel(runId))
   ipcMain.handle(IPC.VerificationPolicyGet, (_event, cwd: string) => verification.getPolicy(cwd))
   ipcMain.handle(
@@ -236,15 +248,15 @@ function registerIpc(): void {
 
   // bounded multi-agent workflows ------------------------------------------
   ipcMain.handle(IPC.WorkflowList, (_event, cwd?: string) => workflows.list(cwd))
-  ipcMain.handle(IPC.WorkflowCreate, (_event, request) => workflows.create(request))
-  ipcMain.handle(IPC.WorkflowStart, (_event, id: string) => workflows.start(id))
-  ipcMain.handle(IPC.WorkflowApprovePlan, (_event, id: string) => workflows.approvePlan(id))
-  ipcMain.handle(IPC.WorkflowRepair, (_event, id: string) => workflows.repair(id))
-  ipcMain.handle(IPC.WorkflowWaiveTests, (_event, id: string) => workflows.waiveTests(id))
-  ipcMain.handle(IPC.WorkflowResume, (_event, id: string) => workflows.resume(id))
+  ipcMain.handle(IPC.WorkflowCreate, (_event, request) => bridge.withSessionOperation(() => workflows.create(request)))
+  ipcMain.handle(IPC.WorkflowStart, (_event, id: string) => bridge.withSessionOperation(() => workflows.start(id)))
+  ipcMain.handle(IPC.WorkflowApprovePlan, (_event, id: string) => bridge.withSessionOperation(() => workflows.approvePlan(id)))
+  ipcMain.handle(IPC.WorkflowRepair, (_event, id: string) => bridge.withSessionOperation(() => workflows.repair(id)))
+  ipcMain.handle(IPC.WorkflowWaiveTests, (_event, id: string) => bridge.withSessionOperation(() => workflows.waiveTests(id)))
+  ipcMain.handle(IPC.WorkflowResume, (_event, id: string) => bridge.withSessionOperation(() => workflows.resume(id)))
   ipcMain.handle(IPC.WorkflowCancel, (_event, id: string) => workflows.cancel(id))
-  ipcMain.handle(IPC.WorkflowMerge, (_event, id: string) => workflows.merge(id))
-  ipcMain.handle(IPC.WorkflowCleanup, (_event, id: string) => workflows.cleanup(id))
+  ipcMain.handle(IPC.WorkflowMerge, (_event, id: string) => bridge.withSessionOperation(() => workflows.merge(id)))
+  ipcMain.handle(IPC.WorkflowCleanup, (_event, id: string) => bridge.withSessionOperation(() => workflows.cleanup(id)))
 
   // plugin store --------------------------------------------------------------
   ipcMain.handle(IPC.PluginsCatalog, () => plugins.getCatalog())
@@ -319,6 +331,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  bridge.disposeSubagentSessions()
   terminals.dispose()
   void Promise.all([bridge.stop(), verification.flush(), workflows.shutdown()])
 })

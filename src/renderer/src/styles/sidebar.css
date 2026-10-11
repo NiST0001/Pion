@@ -195,6 +195,36 @@
   background: var(--bg-hover);
 }
 
+/* branch actions ----------------------------------------------------------- */
+
+.project-branch-action-anchor {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+}
+
+.project-branch-menu {
+  position: absolute;
+  z-index: 220;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 210px;
+  max-width: calc(var(--sidebar-w) - 24px);
+  padding: 5px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+}
+
+.project-branch-menu-hint {
+  padding: 5px 9px;
+  color: var(--fg-faint);
+  font-size: 11px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /* session context menu ------------------------------------------------------ */
 
 .context-menu {

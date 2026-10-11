@@ -60,6 +60,8 @@ export const IPC = {
   AgentHistoryIndex: 'pion:agent-history-index',
   AgentTaskHistory: 'pion:agent-task-history',
   AgentRunningSessions: 'pion:agent-running-sessions',
+  AgentSubagentSessions: 'pion:agent-subagent-sessions',
+  AgentSubagentSession: 'pion:agent-subagent-session',
   AgentUnreadSessions: 'pion:agent-unread-sessions',
   AgentEntriesPage: 'pion:agent-entries-page',
   AgentTree: 'pion:agent-tree',
@@ -130,6 +132,7 @@ export const IPC = {
   BranchesList: 'pion:branches-list',
   BranchCreate: 'pion:branch-create',
   BranchRename: 'pion:branch-rename',
+  BranchDelete: 'pion:branch-delete',
   GitStatus: 'pion:git-status',
   GitDiff: 'pion:git-diff',
   GitStagePaths: 'pion:git-stage-paths',
@@ -156,6 +159,7 @@ export const IPC = {
 
 /** main -> renderer 的事件推送频道。 */
 export const IPC_EVENTS = {
+  SubagentSessions: 'pion:subagent-sessions',
   AgentEvent: 'pion:agent-event',
   AgentStatus: 'pion:agent-status',
   AgentMcpStatus: 'pion:agent-mcp-status',

@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { resolve } from 'node:path'
+import { realpath } from 'node:fs/promises'
 import type { BrowserWindow } from 'electron'
 import { TerminalService } from '../../src/main/terminal-service'
 import { IPC_EVENTS } from '../../src/shared/ipc'
@@ -30,6 +31,48 @@ function setup() {
   service.bind({ webContents: { id: 2, send: vi.fn(), isDestroyed: () => false }, once: vi.fn() } as unknown as BrowserWindow)
   return { service, send, processes, closeWindow: () => { destroyed = true; closed.forEach((callback) => callback()) } }
 }
+
+it('blocks related live terminals and permanently retains disposed unconfirmed cwd', async () => {
+  const { service, processes } = setup()
+  const cwd = resolve('/project/worktree')
+  const terminal = await service.open(1, cwd, 80, 24)
+  expect(() => service.assertWorktreeDeletionIdle(cwd)).toThrow(/终端/)
+  expect(() => service.assertWorktreeDeletionIdle(resolve('/project'))).toThrow(/终端/)
+  expect(() => service.assertWorktreeDeletionIdle(resolve('/project/worktree/nested'))).toThrow(/终端/)
+  expect(() => service.assertWorktreeDeletionIdle(resolve('/project/worktree-other'))).not.toThrow()
+  service.close(1, terminal.id)
+  expect(processes[0].kill).toHaveBeenCalledOnce()
+  expect(() => service.assertWorktreeDeletionIdle(cwd)).toThrow(/未确认|尚未确认/)
+  // A stale callback after listener disposal cannot erase the isolation latch.
+  processes[0].exit?.({ exitCode: 0 })
+  expect(() => service.assertWorktreeDeletionIdle(cwd)).toThrow()
+})
+
+it('allows terminals with an observed exit before disposal', async () => {
+  const { service, processes } = setup()
+  const cwd = resolve('/project')
+  const terminal = await service.open(1, cwd, 80, 24)
+  processes[0].exit?.({ exitCode: 0 })
+  expect(() => service.assertWorktreeDeletionIdle(cwd)).not.toThrow()
+  service.close(1, terminal.id)
+  expect(() => service.assertWorktreeDeletionIdle(cwd)).not.toThrow()
+})
+
+it('reserves opens before realpath and rechecks the mutation guard before spawning', async () => {
+  const { service } = setup()
+  let finish!: (cwd: string) => void
+  vi.mocked(realpath).mockImplementationOnce(() => new Promise<string>((done) => { finish = done }))
+  let blocked = false
+  service.setMutationGuard(() => { if (blocked) throw new Error('deletion active') })
+  const opening = service.open(1, resolve('/project'), 80, 24)
+  expect(() => service.assertWorktreeDeletionIdle(resolve('/unrelated'))).toThrow(/打开/)
+  blocked = true
+  finish(resolve('/project'))
+  await expect(opening).rejects.toThrow('deletion active')
+  expect(mock.spawn).not.toHaveBeenCalled()
+  expect(() => service.assertWorktreeDeletionIdle(resolve('/project'))).not.toThrow()
+  await expect(service.open(1, resolve('/project'), 80, 24)).rejects.toThrow('deletion active')
+})
 
 it('binds a shell to its opening project and reuses it without changing cwd', async () => {
   const { service, processes, closeWindow } = setup()

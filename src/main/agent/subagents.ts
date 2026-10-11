@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { DEFAULT_SUBAGENTS_ENABLED, DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, validateSubagentSettings, type SubagentSettings } from '../../shared/subagents'
 import { Type } from 'typebox'
+import type { SubagentSessionObserver, SubagentSessionPublisher } from './subagent-session-observer'
 import {
   createAgentSession, DefaultResourceLoader, defineTool, SessionManager, SettingsManager,
   type AgentSession, type AgentToolResult, type ExtensionFactory, type ModelRuntime
@@ -24,7 +25,7 @@ export async function readRuntimeSubagentSettings(): Promise<SubagentSettings> {
 export interface SubagentTask { name: string; task: string }
 type Usage = NonNullable<AgentToolResult<unknown>['usage']>
 export interface SubagentResult { name: string; status: 'completed' | 'failed' | 'aborted'; text: string; usage?: Usage }
-type Runner = (task: SubagentTask, signal: AbortSignal, progress: (text: string) => void, settings?: Readonly<SubagentSettings>) => Promise<SubagentResult>
+type Runner = (task: SubagentTask, signal: AbortSignal, progress: (text: string) => void, settings?: Readonly<SubagentSettings>, observer?: SubagentSessionObserver) => Promise<SubagentResult>
 const emptyUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
 function addUsage(total: Usage, usage: Usage) {
   for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens'] as const) total[key] += usage[key] || 0
@@ -32,7 +33,7 @@ function addUsage(total: Usage, usage: Usage) {
 }
 
 /** Per-parent-runtime control. No plugin installation, global toggle or recursive delegation. */
-export function createSubagentControl(run: Runner, getSettings: () => SubagentSettings | Promise<SubagentSettings> = readRuntimeSubagentSettings) {
+export function createSubagentControl(run: Runner, getSettings: () => SubagentSettings | Promise<SubagentSettings> = readRuntimeSubagentSettings, publisher?: SubagentSessionPublisher) {
   let enabled = DEFAULT_SUBAGENTS_ENABLED
   let batchActive = false
   const active = new Set<AbortController>()
@@ -56,7 +57,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
       enabled = DEFAULT_SUBAGENTS_ENABLED
       sync(true)
     })
-    pi.on('session_shutdown', () => { stop() })
+    pi.on('session_shutdown', () => { stop(); publisher?.halt() })
     // Plan-mode restoration can hide this tool. Explicit off remains off until
     // the user turns it back on; a fresh backend starts with the default on.
     pi.on('before_agent_start', async (event) => {
@@ -130,12 +131,44 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
         if (!enabled || controller.signal.aborted) throw new Error('子代理调用已中止。')
         if (params.tasks.length > settings.maxParallel) throw new Error(`当前设置每批最多 ${settings.maxParallel} 个子代理，请减少任务数量。`)
         timer = setTimeout(abort, settings.timeoutMinutes * 60_000)
+        let admitted = !publisher
+        if (publisher) {
+          try { admitted = await publisher.reserve(_id, params.tasks.length, controller.signal) }
+          catch { /* Missing/failed RPC ACK is never permission to start children. */ }
+        }
+        if (!enabled || controller.signal.aborted) admitted = false
+        if (!admitted && publisher) progress('临时子会话准入未确认（拒绝、超时或取消），未启动此批子代理')
         const ordered = await Promise.all(params.tasks.map(async (task) => {
           let result: SubagentResult
+          // Only the runtime host opts into this private display channel. Keep
+          // the legacy four-argument runner call exactly unchanged otherwise.
           try {
-            if (controller.signal.aborted) throw new Error('已中止')
+            if (!admitted) {
+              const text = '临时子会话不可用，未启动子代理'
+              result = { name: task.name, status: 'failed', text }
+              results.push(result)
+              progress(`${task.name}：${text}`)
+              return result
+            }
+            let observer: SubagentSessionObserver | undefined
+            if (publisher) {
+              try { observer = publisher.begin(task, _id) } catch { /* Fail admission closed. */ }
+              if (!observer) {
+                const text = '临时子会话不可用，未启动子代理'
+                result = { name: task.name, status: 'failed', text }
+                results.push(result)
+                progress(`${task.name}：${text}`)
+                return result
+              }
+            }
+            if (controller.signal.aborted) {
+              try { observer?.finish('aborted') } catch { /* Display-only. */ }
+              throw new Error('已中止')
+            }
             progress(`${task.name}：启动中`)
-            result = await run(task, controller.signal, (text) => progress(`${task.name}：${text}`), settings)
+            const update = (text: string) => progress(`${task.name}：${text}`)
+            result = observer ? await run(task, controller.signal, update, settings, observer)
+              : await run(task, controller.signal, update, settings)
           } catch (error) {
             result = { name: task.name, status: controller.signal.aborted ? 'aborted' : 'failed', text: String(error).slice(0, Math.min(2000, settings.maxResultChars)) }
           }
@@ -167,7 +200,13 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
   // Serialize mutating tools between siblings. Models/read-only tools still
   // work in parallel. This is not a filesystem sandbox or conflict resolver.
   let writeTail: Promise<unknown> = Promise.resolve()
-  return async (task, signal, progress, settings = DEFAULT_SUBAGENT_SETTINGS) => {
+  return async (task, signal, progress, settings = DEFAULT_SUBAGENT_SETTINGS, observer) => {
+    let childCreated = false
+    const observe = (fn: (value: SubagentSessionObserver) => void) => { try { if (observer) fn(observer) } catch { /* Display must not affect execution. */ } }
+    const displayAbort = () => observe((value) => value.cancelling())
+    signal.addEventListener('abort', displayAbort, { once: true })
+    if (signal.aborted) displayAbort()
+    try {
     const parent = getParent()
     if (!parent.model) throw new Error('当前会话没有可用模型')
     const prefix = `subagent-${randomUUID()}-`
@@ -209,6 +248,7 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
         }
       }))
     })
+    childCreated = true
     session.agent.beforeToolCall = async (context, toolSignal) => {
       if (signal.aborted || toolSignal?.aborted) return { block: true, reason: '子代理已中止' }
       if (!parent.getActiveToolNames().includes(context.toolCall.name)) return { block: true, reason: '主会话已禁用此工具' }
@@ -221,7 +261,18 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
       return parent.agent.beforeToolCall({ ...context, args, toolCall: { ...context.toolCall, id: prefix + context.toolCall.id } }, gateSignal)
     }
     session.agent.afterToolCall = (context, toolSignal) => parent.agent.afterToolCall?.({ ...context, toolCall: { ...context.toolCall, id: prefix + context.toolCall.id } }, toolSignal) ?? Promise.resolve(undefined)
-    const abort = () => { void session.abort().catch(() => {}) }
+    // Retain the actual abort promise, not just an abort signal or a stopped
+    // wait. A rejected/hung shutdown never produces a terminal display/TTL.
+    let abortPromise: Promise<void> | undefined
+    let abortRejected = false
+    const abort = () => {
+      observe((value) => value.cancelling())
+      if (!abortPromise) {
+        try { abortPromise = Promise.resolve(session.abort()) }
+        catch { abortRejected = true; abortPromise = Promise.reject(new Error('子代理收尾未确认')) }
+        void abortPromise.catch(() => { abortRejected = true })
+      }
+    }
     signal.addEventListener('abort', abort, { once: true })
     const usage = emptyUsage()
     // Independent usage entries never enter the parent's model context. Keep
@@ -231,6 +282,7 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
     let turns = 0
     let limited = false
     const unsubscribe = session.subscribe((event) => {
+      observe((value) => value.event(event))
       if (event.type === 'turn_start' && ++turns > settings.maxTurns) { limited = true; abort() }
       if (event.type === 'tool_execution_start') progress(`正在调用 ${event.toolName}`)
       if (event.type === 'message_end' && (event.message.role === 'assistant' || event.message.role === 'toolResult') && event.message.usage) {
@@ -242,26 +294,47 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
         addUsage(usage, event.entry.usage)
       }
     })
+    let finalStatus: SubagentResult['status'] = 'failed'
     try {
-      if (signal.aborted) throw new Error('子代理已中止')
+      if (signal.aborted) { abort(); throw new Error('子代理已中止') }
+      observe((value) => value.running())
       await session.prompt(task.task, { expandPromptTemplates: false })
       const last = [...session.messages].reverse().find((message) => message.role === 'assistant')
       const status = signal.aborted || limited || last?.stopReason === 'aborted' ? 'aborted'
         : last?.stopReason === 'error' ? 'failed' : 'completed'
+      finalStatus = status
       const text = last?.errorMessage || session.getLastAssistantText() || '未返回文本结果'
       return { name: task.name, status, text: (limited ? '达到子代理轮数上限。\n' : '') + text.slice(0, settings.maxResultChars) + (text.length > settings.maxResultChars ? '\n[结果已截断]' : ''), usage }
     } catch (error) {
-      return { name: task.name, status: signal.aborted ? 'aborted' : 'failed', text: String(error).slice(0, Math.min(2000, settings.maxResultChars)), usage }
+      finalStatus = signal.aborted ? 'aborted' : 'failed'
+      return { name: task.name, status: finalStatus, text: String(error).slice(0, Math.min(2000, settings.maxResultChars)), usage }
     } finally {
-      signal.removeEventListener('abort', abort)
       // Keep collecting completed usage while shutdown settles. The returned
       // result owns this same accumulator, including cancellation/failure paths.
       try {
-        await session.abort().catch(() => {})
+        // prompt has really settled here. Await the actual abort as well,
+        // then dispose before declaring the display terminal.
+        if (!abortPromise) {
+          try { abortPromise = Promise.resolve(session.abort()) }
+          catch { abortRejected = true }
+        }
+        try { await abortPromise } catch { abortRejected = true }
         session.dispose()
+        if (!abortRejected) observe((value) => value.finish(signal.aborted || limited ? 'aborted' : finalStatus))
+        else observe((value) => value.cancelling())
+      } catch {
+        observe((value) => value.cancelling())
       } finally {
+        signal.removeEventListener('abort', abort)
         unsubscribe()
       }
+    }
+    } catch (error) {
+      if (!childCreated) observe((value) => value.finish(signal.aborted ? 'aborted' : 'failed'))
+      else observe((value) => value.cancelling())
+      throw error
+    } finally {
+      signal.removeEventListener('abort', displayAbort)
     }
   }
 }

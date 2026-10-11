@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CommandChunk, CommandResult, CommandSpec } from '../../src/main/command-runner'
 import { CommandRunner } from '../../src/main/command-runner'
 import { VerificationService } from '../../src/main/verification'
+import type { VerificationRun } from '../../src/shared/operations'
 
 const roots: string[] = []
 const originalPath = process.env.PATH
@@ -58,6 +59,84 @@ async function fixture(): Promise<{ root: string; stateFile: string; npmName: st
 }
 
 describe('VerificationService', () => {
+  it('checks the full private run map beyond thirty displayed records', () => {
+    const service = new VerificationService(join(tmpdir(), 'unused-verification.json'), new FakeRunner([]))
+    const internal = service as unknown as { runs: Map<string, VerificationRun> }
+    const record: VerificationRun = { id: 'old', cwd: '/project', state: 'running', createdAt: 1,
+      steps: [], selectedKinds: [], repairAttempt: 0, revision: 0 }
+    internal.runs.set(record.id, record)
+    for (let index = 0; index < 35; index += 1) {
+      const id = `new-${index}`
+      internal.runs.set(id, { ...record, id, state: 'passed', createdAt: index + 2 })
+    }
+    expect(service.listRuns().some((run) => run.id === record.id)).toBe(false)
+    expect(() => service.assertWorktreeDeletionIdle('/other')).toThrow(/验证/)
+  })
+
+  it('does not treat a command error result as proof of process close', async () => {
+    const { root, stateFile } = await fixture()
+    const runner = new FakeRunner([])
+    vi.spyOn(runner, 'run').mockResolvedValue({ spawnError: 'unknown process exit', durationMs: 1,
+      cancelled: false, timedOut: false })
+    const service = new VerificationService(stateFile, runner)
+    await service.start(root)
+    await vi.waitFor(() => expect(service.listRuns(root)[0].state).toBe('infrastructure-error'))
+    await service.flush()
+    expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+  })
+
+  it('guards starts before discovery and after pending discovery', async () => {
+    const service = new VerificationService(join(tmpdir(), 'unused-verification.json'), new FakeRunner([]))
+    let finish!: () => void
+    const discovery = vi.spyOn(service, 'discover').mockImplementation(async (cwd) => {
+      await new Promise<void>((done) => { finish = done })
+      return { cwd, discoveredAt: 1, steps: [], warnings: [] }
+    })
+    let blocked = false
+    service.setMutationGuard(() => { if (blocked) throw new Error('deletion active') })
+    const pending = service.start(join(tmpdir(), 'project'))
+    expect(() => service.assertWorktreeDeletionIdle('/other')).toThrow(/验证/)
+    blocked = true
+    finish()
+    await expect(pending).rejects.toThrow('deletion active')
+    expect(() => service.assertWorktreeDeletionIdle('/other')).not.toThrow()
+    await expect(service.start('/project')).rejects.toThrow('deletion active')
+    expect(discovery).toHaveBeenCalledOnce()
+  })
+
+  it('keeps cancelled command promises reserved until real settlement', async () => {
+    const { root, stateFile } = await fixture()
+    const runner = new FakeRunner([])
+    let finish!: (result: CommandResult) => void
+    vi.spyOn(runner, 'run').mockImplementation(() => new Promise((done) => { finish = done }))
+    vi.spyOn(runner, 'cancel').mockResolvedValue(true)
+    const service = new VerificationService(stateFile, runner)
+    const started = await service.start(root)
+    await service.cancel(started.id)
+    expect(service.listRuns(root)[0].state).toBe('cancelled')
+    expect(() => service.assertWorktreeDeletionIdle('/unrelated')).toThrow(/验证/)
+    await expect(service.start(root)).rejects.toThrow(/实际结束/)
+    finish({ exitCode: 0, durationMs: 1, cancelled: true, timedOut: false })
+    await vi.waitFor(() => expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow())
+    await service.flush()
+  })
+
+  it('retains the execution slot while automatic repair is pending', async () => {
+    const { root, stateFile } = await fixture()
+    const service = new VerificationService(stateFile, new FakeRunner([1]))
+    await service.setPolicy(root, { autoRepair: true })
+    let finish!: () => void
+    const repair = vi.fn(() => new Promise<null>((done) => { finish = () => done(null) }))
+    service.setAutoRepairHandler(repair)
+    await service.start(root)
+    await vi.waitFor(() => expect(repair).toHaveBeenCalledOnce())
+    expect(service.listRuns(root)[0].state).toBe('failed')
+    expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    finish()
+    await vi.waitFor(() => expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow())
+    await service.flush()
+  })
+
   it('discovers exact package scripts in deterministic order', async () => {
     const { root, stateFile, npmName } = await fixture()
     const service = new VerificationService(stateFile, new FakeRunner([]))

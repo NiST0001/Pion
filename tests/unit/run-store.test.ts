@@ -118,6 +118,20 @@ describe('RunStore standalone SDK usage', () => {
 })
 
 describe('RunStore', () => {
+  it('worktree deletion checks the full cwd ledger beyond the latest page', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-runs-'))
+    roots.push(root)
+    const store = new RunStore(join(root, 'runs.json'))
+    store.create(operation({ id: 'old-pending', cwd: root, state: 'queued', createdAt: 1 }))
+    for (let n = 0; n < 110; n++) store.create(operation({ id: `done-${n}`, cwd: root, state: 'completed', createdAt: n + 2 }))
+    expect(store.list({ cwd: root, limit: 100 }).every((run) => run.state === 'completed')).toBe(true)
+    expect(store.hasUnsettledCwdRuns(root)).toBe(true)
+    expect(store.hasUnsettledCwdRuns(join(root, 'other'))).toBe(false)
+    store.update('old-pending', (run) => { run.state = 'discarded' })
+    expect(store.hasUnsettledCwdRuns(root)).toBe(false)
+    await store.flush()
+  })
+
   it('persists updates atomically and filters by project', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pion-runs-'))
     roots.push(root)

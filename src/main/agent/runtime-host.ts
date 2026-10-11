@@ -9,6 +9,7 @@ import { applyPionNativeToolDefaults, createPionNativeExtensions, createPionNati
 import { createImageGenerationTool } from './image-generation'
 import { createMcpStatusObserver, type McpStatusReadSlot } from './mcp-status-observer'
 import { createSubagentControl, createSubagentRunner } from './subagents'
+import { createSubagentSessionPublisher, type SubagentSessionPublisher } from './subagent-session-observer'
 
 /** Private host arguments, not a replacement for the public pi CLI. */
 export function parseRuntimeArgs(args: string[], cwd: string) {
@@ -37,13 +38,22 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
   // One actual status read across SDK replacements. A timed-out old pending
   // keeps its slot until it really settles, without blocking ordinary startup.
   const mcpReadSlot: McpStatusReadSlot = { busy: false }
+  let previousSubagentPublisher: SubagentSessionPublisher | undefined
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     // Each backend belongs to one project. Cross-project switches must go
     // through AgentBridge, which checks the target project's trust first.
     if (relative(root, resolve(cwd)) !== '' || relative(root, resolve(sessionManager.getCwd())) !== '') throw new Error('跨项目会话切换必须由 Pion 工作台发起')
     let parent: AgentSession
     let models: ModelRuntime
-    const subagents = createSubagentControl(createSubagentRunner(() => parent, () => models, cwd, agentDir))
+    // SDK replacement fences every old display callback before creating the
+    // next runtime. Capture the real RPC command context only at tool execute.
+    previousSubagentPublisher?.halt()
+    const subagentPublisher = createSubagentSessionPublisher({
+      nonce: process.env.PION_SUBAGENT_VIEW_NONCE,
+      createContext: () => parent?.extensionRunner?.createCommandContext()
+    })
+    previousSubagentPublisher = subagentPublisher
+    const subagents = createSubagentControl(createSubagentRunner(() => parent, () => models, cwd, agentDir), undefined, subagentPublisher)
     const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: options.approved })
     // Capture raw modifiers before Pion supplies extras; do not read credentials.
     const loadout = createPionNativeLoadoutBoundary(settingsManager.getSettings().defaultTools)

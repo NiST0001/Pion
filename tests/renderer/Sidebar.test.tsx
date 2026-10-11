@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ComponentProps } from 'react'
 import { readFileSync } from 'node:fs'
 import { ProjectList } from '../../src/renderer/src/features/project/Sidebar'
 import type { BranchInfo, ProjectMeta } from '../../src/shared/types'
+
+afterEach(cleanup)
 
 const project: ProjectMeta = {
   cwd: '/tmp/pion-project',
@@ -101,7 +104,127 @@ describe('Sidebar selection typography', () => {
   })
 })
 
+const worktreeBranch: BranchInfo = { ...branch, cwd: '/tmp/pion-feature', isMain: false }
+
+function branchTree(overrides: Partial<ComponentProps<typeof ProjectList>> = {}) {
+  return <ProjectList
+    projects={[project]}
+    sessionsByProject={{ [worktreeBranch.cwd]: [] }}
+    branchesByProject={{ [project.cwd]: [worktreeBranch] }}
+    searchQuery=""
+    runningSessionPaths={new Set()}
+    previewDensity="compact"
+    onSelect={vi.fn()} onAdd={vi.fn()} onRemove={vi.fn()}
+    onNewSession={vi.fn()} onNewBranch={vi.fn()}
+    onRenameBranch={vi.fn(async () => undefined)}
+    onDeleteBranch={vi.fn(async () => undefined)}
+    onReorder={vi.fn()} onSelectSession={vi.fn()}
+    onDelete={vi.fn(async () => undefined)} onCopy={vi.fn(async () => undefined)}
+    onRename={vi.fn(async () => undefined)} onOpenTaskHistory={vi.fn()}
+    getForkMessages={vi.fn(async () => [])} onFork={vi.fn(async () => '')}
+    favoritePaths={new Set()} onToggleFavorite={vi.fn()}
+    {...overrides}
+  />
+}
+
+function renderBranches(overrides: Partial<ComponentProps<typeof ProjectList>> = {}) {
+  return render(branchTree(overrides))
+}
+
+function openBranchMenu() {
+  fireEvent.click(screen.getByRole('button', { name: `分支操作 ${branch.name}` }))
+}
+
+function openBranchDelete() {
+  openBranchMenu()
+  fireEvent.click(screen.getByRole('menuitem', { name: '删除分支' }))
+}
+
 describe('ProjectList branch actions', () => {
+  it('blocks deletion of the main worktree, missing Git branches and unavailable callbacks', () => {
+    for (const overrides of [
+      { branchesByProject: { [project.cwd]: [branch] } },
+      { branchesByProject: { [project.cwd]: [{ ...worktreeBranch, gitBranch: undefined }] } },
+      { onDeleteBranch: undefined }
+    ]) {
+      const view = renderBranches(overrides)
+      openBranchMenu()
+      expect(screen.getByRole('menuitem', { name: '删除分支' })).toBeDisabled()
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+      view.unmount()
+    }
+  })
+
+  it('does not call deletion before confirmation and preserves history in the warning', async () => {
+    const onDeleteBranch = vi.fn(async () => undefined)
+    renderBranches({ onDeleteBranch })
+    openBranchDelete()
+    expect(onDeleteBranch).not.toHaveBeenCalled()
+    expect(screen.getByRole('alertdialog')).toHaveTextContent(worktreeBranch.cwd)
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('会话历史会保留')
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('未合并分支')
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(onDeleteBranch).not.toHaveBeenCalled()
+    openBranchDelete()
+    fireEvent.click(screen.getByRole('button', { name: '删除分支和工作树' }))
+    await waitFor(() => expect(onDeleteBranch).toHaveBeenCalledWith(project.cwd, worktreeBranch))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+  })
+
+  it('blocks deletion when a running session is hidden by the search filter', () => {
+    const session = { id: 'visible', path: '/sessions/visible', timestamp: '2026-01-01', mtime: 1, preview: 'match', messageCount: 1 }
+    renderBranches({
+      searchQuery: 'match',
+      sessionsByProject: { [worktreeBranch.cwd]: [session, { ...session, id: 'hidden', path: '/sessions/hidden', preview: 'other' }] },
+      runningSessionPaths: new Set(['/sessions/hidden'])
+    })
+    openBranchMenu()
+    expect(screen.getByRole('menuitem', { name: '删除分支' })).toBeDisabled()
+    expect(screen.getByText('此分支有运行中的会话，请先停止')).toBeInTheDocument()
+  })
+
+  it('keeps failures inside confirmation and prevents duplicate submission and busy cancellation', async () => {
+    let reject!: (error: Error) => void
+    const onDeleteBranch = vi.fn(() => new Promise<void>((_resolve, rejectPromise) => { reject = rejectPromise }))
+    renderBranches({ onDeleteBranch })
+    openBranchDelete()
+    const confirm = screen.getByRole('button', { name: '删除分支和工作树' })
+    fireEvent.doubleClick(confirm)
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+    expect(onDeleteBranch).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: '取消' })).toBeDisabled()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    fireEvent.mouseDown(document.querySelector('.confirm-dialog-backdrop')!)
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+    await act(async () => reject(new Error('分支尚未合并')))
+    expect(screen.getByRole('alert')).toHaveTextContent('分支尚未合并')
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '取消' })).not.toBeDisabled()
+  })
+
+  it('rechecks running sessions if they start after opening confirmation', () => {
+    const onDeleteBranch = vi.fn(async () => undefined)
+    const session = { id: 'running', path: '/sessions/running', timestamp: '2026-01-01', mtime: 1, preview: '', messageCount: 1 }
+    const props = { onDeleteBranch, sessionsByProject: { [worktreeBranch.cwd]: [session] } }
+    const view = renderBranches(props)
+    openBranchDelete()
+    view.rerender(branchTree({ ...props, runningSessionPaths: new Set([session.path]) }))
+    fireEvent.click(screen.getByRole('button', { name: '删除分支和工作树' }))
+    expect(onDeleteBranch).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toHaveTextContent('此分支有运行中的会话')
+  })
+
+  it('closes the menu on Escape and outside input', () => {
+    renderBranches()
+    openBranchMenu()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    openBranchMenu()
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  })
+
   it('opens a themed rename dialog and submits the selected Git branch', async () => {
     const onRenameBranch = vi.fn(async () => undefined)
 
@@ -133,7 +256,8 @@ describe('ProjectList branch actions', () => {
       />
     )
 
-    fireEvent.click(screen.getByRole('button', { name: '重命名 feature/old-name 分支' }))
+    fireEvent.click(screen.getByRole('button', { name: '分支操作 feature/old-name' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '重命名 feature/old-name 分支' }))
     const input = screen.getByLabelText('分支名称')
     fireEvent.change(input, { target: { value: 'feature/new-name' } })
     fireEvent.click(screen.getByRole('button', { name: '保存名称' }))

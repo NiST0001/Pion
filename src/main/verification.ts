@@ -138,6 +138,21 @@ export class VerificationService {
   private readonly runs = new Map<string, VerificationRun>()
   private readonly policies = new Map<string, VerificationPolicy>()
   private readonly activeByCwd = new Map<string, string>()
+  private readonly executions = new Map<string, string>()
+  private pendingStarts = 0
+  private commandExitUnconfirmed = false
+  private mutationGuard?: () => void
+
+  setMutationGuard(guard: () => void): void { this.mutationGuard = guard }
+
+  assertWorktreeDeletionIdle(_cwd: string): void {
+    // Deliberately conservative across all projects, including cancelled runs
+    // whose command/repair promise has not actually settled.
+    if (this.commandExitUnconfirmed || this.pendingStarts || this.executions.size || this.activeByCwd.size
+      || [...this.runs.values()].some((run) => run.state === 'queued' || run.state === 'running')) {
+      throw new Error('验证操作尚未结束，不能删除工作树')
+    }
+  }
   private readonly planCache = new Map<string, VerificationPlan>()
   private readonly autoRepairAgentAttempts = new Map<string, number>()
   private autoRepairHandler?: (run: VerificationRun, prompt: string) => Promise<RunOperation | null>
@@ -304,13 +319,28 @@ export class VerificationService {
   }
 
   async start(cwd: string, options: StartVerificationOptions = {}): Promise<VerificationRun> {
+    this.mutationGuard?.()
+    this.pendingStarts += 1
+    try { return await this.startReserved(cwd, options) }
+    finally { this.pendingStarts -= 1 }
+  }
+
+  private async startReserved(cwd: string, options: StartVerificationOptions): Promise<VerificationRun> {
     const root = resolve(cwd)
     const activeId = this.activeByCwd.get(root)
     if (activeId) {
       const active = this.runs.get(activeId)
       if (active && (active.state === 'queued' || active.state === 'running')) return cloneRun(active)
     }
+    if ([...this.executions.values()].includes(root)) throw new Error('此前验证尚未实际结束')
     const plan = await this.discover(root, true)
+    this.mutationGuard?.()
+    const concurrentId = this.activeByCwd.get(root)
+    if (concurrentId) {
+      const concurrent = this.runs.get(concurrentId)
+      if (concurrent) return cloneRun(concurrent)
+    }
+    if ([...this.executions.values()].includes(root)) throw new Error('此前验证尚未实际结束')
     const policy = this.getPolicy(root)
     const selectedKinds = options.kinds?.length ? options.kinds : policy.selectedKinds
     const selected = plan.steps.filter((step) => selectedKinds.includes(step.kind))
@@ -337,7 +367,19 @@ export class VerificationService {
     this.activeByCwd.set(root, run.id)
     this.trimRuns()
     this.changed(run)
-    void this.execute(run.id)
+    this.executions.set(run.id, root)
+    void this.execute(run.id).catch((error: unknown) => {
+      if (run.state !== 'cancelled') {
+        run.state = 'infrastructure-error'
+        run.error = error instanceof Error ? error.message : String(error)
+        run.finishedAt = Date.now()
+        run.revision += 1
+        this.changed(run)
+      }
+    }).finally(() => {
+      this.executions.delete(run.id)
+      if (this.activeByCwd.get(root) === run.id) this.activeByCwd.delete(root)
+    })
     return cloneRun(run)
   }
 
@@ -398,6 +440,7 @@ export class VerificationService {
       run.currentStepId = step.id
       run.revision += 1
       this.changed(run)
+      this.mutationGuard?.()
       const result = await this.runner.run(`${run.id}:${step.id}`, step, (chunk) => {
         const text = cleanOutput(chunk.text)
         if (!text) return
@@ -412,7 +455,14 @@ export class VerificationService {
           text
         }
         this.win?.webContents.send(LOG_CHANNEL, update)
+      }).catch((error: unknown) => {
+        // A custom runner rejection is not evidence of child-process close.
+        this.commandExitUnconfirmed = true
+        throw error
       })
+      // CommandRunner also settles on 'error', potentially before 'close'.
+      // Fail closed for deletion until this service process is restarted.
+      if (result.spawnError) this.commandExitUnconfirmed = true
       step.finishedAt = Date.now()
       step.durationMs = result.durationMs
       step.exitCode = result.exitCode
@@ -457,6 +507,7 @@ export class VerificationService {
       && this.autoRepairHandler
     ) {
       try {
+        this.mutationGuard?.()
         const agentRun = await this.autoRepairHandler(cloneRun(run), run.repairPrompt)
         if (agentRun) this.autoRepairAgentAttempts.set(agentRun.id, run.repairAttempt + 1)
       } catch (error) {

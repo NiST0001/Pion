@@ -4,12 +4,17 @@ import { useEffect } from 'react'
 import type { DragEvent } from 'react'
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { DOCK_PANELS, DOCK_EDGES, DOCK_STORAGE_KEY, defaultDockLayout, dockEdgeAt, measureDockLayout, moveDockPanel, normalizeDockLayout, readDockLayout, resizeDockSplit } from '../../src/renderer/src/utils/dockLayout'
+import { DOCK_PANELS, DOCK_LABELS, DOCK_EDGES, DOCK_STORAGE_KEY, defaultDockLayout, dockEdgeAt, measureDockLayout, moveDockPanel, normalizeDockLayout, readDockLayout, resizeDockSplit } from '../../src/renderer/src/utils/dockLayout'
 import { useDockLayout } from '../../src/renderer/src/hooks/useDockLayout'
 import { DockHeader } from '../../src/renderer/src/features/chrome/DockHeader'
-import type { DockNode, DockPanel } from '../../src/renderer/src/utils/dockLayout'
+import type { DockLayout, DockNode, DockPanel } from '../../src/renderer/src/utils/dockLayout'
 
-const visible = { projects: true, chat: true, review: true, terminal: true }
+const visible: Record<DockPanel, boolean> = { projects: true, chat: true, review: true, terminal: true, browser: false }
+const allVisible = { ...visible, browser: true }
+const panelNode = (panel: DockPanel): DockNode => ({ type: 'panel', panel })
+const splitNode = (axis: 'x' | 'y', ratio: number, first: DockNode, second: DockNode): DockNode => ({ type: 'split', axis, ratio, first, second })
+const oldDefault: DockLayout = { version: 2, root: splitNode('x', 0.2, panelNode('projects'),
+  splitNode('x', 0.68, splitNode('y', 0.7, panelNode('chat'), panelNode('terminal')), panelNode('review'))) }
 const leaves = (node: DockNode): DockPanel[] => node.type === 'panel' ? [node.panel] : [...leaves(node.first), ...leaves(node.second)]
 beforeEach(() => localStorage.clear())
 afterEach(cleanup)
@@ -31,7 +36,9 @@ it('never loses or duplicates panels across repeated edge moves and swaps', () =
   for (const source of DOCK_PANELS) for (const target of DOCK_PANELS) for (const edge of DOCK_EDGES) {
     layout = moveDockPanel(layout, source, target, edge)
     expect(leaves(layout.root).sort()).toEqual([...DOCK_PANELS].sort())
-    const rects = Object.values(measureDockLayout(layout, visible).panels)
+    expect(normalizeDockLayout(layout)).toEqual(layout)
+    const rects = Object.values(measureDockLayout(layout, allVisible).panels)
+    expect(rects).toHaveLength(5)
     expect(rects.reduce((area, rect) => area + rect.width * rect.height, 0)).toBeCloseTo(1)
     for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) {
       const a = rects[i], b = rects[j]
@@ -49,7 +56,7 @@ it('resizes individual splits and collapses hidden branches without modifying sa
   expect(hidden.panels.chat!.height).toBe(1)
   expect(hidden.dividers.some((divider) => divider.path === '10')).toBe(false)
   expect(measureDockLayout(layout, visible).panels.chat!.height).toBeCloseTo(0.3)
-  const solo = measureDockLayout(layout, { projects: false, chat: true, review: false, terminal: false })
+  const solo = measureDockLayout(layout, { projects: false, chat: true, review: false, terminal: false, browser: false })
   expect(solo.panels.chat).toEqual({ x: 0, y: 0, width: 1, height: 1 })
   expect(solo.dividers).toEqual([])
 })
@@ -68,6 +75,84 @@ it('migrates v1 positions and rejects malformed, duplicate or non-finite trees',
   expect(normalizeDockLayout(invalid)).toEqual(defaultDockLayout())
   expect(normalizeDockLayout({ version: 2, root: { ...invalid.root, ratio: NaN } })).toEqual(defaultDockLayout())
   localStorage.setItem(DOCK_STORAGE_KEY, '{broken')
+  expect(readDockLayout()).toEqual(defaultDockLayout())
+})
+
+it('keeps default four-panel geometry and places the visible browser to the right of chat', () => {
+  const layout = defaultDockLayout()
+  expect(DOCK_LABELS.browser).toBe('浏览器')
+  expect(DOCK_STORAGE_KEY).toBe('pion:dock-layout-v2')
+  expect(measureDockLayout(layout, visible)).toEqual(measureDockLayout(oldDefault, visible))
+  const panels = measureDockLayout(layout, allVisible).panels
+  expect(panels.browser!.x).toBeCloseTo(panels.chat!.x + panels.chat!.width)
+  expect(panels.browser!.y).toBe(panels.chat!.y)
+  expect(panels.browser!.height).toBe(panels.chat!.height)
+  localStorage.setItem(DOCK_STORAGE_KEY, JSON.stringify(layout))
+  expect(readDockLayout()).toEqual(layout)
+})
+
+it('migrates valid v2 trees without changing old ratios, order or hidden-browser geometry', () => {
+  const oldLayouts: DockLayout[] = [oldDefault, { version: 2, root: splitNode('y', 0.31,
+    panelNode('terminal'), splitNode('x', 0.47, panelNode('review'),
+      splitNode('y', 0.83, panelNode('projects'), panelNode('chat')))) }]
+  for (const old of oldLayouts) {
+    localStorage.setItem(DOCK_STORAGE_KEY, JSON.stringify(old))
+    const migrated = readDockLayout()
+    const removeBrowser = (node: DockNode): DockNode => {
+      if (node.type === 'panel') return node
+      if (node.second.type === 'panel' && node.second.panel === 'browser') return node.first
+      return { ...node, first: removeBrowser(node.first), second: removeBrowser(node.second) }
+    }
+    expect(removeBrowser(migrated.root)).toEqual(old.root)
+    expect(leaves(migrated.root).sort()).toEqual([...DOCK_PANELS].sort())
+    for (let mask = 0; mask < 16; mask++) {
+      const visibility = { projects: !!(mask & 1), chat: !!(mask & 2), review: !!(mask & 4), terminal: !!(mask & 8), browser: false }
+      expect(measureDockLayout(migrated, visibility)).toEqual(measureDockLayout(old, visibility))
+    }
+    localStorage.setItem(DOCK_STORAGE_KEY, JSON.stringify(migrated))
+    expect(readDockLayout()).toEqual(migrated)
+  }
+})
+
+it('migrates the independent v1 four-slot list with chat in any slot', () => {
+  const oldPanels = ['projects', 'chat', 'review', 'terminal'] as const
+  const names = ['left', 'center', 'right', 'bottom']
+  for (let offset = 0; offset < 4; offset++) {
+    const slots = Object.fromEntries(oldPanels.map((panel, index) => [panel, names[(index + offset) % 4]]))
+    const at = (slot: string) => panelNode(oldPanels.find((panel) => slots[panel] === slot)!)
+    const old: DockLayout = { version: 2, root: splitNode('y', 0.675,
+      splitNode('x', 0.1875, at('left'), splitNode('x', 1 - (420 / 1280) / (1 - 0.1875), at('center'), at('right'))), at('bottom')) }
+    for (const version of [undefined, 1]) {
+      const migrated = normalizeDockLayout({ version, slots, left: 240, right: 420, bottom: 260 })
+      expect(leaves(migrated.root).sort()).toEqual([...DOCK_PANELS].sort())
+      expect(measureDockLayout(migrated, visible)).toEqual(measureDockLayout(old, visible))
+    }
+  }
+  expect(normalizeDockLayout({ version: 1, slots: { projects: 'left', chat: 'center', review: 'right' } })).toEqual(defaultDockLayout())
+  expect(normalizeDockLayout({ version: 1, slots: { projects: 'left', chat: 'center', review: 'right', terminal: 'right' } })).toEqual(defaultDockLayout())
+  expect(normalizeDockLayout({ version: 3, slots: { projects: 'left', chat: 'center', review: 'right', terminal: 'bottom' } })).toEqual(defaultDockLayout())
+})
+
+it('accepts maximal five-panel nesting but rejects missing panels, duplicates and damaged depth', () => {
+  const deepest: DockLayout = { version: 2, root: splitNode('y', 0.4, panelNode('projects'),
+    splitNode('x', 0.3, panelNode('review'), splitNode('y', 0.2, panelNode('terminal'),
+      splitNode('x', 0.6, panelNode('chat'), panelNode('browser'))))) }
+  expect(normalizeDockLayout(deepest)).toEqual(deepest)
+  for (const missing of ['projects', 'chat', 'review', 'terminal'] as const) {
+    const replace = (node: DockNode): DockNode => node.type === 'panel'
+      ? panelNode(node.panel === missing ? 'browser' : node.panel)
+      : { ...node, first: replace(node.first), second: replace(node.second) }
+    expect(normalizeDockLayout({ version: 2, root: replace(oldDefault.root) })).toEqual(defaultDockLayout())
+    expect(normalizeDockLayout({ version: 2, root: replace(deepest.root) })).toEqual(defaultDockLayout())
+  }
+  let damaged: DockNode = deepest.root
+  for (let depth = 0; depth < 12; depth++) damaged = splitNode('x', 0.5, damaged, panelNode('chat'))
+  expect(normalizeDockLayout({ version: 2, root: damaged })).toEqual(defaultDockLayout())
+  const cyclic = splitNode('x', 0.5, panelNode('chat'), panelNode('browser'))
+  if (cyclic.type === 'split') cyclic.first = cyclic
+  expect(normalizeDockLayout({ version: 2, root: cyclic })).toEqual(defaultDockLayout())
+  localStorage.setItem('pion:dock-layout-v1', JSON.stringify({ slots: { projects: 'right', chat: 'center', review: 'left', terminal: 'bottom' } }))
+  localStorage.setItem(DOCK_STORAGE_KEY, JSON.stringify({ version: 2, root: damaged }))
   expect(readDockLayout()).toEqual(defaultDockLayout())
 })
 

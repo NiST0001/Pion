@@ -8,6 +8,7 @@ import { registerAgentIpc } from '../../src/main/ipc/agent'
 import { registerGitIpc } from '../../src/main/ipc/git'
 import { registerWindowIpc } from '../../src/main/ipc/window'
 import { IPC } from '../../src/shared/ipc'
+import type { BranchDeleteRequest, BranchDeleteResult } from '../../src/shared/branches'
 import type { McpStatusTarget } from '../../src/shared/mcp'
 import type { AddModelProviderInput, GitSelectionRequest, ImageContent, MessageRevertRequest, RunTelemetryQuery } from '../../src/shared/types'
 
@@ -42,7 +43,10 @@ function mainEvent(id = 41, iframe = false): IpcMainInvokeEvent & IpcMainEvent {
   return { sender: { id, mainFrame }, senderFrame: iframe ? {} : mainFrame } as unknown as IpcMainInvokeEvent & IpcMainEvent
 }
 
-function agentHarness(methods: Partial<AgentBridge> = {}) {
+function agentHarness(
+  methods: Partial<AgentBridge> = {},
+  assertWorktreeDeletionIdle?: Parameters<typeof registerAgentIpc>[0]['assertWorktreeDeletionIdle']
+) {
   const ipc = collectIpc()
   const projects = { touchCanonical: vi.fn(async () => {}) }
   const pushProjects = vi.fn(async () => {})
@@ -50,7 +54,7 @@ function agentHarness(methods: Partial<AgentBridge> = {}) {
   const bridge = { ...methods, withSessionOperation }
   // This harness supplies only the methods exercised by each route case, not
   // the bridge's private runtime/lifecycle state.
-  registerAgentIpc({ ipcMain: ipc.ipcMain, bridge: bridge as unknown as AgentBridge, projects, pushProjects })
+  registerAgentIpc({ ipcMain: ipc.ipcMain, bridge: bridge as unknown as AgentBridge, projects, pushProjects, assertWorktreeDeletionIdle })
   return { ...ipc, bridge, withSessionOperation, projects, pushProjects }
 }
 
@@ -157,15 +161,80 @@ const reservedAgentChannels = new Set<string>([
   IPC.AgentAddModelProvider, IPC.AgentSetModel, IPC.AgentSetThinking, IPC.AgentSetAutoCompaction,
   IPC.AgentSetAutoRetry, IPC.AgentCompact, IPC.AgentExportHtml, IPC.AgentRenameSession,
   IPC.AgentSetSteeringMode, IPC.AgentSetFollowUpMode, IPC.ProjectTrustSet,
-  IPC.ToolPermissionResolve, IPC.ExtensionUiResolve
+  IPC.ToolPermissionResolve, IPC.ExtensionUiResolve, IPC.BranchCreate, IPC.BranchRename
 ])
+
+describe('branch deletion IPC registration', () => {
+  const request: BranchDeleteRequest = { projectCwd: '/project/main', cwd, name: 'feature/delete' }
+
+  it('forwards the original request, owner and deferred cwd guard without reserving itself', async () => {
+    const result: BranchDeleteResult = { worktreeRemoved: true, branchDeleted: false, warning: 'branch retained' }
+    const assertIdle = vi.fn(async () => {})
+    const deleteBranch = vi.fn<AgentBridge['deleteBranch']>(async (_request, _owner, check) => {
+      expect(assertIdle).not.toHaveBeenCalled()
+      await check()
+      return result
+    })
+    const h = agentHarness({ deleteBranch }, assertIdle)
+    await expect(h.invoke(IPC.BranchDelete, mainEvent(73), request)).resolves.toBe(result)
+    expect(deleteBranch).toHaveBeenCalledExactlyOnceWith(request, 73, expect.any(Function))
+    expect(deleteBranch.mock.contexts[0]).toBe(h.bridge)
+    expect(assertIdle).toHaveBeenCalledExactlyOnceWith(request.cwd)
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+    expect(h.projects.touchCanonical).not.toHaveBeenCalled()
+    expect(h.pushProjects).not.toHaveBeenCalled()
+  })
+
+  it('fails closed without an external idle guard', () => {
+    const deleteBranch = vi.fn<AgentBridge['deleteBranch']>()
+    const h = agentHarness({ deleteBranch })
+    expect(() => h.invoke(IPC.BranchDelete, mainEvent(), request)).toThrow('工作树删除安全检查未接入')
+    expect(deleteBranch).not.toHaveBeenCalled()
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+  })
+
+  it('rejects iframe access before invoking the bridge or guard', () => {
+    const deleteBranch = vi.fn<AgentBridge['deleteBranch']>()
+    const assertIdle = vi.fn()
+    const h = agentHarness({ deleteBranch }, assertIdle)
+    expect(() => h.invoke(IPC.BranchDelete, mainEvent(73, true), request)).toThrow('只允许主窗口删除分支')
+    expect(deleteBranch).not.toHaveBeenCalled()
+    expect(assertIdle).not.toHaveBeenCalled()
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+  })
+
+  it('preserves synchronous and asynchronous bridge failures', async () => {
+    const error = new Error('owner or worktree rejected')
+    const deleteBranch = vi.fn<AgentBridge['deleteBranch']>(() => { throw error })
+    const h = agentHarness({ deleteBranch }, vi.fn())
+    expect(() => h.invoke(IPC.BranchDelete, mainEvent(), request)).toThrow(error)
+    deleteBranch.mockRejectedValueOnce(error)
+    await expect(h.invoke(IPC.BranchDelete, mainEvent(), request)).rejects.toBe(error)
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+    expect(h.pushProjects).not.toHaveBeenCalled()
+  })
+
+  it('propagates a failing deferred idle check unchanged', async () => {
+    const error = new Error('terminal owns target worktree')
+    const assertIdle = vi.fn(async () => { throw error })
+    const deleteBranch = vi.fn<AgentBridge['deleteBranch']>(async (_request, _owner, check) => {
+      await check()
+      return { worktreeRemoved: true, branchDeleted: true }
+    })
+    const h = agentHarness({ deleteBranch }, assertIdle)
+    await expect(h.invoke(IPC.BranchDelete, mainEvent(), request)).rejects.toBe(error)
+    expect(assertIdle).toHaveBeenCalledExactlyOnceWith(request.cwd)
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+  })
+})
 
 describe('agent IPC registration', () => {
   it('registers exactly the agent domain without touching services at registration time', () => {
     const h = agentHarness()
     expect([...h.handlers.keys()].sort()).toEqual([...new Set([
       ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
-      IPC.AgentRevertMessage, IPC.AgentMcpStatus
+      IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete,
+      IPC.AgentSubagentSessions, IPC.AgentSubagentSession
     ])].sort())
     expect(h.listeners.size).toBe(0)
     expect(h.withSessionOperation).not.toHaveBeenCalled()
@@ -384,6 +453,32 @@ describe('agent IPC registration', () => {
     expect(() => h.invoke(IPC.AgentMcpStatus, mainEvent(owner), target)).toThrow(error)
   })
 
+  it('forwards read-only child-session IDs and owner without reserving a mutation', () => {
+    const list = { revision: 1, sessions: [] }, snapshot = null
+    const getSubagentSessions = vi.fn().mockReturnValue(list)
+    const getSubagentSession = vi.fn().mockReturnValue(snapshot)
+    const h = agentHarness({ getSubagentSessions, getSubagentSession })
+    expect(h.invoke(IPC.AgentSubagentSessions, mainEvent(99))).toBe(list)
+    expect(getSubagentSessions).toHaveBeenCalledExactlyOnceWith(99)
+    expect(h.invoke(IPC.AgentSubagentSession, mainEvent(99), 'child', 'backend')).toBe(snapshot)
+    expect(getSubagentSession).toHaveBeenCalledExactlyOnceWith('child', 'backend', 99)
+    expect(getSubagentSession.mock.contexts[0]).toBe(h.bridge)
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+    const error = new Error('child owner rejected')
+    getSubagentSession.mockImplementationOnce(() => { throw error })
+    expect(() => h.invoke(IPC.AgentSubagentSession, mainEvent(99), 'child', 'backend')).toThrow(error)
+  })
+
+  it('rejects iframe child-session reads before reaching the bridge', () => {
+    const getSubagentSessions = vi.fn(), getSubagentSession = vi.fn()
+    const h = agentHarness({ getSubagentSessions, getSubagentSession })
+    expect(() => h.invoke(IPC.AgentSubagentSessions, mainEvent(7, true))).toThrow('只允许主窗口读取子会话')
+    expect(() => h.invoke(IPC.AgentSubagentSession, mainEvent(7, true), 'child', 'backend')).toThrow('只允许主窗口读取子会话')
+    expect(getSubagentSessions).not.toHaveBeenCalled()
+    expect(getSubagentSession).not.toHaveBeenCalled()
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+  })
+
   it('rejects iframe MCP reads before reaching the bridge or reserving a mutation', () => {
     const getMcpStatus = vi.fn()
     const h = agentHarness({ getMcpStatus })
@@ -446,7 +541,7 @@ describe('Git IPC registration', () => {
   })
 })
 
-function windowHarness() {
+function windowHarness(reserveMutation?: Parameters<typeof registerWindowIpc>[0]['reserveMutation']) {
   const ipc = collectIpc()
   const win = {
     isDestroyed: vi.fn(() => false), isMaximized: vi.fn(() => false),
@@ -458,7 +553,8 @@ function windowHarness() {
   registerWindowIpc({
     ipcMain: ipc.ipcMain, windowFromWebContents,
     windowEffects: windowEffects as unknown as WindowEffectsService,
-    terminals: terminals as unknown as TerminalService
+    terminals: terminals as unknown as TerminalService,
+    reserveMutation
   })
   return { ...ipc, win, windowFromWebContents, windowEffects, terminals }
 }
@@ -474,6 +570,47 @@ const terminalRoutes: Array<[string, 'open' | 'write' | 'resize' | 'close', unkn
 ]
 
 describe('window IPC registration', () => {
+  it('reserves terminal opening and forwards the checked owner only after admission', async () => {
+    let admit!: () => void
+    const admission = new Promise<void>((resolve) => { admit = resolve })
+    const reserveMutation = vi.fn<(operation: () => Promise<unknown>) => void>()
+    const h = windowHarness(async <T>(operation: () => Promise<T>): Promise<T> => {
+      reserveMutation(operation)
+      await admission
+      return operation()
+    })
+    const result = { id: 'terminal-id' }
+    h.terminals.open.mockResolvedValue(result)
+    const pending = h.invoke(IPC.TerminalOpen, mainEvent(73), cwd, 100, 32)
+    expect(reserveMutation).toHaveBeenCalledExactlyOnceWith(expect.any(Function))
+    expect(h.terminals.open).not.toHaveBeenCalled()
+    admit()
+    await expect(pending).resolves.toBe(result)
+    expect(h.terminals.open).toHaveBeenCalledExactlyOnceWith(73, cwd, 100, 32)
+    expect(h.terminals.open.mock.contexts[0]).toBe(h.terminals)
+  })
+
+  it('does not open a terminal when mutation admission rejects', async () => {
+    const error = new Error('worktree deletion in progress')
+    const reserveMutation = vi.fn<(operation: () => Promise<unknown>) => void>(() => { throw error })
+    const h = windowHarness(async <T>(operation: () => Promise<T>): Promise<T> => {
+      reserveMutation(operation)
+      return operation()
+    })
+    await expect(h.invoke(IPC.TerminalOpen, mainEvent(), cwd, 80, 24)).rejects.toBe(error)
+    expect(h.terminals.open).not.toHaveBeenCalled()
+  })
+
+  it('rejects iframe terminal opening before mutation admission', () => {
+    const reserveMutation = vi.fn<(operation: () => Promise<unknown>) => void>()
+    const h = windowHarness(async <T>(operation: () => Promise<T>): Promise<T> => {
+      reserveMutation(operation)
+      return operation()
+    })
+    expect(() => h.invoke(IPC.TerminalOpen, mainEvent(41, true), cwd, 80, 24)).toThrow('只允许主窗口操作终端')
+    expect(reserveMutation).not.toHaveBeenCalled()
+    expect(h.terminals.open).not.toHaveBeenCalled()
+  })
   it('registers its invoke routes and one send listener without resolving a window', () => {
     const h = windowHarness()
     expect([...h.handlers.keys()].sort()).toEqual([
@@ -578,7 +715,8 @@ it('composes the three registrars without duplicate channels', () => {
   })
   const expected = new Set([
     ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
-    IPC.AgentRevertMessage, IPC.AgentMcpStatus,
+    IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete,
+    IPC.AgentSubagentSessions, IPC.AgentSubagentSession,
     ...gitRoutes.map(([channel]) => channel), ...effectRoutes.map(([channel]) => channel),
     ...terminalRoutes.map(([channel]) => channel), IPC.WindowState
   ])

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactElement } from 'react'
 import {
@@ -13,6 +13,8 @@ import {
   Trash2
 } from 'lucide-react'
 import type { ForkMessageOption, SessionMeta } from '../../../../shared/types'
+import type { SubagentSessionSummary } from '../../../../shared/subagent-sessions'
+import { subagentStatusLabel } from './SubagentSessionPane'
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { ConfirmDialog } from '../common/ConfirmDialog'
 import { TextInputDialog } from '../common/TextInputDialog'
@@ -36,6 +38,8 @@ function formatTime(mtime: number): string {
 }
 
 interface SessionItemActions {
+  subagentSessions?: readonly SubagentSessionSummary[]
+  onViewSubagent?: (summary: SubagentSessionSummary) => void
   activePath?: string
   runningSessionPaths: ReadonlySet<string>
   unreadSessionPaths?: ReadonlySet<string>
@@ -53,6 +57,8 @@ interface SessionItemActions {
 
 export function SessionItems({
   sessions,
+  subagentSessions,
+  onViewSubagent,
   activePath,
   runningSessionPaths,
   unreadSessionPaths,
@@ -124,8 +130,8 @@ export function SessionItems({
   return (
     <>
       {sessions.map((session) => (
+        <Fragment key={session.path}>
         <div
-          key={session.path}
           data-session-path={session.path}
           className={`side-item side-session side-session-${previewDensity}${onReorder && !session.optimistic ? ' reorderable' : ''}${session.path === activePath ? ' active' : ''}${runningSessionPaths.has(session.path) || session.optimistic ? ' running' : ''}${unreadSessionPaths?.has(session.path) ? ' unread' : ''}${session.optimistic ? ' optimistic' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
           aria-busy={runningSessionPaths.has(session.path) || session.optimistic}
@@ -198,6 +204,21 @@ export function SessionItems({
             )}
           </div>
         </div>
+        {onViewSubagent && subagentSessions?.some((child) => child.parentSessionPath === session.path && child.cwd === session.projectCwd) && (
+          <div className="side-subagent-sessions" aria-label="临时子会话">
+            {subagentSessions.filter((child) => child.parentSessionPath === session.path && child.cwd === session.projectCwd).map((child) => (
+              <button key={`${child.backendId}:${child.id}`} type="button" className="side-subagent-session" draggable={false}
+                aria-label={`查看子会话 ${child.name} · ${subagentStatusLabel[child.status]}`}
+                onClick={(event) => { event.stopPropagation(); setContextMenu(null); onViewSubagent(child) }}
+                onContextMenu={(event) => { event.preventDefault(); event.stopPropagation() }}
+                onDragStart={(event) => { event.preventDefault(); event.stopPropagation() }}>
+                <span className="side-subagent-name">↳ {child.name}</span>
+                <span className="side-subagent-status">{subagentStatusLabel[child.status]}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        </Fragment>
       ))}
       {contextMenu && createPortal(
         <SessionContextMenu

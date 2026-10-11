@@ -20,9 +20,12 @@
 | src/shared/tool-images.ts | 跨进程工具预览的严格有界 base64、静态 PNG/JPEG 结构/尺寸、PNG 压缩文本/ICC 拒绝、稳定位置及提示；结构辅助函数也为输入/输出原图提供像素准入，允许压缩 PNG metadata 的调用方须另外执行有界 inflate 完整性校验；不等同于真实解码 |
 | src/shared/operations.ts | 运行/恢复数据契约，以及主进程与 renderer 共用的统计候选筛选、执行状态判定和排序 |
 | src/shared/theme.ts | 内置主题 ID（含 division-dark）、默认主题与跨进程校验 |
+| src/shared/subagent-sessions.ts | 临时子会话显示/配额协议、摘要/文字行契约及半小时/容量硬边界；身份不冒充 SDK 历史 ID |
 | src/shared/subagents.ts | 子代理参数类型、默认值、硬边界与跨进程校验 |
 | src/shared/release-notes.ts | 关于页内置发布日志，按版本倒序维护 |
 | src/shared/terminal.ts | PTY 终端快照与增量输出契约 |
+| src/shared/branches.ts | 显式分支/工作树删除身份与非原子操作的部分成功契约 |
+| src/shared/browser.ts | 内嵌浏览器专用非持久 partition、空白页、URL 长度/协议/凭据准入及地址栏规范化 |
 | src/shared/window-effects.ts | 原生外观后端、启用/生效状态、重启需求与 revision 契约 |
 | src/renderer/src/main.tsx | React 启动入口 |
 | src/renderer/src/App.tsx | 工作台装配、布局与交互编排，持有会话/面板控制器及弹窗首次挂载门控 |
@@ -50,6 +53,8 @@
 | src/main/agent/image-inputs.ts | 原生只读参考图读取：严格 O_RDONLY/O_NOFOLLOW/O_NONBLOCK，不支持即失败；绑定捕获的真实 worktree、root/父目录 BigInt 身份及路径/FD 纳秒时间快照复查，分块/EOF 拒绝成长截断；8 MiB/张、16 MiB/合计、4096/边、1600 万累计像素，PNG inflate 前累计准入，PNG 有界完整性/JPEG 结构检查；跨实例真实操作单槽持有至收口，取消仅停止等待，late FD 关闭、close reject 锁存进程隔离至 backend 进程重建，不重试；非 OS 沙箱或硬链接来源证明 |
 | src/main/agent/codex-image-transport.ts | 独立 Codex 订阅 JSON Images API：空引用 generations、非空 images/edits 的 data URL；OAuth 前型号/size/quality/私有输入快照与累计预算校验，原文件 metadata 随字节上传；复用所属 SDK OAuth，无 API-key/付费回退；单张 base64 PNG、有界请求/响应/输出/期限、取消、脱敏诊断（编辑仅公开错误码）及不自动重试/降级/丢弃设置；回显型号/质量非实际证明，图片用量不充当聊天 token 计费 |
 | src/main/agent/png-validation.ts | 输入/输出静态 PNG 共用的有界完整性校验：chunk CRC、完整 IDAT zlib、scanline 几何/过滤器、调色板索引、标准色彩/位深与 Adam7、有界文本/ICC 解压；非完整色彩/ICC 语义或真实解码验证 |
+| src/main/agent/subagent-session-observer.ts | 运行时纯文字投影、真实私有 RPC 配额 ACK、快照合并与收口通知，不把临时记录加入父历史或计费 |
+| src/main/agent/subagent-session-store.ts | 窗口后端隔离的内存记录、同步批量预留、来源/显示路径与双 revision、有界迟到 fence 及单调半小时清理 |
 | src/main/agent/subagents.ts | 内置子代理开关及 SDK 委派：可用时注入复杂任务主动委派与按当前上限合并独立任务到同一并发批次的策略，不可用时不绕过工具过滤；每批读取并冻结全局限制、有界并发/取消、父级工具权限与检查点转发、兄弟写入串行化、有效父系统提示及预热模式继承、结果与模型/预热用量汇总 |
 | src/main/theme-settings.ts | 独立用户主题文件的原子持久化、读取及所属主窗口/主帧校验 |
 | src/main/subagent-settings.ts | 子代理全局设置的校验、串行原子写入与 userData 配置路径 |
@@ -63,6 +68,7 @@
 | src/main/run-store.ts | 运行记录、指标与恢复持久化；统计查询先排除队列；独立 SDK usage 归入匹配已派发运行，receipt 与保守重播下界持久化，不影响上下文占用 |
 | src/main/checkpoints.ts | Git 检查点与回滚 |
 | src/main/git-service.ts、git.ts、git/ | Git 工作区服务、命令与解析；numstat.ts 解析分层变更行数 |
+| src/main/git/branch-delete.ts | NUL 登记解析、无副作用 preflight 捕获真实目录/提交身份、clean/主 HEAD 合并校验及非 force 删除与部分成功 |
 | src/main/verification.ts | 验证计划和自动验证 |
 | src/main/workflow-manager.ts、workflow/ | 多 Agent 工作流编排与契约 |
 | src/main/workflow/runners.ts | 隔离 CLI worker 与确定性验证 runner；权限准备/启动前取消闸门及期限、prompt 前监听、输入接受与完成分离、无运行 handled 与扩展运行保护、message_end 权威输出/错误及取消/超时清理，stop 失败保留原诊断并报告收尾未确认 |
@@ -71,6 +77,7 @@
 | src/main/pi-runtime.ts | Pion SDK 子进程与独立 pi CLI 路径、Windows/asar 解包兼容 |
 | src/main/window-effects.ts | 平台材质选择、DWM/Vibrancy、Linux 透明/KWin X11 请求、主窗口归属校验与回退；偏好由 app-settings.ts 持久化 |
 | src/main/terminal-service.ts | 主窗口所属的项目 PTY 终端，目录绑定、输出缓存、输入/尺寸校验与进程清理 |
+| src/main/browser-security.ts | 宿主载入前绑定 webview guest 的 owner/partition/URL 门、preload/session override 剥离、安全 preferences 与专用 session 权限/下载拒绝；导航/重定向/frame request、popup/nested guest 与 owner 关闭清理，不新增 Pion IPC API或改 defaultSession，保留既有 plugin-store 独立 guest/session 生命周期 |
 
 ## Renderer 状态与导航
 
@@ -90,7 +97,7 @@
 | src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让，权限请求及会话提问面板复用底部余量定位在输入框上方；全局认证仍居中，不测量展开详情、不重挂载消息或草稿 |
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
-| src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1 缓存迁移；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
+| src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1/旧四面板 v2 缓存迁移；浏览器隐藏时保留原几何；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
 | src/renderer/src/hooks/useRunTelemetry.ts、useRunRecovery.ts | 运行统计与恢复；统计排除未派发队列，执行中优先，按实际派发/启动时间排序，保留有界 revision 防止迟到快照复活已退回队列的记录 |
 | src/renderer/src/hooks/useSessionResourceStage.ts | 会话首次就绪后按阶段启动次级资源；同会话历史加载不中断阶段和实时订阅 |
 | src/renderer/src/utils/sessionPanelPreferences.ts | 任务/队列面板共用折叠偏好读写，兼容各自已有键名、会话编码和不同默认值；只接受 JSON boolean，编码/存储异常不阻断 UI |
@@ -104,8 +111,9 @@
 - `chat/`：ChatTimeline（含稳定的滚动占位容器，以独立 timelineReady 区分历史成功接收与空 STATE/关闭 loading，未载入或读取失败提供显式重新加载，不伪装就绪）、ChatMessage、Markdown、ToolCallItem、Composer；ChatMessage 将模型/API 错误显示为可操作的短提示，原始诊断默认折叠且历史回放不注册实时播报；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
 - `chat/ToolCallItem.tsx`：按需工具详情；生图分别展示请求型号/实际版本未知、请求操作/size/quality/引用数、输出 PNG 原图保存尺寸与缩略图上限，不把请求尺寸或质量当实际输出承诺，不补造旧历史设置，也不展示输入原图或引用路径数组。
 - `chat/ToolResultImages.tsx`：ToolCallItem 的有界静态 PNG/JPEG 输出结果预览；按详情展开/收起挂载和释放，以工具 ID/内容位置维持图片身份，固定框显示加载/失败状态；不读取原图/提供商 URL，不参与字符渐入，加载事件不滚动消息区。
+- `session/SubagentSessionPane.tsx`、`hooks/useSubagentSessions.ts`、`styles/subagent-sessions.css`：父行下临时子会话及独立只读纯文字查看、采集/选择隔离、真实 IPC 单槽、可见性门和页面半小时过期，不修改父时间线/草稿/后端。
 - `session/`：HistoryNavigator 跳转条、SessionList 会话行、QueuedMessagesCard、TaskPanel、TaskHistoryPanel；`TaskPanel` 全部完成后隐藏但混合计划保留完成行；`ComposerSupportPanels.tsx` 共用状态判定，保持任务/排队面板的网格槽位及相邻草稿身份稳定。
-- `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
+- `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；分支操作菜单与删除路径确认、禁用/错误/在途门，保留重命名；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
 - `operations/`：RunMetricsStrip、权限确认、验证、运行恢复和工作流面板。RunMetricsStrip 保留在会话顶部，详情在统计条下方同宽悬浮展开，不占消息区高度；任务/排队面板仍在输入框上方。
 - `review/`：Git 改动列表、差异与审查界面。`ReviewPanel.tsx` 保留审查编排、提交草稿与冲突编辑；`ReviewFileTree.tsx` 管理各分组独立折叠、选中父目录展开与文件行渲染，`reviewFileTreeModel.ts` 提供纯树构建、排序、目录计数与父路径计算。文件树在状态码旁显示绿色新增/红色删减行数，直接使用快照的工作区合计（已暂存 + 未暂存，包含未跟踪文件），不额外加载 diff；缺失统计不伪造零值。ModifiedFilesCard 使用同一工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 与工具正文共用可见性观察器，按小段延迟创建动画字符，保留渐入并在结束后回收节点，实时文字仅动画新增后缀；DiffView 对长差异分页，工具内使用有界滚动区，保留全部差异的翻页访问。
 - `settings/`：设置、模型选择器与按职责拆分的页面。
@@ -116,6 +124,7 @@
 - `capabilities/`：技能工具列表、MCP 只读状态与插件商店；`McpStatusPage.tsx` 查看当前后端的状态/登记工具数/曝光，只读缓存刷新、可见时订阅与轮询；关闭/隐藏清理，选择 generation 与 scope 拒迟到结果，实际 IPC 跨卸载单槽、独立单调过期防止挂起读取或重复缓存保留旧连接；旧插件/禁用/未知不推测可用性。`SkillsToolsModal.tsx` 将 Pion 内置任务/提问/子代理/生图与插件工具区分展示；生图卡片说明 size/quality 请求、≤5 个 PNG/JPEG 参考图编辑及另存新路径、原文件/metadata 上传、read + network + write、服务兼容性/精确尺寸未保证、mask 不支持、实验型号/实际版本未知、Codex 登录和账号额度及计划模式不可用。
 - `chrome/`：窗口标题栏等外壳组件；`DockHeader.tsx` 提供简洁拖动标题、带目标/方向图标的自定义布局菜单和隐藏按钮。
 - `terminal/TerminalPanel.tsx`：按需加载的 xterm.js 终端，保持 PTY 连接、可见尺寸适配、主题同步及结束确认。
+- `browser/BrowserPanel.tsx`：首开 lazy 后保持挂载的 webview 面板，地址栏/前进后退/刷新停止、标题/加载与安全错误提示，IME 及导航请求失效保护；初始空白不自动联网，隐藏不重置页面，无 Pion guest preload。
 - `common/`：通用对话框、空状态和扩展 UI；`AnimatedDisclosure.tsx` 按需挂载详情，提供可反转的短收起过渡，结束后释放 DOM，兼容减少动态效果。
 
 ## 样式与渐入
@@ -124,6 +133,7 @@
 - `src/renderer/src/styles/`：按功能拆分的 CSS；`refinements/` 为细化样式。
 - `styles/refinements/project.css`：会话运行整周圆角光环与独立柔和光晕同步呼吸（减少动态效果静态可见、强制色关闭光晕并使用系统 Highlight 轮廓，不旋转/扫描文字）、未读标记和项目列表细节。
 - `styles/dock.css`、`styles/terminal.css`：模块化工作区、拖动反馈、分隔条及终端面板。
+- `styles/browser.css`：浏览器地址栏/工具条、主题/高对比度回退，拖动与 resize 期间临时隐藏 guest、保留实例。
 - `styles/window-effects.css`：连续工作区底色与局部磨砂；悬浮输入框/统计条、侧栏底部设置/插件商店栏、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。
 - `styles/motion.css`：通用动效、详情网格高度过渡、工具箭头旋转及减少动态效果适配。
@@ -186,7 +196,11 @@
   - `SettingsModal.test.tsx`：提供商设置与内置主题即时切换（含“信号橙”）；页面拆分后会话草稿、自动重试、压缩/导出状态和日志跨页保持，父更新不替换聚焦输入，主题失败提示/迟到失败隔离，以及信任与工具策略回调、忙碌和错误透传。
   - `WorkbenchDialogs.test.tsx`：首次按需 lazy 加载、关闭/重开及兄弟弹窗切换时的组件身份、草稿与独立挂起隔离，受控确认、操作页/修复回调透传，以及真实设置弹窗原有打开重置和在途操作保留；下游 mocks 在用例内注册并清理。
   - `windowEffects.test.tsx`：毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条、权限请求避让输入框与实底回退的源码契约（不替代 GPU 真机验证）。
-  - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1 迁移、拖动预览与菜单操作时不重挂载内容。
+  - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1/四面板 v2 迁移及浏览器隐藏时旧几何保留、五面板移动/持久化、拖动预览与菜单操作时不重挂载内容。
+  - `BrowserPanel.test.tsx`：DOM-only webview methods/events 模拟，显式导航、前进后退/刷新停止、隐藏保留实例、IME/草稿、危险 URL/安全失败及旧请求失效；不启动真实 Electron guest。
+- `src/renderer/src/agent/branchListRevision.ts`：按 preload API/cwd 隔离的有界查询 token，bootstrap 与分支变更共享门，防迟到列表复活已删项。
+- `tests/unit/branch-delete.test.ts`、`agent-bridge-branch-delete.test.ts`：模拟 Git/文件身份及 SDK 退出，覆盖主工作树/登记/clean/merged、无 force、preflight 失败零停止、目录别名、互斥/owner、真实退出与未知隔离、部分成功；不实际删除用户仓库。
+- `tests/renderer/branchDeleteActions.test.tsx`：删除投影/刷新次序、错误及部分成功、保留历史、bootstrap/变更竞态与跨 API/cwd token 隔离。
 - `tests/unit/task-planning.test.ts`：跨消息任务 ID/状态/依赖保留、完成快照可读归档、新目标身份/编号、同目标重开、失败回滚、长计划、显式清空、分支恢复、单一进行中、模式隐藏及延续提示契约；不调用真实模型。
 - `tests/unit/run-store.test.ts`：运行持久化与中断恢复、统计查询在限制条数前过滤队列，默认查询保留队列；撤销空闲门控扫描完整账本，不被展示条数限制掩盖旧队列；独立 usage 的运行归属、模型别名、持久去重、容量边界与损坏 receipt 容错。
 - `tests/unit/agent-bridge-send-queue.test.ts`：已有排队消息时 Enter 优先直接发送并保留原有队列；handled 派发无事件收尾、扩展新运行/迟到响应隔离与队列精确归属。
@@ -196,7 +210,10 @@
 - `tests/renderer/messageRevertHistory.test.tsx`、`messageRevertInteraction.test.tsx`、`messageRevertNavigation.test.tsx`、`messageRevertSend.test.tsx`：逻辑会话/首次实时归属、元数据叶节点刷新、旧缓存和请求隔离、确认/取消/重复点击、草稿及附件保护、重启错误下恢复、撤销释放旧阅读范围，以及真实 Composer 到发送/排队的原文与图片透传。
 - `tests/unit/ipc-registration.test.ts`：模拟 IPC/服务检查领域路由集合及组合去重、参数/返回/错误与 this 接收者、启动项目更新顺序、YOLO 严格转换、子代理/消息撤销及只读 MCP 状态的主帧与 owner、异步变更预留、窗口控制与终端转发；不启动真实 Electron、Agent 或 Git。
 - `tests/unit/terminal-service.test.ts`：项目终端复用、窗口归属校验、有界输出、并发打开和关闭清理（使用模拟 PTY）。
+- `tests/unit/browser-security.test.ts`：局部 Electron mock 的 URL/partition/owner 门、preload 剥离、安全 flags、权限/下载/popup/导航拒绝、关闭清理及既有 plugin-store guest 兼容；不是对网页全局、真实 attach 顺序或全部现有 IPC owner 的实机验证。
 - `tests/unit/window-effects.test.ts`、`window-effects-settings.test.ts`：模拟原生 API 的平台选择、Linux 重启边界、窗口归属、高对比度/失败回退及偏好持久化；不替代平台真机验证。
+- `tests/unit/subagent-session-observer.test.ts`、`subagent-session-store.test.ts`、`subagent-session-bridge.test.ts`：有界文字/空 final、私有配额 ACK 及拒绝零启动、真实 start receipt/owner、路径回填/双 revision、容量/退役、真实退出与单调半小时清理；不调用真实模型。
+- `tests/renderer/SubagentSessionPane.test.tsx`、`subagentSessions.test.tsx`：只读查看与安全文字、过期/重复读取/迟到隔离、可见性、API 更换与真实 pending 持槽；父子行点击作用域由 `SessionList.test.tsx` 覆盖。
 - `tests/unit/subagents.test.ts`、`subagent-runner.test.ts`、`subagents-bridge.test.ts`、`subagent-permissions.test.ts`：默认开启、显式关闭门控、主动委派提示与原始约束保留、动态批次宽度/单子代理上限及四子代理同时启动、工具不可用/配置失败/读取期间关闭的提示隔离、每批配置快照与下一批变更、配置读取期间的批次锁、有界并发/超时/轮数/摘要长度、继承工具与权限拒绝、串行写入、会话归属及迟到请求、子模型计费去重与权限交互取消。
 - `tests/unit/theme-settings.test.ts`：主题跨实例恢复、参数校验、损坏文件保护、窗口归属及安装脚本同步范围契约。
 - `tests/unit/subagent-settings.test.ts`：所属窗口/主帧校验、参数硬边界、全局设置原子持久化、现有运行时读取更新配置和损坏配置拒绝。

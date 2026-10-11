@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { isAbsolute } from 'node:path'
+import { isAbsolute, resolve, sep } from 'node:path'
 import { realpath, stat } from 'node:fs/promises'
 import type { BrowserWindow, WebContents } from 'electron'
 import type { IPty } from 'node-pty'
@@ -25,6 +25,25 @@ export class TerminalService {
   private readonly entries = new Map<string, RecordEntry>()
   private readonly opening = new Map<string, Promise<TerminalSnapshot>>()
 
+  private openingCount = 0
+  private readonly unconfirmedDisposedCwds = new Set<string>()
+  private mutationGuard?: () => void
+
+  setMutationGuard(guard: () => void): void { this.mutationGuard = guard }
+
+  assertWorktreeDeletionIdle(cwd: string): void {
+    if (this.openingCount || this.opening.size) throw new Error('终端正在打开，不能删除工作树')
+    const target = resolve(cwd)
+    const related = (directory: string): boolean => {
+      const bound = resolve(directory)
+      return bound === target || bound.startsWith(`${target}${sep}`) || target.startsWith(`${bound}${sep}`)
+    }
+    if ([...this.unconfirmedDisposedCwds].some(related)
+      || [...this.entries.values()].some((entry) => entry.snapshot.exitCode === undefined && related(entry.snapshot.cwd))) {
+      throw new Error('相关终端尚未确认退出，不能删除工作树；结束未确认时需重启应用')
+    }
+  }
+
   bind(win: BrowserWindow): void {
     const owner = win.webContents.id
     this.owners.set(owner, win.webContents)
@@ -32,11 +51,19 @@ export class TerminalService {
   }
 
   async open(owner: number, cwd: string, cols: number, rows: number): Promise<TerminalSnapshot> {
+    this.mutationGuard?.()
+    this.openingCount += 1
+    try { return await this.openReserved(owner, cwd, cols, rows) }
+    finally { this.openingCount -= 1 }
+  }
+
+  private async openReserved(owner: number, cwd: string, cols: number, rows: number): Promise<TerminalSnapshot> {
     this.assertOwner(owner)
     if (typeof cwd !== 'string' || !isAbsolute(cwd) || cwd.includes('\0')) throw new Error('终端需要有效的绝对项目路径')
     const directory = await realpath(cwd)
     if (!(await stat(directory)).isDirectory()) throw new Error('终端工作目录不存在')
     this.assertOwner(owner)
+    this.mutationGuard?.()
     const key = `${owner}\0${directory}`
     const inFlight = this.opening.get(key)
     if (inFlight) return inFlight
@@ -59,6 +86,7 @@ export class TerminalService {
     const shell = process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : process.env.SHELL || '/bin/bash'
     const env = Object.fromEntries(Object.entries(process.env).filter((pair): pair is [string, string] => typeof pair[1] === 'string'))
     delete env.ELECTRON_RUN_AS_NODE
+    this.mutationGuard?.()
     const pty = spawn(shell, [], { cwd, cols: this.size(cols, 80), rows: this.size(rows, 24),
       name: 'xterm-256color', env: { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } })
     const entry: RecordEntry = {
@@ -106,6 +134,8 @@ export class TerminalService {
     this.disposeEntry(this.get(owner, id))
   }
   private disposeEntry(entry: RecordEntry): void {
+    // Disposing listeners and sending kill do not confirm process exit.
+    if (entry.snapshot.exitCode === undefined) this.unconfirmedDisposedCwds.add(entry.snapshot.cwd)
     this.entries.delete(entry.snapshot.id)
     if (entry.timer) clearTimeout(entry.timer)
     entry.disposables.forEach((disposable) => disposable.dispose())

@@ -4,7 +4,9 @@ import '@testing-library/jest-dom/vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { SessionItems } from '../../src/renderer/src/features/session/SessionList'
+import { ProjectList } from '../../src/renderer/src/features/project/Sidebar'
 import type { SessionMeta } from '../../src/shared/types'
+import type { SubagentSessionSummary } from '../../src/shared/subagent-sessions'
 
 const optimistic: SessionMeta = {
   projectCwd: '/tmp/project',
@@ -16,6 +18,55 @@ const optimistic: SessionMeta = {
   messageCount: 1,
   optimistic: true
 }
+
+describe('SessionItems temporary children', () => {
+  it('passes child props through project, folder and worktree without adding to normal counts', () => {
+    const session = { ...optimistic, path: '/parent.jsonl', optimistic: false }
+    const child: SubagentSessionSummary = { id: 'child', backendId: 'backend', runtimeId: 'runtime', parentToolCallId: 'tool', parentSessionId: 'parent', parentSessionPath: session.path, cwd: session.projectCwd!, name: '项目子任务', status: 'running', revision: 1, truncated: false }
+    const onViewSubagent = vi.fn()
+    const onSelectSession = vi.fn()
+    const { container } = render(<ProjectList
+      projects={[{ cwd: session.projectCwd!, name: '项目', addedAt: 1, lastUsedAt: 1 }]}
+      sessionsByProject={{ [session.projectCwd!]: [session] }} branchesByProject={{}} searchQuery=""
+      runningSessionPaths={new Set()} previewDensity="compact" favoritePaths={new Set()}
+      subagentSessions={[child]} onViewSubagent={onViewSubagent}
+      onSelect={vi.fn()} onAdd={vi.fn()} onRemove={vi.fn()} onNewSession={vi.fn()} onNewBranch={vi.fn()}
+      onRenameBranch={vi.fn()} onReorder={vi.fn()} onSelectSession={onSelectSession} onDelete={vi.fn()} onCopy={vi.fn()}
+      onRename={vi.fn()} onOpenTaskHistory={vi.fn()} getForkMessages={vi.fn().mockResolvedValue([])} onFork={vi.fn().mockResolvedValue('')}
+      onToggleFavorite={vi.fn()}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: '查看子会话 项目子任务 · 运行中' }))
+    expect(onViewSubagent).toHaveBeenCalledWith(child)
+    expect(onSelectSession).not.toHaveBeenCalled()
+    expect(container.querySelector('.project-branch-count')).toHaveTextContent('1')
+    expect(container.querySelector('.side-session')).not.toHaveClass('running')
+  })
+  it('scopes children to exact cwd/path and isolates child actions while preserving the normal row', () => {
+    const parent = { ...optimistic, path: '/parent.jsonl', optimistic: false }
+    const child: SubagentSessionSummary = { id: 'child', backendId: 'backend', runtimeId: 'runtime', parentToolCallId: 'tool', parentSessionId: 'parent', parentSessionPath: parent.path, cwd: parent.projectCwd!, name: '检查', status: 'completed', revision: 1, truncated: false }
+    const props = {
+      sessions: [parent], previewDensity: 'compact' as const, runningSessionPaths: new Set<string>(), favoritePaths: new Set<string>(),
+      onSelect: vi.fn(), onReorder: vi.fn(), onDelete: vi.fn(), onCopy: vi.fn(), onRename: vi.fn(), onOpenTaskHistory: vi.fn(),
+      getForkMessages: vi.fn().mockResolvedValue([]), onFork: vi.fn().mockResolvedValue(''), onToggleFavorite: vi.fn(), onViewSubagent: vi.fn()
+    }
+    const { container, rerender } = render(<SessionItems {...props} subagentSessions={[child, { ...child, id: 'wrong-cwd', cwd: '/other', name: '其他项目' }, { ...child, id: 'wrong-path', parentSessionPath: '/other.jsonl', name: '其他会话' }]} />)
+    const row = container.querySelector('.side-session')
+    const button = screen.getByRole('button', { name: '查看子会话 检查 · 已完成' })
+    expect(container.querySelectorAll('.side-subagent-session')).toHaveLength(1)
+    expect(button).toHaveAttribute('draggable', 'false')
+    fireEvent.click(button)
+    fireEvent.contextMenu(button)
+    fireEvent.dragStart(button)
+    expect(props.onViewSubagent).toHaveBeenCalledWith(child)
+    for (const callback of [props.onSelect, props.onReorder, props.onDelete, props.onCopy, props.onRename, props.onFork, props.onToggleFavorite]) expect(callback).not.toHaveBeenCalled()
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+    rerender(<SessionItems {...props} subagentSessions={[]} />)
+    expect(container.querySelector('.side-session')).toBe(row)
+    expect(container.querySelector('.side-subagent-session')).toBeNull()
+    rerender(<SessionItems {...props} onViewSubagent={undefined} subagentSessions={[child]} />)
+    expect(container.querySelector('.side-subagent-session')).toBeNull()
+  })
+})
 
 describe('SessionItems running indicator state', () => {
   it('scopes the light to running rows without changing selection, unread or favorite actions', () => {
