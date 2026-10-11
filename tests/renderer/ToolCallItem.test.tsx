@@ -14,6 +14,12 @@ import { CODEX_IMAGE_REQUEST_ALIAS, IMAGE_GENERATION_TOOL_NAME } from '../../src
 import { DIFF_PAGE_SIZE } from '../../src/renderer/src/features/review/DiffView'
 import { REVIEW_REVEAL_CHUNK_SIZE } from '../../src/renderer/src/features/review/ReviewRevealText'
 import { SkillsToolsModal } from '../../src/renderer/src/features/capabilities/SkillsToolsModal'
+import {
+  assignPendingLineDelays,
+  resetLineRevealClock,
+  SCREEN_TEXT_REVEAL_LINE_LIVE_STAGGER_MS,
+  SCREEN_TEXT_REVEAL_LINE_STAGGER_MS
+} from '../../src/renderer/src/utils/screenTextReveal'
 
 const chatCss = readFileSync(resolve('src/renderer/src/styles/chat.css'), 'utf8')
 const previewPart = {
@@ -67,6 +73,96 @@ describe('ToolCallItem', () => {
     }
     expect(container.querySelector('.tool-body')).not.toBeInTheDocument()
     expect(container.querySelector('.tool-subagent-summary')).not.toBeInTheDocument()
+  })
+
+  it.each([false, true])('defers whole historical batch frames to the header-first shared settle scan (readOnly=%s)', (readOnly) => {
+    vi.spyOn(performance, 'now').mockReturnValue(1000)
+    resetLineRevealClock()
+    const { container, rerender } = render(<ToolCallItem tool={batchTool} historical readOnly={readOnly} />)
+    const head = container.querySelector<HTMLElement>('.tool-head')!
+    const rows = Array.from(container.querySelectorAll<HTMLElement>('.tool-subagent-row'))
+    const lines = [head, ...rows]
+    for (const line of lines) {
+      expect(line).toHaveClass('screen-text-reveal-line', 'screen-text-reveal-line-history')
+      expect(line).not.toHaveAttribute('data-line-reveal-ready')
+      expect(line.style.getPropertyValue('--screen-text-reveal-delay')).toBe('')
+    }
+    // Name, state, summary button and background all belong to the same line,
+    // not independently animated name characters or synthetic SDK calls.
+    expect(rows[0].querySelectorAll('.screen-text-reveal-line')).toHaveLength(0)
+    expect(rows[0]).toContainElement(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
+    assignPendingLineDelays(container)
+    lines.forEach((line, index) => {
+      expect(line).toHaveAttribute('data-line-reveal-ready', 'true')
+      expect(line.style.getPropertyValue('--screen-text-reveal-delay')).toBe(`${index * SCREEN_TEXT_REVEAL_LINE_STAGGER_MS}ms`)
+    })
+    const delayWrites = rows.map((row) => vi.spyOn(row.style, 'setProperty'))
+    const toggle = screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' })
+    toggle.focus()
+    fireEvent.click(toggle)
+    rerender(<ToolCallItem tool={{ ...batchTool, status: 'running', subagentBatch: {
+      version: 1, tasks: batchTool.subagentBatch!.tasks.map((task) => ({ ...task, status: 'completed' as const }))
+    } }} historical readOnly={readOnly} />)
+    assignPendingLineDelays(container)
+    expect(container.querySelector('.tool-head')).toBe(head)
+    Array.from(container.querySelectorAll('.tool-subagent-row')).forEach((row, index) => expect(row).toBe(rows[index]))
+    expect(toggle).toHaveFocus()
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    delayWrites.forEach((spy) => expect(spy).not.toHaveBeenCalled())
+    expect(container.querySelector('.tool-subagent-summary')).toHaveTextContent('入口结果')
+  })
+
+  it.each([false, true])('suppresses all batch frame markers and delay refs with noReveal (historical=%s)', (historical) => {
+    const { container } = render(<ToolCallItem tool={batchTool} historical={historical} readOnly noReveal />)
+    assignPendingLineDelays(container)
+    expect(container.querySelectorAll('.screen-text-reveal-line')).toHaveLength(0)
+    expect(container.querySelectorAll('[data-line-reveal-ready]')).toHaveLength(0)
+    expect(container.querySelectorAll('[style*="screen-text-reveal-delay"]')).toHaveLength(0)
+    screen.getAllByRole('listitem').forEach((row) => expect(row).toBeVisible())
+  })
+
+  it('restores a freshly mounted cached batch on the history clock without replaying same-scope refreshes', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(1000)
+    const { container, rerender } = render(<ToolCallItem tool={batchTool} historical />)
+    resetLineRevealClock()
+    assignPendingLineDelays(container)
+    const oldRows = Array.from(container.querySelectorAll<HTMLElement>('.tool-subagent-row'))
+    rerender(<ToolCallItem tool={{ ...batchTool }} historical />)
+    assignPendingLineDelays(container)
+    expect(container.querySelector('.tool-subagent-row')).toBe(oldRows[0])
+    expect(oldRows[0].style.getPropertyValue('--screen-text-reveal-delay')).toBe(`${SCREEN_TEXT_REVEAL_LINE_STAGGER_MS}ms`)
+    // Timeline unmounts the old scope, then restores its cached historical tool.
+    rerender(<></>)
+    resetLineRevealClock()
+    rerender(<ToolCallItem tool={{ ...batchTool }} historical />)
+    const restoredRows = Array.from(container.querySelectorAll<HTMLElement>('.tool-subagent-row'))
+    restoredRows.forEach((row, index) => {
+      expect(row).not.toBe(oldRows[index])
+      expect(row).not.toHaveAttribute('data-line-reveal-ready')
+    })
+    assignPendingLineDelays(container)
+    restoredRows.forEach((row, index) => expect(row.style.getPropertyValue('--screen-text-reveal-delay'))
+      .toBe(`${(index + 1) * SCREEN_TEXT_REVEAL_LINE_STAGGER_MS}ms`))
+  })
+
+  it('assigns live frame refs even for a newly received non-streaming final batch, without requeuing updates', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(1000)
+    resetLineRevealClock()
+    const { container, rerender } = render(<ToolCallItem tool={batchTool} />)
+    const head = container.querySelector<HTMLElement>('.tool-head')!
+    const rows = Array.from(container.querySelectorAll<HTMLElement>('.tool-subagent-row'))
+    const lines = [head, ...rows]
+    lines.forEach((line, index) => {
+      expect(line).toHaveClass('screen-text-reveal-line-live')
+      expect(line).toHaveAttribute('data-line-reveal-ready', 'true')
+      expect(line.style.getPropertyValue('--screen-text-reveal-delay')).toBe(`${index * SCREEN_TEXT_REVEAL_LINE_LIVE_STAGGER_MS}ms`)
+    })
+    const delayWrites = rows.map((row) => vi.spyOn(row.style, 'setProperty'))
+    fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
+    rerender(<ToolCallItem tool={{ ...batchTool, live: true, status: 'running' }} />)
+    expect(container.querySelector('.tool-subagent-row')).toBe(rows[0])
+    delayWrites.forEach((spy) => expect(spy).not.toHaveBeenCalled())
+    expect(container.querySelector('.tool-subagent-summary')).toHaveTextContent('入口结果')
   })
 
   it('opens individual bounded summaries without opening or remounting aggregate details', () => {
@@ -154,7 +250,7 @@ describe('ToolCallItem', () => {
       fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：实时摘要' }))
       const body = container.querySelector('.tool-subagent-summary pre')!
       expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(Array.from(summary).length)
-      act(() => vi.advanceTimersByTime(300))
+      act(() => vi.advanceTimersByTime(600))
       const firstChunk = body.querySelector('span')
       const appended: ToolItem = { ...tool, subagentBatch: { version: 1, tasks: [
         { ...tool.subagentBatch!.tasks[0], summary: summary + 'new' }
@@ -164,7 +260,7 @@ describe('ToolCallItem', () => {
       expect(body.querySelector('span')).toBe(firstChunk)
       expect(Array.from(body.querySelectorAll('.screen-text-reveal-live')).map((node) => node.textContent).join('')).toBe('new')
       expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(3)
-      act(() => vi.advanceTimersByTime(300))
+      act(() => vi.advanceTimersByTime(600))
       rerender(<ToolCallItem tool={{ ...appended, status: 'done', subagentBatch: { version: 1, tasks: [
         { ...appended.subagentBatch!.tasks[0], status: 'completed' }
       ] } }} />)
@@ -296,7 +392,7 @@ describe('ToolCallItem', () => {
     try {
       const { container, rerender } = render(<ToolCallItem tool={liveTool} />)
       fireEvent.click(screen.getByRole('button', { name: '展开终端工具详情' }))
-      act(() => vi.advanceTimersByTime(300))
+      act(() => vi.advanceTimersByTime(600))
       const body = container.querySelector('.tool-output')
       expect(body?.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
       rerender(<ToolCallItem tool={{ ...liveTool, status: 'done' }} />)

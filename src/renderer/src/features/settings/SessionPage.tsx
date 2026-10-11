@@ -1,12 +1,13 @@
 import type { ReactElement } from 'react'
 import { Download, Loader2, RefreshCw } from 'lucide-react'
-import type { SessionInfo } from '../../../../shared/types'
+import type { ModelOption, SessionInfo } from '../../../../shared/types'
 import { PageHeading } from './SettingsPageHeading'
 import { SubagentSettings } from './SubagentSettings'
 import { SESSION_PREVIEW_OPTIONS } from '../../utils/sessionPreview'
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 
 interface SessionPageProps {
+  models?: ModelOption[]
   session: Pick<SessionInfo, 'sessionName' | 'autoCompactionEnabled' | 'steeringMode' | 'followUpMode'> | null
   name: string
   nameSaved: boolean
@@ -37,6 +38,7 @@ interface SessionPageProps {
 }
 
 export function SessionPage({
+  models = [],
   session,
   name,
   nameSaved,
@@ -229,7 +231,7 @@ export function SessionPage({
         </div>
       </div>
 
-      <SubagentSettings />
+      <SubagentSettings models={models} />
 
       <div className="settings-section">
         <div className="settings-section-title">通知</div>

@@ -37,7 +37,8 @@ export class SubagentSettingsStore {
         await writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
         await rename(temporary, path)
       } finally { await unlink(temporary).catch(() => undefined) }
-      return { ...settings }
+      // Do not return the nested identity object retained by this write.
+      return validateSubagentSettings(settings)
     })
     this.writes = write
     return write

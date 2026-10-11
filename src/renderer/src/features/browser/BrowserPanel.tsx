@@ -1,5 +1,5 @@
 import { createElement, useEffect, useRef, useState } from 'react'
-import { BROWSER_BLANK_URL, BROWSER_PARTITION, normalizeBrowserUrl } from '../../../../shared/browser'
+import { BROWSER_BLANK_URL, BROWSER_PARTITION, isAllowedBrowserUrl, normalizeBrowserUrl } from '../../../../shared/browser'
 
 // Keep the custom element contract local; do not widen every renderer's JSX types.
 interface BrowserWebview extends HTMLElement {
@@ -25,11 +25,18 @@ function isAbortedNavigation(cause: unknown): boolean {
     && /^ERR_ABORTED(?:\s|\(|$)/.test(cause.message)
 }
 
-export function BrowserPanel({ visible }: { visible: boolean }) {
+interface BrowserPanelProps {
+  visible: boolean
+  navigation?: { id: number; url: string }
+}
+
+export function BrowserPanel({ visible, navigation }: BrowserPanelProps) {
   const webviewRef = useRef<BrowserWebview | null>(null)
   const readyRef = useRef(false)
   const mountedRef = useRef(false)
   const requestRef = useRef(0)
+  const lastNavigationIdRef = useRef<number | null>(null)
+  const pendingNavigationRef = useRef<{ id: number; url: string } | null>(null)
   const navigationUrlRef = useRef(BROWSER_BLANK_URL)
   const editingRef = useRef(false)
   const composingRef = useRef(false)
@@ -39,6 +46,35 @@ export function BrowserPanel({ visible }: { visible: boolean }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [history, setHistory] = useState({ back: false, forward: false })
+
+  const cancelPendingNavigation = () => {
+    pendingNavigationRef.current = null
+    requestRef.current++
+  }
+  const performNavigate = (url: string) => {
+    const view = webviewRef.current
+    if (!view || !readyRef.current || !mountedRef.current) return
+    const request = ++requestRef.current
+    navigationUrlRef.current = url
+    setError('')
+    try {
+      // Keep src fixed: only explicit requests use the existing guest's API.
+      void view.loadURL(url).catch((cause: unknown) => {
+        if (!mountedRef.current || request !== requestRef.current) return
+        if (isAbortedNavigation(cause)) return
+        setLoading(false)
+        setError(LOAD_ERROR)
+      })
+    } catch { setLoading(false); setError(ACTION_ERROR) }
+  }
+  const consumePendingNavigation = () => {
+    const pending = pendingNavigationRef.current
+    if (!pending || !readyRef.current) return
+    // Consume before calling Electron, including synchronous throws/rejections.
+    pendingNavigationRef.current = null
+    setDraft(pending.url)
+    performNavigate(pending.url)
+  }
 
   useEffect(() => {
     const view = webviewRef.current
@@ -55,7 +91,12 @@ export function BrowserPanel({ visible }: { visible: boolean }) {
         setHistory({ back: view.canGoBack(), forward: view.canGoForward() })
       } catch { setError(ACTION_ERROR) }
     }
-    const onReady = () => { readyRef.current = true; setReady(true); sync() }
+    const onReady = () => {
+      readyRef.current = true
+      setReady(true)
+      sync()
+      consumePendingNavigation()
+    }
     const onNavigation = (event: Event) => {
       const navigation = event as Event & { isMainFrame?: unknown; url?: unknown }
       if (navigation.isMainFrame !== true) return
@@ -84,39 +125,53 @@ export function BrowserPanel({ visible }: { visible: boolean }) {
     return () => {
       mountedRef.current = false
       readyRef.current = false
-      requestRef.current++
+      lastNavigationIdRef.current = null
+      cancelPendingNavigation()
       for (const [name, listener] of listeners) view.removeEventListener(name, listener)
     }
   }, [])
 
+  useEffect(() => {
+    // Empty props revoke pending work; retain the consumed ID for this mount so
+    // removing/reintroducing a request cannot replay an already handled click.
+    if (!navigation) { cancelPendingNavigation(); return }
+    const { id, url } = navigation
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      cancelPendingNavigation()
+      setError(ACTION_ERROR)
+      return
+    }
+    // Unlike address-bar submission, a clicked link is never normalized/repaired.
+    // Validate even a reused ID: malformed props must revoke pending work.
+    if (!isAllowedBrowserUrl(url) || url === BROWSER_BLANK_URL) {
+      lastNavigationIdRef.current = id
+      cancelPendingNavigation()
+      setError(ACTION_ERROR)
+      return
+    }
+    if (lastNavigationIdRef.current === id) return
+    lastNavigationIdRef.current = id
+    cancelPendingNavigation()
+    pendingNavigationRef.current = { id, url }
+    setDraft(url)
+    setError('')
+    consumePendingNavigation()
+  }, [navigation?.id, navigation?.url])
+
   const act = (action: (view: BrowserWebview) => void) => {
+    cancelPendingNavigation()
     const view = webviewRef.current
     if (!view || !readyRef.current) return
     // History/reload/stop can replace an address-bar request too. A delayed
     // rejection from that older request must not overwrite the newer action.
-    requestRef.current++
     try { setError(''); action(view) } catch { setError(ACTION_ERROR) }
   }
   const navigate = () => {
     if (composingRef.current) return
+    cancelPendingNavigation()
     const url = normalizeBrowserUrl(draft)
     if (!url) { setError('请输入有效的 HTTP 或 HTTPS 地址。'); return }
-    const view = webviewRef.current
-    if (!view || !readyRef.current) return
-    const request = ++requestRef.current
-    navigationUrlRef.current = url
-    setError('')
-    try {
-      // Only explicit submission navigates. React always sees the same initial
-      // src prop, so unrelated state changes never reset the current document.
-      void view.loadURL(url).catch((cause: unknown) => {
-        if (!mountedRef.current || request !== requestRef.current) return
-        // stop()/a newer navigation normally rejects with ERR_ABORTED.
-        if (isAbortedNavigation(cause)) return
-        setLoading(false)
-        setError(LOAD_ERROR)
-      })
-    } catch { setLoading(false); setError(ACTION_ERROR) }
+    performNavigate(url)
   }
 
   return <section className="browser-panel" aria-label="浏览器" aria-hidden={!visible}>

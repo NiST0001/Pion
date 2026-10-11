@@ -9,11 +9,16 @@ export const SCREEN_TEXT_REVEAL_LINE_CLASS = 'screen-text-reveal-line'
 export const SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS = 'screen-text-reveal-line-live'
 export const SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS = 'screen-text-reveal-line-history'
 export const SCREEN_TEXT_REVEAL_STATIC_CLASS = 'screen-text-reveal-static'
-// Five times faster than the original 6ms / 260ms reveal while retaining a
-// small left-to-right cue on long messages.
+// Keep history's fast cascade; streamed suffixes fade at half its speed.
+// Fade durations match refinements.css; cleanup must outlast the last delay.
 export const SCREEN_TEXT_REVEAL_STAGGER_MS = 1.2
 export const SCREEN_TEXT_REVEAL_MAX_DELAY_MS = 180
+export const SCREEN_TEXT_REVEAL_DURATION_MS = 52
+export const SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS = 2.4
+export const SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS = 360
+export const SCREEN_TEXT_REVEAL_LIVE_DURATION_MS = 104
 export const SCREEN_TEXT_REVEAL_LINE_STAGGER_MS = 20
+export const SCREEN_TEXT_REVEAL_LINE_LIVE_STAGGER_MS = 40
 export type TextRevealMode = 'history' | 'live'
 
 let nextLineRevealAt = 0
@@ -28,11 +33,13 @@ function now(): number {
  * burn slots and re-renders can never requeue a line. An idle clock restarts
  * at the next new line; a busy clock queues behind the last scheduled line.
  */
-export function takeLineRevealSlot(): number {
+export function takeLineRevealSlot(mode: TextRevealMode = 'history'): number {
   const currentTime = now()
   if (nextLineRevealAt <= currentTime) nextLineRevealAt = currentTime
   const delay = Math.max(0, Math.round(nextLineRevealAt - currentTime))
-  nextLineRevealAt = Math.max(nextLineRevealAt, currentTime) + SCREEN_TEXT_REVEAL_LINE_STAGGER_MS
+  nextLineRevealAt = Math.max(nextLineRevealAt, currentTime) + (mode === 'live'
+    ? SCREEN_TEXT_REVEAL_LINE_LIVE_STAGGER_MS
+    : SCREEN_TEXT_REVEAL_LINE_STAGGER_MS)
   return delay
 }
 
@@ -79,7 +86,7 @@ export function assignLineRevealDelay(element: HTMLElement | null): void {
   if (!element || element.dataset.lineRevealReady === 'true') return
   if (element.classList.contains(SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS)) return
   element.dataset.lineRevealReady = 'true'
-  element.style.setProperty('--screen-text-reveal-delay', `${takeLineRevealSlot()}ms`)
+  element.style.setProperty('--screen-text-reveal-delay', `${takeLineRevealSlot('live')}ms`)
 }
 
 /**
@@ -145,7 +152,7 @@ export function RevealText({
       {characters.slice(start).map((character, delayIndex) => {
         const index = start + delayIndex
         const style = mode === 'live'
-          ? { '--screen-text-reveal-delay': `${Math.min(delayIndex * SCREEN_TEXT_REVEAL_STAGGER_MS, SCREEN_TEXT_REVEAL_MAX_DELAY_MS)}ms` } as CSSProperties
+          ? { '--screen-text-reveal-delay': `${Math.min(delayIndex * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)}ms` } as CSSProperties
           : undefined
         return (
           <span

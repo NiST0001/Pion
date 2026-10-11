@@ -96,14 +96,22 @@ const SUBAGENT_STATUS_LABELS = {
 } as const
 
 // These are display rows from the real batch, not additional SDK tool calls.
-const SubagentBatchRow = memo(function SubagentBatchRow({ task, mode }: {
+const SubagentBatchRow = memo(function SubagentBatchRow({ task, mode, frameMode }: {
   task: NonNullable<ToolItem['subagentBatch']>['tasks'][number]
   mode?: TextRevealMode
+  frameMode?: TextRevealMode
 }): ReactElement {
   const [open, setOpen] = useState(false)
   const hasSummary = Boolean(task.summary)
   const displayName = task.name.trim() ? task.name : `子代理 ${task.index + 1}`
-  return <li className="tool-subagent-row" data-subagent-index={task.index}>
+  // Reveal the complete frame (including its background and controls) on the
+  // same clock as the tool header. Summary text keeps its own chunk/suffix
+  // lifecycle; status updates and disclosure toggles never reattach this ref.
+  return <li
+    className={`tool-subagent-row${frameMode ? ` ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${frameMode === 'history' ? SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS : SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS}` : ''}`}
+    ref={frameMode ? assignLineRevealDelay : undefined}
+    data-subagent-index={task.index}
+  >
     <div className="tool-subagent-row-head">
       <span className="tool-subagent-name">{displayName}</span>
       <span className={`tool-subagent-status tool-subagent-status-${task.status}`}>
@@ -138,6 +146,9 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
   const stats = useMemo(() => tool.diff ? diffStats(tool.diff) : null, [tool.diff])
   const liveOutput = tool.live === true && !historical
   const detailMode = revealSuppressed ? undefined : historical ? 'history' : liveOutput ? 'live' : undefined
+  // New frames use the header's live reveal even when there is no streaming
+  // detail output (e.g. a newly received terminal batch result).
+  const frameMode = revealSuppressed ? undefined : historical ? 'history' : 'live'
 
   return (
     <div className={`tool-call tool-${tool.status}${historical ? ' history-reveal' : ''}`}>
@@ -192,7 +203,7 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
       </button>
 
       {batch && <ul className="tool-subagent-batch" aria-label={`子代理任务（${batch.tasks.length} 项）`}>
-        {batch.tasks.map((task) => <SubagentBatchRow key={`${tool.id}:${task.index}`} task={task} mode={detailMode} />)}
+        {batch.tasks.map((task) => <SubagentBatchRow key={`${tool.id}:${task.index}`} task={task} mode={detailMode} frameMode={frameMode} />)}
       </ul>}
 
       <AnimatedDisclosure open={open}>

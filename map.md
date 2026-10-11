@@ -21,7 +21,7 @@
 | src/shared/operations.ts | 运行/恢复数据契约，以及主进程与 renderer 共用的统计候选筛选、执行状态判定和排序 |
 | src/shared/theme.ts | 内置主题 ID（含 division-dark）、默认主题与跨进程校验 |
 | src/shared/subagent-sessions.ts | 临时子会话显示/配额协议、摘要/文字行契约及半小时/容量硬边界；身份不冒充 SDK 历史 ID |
-| src/shared/subagents.ts | 子代理参数类型、默认值、硬边界与跨进程校验 |
+| src/shared/subagents.ts | 子代理限制/默认模型类型及精确 provider/id 校验，旧缺字段继承兼容、硬边界与跨进程规范化 |
 | src/shared/subagent-batches.ts | 主会话批次显示白名单：真实输入索引、最多 8 项名称/状态和有界摘要，兼容完整有序旧终态；不按重名/完成顺序猜身份，不包含临时正文或计费数据 |
 | src/shared/release-notes.ts | 关于页内置发布日志，按版本倒序维护 |
 | src/shared/terminal.ts | PTY 终端快照与增量输出契约 |
@@ -56,7 +56,7 @@
 | src/main/agent/png-validation.ts | 输入/输出静态 PNG 共用的有界完整性校验：chunk CRC、完整 IDAT zlib、scanline 几何/过滤器、调色板索引、标准色彩/位深与 Adam7、有界文本/ICC 解压；非完整色彩/ICC 语义或真实解码验证 |
 | src/main/agent/subagent-session-observer.ts | 运行时纯文字投影、真实私有 RPC 配额 ACK、快照合并与收口通知，不把临时记录加入父历史或计费 |
 | src/main/agent/subagent-session-store.ts | 窗口后端隔离的内存记录、同步批量预留、来源/显示路径与双 revision、有界迟到 fence 及单调半小时清理 |
-| src/main/agent/subagents.ts | 内置子代理开关及 SDK 委派：可用时注入复杂任务主动委派与按当前上限合并独立任务到同一并发批次的策略，不可用时不绕过工具过滤；每批读取并冻结全局限制、有界并发/取消、父级工具权限与检查点转发、兄弟写入串行化、有效父系统提示及预热模式继承、结果与模型/预热用量汇总 |
+| src/main/agent/subagents.ts | 内置子代理开关及 SDK 委派：可用时注入复杂任务主动委派与按当前上限合并独立任务到同一并发批次的策略，不可用时不绕过工具过滤；每批深冻结全局限制/默认模型及逐任务精确模型覆盖，已有 SDK catalog/availability 同步查找、未知单子失败不回退、有界模型 ID 提示；有界并发/取消、父级工具权限与检查点转发、兄弟写入串行化、有效父系统提示及预热模式继承、结果与模型/预热用量汇总 |
 | src/main/theme-settings.ts | 独立用户主题文件的原子持久化、读取及所属主窗口/主帧校验 |
 | src/main/subagent-settings.ts | 子代理全局设置的校验、串行原子写入与 userData 配置路径 |
 | src/main/agent/ask-user.ts | SDK customTools 内置提问，选项/自由回答、取消和中止保护；不依赖提问插件 |
@@ -110,7 +110,7 @@
 
 以下目录位于 `src/renderer/src/features/`：
 
-- `chat/`：主会话 ToolCallItem 在一条真实子代理批次记录内显示数量和各索引任务的名称/状态，有界摘要独立按普通工具渐入展开，不伪造多次 SDK 调用；ChatTimeline（含稳定的滚动占位容器，以独立 timelineReady 区分历史成功接收与空 STATE/关闭 loading，未载入或读取失败提供显式重新加载，不伪装就绪）、ChatMessage、Markdown、ToolCallItem、Composer；ChatMessage 将模型/API 错误显示为可操作的短提示，原始诊断默认折叠且历史回放不注册实时播报；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
+- `chat/`：主会话 ToolCallItem 在一条真实子代理批次记录内显示数量和各索引任务的名称/状态，有界摘要独立按普通工具渐入展开，任务框整体接同历史行时钟等待从上往下渐显，不状态重播；实时输出行/字符节奏与回收期限同步为原两倍时长，不伪造多次 SDK 调用；ChatTimeline（含稳定的滚动占位容器，以独立 timelineReady 区分历史成功接收与空 STATE/关闭 loading，未载入或读取失败提供显式重新加载，不伪装就绪）、ChatMessage、Markdown、ToolCallItem、Composer；ChatMessage 将模型/API 错误显示为可操作的短提示，原始诊断默认折叠且历史回放不注册实时播报；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
 - `chat/ToolCallItem.tsx`：按需工具详情；生图分别展示请求型号/实际版本未知、请求操作/size/quality/引用数、输出 PNG 原图保存尺寸与缩略图上限，不把请求尺寸或质量当实际输出承诺，不补造旧历史设置，也不展示输入原图或引用路径数组。
 - `chat/ToolResultImages.tsx`：ToolCallItem 的有界静态 PNG/JPEG 输出结果预览；按详情展开/收起挂载和释放，以工具 ID/内容位置维持图片身份，固定框显示加载/失败状态；不读取原图/提供商 URL，不参与字符渐入，加载事件不滚动消息区。
 - `hooks/useSubagentSessions.ts`、`agent/subagentTimeline.ts`、`styles/subagent-sessions.css`：父行下可独立折叠的临时子会话列表（默认展开、显示数量、刷新保留原生收起状态）、选择及采集/投影隔离、真实 IPC 单槽、可见性门和页面半小时过期；App 直接复用普通 ChatTimeline/ChatMessage/ToolCallItem 的安全只读呈现与独立滚动，无额外查看面板/返回按钮，子工具连续行紧凑排列且空工具调用助手正文不制造空泡泡，真实文字/思考间距及工具点击区域保持；父 DOM/草稿/阅读位置保留、父控制隐藏且 inert。
@@ -122,11 +122,12 @@
   - `SettingsModal.tsx`：设置外壳、导航与操作编排，继续持有原有会话名称草稿、压缩/导出状态、诊断日志及主题保存 revision，切页不因拆分而重置宿主状态。
   - `ModelsPage.tsx`、`SessionPage.tsx`、`SecurityPage.tsx`：模型与提供商、会话行为与工具、安全信任与权限页面；新增页面通过受控 props 回调操作，不反向依赖弹窗。
   - `AppearancePage.tsx`、`AboutPage.tsx`、`DiagnosticsPage.tsx`：外观、版本与更新日志、会话状态与 stderr 页面；`SettingsInfoRow.tsx` 为关于/诊断共用的信息行。
-  - `ReleaseNotes.tsx` 在关于 Pion 页展示可展开的更新日志；`WindowEffectsSettings.tsx` 提供简洁的“毛玻璃”开关，仅在重启、不可用或透明回退等必要状态下提示；外观页保留原四套主题并提供“信号橙”战术风格主题，即时切换，不额外渲染实时预览；`SubagentSettings.tsx` 在会话页提供子代理全局数量/超时/轮数/结果长度配置，保存后下一批生效。
+  - `ReleaseNotes.tsx` 在关于 Pion 页展示可展开的更新日志；`WindowEffectsSettings.tsx` 提供简洁的“毛玻璃”开关，仅在重启、不可用或透明回退等必要状态下提示；外观页保留原四套主题并提供“信号橙”战术风格主题，即时切换，不额外渲染实时预览；`SubagentSettings.tsx` 在会话页提供子代理全局数量/超时/轮数/结果长度及默认模型配置，透传已有模型候选/保留未显示的保存选择，精确 ID 编码及迟到 owner 隔离，保存后下一批生效。
 - `capabilities/`：技能工具列表、MCP 只读状态与插件商店；`McpStatusPage.tsx` 查看当前后端的状态/登记工具数/曝光，只读缓存刷新、可见时订阅与轮询；关闭/隐藏清理，选择 generation 与 scope 拒迟到结果，实际 IPC 跨卸载单槽、独立单调过期防止挂起读取或重复缓存保留旧连接；旧插件/禁用/未知不推测可用性。`SkillsToolsModal.tsx` 将 Pion 内置任务/提问/子代理/生图与插件工具区分展示；生图卡片说明 size/quality 请求、≤5 个 PNG/JPEG 参考图编辑及另存新路径、原文件/metadata 上传、read + network + write、服务兼容性/精确尺寸未保证、mask 不支持、实验型号/实际版本未知、Codex 登录和账号额度及计划模式不可用。
 - `chrome/`：窗口标题栏等外壳组件；`DockHeader.tsx` 提供简洁拖动标题、带目标/方向图标的自定义布局菜单和隐藏按钮。
 - `terminal/TerminalPanel.tsx`：按需加载的 xterm.js 终端，保持 PTY 连接、可见尺寸适配、主题同步及结束确认。
-- `browser/BrowserPanel.tsx`：首开 lazy 后保持挂载的 webview 面板，地址栏/前进后退/刷新停止、标题/加载与安全错误提示，IME 及导航请求失效保护；初始空白不自动联网，隐藏不重置页面，无 Pion guest preload。
+- `browser/BrowserPanel.tsx`：首开 lazy 后保持挂载的 webview 面板，地址栏/前进后退/刷新停止、标题/加载与安全错误提示，IME 及导航请求失效保护；初始空白不自动联网，隐藏不重置页面，无 Pion guest preload；显式链接请求等待 guest ready，只消费最新请求，新点击同 URL 可再导航，不在重渲染/重开时重放。
+- `browser/BrowserNavigationContext.ts`：仅宿主 renderer 的链接导航 Context；普通 Markdown HTTP(S) 链接阻止默认开窗，经 App 打开同一 BrowserPanel，非法链接/无 Provider 不退回外部窗口，只读子会话不可导航，不新增 IPC 或 guest API。
 - `common/`：通用对话框、空状态和扩展 UI；`AnimatedDisclosure.tsx` 按需挂载详情，提供可反转的短收起过渡，结束后释放 DOM，兼容减少动态效果。
 
 ## 样式与渐入
@@ -187,7 +188,7 @@
   - `HistoryNavigator.test.tsx`：跳转条交互，实时索引增加时保留手动浏览的范围；无匹配活动 ID 不回退最后项、重复文本的明确跳转保持独立。
   - `loadingScroll.test.tsx`：详情反复展开/动画折叠后回收高度且钳制不恢复跟随、保留无关加载占位、初次加载可滚入空白、部分渲染不缩短滚动范围、首个 scroll 前手势生效、会话切换/空加载的程序化 scroll 不锁住占位、分页保留消息屏幕位置及加载中的向上滚动、占位不遮蔽分页位移、补偿不连锁分页、跳转短页前释放旧空白范围且滚至末尾不回拉，以及用户取消待执行跳转。
   - `liveHistoryIndex.test.tsx`：忙碌时按落盘/完成事件更新索引、在途事件补刷新、过滤 token 增量、读取失败保留与会话隔离。
-  - `Composer.test.tsx`：输入框、@ 参考、回车发送与斜杠命令；`ChatMessage.test.tsx` 覆盖模型/API 友好提示、实时无障碍播报、历史静默及折叠原始诊断，以及运行中用户行的独立显示定位属性/迟到真实 ID，不合成撤销身份；`SubagentsToggle.test.tsx` 覆盖胶囊形样式契约、子代理开启/关闭文字、悬浮不改变状态、在途去重与跨会话错误隔离；`SubagentSettings.test.tsx` 覆盖配置加载、校验、保存去重、失败保留草稿和恢复默认。
+  - `Composer.test.tsx`：输入框、@ 参考、回车发送与斜杠命令；`ChatMessage.test.tsx` 覆盖模型/API 友好提示、实时无障碍播报、历史静默及折叠原始诊断，以及运行中用户行的独立显示定位属性/迟到真实 ID，不合成撤销身份；`SubagentsToggle.test.tsx` 覆盖胶囊形样式契约、子代理开启/关闭文字、悬浮不改变状态、在途去重与跨会话错误隔离；`SubagentSettings.test.tsx` 覆盖配置加载、模型优先设置/隐藏候选保留/精确 ID、跨 owner 迟到保存/读取隔离、校验、保存去重、失败保留草稿和恢复默认；`tests/unit/subagent-settings.test.ts` 另覆盖旧配置兼容、模型边界/额外字段拒绝及嵌套对象不别名落盘。
   - `SortableSidebarGroup.test.tsx`：项目/分支排序持久化及隐藏项、新增项的顺序处理。
   - `SessionList.test.tsx`：会话行状态与未读标记。
   - `ReviewPanel.test.tsx`：文件树工作区增删行数、状态码保留、暂存分组统计口径、零值/缺失与快照更新、嵌套折叠及点击选中；无关快照更新保留折叠与提交草稿，外部选中只展开当前分组父目录，冲突分组临时为空不串状态；无实时 Git 差异时保留工具记录回退。
@@ -200,7 +201,8 @@
   - `WorkbenchDialogs.test.tsx`：首次按需 lazy 加载、关闭/重开及兄弟弹窗切换时的组件身份、草稿与独立挂起隔离，受控确认、操作页/修复回调透传，以及真实设置弹窗原有打开重置和在途操作保留；下游 mocks 在用例内注册并清理。
   - `windowEffects.test.tsx`：毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条、权限请求避让输入框与实底回退的源码契约（不替代 GPU 真机验证）。
   - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1/四面板 v2 迁移及浏览器隐藏时旧几何保留、五面板移动/持久化、拖动预览与菜单操作时不重挂载内容。
-  - `BrowserPanel.test.tsx`：DOM-only webview methods/events 模拟，显式导航、前进后退/刷新停止、隐藏保留实例、IME/草稿、危险 URL/安全失败及旧请求失效；不启动真实 Electron guest。
+  - `MarkdownLinks.test.tsx`：普通网页链接左键/键盘/中键的内置导航、默认开窗阻止、无 Provider/非法 URL/只读失败关闭；`SubagentConversation.test.tsx` 补真实 App Context 与 lazy BrowserPanel 连接及同 guest 隐藏/再导航契约。
+  - `BrowserPanel.test.tsx`：链接请求等待 ready/最新胜出/消费一次/同 URL 新请求与失败不重试；DOM-only webview methods/events 模拟，显式导航、前进后退/刷新停止、隐藏保留实例、IME/草稿、危险 URL/安全失败及旧请求失效；不启动真实 Electron guest。
 - `src/renderer/src/agent/branchListRevision.ts`：按 preload API/cwd 隔离的有界查询 token，bootstrap 与分支变更共享门，防迟到列表复活已删项。
 - `tests/unit/branch-delete.test.ts`、`agent-bridge-branch-delete.test.ts`：模拟 Git/文件身份及 SDK 退出，覆盖主工作树/登记/clean/merged、无 force、preflight 失败零停止、目录别名、互斥/owner、真实退出与未知隔离、部分成功；不实际删除用户仓库。
 - `tests/renderer/branchDeleteActions.test.tsx`：删除投影/刷新次序、错误及部分成功、保留历史、bootstrap/变更竞态与跨 API/cwd token 隔离。
@@ -219,7 +221,7 @@
 - `tests/unit/window-effects.test.ts`、`window-effects-settings.test.ts`：模拟原生 API 的平台选择、Linux 重启边界、窗口归属、高对比度/失败回退及偏好持久化；不替代平台真机验证。
 - `tests/unit/subagent-session-observer.test.ts`、`subagent-session-store.test.ts`、`subagent-session-bridge.test.ts`：有界文字/空 final、私有配额 ACK 及拒绝零启动、真实 start receipt/owner、路径回填/双 revision、容量/退役、真实退出与单调半小时清理；不调用真实模型。
 - `tests/renderer/SubagentConversation.test.tsx`、`subagentTimeline.test.tsx`、`subagentSessions.test.tsx`：普通会话界面只读复用、真实消息身份合并/稳定 key/空 final、父 DOM/草稿保留、列表切回而不重启父后端，安全内容/过期/重复读取/迟到隔离、可见性、API 更换与真实 pending 持槽；侧栏父子选择与跨 backend 同 ID 由 `SessionList.test.tsx` 覆盖。
-- `tests/unit/subagents.test.ts`、`subagent-runner.test.ts`、`subagents-bridge.test.ts`、`subagent-permissions.test.ts`：默认开启、显式关闭门控、主动委派提示与原始约束保留、动态批次宽度/单子代理上限及四子代理同时启动、工具不可用/配置失败/读取期间关闭的提示隔离、每批配置快照与下一批变更、配置读取期间的批次锁、有界并发/超时/轮数/摘要长度、继承工具与权限拒绝、串行写入、会话归属及迟到请求、子模型计费去重与权限交互取消。
+- `tests/unit/subagents.test.ts`、`subagent-runner.test.ts`、`subagents-bridge.test.ts`、`subagent-permissions.test.ts`：默认开启、显式关闭门控、主动委派提示与原始约束保留、动态批次宽度/单子代理上限及四子代理同时启动、工具不可用/配置失败/读取期间关闭的提示隔离、默认/逐任务/显式继承模型优先级、同 ID 不同提供商、未知/不可用单子失败、非法值/冻结/现有可用模型 ID 提示、不改父模型；每批配置快照与下一批变更、配置读取期间的批次锁、有界并发/超时/轮数/摘要长度、继承工具与权限拒绝、串行写入、会话归属及迟到请求、子模型计费去重与权限交互取消。
 - `tests/unit/theme-settings.test.ts`：主题跨实例恢复、参数校验、损坏文件保护、窗口归属及安装脚本同步范围契约。
 - `tests/unit/subagent-settings.test.ts`：所属窗口/主帧校验、参数硬边界、全局设置原子持久化、现有运行时读取更新配置和损坏配置拒绝。
 - `tests/unit/runtime-lifecycle.test.ts`：RPC 启动失败及正常返回等待 owner dispose，保留主诊断并区分清理失败；创建失败不清理不存在的 runtime，不连接真实 MCP。

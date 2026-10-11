@@ -1,9 +1,11 @@
-import { memo, useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useContext, useLayoutEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import { Check, Copy } from 'lucide-react'
+import { BROWSER_BLANK_URL, isAllowedBrowserUrl } from '../../../../shared/browser'
+import { BrowserNavigationContext } from '../browser/BrowserNavigationContext'
 import {
   assignLineRevealDelay,
   SCREEN_TEXT_REVEAL_CHARACTER_CLASS,
@@ -11,8 +13,8 @@ import {
   SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS,
   SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS,
   SCREEN_TEXT_REVEAL_LIVE_CLASS,
-  SCREEN_TEXT_REVEAL_MAX_DELAY_MS,
-  SCREEN_TEXT_REVEAL_STAGGER_MS
+  SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS,
+  SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS
 } from '../../utils/screenTextReveal'
 import type { TextRevealMode } from '../../utils/screenTextReveal'
 
@@ -179,7 +181,7 @@ function wrapLiveLineChars(
               ...(isNew ? [SCREEN_TEXT_REVEAL_LIVE_CLASS] : [])
             ],
             ...(isNew
-              ? { style: `--screen-text-reveal-delay:${Math.min((absoluteIndex - startFrom) * SCREEN_TEXT_REVEAL_STAGGER_MS, SCREEN_TEXT_REVEAL_MAX_DELAY_MS)}ms` }
+              ? { style: `--screen-text-reveal-delay:${Math.min((absoluteIndex - startFrom) * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)}ms` }
               : {})
           },
           children: [{ type: 'text', value: character }]
@@ -283,13 +285,33 @@ function hasLineRevealClass(className: unknown): boolean {
   return Array.isArray(className) && className.includes(SCREEN_TEXT_REVEAL_LINE_CLASS)
 }
 
-const MARKDOWN_COMPONENTS: Components = {
-  pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
-  a: ({ href, children }) => (
-    <a href={href} target="_blank" rel="noreferrer noopener">
+function BrowserMarkdownLink({ href, children }: {
+  href?: string
+  children?: React.ReactNode
+}): React.ReactElement {
+  const navigate = useContext(BrowserNavigationContext)
+  if (!isAllowedBrowserUrl(href) || href === BROWSER_BLANK_URL) return <span>{children}</span>
+
+  return (
+    <a
+      href={href}
+      onClick={(event) => {
+        event.preventDefault()
+        if (event.button === 0) navigate?.(href)
+      }}
+      onAuxClick={(event) => {
+        event.preventDefault()
+        if (event.button === 1) navigate?.(href)
+      }}
+    >
       {children}
     </a>
-  ),
+  )
+}
+
+const MARKDOWN_COMPONENTS: Components = {
+  pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+  a: BrowserMarkdownLink,
   // Waterfall line wrappers carry a marker class; attach their one fixed
   // delay at commit time via a ref callback. List items are marked directly
   // (so their bullet fades too); every other element renders untouched.

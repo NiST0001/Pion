@@ -311,6 +311,7 @@ export function SettingsModal({
 
             {page === 'session' && (
               <SessionPage
+                models={models}
                 session={session}
                 name={name}
                 nameSaved={nameSaved}

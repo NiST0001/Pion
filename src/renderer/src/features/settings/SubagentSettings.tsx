@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ModelOption } from '../../../../shared/types'
 import { DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, validateSubagentSettings, type SubagentSettings as Settings } from '../../../../shared/subagents'
 
-const FIELDS: { key: keyof Settings; label: string; description: string }[] = [
+const FIELDS: { key: keyof typeof SUBAGENT_LIMITS; label: string; description: string }[] = [
   { key: 'maxParallel', label: '每批最大子代理数', description: '同批并行执行的数量，1–8 个；数量越多，额外模型用量可能越高。' },
   { key: 'timeoutMinutes', label: '每批超时（分钟）', description: '1–30 分钟；超时会中止该批子任务，不代表任务已完成。' },
   { key: 'maxTurns', label: '每个子代理最多轮数', description: '1–64 轮；到达上限后停止并报告未完成事项。' },
   { key: 'maxResultChars', label: '每个结果最多字符', description: '1000–32000 字符；超出时明确标记截断，不影响用量统计。' }
 ]
 
-export function SubagentSettings() {
+export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
   const api = typeof window === 'undefined' ? undefined : window.pion
   const available = typeof api?.getSubagentSettings === 'function' && typeof api?.setSubagentSettings === 'function'
   const [settings, setSettings] = useState<Settings>({ ...DEFAULT_SUBAGENT_SETTINGS })
@@ -18,20 +19,30 @@ export function SubagentSettings() {
   const [message, setMessage] = useState('')
   const mounted = useRef(true)
   const inFlight = useRef(false)
+  const owner = useRef(api)
+  owner.current = api
+  const generation = useRef(0)
   useEffect(() => {
-    let cancelled = false
+    const revision = ++generation.current
+    const capturedApi = api
+    const current = () => mounted.current && owner.current === capturedApi && generation.current === revision
     mounted.current = true
+    setLoading(true)
+    setSaving(inFlight.current)
+    setSettings({ ...DEFAULT_SUBAGENT_SETTINGS })
+    setError('')
+    setMessage('')
     if (!available) {
       setError('子代理设置不可用，请使用更新后的桌面主进程。')
       setLoading(false)
     } else {
       void api!.getSubagentSettings().then((value) => {
-        if (!cancelled) setSettings(validateSubagentSettings(value))
+        if (current()) setSettings(validateSubagentSettings(value))
       }).catch((reason: unknown) => {
-        if (!cancelled) setError(`读取失败，可修改后保存以修复：${String(reason)}`)
-      }).finally(() => { if (!cancelled) setLoading(false) })
+        if (current()) setError(`读取失败，可修改后保存以修复：${String(reason)}`)
+      }).finally(() => { if (current()) setLoading(false) })
     }
-    return () => { cancelled = true; mounted.current = false }
+    return () => { ++generation.current; mounted.current = false }
   }, [api, available])
 
   const save = async () => {
@@ -39,23 +50,57 @@ export function SubagentSettings() {
     let next: Settings
     try { next = validateSubagentSettings(settings) }
     catch (reason) { setError(String(reason)); return }
+    const capturedApi = api!
+    const revision = generation.current
+    const current = () => mounted.current && owner.current === capturedApi && generation.current === revision
     inFlight.current = true
     setSaving(true)
     setError('')
     setMessage('')
     try {
-      const saved = await api!.setSubagentSettings(next)
-      if (mounted.current) {
+      const saved = await capturedApi.setSubagentSettings(next)
+      if (current()) {
         setSettings(validateSubagentSettings(saved))
         setMessage('已保存，下一批子代理任务生效。')
       }
-    } catch (reason) { if (mounted.current) setError(`保存失败：${String(reason)}`) }
+    } catch (reason) { if (current()) setError(`保存失败：${String(reason)}`) }
     finally { inFlight.current = false; if (mounted.current) setSaving(false) }
   }
+
+  const selection = settings.defaultModel ?? null
+  const modelValue = selection ? JSON.stringify([selection.provider, selection.id]) : 'inherit'
+  const groups = new Map<string, ModelOption[]>()
+  for (const model of models) {
+    const group = groups.get(model.provider) ?? []
+    if (!group.some((entry) => entry.id === model.id)) group.push(model)
+    groups.set(model.provider, group)
+  }
+  const missingSelection = selection && !models.some((model) => model.provider === selection.provider && model.id === selection.id)
 
   return <form className="settings-section subagent-settings" onSubmit={(event) => { event.preventDefault(); void save() }}>
     <div className="settings-section-title">子代理</div>
     <p className="setting-desc">全局参数，保存后从下一批任务开始使用，不中断当前批次。子代理默认开启，可在输入框按会话关闭；重建后端会恢复默认开启。权限与检查点规则不变。</p>
+    <label className="setting-row">
+      <span><span className="setting-label">默认子代理模型</span><span className="setting-desc subagent-setting-description">每任务可由主会话指定，优先于默认；不同模型可能产生不同费用。</span></span>
+      <select className="setting-input" aria-label="默认子代理模型" value={modelValue}
+        disabled={loading || saving || !available}
+        onChange={(event) => {
+          const value = event.target.value
+          let defaultModel: Settings['defaultModel'] = null
+          if (value !== 'inherit') {
+            const [provider, id] = JSON.parse(value) as [string, string]
+            defaultModel = { provider, id }
+          }
+          setSettings((current) => ({ ...current, defaultModel }))
+          setMessage('')
+        }}>
+        <option value="inherit">继承主会话模型</option>
+        {selection && missingSelection && <option value={modelValue}>{selection.provider}/{selection.id}（当前列表未显示）</option>}
+        {[...groups].map(([provider, group]) => <optgroup key={provider} label={provider}>
+          {group.map((model) => <option key={model.id} value={JSON.stringify([model.provider, model.id])}>{model.name || model.id}</option>)}
+        </optgroup>)}
+      </select>
+    </label>
     {FIELDS.map(({ key, label, description }) => <label className="setting-row" key={key}>
       <span><span className="setting-label">{label}</span><span className="setting-desc subagent-setting-description">{description}</span></span>
       <input className="setting-input" type="number" aria-label={label} required step={1}

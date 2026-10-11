@@ -6,8 +6,8 @@ import { BrowserPanel } from '../../src/renderer/src/features/browser/BrowserPan
 import { BROWSER_BLANK_URL, BROWSER_PARTITION } from '../../src/shared/browser'
 
 // A DOM-only custom element mock: no Electron guest, network or GUI is started.
-function setup() {
-  const result = render(<BrowserPanel visible />)
+function setup(navigation?: { id: number; url: string }) {
+  const result = render(<BrowserPanel visible navigation={navigation} />)
   const view = result.container.querySelector('webview')!
   const api = {
     loadURL: vi.fn(async (_url: string): Promise<void> => undefined),
@@ -59,6 +59,161 @@ describe('BrowserPanel', () => {
     expect(container.querySelector('webview')).toBe(view)
     expect(view).toHaveAttribute('src', BROWSER_BLANK_URL)
     expect(api.loadURL).toHaveBeenCalledTimes(1)
+  })
+
+  it('waits for dom-ready and consumes only the latest clicked link once', () => {
+    const { api, emit, rerender, input } = setup({ id: 1, url: 'https://first.example/' })
+    rerender(<BrowserPanel visible navigation={{ id: 2, url: 'https://latest.example/' }} />)
+    expect(api.loadURL).not.toHaveBeenCalled()
+    emit('dom-ready')
+    expect(api.loadURL).toHaveBeenCalledExactlyOnceWith('https://latest.example/')
+    expect(input).toHaveValue('https://latest.example/')
+    emit('dom-ready')
+    expect(api.loadURL).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves the guest and never replays the same request on rerender/hide/reopen', () => {
+    const navigation = { id: 1, url: 'https://example.com/raw%2fpath' }
+    const { api, emit, rerender, view, container, input } = setup(navigation)
+    emit('dom-ready')
+    fireEvent.focus(input)
+    fireEvent.change(input, { target: { value: 'draft' } })
+    rerender(<BrowserPanel visible={false} navigation={{ ...navigation }} />)
+    rerender(<BrowserPanel visible navigation={{ ...navigation }} />)
+    rerender(<BrowserPanel visible navigation={{ id: 1, url: 'https://ignored.example/' }} />)
+    rerender(<BrowserPanel visible />)
+    rerender(<BrowserPanel visible navigation={navigation} />)
+    expect(api.loadURL).toHaveBeenCalledExactlyOnceWith(navigation.url)
+    expect(input).toHaveValue('draft')
+    expect(container.querySelector('webview')).toBe(view)
+    expect(view).toHaveAttribute('src', BROWSER_BLANK_URL)
+    // A distinct click on the identical URL really navigates again.
+    rerender(<BrowserPanel visible navigation={{ ...navigation, id: 2 }} />)
+    expect(api.loadURL).toHaveBeenCalledTimes(2)
+    expect(api.loadURL).toHaveBeenLastCalledWith(navigation.url)
+    expect(input).toHaveValue(navigation.url)
+    expect(container.querySelector('webview')).toBe(view)
+  })
+
+  it.each([
+    'about:blank', 'example.com', 'localhost:3000', ' https://example.com/',
+    'https://example.com/has space', 'https:\\example.com',
+    'javascript:alert(1)', 'file:///private', 'data:text/html,private',
+    'https://user:secret@example.com/', 'https://@example.com/'
+  ])('rejects raw clicked URLs without repairing or external fallback: %s', (url) => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const { api, emit, input } = setup({ id: 1, url })
+    emit('dom-ready')
+    expect(api.loadURL).not.toHaveBeenCalled()
+    expect(open).not.toHaveBeenCalled()
+    expect(input).toHaveValue('')
+    expect(screen.getByRole('alert')).toHaveTextContent('浏览器操作失败')
+    expect(screen.getByRole('alert')).not.toHaveTextContent(url)
+  })
+
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('rejects invalid click ID %s', (id) => {
+    const { api, emit } = setup({ id, url: 'https://example.com/' })
+    emit('dom-ready')
+    expect(api.loadURL).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toHaveTextContent('浏览器操作失败')
+  })
+
+  it('revokes a pending click on empty/invalid requests or manual submission before readiness', () => {
+    const { api, emit, rerender } = setup({ id: 1, url: 'https://first.example/' })
+    rerender(<BrowserPanel visible />)
+    emit('dom-ready')
+    expect(api.loadURL).not.toHaveBeenCalled()
+    // Even a synthetic submit before readiness cannot leave a stale click queued.
+    cleanup()
+    const pending = setup({ id: 2, url: 'https://pending.example/' })
+    pending.submit('https://manual.example/')
+    pending.emit('dom-ready')
+    expect(pending.api.loadURL).not.toHaveBeenCalled()
+    pending.rerender(<BrowserPanel visible navigation={{ id: 3, url: 'https://accepted.example/' }} />)
+    pending.rerender(<BrowserPanel visible navigation={{ id: 4, url: 'about:blank' }} />)
+    expect(pending.api.loadURL).toHaveBeenCalledExactlyOnceWith('https://accepted.example/')
+    // Address-bar convenience (including blank) is unchanged.
+    pending.submit('about:blank')
+    expect(pending.api.loadURL).toHaveBeenLastCalledWith(BROWSER_BLANK_URL)
+  })
+
+  it('fails closed on malformed replacement even when its ID is reused', () => {
+    const { api, emit, rerender } = setup({ id: 1, url: 'https://pending.example/' })
+    rerender(<BrowserPanel visible navigation={{ id: 1, url: 'about:blank' }} />)
+    emit('dom-ready')
+    expect(api.loadURL).not.toHaveBeenCalled()
+    expect(screen.getByRole('alert')).toHaveTextContent('浏览器操作失败')
+  })
+
+  it('drops invalid replacements and pending work on unmount before dom-ready', () => {
+    const { api, emit, rerender } = setup({ id: 1, url: 'https://pending.example/' })
+    rerender(<BrowserPanel visible navigation={{ id: 2, url: 'private.invalid' }} />)
+    emit('dom-ready')
+    expect(api.loadURL).not.toHaveBeenCalled()
+    cleanup()
+    const pending = setup({ id: 3, url: 'https://pending.example/' })
+    pending.unmount()
+    pending.emit('dom-ready')
+    expect(pending.api.loadURL).not.toHaveBeenCalled()
+  })
+
+  it('does not retry a synchronously failed explicit click', () => {
+    const { api, emit, rerender } = setup()
+    emit('dom-ready')
+    api.loadURL.mockImplementation(() => { throw new Error('private URL') })
+    rerender(<BrowserPanel visible navigation={{ id: 1, url: 'https://example.com/' }} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('浏览器操作失败')
+    rerender(<BrowserPanel visible navigation={{ id: 1, url: 'https://example.com/' }} />)
+    emit('dom-ready')
+    expect(api.loadURL).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['empty', 'invalid', 'back', 'forward', 'stop'] as const)('invalidates clicked promise rejection after %s', async (action) => {
+    const { api, emit, rerender } = setup()
+    api.canGoBack.mockReturnValue(true)
+    api.canGoForward.mockReturnValue(true)
+    emit('dom-ready')
+    let reject!: (cause: Error) => void
+    api.loadURL.mockImplementation(() => new Promise<void>((_resolve, rejected) => { reject = rejected }))
+    rerender(<BrowserPanel visible navigation={{ id: 1, url: 'https://old.example/' }} />)
+    if (action === 'empty') rerender(<BrowserPanel visible />)
+    else if (action === 'invalid') rerender(<BrowserPanel visible navigation={{ id: 2, url: 'javascript:private' }} />)
+    else {
+      if (action === 'stop') emit('did-start-loading')
+      fireEvent.click(screen.getByRole('button', { name: action === 'back' ? '后退' : action === 'forward' ? '前进' : '停止' }))
+    }
+    await act(async () => { reject(new Error('private old failure')) })
+    if (action === 'invalid') expect(screen.getByRole('alert')).toHaveTextContent('浏览器操作失败')
+    else expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('consumes rejected clicks once and protects new clicks/manual actions from late rejection', async () => {
+    const { api, emit, rerender, submit, unmount } = setup()
+    emit('dom-ready')
+    const rejects: Array<(cause: Error) => void> = []
+    api.loadURL.mockImplementation(() => new Promise<void>((_resolve, reject) => { rejects.push(reject) }))
+    rerender(<BrowserPanel visible navigation={{ id: 1, url: 'https://same.example/' }} />)
+    rerender(<BrowserPanel visible navigation={{ id: 2, url: 'https://same.example/' }} />)
+    await act(async () => { rejects[0](new Error('private old failure')) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    await act(async () => { rejects[1](new Error('private current failure')) })
+    expect(screen.getByRole('alert')).toHaveTextContent('页面无法加载')
+    expect(screen.getByRole('alert')).not.toHaveTextContent('private')
+    rerender(<BrowserPanel visible={false} navigation={{ id: 2, url: 'https://same.example/' }} />)
+    rerender(<BrowserPanel visible navigation={{ id: 2, url: 'https://same.example/' }} />)
+    emit('dom-ready')
+    expect(api.loadURL).toHaveBeenCalledTimes(2)
+    rerender(<BrowserPanel visible navigation={{ id: 3, url: 'https://clicked.example/' }} />)
+    submit('https://manual.example/')
+    await act(async () => { rejects[2](new Error('old clicked failure')) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }))
+    await act(async () => { rejects[3](new Error('old manual failure')) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    rerender(<BrowserPanel visible navigation={{ id: 4, url: 'https://last.example/' }} />)
+    unmount()
+    await act(async () => { rejects[4](new Error('unmounted failure')) })
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('tracks history, loading and page title and exposes navigation controls', () => {

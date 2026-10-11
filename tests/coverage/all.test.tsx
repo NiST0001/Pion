@@ -7,6 +7,7 @@
 import '../unit/tool-permission-policy.test'
 import '../unit/browser-security.test'
 import '../renderer/BrowserPanel.test'
+import '../renderer/MarkdownLinks.test'
 import '../renderer/branchDeleteActions.test'
 import '../unit/subagent-session-observer.test'
 import '../unit/subagent-session-store.test'

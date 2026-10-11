@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { assertSubagentSettingsOwner, SubagentSettingsStore } from '../../src/main/subagent-settings'
-import { DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, validateSubagentSettings } from '../../src/shared/subagents'
+import { DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, validateSubagentModelSelection, validateSubagentSettings } from '../../src/shared/subagents'
 import { readRuntimeSubagentSettings } from '../../src/main/agent/subagents'
 
 vi.mock('electron', () => ({ app: { getPath: () => '/unused' } }))
@@ -24,6 +24,44 @@ it.each(Object.keys(SUBAGENT_LIMITS) as (keyof typeof SUBAGENT_LIMITS)[])('valid
     expect(() => validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, [key]: value })).toThrow()
   }
   expect(validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, [key]: SUBAGENT_LIMITS[key].max })[key]).toBe(SUBAGENT_LIMITS[key].max)
+})
+
+it('normalizes legacy settings to inherited model and clones exact model identities', () => {
+  const { defaultModel: _defaultModel, ...legacy } = DEFAULT_SUBAGENT_SETTINGS
+  expect(validateSubagentSettings(legacy)).toEqual({ ...legacy, defaultModel: null })
+  const model = { provider: 'provider-a', id: 'model-a' }
+  const normalized = validateSubagentSettings({ ...legacy, defaultModel: model })
+  expect(normalized.defaultModel).toEqual(model)
+  expect(normalized.defaultModel).not.toBe(model)
+  model.id = 'changed'
+  expect(normalized.defaultModel!.id).toBe('model-a')
+  expect(validateSubagentModelSelection(null)).toBeNull()
+  expect(validateSubagentModelSelection({ provider: 'p'.repeat(128), id: 'i'.repeat(256) })).toEqual({ provider: 'p'.repeat(128), id: 'i'.repeat(256) })
+})
+
+it.each([undefined, '', [], { provider: 'p' }, { provider: 'p', id: '' },
+  { provider: 'p'.repeat(129), id: 'm' }, { provider: 'p', id: 'i'.repeat(257) },
+  { provider: 'p ', id: 'm' }, { provider: 'p', id: 'm\n' },
+  { provider: 'p', id: 'm', apiKey: 'do-not-save' }, { provider: 'p', id: 'm', name: 'display-only' }
+])('rejects an invalid explicit model selection: %j', (model) => {
+  expect(() => validateSubagentModelSelection(model)).toThrow()
+})
+
+it('saves the captured nested model without aliasing queued input or returned values', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pion-subagent-model-settings-'))
+  roots.push(root)
+  const path = join(root, 'settings.json')
+  const store = new SubagentSettingsStore(() => path)
+  vi.stubEnv('PION_SUBAGENT_SETTINGS_FILE', path)
+  const input = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'provider-a', id: 'model-a' } }
+  const savedPromise = store.set(input)
+  input.defaultModel.id = 'changed-before-write'
+  const saved = await savedPromise
+  expect(saved.defaultModel).toEqual({ provider: 'provider-a', id: 'model-a' })
+  saved.defaultModel!.id = 'changed-after-return'
+  expect((await store.get()).defaultModel).toEqual({ provider: 'provider-a', id: 'model-a' })
+  expect((await readRuntimeSubagentSettings()).defaultModel).toEqual({ provider: 'provider-a', id: 'model-a' })
+  expect(JSON.parse(await readFile(path, 'utf8')).defaultModel).toEqual({ provider: 'provider-a', id: 'model-a' })
 })
 
 it('persists global defaults atomically and existing runtimes read the next saved configuration', async () => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { initialState, type AgentState } from '../../src/renderer/src/agent/types'
 import type { SessionMeta } from '../../src/shared/types'
@@ -222,6 +222,42 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     expect(f.apiMocks.getSubagentSession).toHaveBeenCalledWith('child', 'backend')
     expectNoParentBackendAction(f.actions)
     expect(f.fallback.size).toBe(0)
+  })
+
+  it('routes ordinary chat links through the existing internal browser without touching the parent backend', async () => {
+    const f = setup()
+    const first = 'https://github.com/NiST0001/Pion/actions'
+    const second = 'https://github.com/NiST0001/Pion/releases/tag/v0.1.71'
+    f.state.timeline = [{ kind: 'assistant', id: 150, text: `[查看构建流程](${first})\n\n[查看发布页面](${second})`, thinking: '', streaming: false }]
+    const view = render(<App />)
+    await paint()
+    expect(view.container.querySelector('webview')).toBeNull()
+    const openWindow = vi.spyOn(window, 'open').mockImplementation(() => null)
+    fireEvent.click(screen.getByRole('link', { name: '查看构建流程' }))
+    await paint()
+    await waitFor(() => expect(view.container.querySelector('webview')).not.toBeNull())
+    const guest = view.container.querySelector('webview')!
+    const loadURL = vi.fn(async () => {})
+    Object.assign(guest, { loadURL, getURL: () => 'about:blank', getTitle: () => '', canGoBack: () => false, canGoForward: () => false })
+    expect(screen.getByRole('button', { name: '浏览器' })).toHaveAttribute('aria-pressed', 'true')
+    expect(loadURL).not.toHaveBeenCalled()
+    fireEvent(guest, new Event('dom-ready'))
+    await paint()
+    expect(loadURL).toHaveBeenCalledExactlyOnceWith(first)
+    fireEvent.click(screen.getByRole('button', { name: '浏览器' }))
+    await paint()
+    expect(view.container.querySelector('webview')).toBe(guest)
+    fireEvent.click(screen.getByRole('link', { name: '查看发布页面' }))
+    await paint()
+    expect(view.container.querySelector('webview')).toBe(guest)
+    expect(loadURL).toHaveBeenCalledTimes(2)
+    expect(loadURL).toHaveBeenLastCalledWith(second)
+    view.rerender(<App />)
+    await paint()
+    expect(loadURL).toHaveBeenCalledTimes(2)
+    expect(openWindow).not.toHaveBeenCalled()
+    expectNoParentBackendAction(f.actions)
+    expect(f.actions.abort).not.toHaveBeenCalled()
   })
 
   it('preserves ordinary message/tool/thinking DOM across delayed body refresh and stops streaming on a terminal summary', async () => {

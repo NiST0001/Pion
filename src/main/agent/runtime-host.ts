@@ -53,7 +53,9 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
       createContext: () => parent?.extensionRunner?.createCommandContext()
     })
     previousSubagentPublisher = subagentPublisher
-    const subagents = createSubagentControl(createSubagentRunner(() => parent, () => models, cwd, agentDir), undefined, subagentPublisher)
+    const subagents = createSubagentControl(createSubagentRunner(() => parent, () => models, cwd, agentDir), undefined, subagentPublisher,
+      // Read only this existing runtime's snapshot. No refresh, login or auth lookup.
+      () => models.getAvailableSnapshot().slice(0, 4096).map(({ provider, id }) => ({ provider, id })))
     const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: options.approved })
     // Capture raw modifiers before Pion supplies extras; do not read credentials.
     const loadout = createPionNativeLoadoutBoundary(settingsManager.getSettings().defaultTools)

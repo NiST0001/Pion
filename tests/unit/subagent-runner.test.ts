@@ -1,21 +1,21 @@
 import { beforeEach, expect, it, vi } from 'vitest'
-import { SettingsManager, type AgentSession, type AgentSessionEvent, type ModelRuntime, type SessionEntry } from '@earendil-works/pi-coding-agent'
-import { createSubagentRunner } from '../../src/main/agent/subagents'
+import { SettingsManager, type AgentSession, type AgentSessionEvent, type ModelRuntime, type SessionEntry, type ExtensionToolContext } from '@earendil-works/pi-coding-agent'
+import { createSubagentControl, createSubagentRunner } from '../../src/main/agent/subagents'
 import { DEFAULT_SUBAGENT_SETTINGS } from '../../src/shared/subagents'
 import type { SubagentSessionObserver } from '../../src/main/agent/subagent-session-observer'
 
-const mocks = vi.hoisted(() => ({ create: vi.fn(), loader: vi.fn() }))
+const mocks = vi.hoisted(() => ({ create: vi.fn(), loader: vi.fn(), reload: vi.fn() }))
 vi.mock('@earendil-works/pi-coding-agent', async (original) => ({
   ...await original<typeof import('@earendil-works/pi-coding-agent')>(),
   createAgentSession: mocks.create,
   DefaultResourceLoader: class {
     constructor(options: unknown) { mocks.loader(options) }
-    async reload() {}
+    async reload() { await mocks.reload() }
   }
 }))
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => { vi.clearAllMocks(); mocks.reload.mockReset() })
 
-function setup(block = false, cacheWarming: 'off' | 'streaming' | 'idle' = 'off') {
+function setup(block = false, cacheWarming: 'off' | 'streaming' | 'idle' = 'off', models = {} as ModelRuntime) {
   const execute = vi.fn(async (_id: string, ..._args: unknown[]) => ({ content: [{ type: 'text', text: 'ok' }], details: {} }))
   const before = vi.fn(async () => block ? { block: true, reason: 'denied' } : undefined)
   const after = vi.fn(async () => undefined)
@@ -45,7 +45,7 @@ function setup(block = false, cacheWarming: 'off' | 'streaming' | 'idle' = 'off'
     }
     return { session }
   })
-  return { run: createSubagentRunner(() => parent, () => ({} as ModelRuntime), '/project', '/agent'), execute, before, after, dispose, active, parent }
+  return { run: createSubagentRunner(() => parent, () => models, '/project', '/agent'), execute, before, after, dispose, active, parent }
 }
 
 it('uses the parent model, only inherited built-ins and live permission hooks', async () => {
@@ -268,4 +268,105 @@ it('namespaces child tool IDs and serializes sibling writes', async () => {
   await Promise.all([a, b])
   expect(h.execute).toHaveBeenCalledTimes(2)
   expect(h.execute.mock.calls[0][0]).not.toBe(h.execute.mock.calls[1][0])
+})
+
+function modelRuntimeFixture() {
+  // Same ID across providers is intentional: neither API type nor display name
+  // may collapse the exact provider+ID identity.
+  const models = [{ provider: 'provider-a', id: 'same-id', api: 'shared-api', name: 'Same display' },
+    { provider: 'provider-b', id: 'same-id', api: 'shared-api', name: 'Same display' }]
+  const getModel = vi.fn((provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id))
+  const getAvailableSnapshot = vi.fn(() => models)
+  const getAuth = vi.fn(() => { throw new Error('must not look up credentials') })
+  const runtime = { getModel, getAvailableSnapshot, getAuth } as unknown as ModelRuntime
+  return { models, runtime, getModel, getAvailableSnapshot, getAuth }
+}
+
+it.each(['default', 'override', 'parent-null', 'legacy'] as const)('resolves %s model without changing parent model or runtime', async (mode) => {
+  const fixture = modelRuntimeFixture()
+  const h = setup(false, 'off', fixture.runtime)
+  const original = h.parent.model
+  const settings = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'provider-a', id: 'same-id' } }
+  const task = { name: 'worker', task: 'inspect', ...(mode === 'override' ? { model: { provider: 'provider-b', id: 'same-id' } }
+    : mode === 'parent-null' ? { model: null } : {}) }
+  await h.run(task, new AbortController().signal, () => {}, mode === 'legacy' ? DEFAULT_SUBAGENT_SETTINGS : settings)
+  const options = mocks.create.mock.calls[0][0]
+  expect(options.model).toBe(mode === 'default' ? fixture.models[0] : mode === 'override' ? fixture.models[1] : original)
+  expect(options.modelRuntime).toBe(fixture.runtime)
+  expect(options.thinkingLevel).toBe(h.parent.thinkingLevel)
+  expect(h.parent.model).toBe(original)
+  expect(h.parent.messages).toEqual([])
+  if (mode === 'legacy' || mode === 'parent-null') {
+    expect(fixture.getModel).not.toHaveBeenCalled()
+    expect(fixture.getAvailableSnapshot).not.toHaveBeenCalled()
+  } else expect(fixture.getModel).toHaveBeenCalledWith(mode === 'default' ? 'provider-a' : 'provider-b', 'same-id')
+  expect(fixture.getAuth).not.toHaveBeenCalled()
+})
+
+it('captures selected model and its existing runtime before asynchronous loader work', async () => {
+  const fixture = modelRuntimeFixture()
+  const h = setup()
+  let activeRuntime = fixture.runtime
+  const getModels = vi.fn(() => activeRuntime)
+  const run = createSubagentRunner(() => h.parent, getModels, '/project', '/agent')
+  let release!: () => void
+  mocks.reload.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve }))
+  const selection = { provider: 'provider-b', id: 'same-id' }
+  const pending = run({ name: 'worker', task: 'inspect', model: selection }, new AbortController().signal, () => {})
+  selection.provider = 'provider-a'
+  activeRuntime = {} as ModelRuntime
+  Object.assign(h.parent, { model: { provider: 'changed-parent', id: 'later' } })
+  release()
+  await pending
+  expect(getModels).toHaveBeenCalledOnce()
+  expect(mocks.create.mock.calls[0][0].model).toBe(fixture.models[1])
+  expect(mocks.create.mock.calls[0][0].modelRuntime).toBe(fixture.runtime)
+})
+
+it.each(['unknown', 'unavailable', 'missing-snapshot', 'missing-getModel', 'api-confusion', 'display-confusion'] as const)(
+  'fails %s explicit selection before creating/loading a child without fallback', async (reason) => {
+    const fixture = modelRuntimeFixture()
+    if (reason === 'unavailable') fixture.getAvailableSnapshot.mockReturnValue([])
+    if (reason === 'missing-snapshot') Object.assign(fixture.runtime, { getAvailableSnapshot: undefined })
+    if (reason === 'missing-getModel') Object.assign(fixture.runtime, { getModel: undefined })
+    const h = setup(false, 'off', fixture.runtime)
+    const selection = { provider: reason === 'api-confusion' ? 'shared-api' : 'provider-a',
+      id: reason === 'unknown' ? 'unknown' : reason === 'display-confusion' ? 'Same display' : 'same-id' }
+    await expect(h.run({ name: 'worker', task: 'inspect', model: selection }, new AbortController().signal, () => {})).rejects.toThrow(reason === 'display-confusion' ? 'provider/id 无效' : '未启动')
+    expect(mocks.create).not.toHaveBeenCalled()
+    expect(mocks.loader).not.toHaveBeenCalled()
+    expect(fixture.getAuth).not.toHaveBeenCalled()
+    expect(h.parent.model).toEqual({ provider: 'fixture', id: 'fixture' })
+  })
+
+it('accounts actual selected-child usage without charging parent context or altering model', async () => {
+  const fixture = modelRuntimeFixture()
+  const h = setup(false, 'off', fixture.runtime)
+  let notify!: (event: AgentSessionEvent) => void
+  const assistant = { role: 'assistant' as const, content: [], api: 'anthropic-messages' as const,
+    provider: 'provider-b', model: 'same-id', usage: unitUsage(), stopReason: 'stop' as const, timestamp: 1 }
+  mocks.create.mockImplementationOnce(async () => ({ session: {
+    agent: {}, messages: [assistant], abort: async () => {}, dispose: h.dispose,
+    subscribe: (listener: typeof notify) => { notify = listener; return () => {} }, getLastAssistantText: () => 'done',
+    prompt: async () => { notify({ type: 'message_end', message: assistant }) }
+  } }))
+  const result = await h.run({ name: 'worker', task: 'inspect', model: { provider: 'provider-b', id: 'same-id' } }, new AbortController().signal, () => {})
+  expect(result.usage).toEqual(unitUsage())
+  expect(h.parent.messages).toEqual([])
+  expect(h.parent.model).toEqual({ provider: 'fixture', id: 'fixture' })
+})
+
+it('an unknown catalog model fails only its child while a legal sibling still runs', async () => {
+  const fixture = modelRuntimeFixture()
+  const h = setup(false, 'off', fixture.runtime)
+  const control = createSubagentControl(h.run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS }))
+  const result = await control.tool.execute('mixed-models', { tasks: [
+    { name: 'unknown', task: 'inspect', model: { provider: 'provider-a', id: 'missing' } },
+    { name: 'known', task: 'inspect', model: { provider: 'provider-b', id: 'same-id' } }
+  ] }, undefined, undefined, {} as ExtensionToolContext)
+  expect((result.details as { results: { name: string; status: string }[] }).results.map(({ name, status }) => [name, status]))
+    .toEqual([['unknown', 'failed'], ['known', 'completed']])
+  expect(mocks.create).toHaveBeenCalledOnce()
+  expect(mocks.create.mock.calls[0][0].model).toBe(fixture.models[1])
+  expect(h.parent.model).toEqual({ provider: 'fixture', id: 'fixture' })
 })

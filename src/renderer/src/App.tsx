@@ -23,6 +23,8 @@ import { deriveLatestRunChanges } from './agent/timeline'
 import { deriveWorkingStatus } from './agent/workingStatus'
 import type { FileChange } from './agent/types'
 import { DEFAULT_SUBAGENTS_ENABLED } from '../../shared/subagents'
+import { BROWSER_BLANK_URL, isAllowedBrowserUrl } from '../../shared/browser'
+import { BrowserNavigationContext } from './features/browser/BrowserNavigationContext'
 import { hasIncompleteTasks } from '../../shared/task-history'
 import type {
   BranchInfo,
@@ -203,6 +205,15 @@ export function App(): ReactElement {
   const [terminalCwd, setTerminalCwd] = useState<string>()
   const [browserOpen, setBrowserOpen] = useState(false)
   const [browserMounted, setBrowserMounted] = useState(false)
+  const browserNavigationIdRef = useRef(0)
+  const [browserNavigation, setBrowserNavigation] = useState<{ id: number; url: string }>()
+  const openBrowserUrl = useCallback((url: string) => {
+    if (!isAllowedBrowserUrl(url) || url === BROWSER_BLANK_URL
+      || browserNavigationIdRef.current >= Number.MAX_SAFE_INTEGER) return
+    setBrowserNavigation({ id: ++browserNavigationIdRef.current, url })
+    setBrowserMounted(true)
+    setBrowserOpen(true)
+  }, [])
   const dockVisible = { projects: sidebarOpen, chat: true, review: reviewOpen, terminal: terminalOpen, browser: browserOpen }
   const dock = useDockLayout(dockVisible)
   const dockHeader = (panel: DockPanel, onClose?: () => void) => (
@@ -805,6 +816,7 @@ export function App(): ReactElement {
   }
 
   return (
+    <BrowserNavigationContext.Provider value={openBrowserUrl}>
     <div className="app">
       {/* Keep this resource mounted for overlay backplates and scrollable leaf
           popovers. Separate backplates let the floating input/summary and
@@ -1167,7 +1179,7 @@ export function App(): ReactElement {
         </div>
         <div className="dock-browser" {...dock.panelProps('browser')}>
           {dockHeader('browser', () => setBrowserOpen(false))}
-          {browserMounted && <Suspense fallback={<div className="side-empty">浏览器加载中…</div>}><BrowserPanel visible={browserOpen} /></Suspense>}
+          {browserMounted && <Suspense fallback={<div className="side-empty">浏览器加载中…</div>}><BrowserPanel visible={browserOpen} navigation={browserNavigation} /></Suspense>}
         </div>
         {dock.dividers.map((divider, index) => <div key={divider.path} className={`dock-divider dock-divider-${divider.axis}`}
           role="separator" aria-label={`调整分栏 ${index + 1}`} {...dock.dividerProps(divider)} />)}
@@ -1330,5 +1342,6 @@ export function App(): ReactElement {
         }}
       />
     </div>
+    </BrowserNavigationContext.Provider>
   )
 }

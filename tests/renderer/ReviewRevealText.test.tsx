@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, render } from '@testing-library/react'
+import { act, fireEvent, render } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { REVIEW_REVEAL_CHUNK_SIZE, ReviewRevealText } from '../../src/renderer/src/features/review/ReviewRevealText'
 
@@ -47,14 +47,49 @@ it('reclaims live spans, animates only new suffixes and keeps completed chunks s
   const text = 'a'.repeat(REVIEW_REVEAL_CHUNK_SIZE) + 'old'
   const { container, rerender } = render(<pre><ReviewRevealText text={text} mode="live" /></pre>)
   act(() => vi.advanceTimersByTime(300))
+  // The old cleanup deadline must not cut off the slower live cascade.
+  expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(text.length)
+  act(() => vi.advanceTimersByTime(232))
   const first = container.querySelector('pre > span')
   expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
   rerender(<pre><ReviewRevealText text={text + 'new'} mode="live" /></pre>)
   expect(container.querySelector('pre > span')).toBe(first)
   expect([...container.querySelectorAll('.screen-text-reveal-live')].map((node) => node.textContent).join('')).toBe('new')
-  act(() => vi.advanceTimersByTime(300))
+  act(() => vi.advanceTimersByTime(532))
   expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
   expect(container.textContent).toBe(text + 'new')
+})
+
+it('reclaims after the last character animation, not an earlier character', () => {
+  vi.useFakeTimers()
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const { container } = render(<ReviewRevealText text="abc" mode="live" />)
+  const characters = container.querySelectorAll('[data-screen-reveal-character]')
+  const finish = (element: Element): void => {
+    // JSDOM has no AnimationEvent constructor; React selects the supported
+    // Webkit event name. Real Chromium uses the standard animationend event.
+    const event = new Event('webkitAnimationEnd', { bubbles: true })
+    Object.defineProperty(event, 'animationName', { value: 'screen-text-reveal' })
+    fireEvent(element, event)
+  }
+  finish(characters[0])
+  expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(3)
+  finish(characters[2])
+  expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+  expect(container.textContent).toBe('abc')
+})
+
+it('restarts the cleanup deadline for each appended suffix without replaying the prefix', () => {
+  vi.useFakeTimers()
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const { container, rerender } = render(<ReviewRevealText text="old" mode="live" />)
+  act(() => vi.advanceTimersByTime(500))
+  rerender(<ReviewRevealText text="old appended" mode="live" />)
+  expect([...container.querySelectorAll('.screen-text-reveal-live')].map((node) => node.textContent).join('')).toBe(' appended')
+  act(() => vi.advanceTimersByTime(32))
+  expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(9)
+  act(() => vi.advanceTimersByTime(500))
+  expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
 })
 
 it('does not allocate animation characters when reduced motion is requested', () => {

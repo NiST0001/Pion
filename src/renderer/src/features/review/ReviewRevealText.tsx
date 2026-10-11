@@ -1,5 +1,10 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { appendedCharacterCount, armScreenTextReveal, RevealText, type TextRevealMode } from '../../utils/screenTextReveal'
+import {
+  appendedCharacterCount, armScreenTextReveal, RevealText,
+  SCREEN_TEXT_REVEAL_DURATION_MS, SCREEN_TEXT_REVEAL_MAX_DELAY_MS,
+  SCREEN_TEXT_REVEAL_LIVE_DURATION_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS,
+  type TextRevealMode
+} from '../../utils/screenTextReveal'
 
 // Bound both initial character DOM and geometry work, including single-line
 // JSON/minified output. Invisible chunks remain inexpensive ordinary text.
@@ -70,12 +75,21 @@ const RevealChunk = memo(function RevealChunk({ text, mode, revealCount }: {
       const container = element.closest<HTMLElement>('.review-detail-body, .chat-scroll') ?? element
       armScreenTextReveal(container, element)
     }
-    // 180ms maximum stagger + 52ms fade; release spans and animation state.
-    const timer = window.setTimeout(() => setPhase('done'), 300)
+    // Animation events reclaim first; allow the entire bounded stagger + fade
+    // to finish before the fallback (including the slower streamed suffix).
+    const duration = mode === 'live' ? SCREEN_TEXT_REVEAL_LIVE_DURATION_MS : SCREEN_TEXT_REVEAL_DURATION_MS
+    const maxDelay = mode === 'live' ? SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS : SCREEN_TEXT_REVEAL_MAX_DELAY_MS
+    const timer = window.setTimeout(() => setPhase('done'), maxDelay + duration + 68)
     return () => window.clearTimeout(timer)
   }, [phase, text, mode])
 
-  return <span ref={ref} style={{ opacity: phase === 'waiting' ? 0 : undefined }}>
+  return <span ref={ref} style={{ opacity: phase === 'waiting' ? 0 : undefined }}
+    onAnimationEnd={(event) => {
+      // Earlier characters finish first; only the final fading character can
+      // reclaim the whole chunk without interrupting its remaining suffix.
+      if (event.animationName === 'screen-text-reveal'
+        && event.target === ref.current?.lastElementChild) setPhase('done')
+    }}>
     {phase === 'animating'
       ? <RevealText text={text} mode={mode} revealCount={hasAnimated.current ? revealCount : undefined} />
       : text}

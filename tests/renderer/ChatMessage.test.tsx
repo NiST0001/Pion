@@ -727,6 +727,18 @@ describe('ChatMessage', () => {
     expect(container.querySelector('.caret')).not.toBeInTheDocument()
   })
 
+  it('uses doubled live character delays for Markdown output without reanimating the prefix', () => {
+    const item = { kind: 'assistant' as const, id: 90, text: 'abc', thinking: '', streaming: true, live: true }
+    const view = render(<ChatMessage item={item} canFork={false} />)
+    const characters = view.container.querySelectorAll<HTMLElement>('.markdown .screen-text-reveal-live')
+    expect(characters).toHaveLength(3)
+    expect(characters[1].style.getPropertyValue('--screen-text-reveal-delay')).toBe('2.4ms')
+    view.rerender(<ChatMessage item={{ ...item, text: 'abcde' }} canFork={false} />)
+    const suffix = view.container.querySelectorAll<HTMLElement>('.markdown .screen-text-reveal-live')
+    expect(Array.from(suffix, (node) => node.textContent).join('')).toBe('de')
+    expect(suffix[1].style.getPropertyValue('--screen-text-reveal-delay')).toBe('2.4ms')
+  })
+
   it('keeps the restored running bubble fade while animating only new thinking and staying silent', () => {
     const item = { kind: 'assistant' as const, id: 35, text: '恢复的输出', thinking: '原思考',
       live: true, historical: true, noReveal: false, streaming: true, error: '恢复的错误' }

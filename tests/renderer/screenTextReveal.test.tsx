@@ -2,6 +2,7 @@
 
 import '@testing-library/jest-dom/vitest'
 import { render } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import { Markdown } from '../../src/renderer/src/features/chat/Markdown'
 import {
@@ -9,7 +10,9 @@ import {
   armScreenTextReveal,
   resetLineRevealClock,
   RevealText,
-  takeLineRevealSlot
+  takeLineRevealSlot,
+  SCREEN_TEXT_REVEAL_LIVE_DURATION_MS,
+  SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS
 } from '../../src/renderer/src/utils/screenTextReveal'
 
 describe('screen text reveal', () => {
@@ -70,7 +73,7 @@ describe('screen text reveal', () => {
     const items = [...view.container.querySelectorAll<HTMLElement>('li.screen-text-reveal-line')]
     expect(items).toHaveLength(2)
     expect(items.map((item) => item.style.getPropertyValue('--screen-text-reveal-delay')))
-      .toEqual(['0ms', '20ms'])
+      .toEqual(['0ms', '40ms'])
     nowSpy.mockRestore()
   })
 
@@ -95,6 +98,44 @@ describe('screen text reveal', () => {
     expect(takeLineRevealSlot()).toBe(0)
     resetLineRevealClock()
     nowSpy.mockRestore()
+  })
+
+  it('doubles live character stagger and cap without slowing history characters', () => {
+    const view = render(<RevealText text={'a'.repeat(200)} mode="live" />)
+    const characters = view.container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')
+    expect(characters[1].style.getPropertyValue('--screen-text-reveal-delay')).toBe('2.4ms')
+    expect(characters[199].style.getPropertyValue('--screen-text-reveal-delay')).toBe('360ms')
+    view.rerender(<RevealText text="abc" mode="history" />)
+    const rect = { top: 0, bottom: 10, width: 20, height: 10 } as DOMRect
+    view.container.getBoundingClientRect = () => rect
+    for (const character of view.container.querySelectorAll<HTMLElement>('span')) {
+      character.getBoundingClientRect = () => rect
+    }
+    armScreenTextReveal(view.container)
+    expect(view.container.querySelectorAll<HTMLElement>('span')[1].style.getPropertyValue('--screen-text-reveal-delay')).toBe('1.2ms')
+  })
+
+  it('uses live 40ms slots while retaining history 20ms slots on the shared clock', () => {
+    const nowSpy = vi.spyOn(performance, 'now').mockReturnValue(1000)
+    resetLineRevealClock()
+    expect(takeLineRevealSlot('live')).toBe(0)
+    expect(takeLineRevealSlot('history')).toBe(40)
+    expect(takeLineRevealSlot('history')).toBe(60)
+    resetLineRevealClock()
+    nowSpy.mockRestore()
+  })
+
+  it('keeps CSS fade durations aligned with cleanup constants and reduced-motion overrides', () => {
+    // Static contract only: this does not claim real browser animation timing.
+    const css = readFileSync('src/renderer/src/styles/refinements.css', 'utf8')
+    expect(css).toContain(`.screen-text-reveal-live {\n  animation-duration: ${SCREEN_TEXT_REVEAL_LIVE_DURATION_MS}ms;`)
+    expect(css).toContain('.screen-text-reveal-line-live[data-line-reveal-ready="true"] {\n  animation-duration: 180ms;')
+    expect(css).toContain('animation: screen-text-reveal 90ms')
+    expect(css).toContain('animation: screen-text-reveal 52ms')
+    expect(SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS).toBe(360)
+    const reducedMotion = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)', css.indexOf('.screen-text-reveal-line {')))
+    expect(reducedMotion).toContain('.screen-text-reveal-line-live[data-line-reveal-ready="true"]')
+    expect(reducedMotion).toContain('animation: none;')
   })
 
   it('animates only the appended suffix of a live value', () => {
