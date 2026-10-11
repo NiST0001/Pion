@@ -90,6 +90,42 @@ const ToolDetails = memo(function ToolDetails({ toolId, name, diff, command, out
   </div>
 })
 
+const SUBAGENT_STATUS_LABELS = {
+  pending: '待执行', running: '执行中', completed: '已完成',
+  failed: '失败', aborted: '已停止', unknown: '未知'
+} as const
+
+// These are display rows from the real batch, not additional SDK tool calls.
+const SubagentBatchRow = memo(function SubagentBatchRow({ task, mode }: {
+  task: NonNullable<ToolItem['subagentBatch']>['tasks'][number]
+  mode?: TextRevealMode
+}): ReactElement {
+  const [open, setOpen] = useState(false)
+  const hasSummary = Boolean(task.summary)
+  const displayName = task.name.trim() ? task.name : `子代理 ${task.index + 1}`
+  return <li className="tool-subagent-row" data-subagent-index={task.index}>
+    <div className="tool-subagent-row-head">
+      <span className="tool-subagent-name">{displayName}</span>
+      <span className={`tool-subagent-status tool-subagent-status-${task.status}`}>
+        {SUBAGENT_STATUS_LABELS[task.status]}
+      </span>
+      {hasSummary && <button type="button" className="tool-subagent-summary-toggle"
+        aria-expanded={open}
+        aria-label={`${open ? '收起' : '展开'}第 ${task.index + 1} 项子代理结果摘要：${displayName}`}
+        onClick={() => setOpen((value) => !value)}>
+        <ChevronRight size={12} aria-hidden="true" />摘要
+      </button>}
+      {!hasSummary && task.summaryTruncated && <span className="tool-subagent-summary-notice">摘要已截断</span>}
+    </div>
+    {hasSummary && <AnimatedDisclosure open={open}>
+      <div className="tool-subagent-summary">
+        <pre>{mode ? <ReviewRevealText text={task.summary ?? ''} mode={mode} /> : task.summary}</pre>
+        {task.summaryTruncated && <span className="tool-subagent-summary-notice">摘要已截断</span>}
+      </div>
+    </AnimatedDisclosure>}
+  </li>
+})
+
 export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noReveal, readOnly = false }: { tool: ToolItem; historical?: boolean; noReveal?: boolean; readOnly?: boolean }): ReactElement {
   const [open, setOpen] = useState(false)
   const revealSuppressed = noReveal === true
@@ -97,9 +133,11 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
   const isWrite = tool.name === 'write'
   const isShell = tool.name === 'bash' || tool.name === 'powershell'
   const label = TOOL_LABELS[tool.name] ?? tool.name
+  const batch = tool.name === 'pion_subagents' ? tool.subagentBatch : undefined
 
   const stats = useMemo(() => tool.diff ? diffStats(tool.diff) : null, [tool.diff])
   const liveOutput = tool.live === true && !historical
+  const detailMode = revealSuppressed ? undefined : historical ? 'history' : liveOutput ? 'live' : undefined
 
   return (
     <div className={`tool-call tool-${tool.status}${historical ? ' history-reveal' : ''}`}>
@@ -130,7 +168,7 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
             <Wrench size={14} />
           )}
         </span>
-        <span className="tool-name">{label}</span>
+        <span className="tool-name">{label}{batch && <> · {batch.tasks.length} 项</>}</span>
         {tool.path && (
           <code className="tool-path" title={tool.path}>
             {tool.path}
@@ -153,13 +191,17 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
         )}
       </button>
 
+      {batch && <ul className="tool-subagent-batch" aria-label={`子代理任务（${batch.tasks.length} 项）`}>
+        {batch.tasks.map((task) => <SubagentBatchRow key={`${tool.id}:${task.index}`} task={task} mode={detailMode} />)}
+      </ul>}
+
       <AnimatedDisclosure open={open}>
         <ToolDetails toolId={tool.id} name={tool.name} diff={tool.diff} command={tool.command}
           outputText={tool.outputText} writeContent={tool.writeContent}
           readOnly={readOnly} images={readOnly ? undefined : tool.images}
           imageNotice={readOnly ? undefined : tool.imageNotice} imageModelInfo={tool.imageModelInfo}
           imageSettingsInfo={tool.imageSettingsInfo}
-          mode={revealSuppressed ? undefined : historical ? 'history' : liveOutput ? 'live' : undefined} />
+          mode={detailMode} />
       </AnimatedDisclosure>
     </div>
   )

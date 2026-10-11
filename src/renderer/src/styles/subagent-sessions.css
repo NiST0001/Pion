@@ -10,6 +10,11 @@
 .side-subagent-session.active { background: var(--selected-bg); color: var(--fg); }
 .side-subagent-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side-subagent-status { flex: none; font-size: 11px; }
+/* Only adjacent child tools are denser: retain ordinary message/thinking
+   spacing and the full 28px tool header click target. With the shared 24px
+   timeline gap and -8px tool margins, -12px leaves a 4px inter-tool gap. */
+.child-chat-scroll .timeline > .tool-call + .tool-call { margin-top: -12px; }
+
 @media (forced-colors: active) {
   .side-subagent-session.active { background: Highlight; color: HighlightText; }
   html.pion-keyboard-focus .side-subagent-session:focus-visible,

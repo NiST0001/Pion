@@ -166,8 +166,10 @@ export const ChatMessage = memo(function ChatMessage({
   }
 
   // The timeline-level working status occupies this slot until the assistant
-  // has actual thinking, text, or an error to show. Avoid a duplicate dots row.
-  if (item.streaming && item.text === '' && item.thinking === '' && !item.error) return null
+  // has actual thinking, text, or an error to show. Child tool-only messages
+  // also finish with empty bodies: keep their identity in data, not blank
+  // bubbles/gaps between the ordinary tool cards.
+  if ((item.streaming || readOnly) && item.text === '' && item.thinking === '' && !item.error) return null
 
   const thinkingOnly = item.thinking !== '' && item.text === '' && !item.error
 

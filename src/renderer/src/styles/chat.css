@@ -1050,3 +1050,88 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
   padding: 2px 12px;
 }
 
+/* Real subagent batch rows remain visible independently of aggregate details. */
+.tool-subagent-batch {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 2px 0 6px 24px;
+  padding: 0;
+  list-style: none;
+}
+
+.tool-subagent-row {
+  min-width: 0;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+}
+
+.tool-subagent-row-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  min-width: 0;
+}
+
+.tool-subagent-name {
+  flex: 1 1 120px;
+  min-width: 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.tool-subagent-status {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.tool-subagent-status-running { color: var(--warn); }
+.tool-subagent-status-completed { color: var(--ok); }
+.tool-subagent-status-failed { color: var(--danger); }
+
+.tool-subagent-summary-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 5px;
+  border-radius: var(--radius-sm);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+.tool-subagent-summary-toggle:hover { background: var(--bg-elev); color: var(--fg); }
+.tool-subagent-summary-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+html.pion-keyboard-focus .tool-subagent-summary-toggle:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+
+.tool-subagent-summary { padding-top: 6px; }
+.tool-subagent-summary pre {
+  margin: 0;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tool-subagent-summary-notice { color: var(--fg-faint); font-size: 10px; }
+
+@media (forced-colors: active) {
+  .tool-subagent-row { background: Canvas; color: CanvasText; }
+  .tool-subagent-status { background: Canvas; color: CanvasText; }
+  .tool-subagent-summary-toggle:hover { background: Highlight; color: HighlightText; }
+  html.pion-keyboard-focus .tool-subagent-summary-toggle:focus-visible { outline-color: Highlight; }
+}
+

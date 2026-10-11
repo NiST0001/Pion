@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { LiveSessionState, WireEventInput, WireMessage } from '../../shared/types'
 import { collectToolImages } from '../../shared/tool-images'
 import { generatedImageModelInfo, generatedImageSettingsInfo } from '../../shared/image-generation'
+import { plannedSubagentBatch, projectSubagentBatchResult, type SubagentBatch } from '../../shared/subagent-batches'
 
 export const LIVE_MAX_ROWS = 256
 export const LIVE_MAX_BYTES = 4 * 1024 * 1024
@@ -12,7 +13,7 @@ const ROW_OVERHEAD = 1024
 const MESSAGE_OVERHEAD = 16 * 1024
 const STREAM_RESERVE = 32 * 1024
 
-type TruncatedField = 'text' | 'thinking' | 'error' | 'diff' | 'outputText'
+type TruncatedField = 'text' | 'thinking' | 'error' | 'diff' | 'outputText' | 'subagentBatch'
 type Row = {
   truncatedFields?: Set<TruncatedField>
   role: string
@@ -29,6 +30,8 @@ type Row = {
   bytes: number
   streaming?: boolean
   finalResult?: boolean
+  toolName?: string
+  batch?: SubagentBatch
 }
 const object = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' ? value as Record<string, unknown> : {}
@@ -203,9 +206,18 @@ export class LiveSessionProjection {
         row.bytes = ROW_OVERHEAD + encodedBytes(row.events)
         this.bytes += row.bytes; this.trim(row)
       } else if (message.role === 'toolResult' && typeof message.toolCallId === 'string') {
-        const row = this.rows.find((r) => r.role === 'tool' && r.id === message.toolCallId)
-        if (!row) return
-        const safe = this.message(message, RESULT_BYTES, true)
+        const matches = this.rows.filter((r) => r.role === 'tool' && r.id === message.toolCallId)
+        const row = matches.length === 1 ? matches[0] : undefined
+        if (!row) {
+          if (matches.length || message.toolName !== 'pion_subagents' || message.toolCallId.length > 512) return
+          const safe = this.message(message, RESULT_BYTES, true)
+          this.add({ role: 'tool', id: message.toolCallId, toolName: 'pion_subagents', finalResult: true,
+            events: [{ type: 'message_end', message: safe }], text: '', thinking: '', textBytes: 0,
+            bytes: ROW_OVERHEAD + encodedBytes(safe) })
+          return
+        }
+        const safe = this.message(message, RESULT_BYTES, true, row.toolName, row.batch)
+        row.batch = object(safe.details).subagentBatch as SubagentBatch | undefined
         this.replace(row, [row.events[0], { type: 'message_end', message: safe }, ...row.events.filter((e) => e.type === 'entry_appended')])
         row.finalResult = true
       }
@@ -214,16 +226,21 @@ export class LiveSessionProjection {
     if (event.type === 'tool_execution_start' && typeof event.toolCallId === 'string') {
       if (event.toolCallId.length > 512) { this.truncated = true; return }
       if (this.rows.some((r) => r.role === 'tool' && r.id === event.toolCallId)) return
-      const safe = { type: 'tool_execution_start', toolCallId: event.toolCallId.slice(0, 512), toolName: String(event.toolName ?? '').slice(0, 512), args: this.boundedValue(event.args, VALUE_BYTES) } as WireEventInput
-      this.add({ role: 'tool', id: event.toolCallId, events: [safe], text: '', thinking: '', textBytes: 0, bytes: ROW_OVERHEAD + encodedBytes(safe) })
+      const toolName = String(event.toolName ?? '').slice(0, 512)
+      const batch = toolName === 'pion_subagents' ? plannedSubagentBatch(event.args) : undefined
+      const safe = { type: 'tool_execution_start', toolCallId: event.toolCallId.slice(0, 512), toolName,
+        args: toolName === 'pion_subagents' ? this.batchArgs(batch) : this.boundedValue(event.args, VALUE_BYTES) } as WireEventInput
+      this.add({ role: 'tool', id: event.toolCallId, toolName, batch, events: [safe], text: '', thinking: '', textBytes: 0, bytes: ROW_OVERHEAD + encodedBytes(safe) })
       return
     }
     if (event.type === 'tool_execution_update' || event.type === 'tool_execution_end') {
       const row = this.rows.find((r) => r.role === 'tool' && r.id === event.toolCallId)
       if (!row || row.finalResult) return
       const end = event.type === 'tool_execution_end'
-      const payload = this.message({ role: 'toolResult', ...object(end ? event.result : event.partialResult) }, end ? RESULT_BYTES : VALUE_BYTES, end)
-      this.replace(row, [row.events[0], { type: event.type, toolCallId: row.id!, toolName: String(event.toolName ?? '').slice(0, 512), ...(end ? { result: payload, isError: Boolean(event.isError) } : { partialResult: payload }) } as WireEventInput])
+      const payload = this.message({ ...object(end ? event.result : event.partialResult), role: 'toolResult' }, end ? RESULT_BYTES : VALUE_BYTES, end, row.toolName, row.batch)
+      row.batch = object(payload.details).subagentBatch as SubagentBatch | undefined
+      this.replace(row, [row.events[0], { type: event.type, toolCallId: row.id!, toolName: row.toolName ?? '', ...(end ? { result: payload, isError: Boolean(event.isError) } : { partialResult: payload }) } as WireEventInput])
+      if (end) row.finalResult = true
       return
     }
     if (event.type === 'entry_appended') {
@@ -304,10 +321,35 @@ export class LiveSessionProjection {
     // Annotation bytes are covered by ROW_OVERHEAD, never by the delta budget.
   }
 
-  private message(raw: Record<string, unknown>, budget: number, images = false): WireMessage {
+  private batchArgs(batch: SubagentBatch | undefined): unknown {
+    return batch ? { tasks: batch.tasks.map(({ name }) => ({ name })) } : {}
+  }
+
+  private message(raw: Record<string, unknown>, budget: number, images = false, knownToolName?: string, knownBatch?: SubagentBatch): WireMessage {
     const result: WireMessage = { role: String(raw.role ?? '').slice(0, 128), ...(safeTimestamp(raw.timestamp) !== undefined ? { timestamp: safeTimestamp(raw.timestamp) } : {}), ...(typeof raw.toolCallId === 'string' ? { toolCallId: raw.toolCallId.slice(0, 512) } : {}), ...(typeof raw.isError === 'boolean' ? { isError: raw.isError } : {}) }
     let remaining = budget - MESSAGE_OVERHEAD
     const fields = new Set<TruncatedField>()
+    // Only a standard tool name or this exact captured tool-call row establishes provenance.
+    const toolName = knownToolName ?? raw.toolName
+    if (raw.role === 'toolResult' && toolName === 'pion_subagents'
+      && (raw.toolName === undefined || raw.toolName === toolName)) {
+      let batch = projectSubagentBatchResult(raw.details, knownBatch, images)
+      if (batch && encodedBytes({ subagentBatch: batch }) > remaining) {
+        this.truncated = true
+        // Only actual snapshot budget loss, never missing/invalid native metadata.
+        if (batch.tasks.some((task) => task.summary !== undefined)) fields.add('subagentBatch')
+        batch = { version: 1, tasks: batch.tasks.map(({ index, name, status, summary, summaryTruncated }) => ({
+          index, name, status, ...(summary !== undefined || summaryTruncated ? { summaryTruncated: true } : {})
+        })) }
+      }
+      if (batch && encodedBytes({ subagentBatch: batch }) <= remaining) {
+        result.details = { subagentBatch: batch }
+        remaining -= encodedBytes(result.details)
+      } else if (batch) {
+        this.truncated = true
+        fields.add('subagentBatch')
+      }
+    }
     const contentField = raw.role === 'toolResult' ? 'outputText' : 'text'
     const text = (value: unknown, field: TruncatedField = contentField): string => {
       if (typeof value !== 'string' || value === '') return ''
@@ -338,7 +380,14 @@ export class LiveSessionProjection {
         const p = object(raw.content[index])
         if (p.type === 'text') result.content.push({ type: 'text', text: text(p.text) })
         else if (p.type === 'thinking') result.content.push({ type: 'thinking', thinking: text(p.thinking, 'thinking') })
-        else if (images) {
+        else if (raw.role === 'assistant' && p.type === 'toolCall' && p.name === 'pion_subagents'
+          && typeof p.id === 'string' && p.id.length <= 512) {
+          const call = { type: 'toolCall', id: p.id, name: 'pion_subagents', arguments: this.batchArgs(plannedSubagentBatch(p.arguments)) }
+          const size = encodedBytes(call)
+          if (size <= remaining) { remaining -= size; result.content.push(call) }
+          else this.truncated = true
+        }
+        else if (images && toolName !== 'pion_subagents') {
           const image = previews.find((preview) => preview.partIndex === index)
           const size = image ? encodedBytes(image) : 0
           if (image && size <= remaining) {
@@ -356,7 +405,7 @@ export class LiveSessionProjection {
     if (typeof raw.errorMessage === 'string') result.errorMessage = text(raw.errorMessage, 'error')
     if (typeof raw.stopReason === 'string') result.stopReason = raw.stopReason.slice(0, 128)
     if (typeof raw.toolName === 'string') result.toolName = raw.toolName.slice(0, 512)
-    if (images) {
+    if (images && toolName !== 'pion_subagents') {
       const generated = object(object(raw.details).imageGeneration)
       const model = generatedImageModelInfo(generated)
       const settings = generatedImageSettingsInfo(generated)

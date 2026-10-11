@@ -354,6 +354,105 @@ describe('bounded backend live projection', () => {
     expect(state.snapshot('/project').events).toHaveLength(1)
   })
 
+  it('preserves all four planned names and partial/final batch rows across background snapshots', () => {
+    const state = new LiveSessionProjection()
+    const tasks = Array.from({ length: 4 }, (_, index) => ({ name: `child-${index}`, task: 'private instruction'.repeat(10000) }))
+    state.record({ type: 'tool_execution_start', toolCallId: 'batch', toolName: 'pion_subagents', args: { tasks, secret: 'private arg' } })
+    const planned = state.snapshot('/project').events[0] as Extract<WireEvent, { type: 'tool_execution_start' }>
+    expect(planned.args).toEqual({ tasks: tasks.map(({ name }) => ({ name })) })
+    const rows = tasks.map(({ name }, index) => ({ index, name, status: index === 2 ? 'completed' : 'running', summary: `summary-${index}` }))
+    const details = { subagentBatch: { version: 1, tasks: rows }, usage: { secret: 'usage' }, privateChildRecords: 'child body' }
+    state.record({ type: 'tool_execution_update', toolCallId: 'batch', partialResult: { content: [], details } })
+    const update = state.snapshot('/project').events[1] as Extract<WireEvent, { type: 'tool_execution_update' }>
+    expect((update.partialResult as WireMessage).details).toEqual({ subagentBatch: details.subagentBatch })
+    const final = { version: 1, tasks: rows.map((row) => ({ ...row, status: 'completed' })) }
+    state.record({ type: 'tool_execution_end', toolCallId: 'batch', result: { content: [], details: { ...details, subagentBatch: final } } })
+    state.record({ type: 'tool_execution_update', toolCallId: 'batch', partialResult: { details } })
+    const end = state.snapshot('/project').events[1] as Extract<WireEvent, { type: 'tool_execution_end' }>
+    expect((end.result as WireMessage).details).toEqual({ subagentBatch: final })
+    state.record({ type: 'message_end', message: { role: 'toolResult', toolCallId: 'batch', content: [], details: { subagentBatch: final } } })
+    expect(messageOf(state.snapshot('/project').events[1]).details).toEqual({ subagentBatch: final })
+    expect(JSON.stringify(state.snapshot('/project'))).not.toMatch(/private instruction|private arg|privateChildRecords|child body|usage/)
+  })
+
+  it('keeps four independent batch results in their own rows during partial and final STATE recovery', () => {
+    const state = new LiveSessionProjection()
+    const batches = Array.from({ length: 4 }, (_, batchIndex) => ({ version: 1,
+      tasks: Array.from({ length: 4 }, (_, index) => ({ index, name: `batch-${batchIndex}-child-${index}`, status: 'running' })) }))
+    batches.forEach((batch, index) => {
+      state.record({ type: 'tool_execution_start', toolCallId: `batch-${index}`, toolName: 'pion_subagents', args: { tasks: batch.tasks } })
+      state.record({ type: 'tool_execution_update', toolCallId: `batch-${index}`, partialResult: { details: { subagentBatch: batch } } })
+    })
+    expect(state.snapshot('/project').events.filter((event) => event.type === 'tool_execution_update')
+      .map((event) => ((event as Extract<WireEvent, { type: 'tool_execution_update' }>).partialResult as WireMessage).details)).toEqual(batches.map((subagentBatch) => ({ subagentBatch })))
+    const finals = batches.map((batch) => ({ ...batch, tasks: batch.tasks.map((task) => ({ ...task, status: 'completed' })) }))
+    finals.forEach((batch, index) => state.record({ type: 'message_end', message: { role: 'toolResult', toolCallId: `batch-${index}`, details: { subagentBatch: batch } } }))
+    expect(state.snapshot('/project').events.filter((event) => event.type === 'message_end')
+      .map((event) => messageOf(event).details)).toEqual(finals.map((subagentBatch) => ({ subagentBatch })))
+  })
+
+  it('keeps only names in native assistant tool-call arguments even with huge task bodies', () => {
+    const state = new LiveSessionProjection(); start(state)
+    const tasks = Array.from({ length: 4 }, (_, index) => ({ task: 'body'.repeat(100000), name: `worker-${index}` }))
+    state.record({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'toolCall', name: 'pion_subagents', id: 'batch', arguments: { tasks, other: 'private' } }] } })
+    expect(messageOf(state.snapshot('/project').events[1]).content).toEqual([
+      { type: 'toolCall', name: 'pion_subagents', id: 'batch', arguments: { tasks: tasks.map(({ name }) => ({ name })) } }
+    ])
+    expect(JSON.stringify(state.snapshot('/project'))).not.toMatch(/body|private/)
+  })
+
+  it('requires scoped native provenance, not arbitrary details or another same-id backend', () => {
+    const native = new LiveSessionProjection(), other = new LiveSessionProjection()
+    const batch = { version: 1, tasks: [{ index: 0, name: 'worker', status: 'completed' }] }
+    native.record({ type: 'tool_execution_start', toolCallId: 'same', toolName: 'pion_subagents', args: { tasks: [{ name: 'worker' }] } })
+    other.record({ type: 'tool_execution_start', toolCallId: 'same', toolName: 'read', args: {} })
+    for (const state of [native, other]) state.record({ type: 'message_end', message: { role: 'toolResult', toolCallId: 'same', content: [], details: { subagentBatch: batch } } })
+    expect(messageOf(native.snapshot('/project').events[1]).details).toEqual({ subagentBatch: batch })
+    expect(messageOf(other.snapshot('/project').events[1]).details).toBeUndefined()
+    const standalone = new LiveSessionProjection()
+    standalone.record({ type: 'message_end', message: { role: 'toolResult', toolName: 'pion_subagents', toolCallId: 'standalone', details: { subagentBatch: batch } } })
+    expect(messageOf(standalone.snapshot('/project').events[0]).details).toEqual({ subagentBatch: batch })
+    const unnamed = new LiveSessionProjection()
+    unnamed.record({ type: 'message_end', message: { role: 'toolResult', toolCallId: 'standalone', details: { subagentBatch: batch } } })
+    expect(unnamed.snapshot('/project').events).toEqual([])
+  })
+
+  it('charges encoded batch metadata to result budgets and preserves statuses when dropping summaries', () => {
+    const state = new LiveSessionProjection()
+    const tasks = Array.from({ length: 8 }, (_, index) => ({ name: `worker-${index}` }))
+    state.record({ type: 'tool_execution_start', toolCallId: 'batch', toolName: 'pion_subagents', args: { tasks } })
+    const batch = { version: 1, tasks: tasks.map(({ name }, index) => ({ index, name, status: 'running', summary: '\u0000'.repeat(2048) })) }
+    state.record({ type: 'tool_execution_update', toolCallId: 'batch', partialResult: { content: [{ type: 'text', text: 'x'.repeat(100000) }], details: { subagentBatch: batch }, usage: { input: 123 } } })
+    const event = state.snapshot('/project').events[1] as Extract<WireEvent, { type: 'tool_execution_update' }>
+    expect((event.partialResult as WireMessage).details).toEqual({ subagentBatch: { version: 1, tasks: tasks.map(({ name }, index) => ({ index, name, status: 'running', summaryTruncated: true })) } })
+    expect(Buffer.byteLength(JSON.stringify(event.partialResult))).toBeLessThan(32 * 1024)
+    expect(state.snapshot('/project').truncated).toBe(true)
+    expect((event.partialResult as WireMessage)._pionLiveTruncatedFields).toContain('subagentBatch')
+    expect(JSON.stringify(event)).not.toContain('usage')
+    state.record({ type: 'tool_execution_end', toolCallId: 'batch', result: { content: [] } })
+    const final = state.snapshot('/project').events[1] as Extract<WireEvent, { type: 'tool_execution_end' }>
+    expect((final.result as WireMessage).details).toEqual({ subagentBatch: { version: 1, tasks: tasks.map(({ name }, index) => ({ index, name, status: 'unknown' })) } })
+    expect((final.result as WireMessage)._pionLiveTruncatedFields).toBeUndefined()
+    state.record({ type: 'tool_execution_update', toolCallId: 'batch', partialResult: { details: { subagentBatch: batch } } })
+    expect(state.snapshot('/project').events[1]).toEqual(final)
+    expect(Buffer.byteLength(JSON.stringify(state.snapshot('/project')))).toBeLessThan(LIVE_MAX_BYTES)
+  })
+
+  it('marks entire batch budget omission, not native missing/invalid metadata', () => {
+    const state = new LiveSessionProjection()
+    // Exercise the serializer's smaller remaining-budget boundary directly.
+    const serialize = (state as unknown as { message(raw: Record<string, unknown>, budget: number, images: boolean): WireMessage }).message.bind(state)
+    const tasks = Array.from({ length: 4 }, (_, index) => ({ index, name: `worker-${index}`, status: 'completed', summary: `done-${index}` }))
+    const raw = { role: 'toolResult', toolName: 'pion_subagents', details: { subagentBatch: { version: 1, tasks } } }
+    const omitted = serialize(raw, 16 * 1024 + 1, true)
+    expect(omitted.details).toBeUndefined()
+    expect(omitted._pionLiveTruncatedFields).toEqual(['subagentBatch'])
+    for (const details of [undefined, { subagentBatch: { version: 2, tasks } }]) {
+      const native = serialize({ ...raw, details }, 16 * 1024 + 1, true)
+      expect(native._pionLiveTruncatedFields).toBeUndefined()
+    }
+  })
+
   it('uses unique backend identities instead of nullable usage ids', () => {
     expect(new LiveSessionProjection().backendId).not.toBe(new LiveSessionProjection().backendId)
   })

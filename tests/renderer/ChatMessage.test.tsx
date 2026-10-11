@@ -33,6 +33,25 @@ describe('ChatMessage', () => {
     vi.useRealTimers()
   })
 
+  it('does not leave blank completed assistant bubbles between child tools', () => {
+    const item = { kind: 'assistant' as const, id: 88, text: '', thinking: '', streaming: false }
+    const props = { item, canFork: false, onFork: vi.fn() }
+    const view = render(<ChatMessage {...props} readOnly />)
+    expect(view.container.querySelector('.row-assistant')).toBeNull()
+    view.rerender(<ChatMessage {...props} readOnly item={{ ...item, thinking: '保留真实思考' }} />)
+    expect(view.container.querySelector('details.thinking pre')).toHaveTextContent('保留真实思考')
+    view.rerender(<ChatMessage {...props} readOnly item={{ ...item, text: '保留真实回复' }} />)
+    expect(view.container.querySelector('.bubble-assistant')).toHaveTextContent('保留真实回复')
+    view.rerender(<ChatMessage {...props} />)
+    expect(view.container.querySelector('.row-assistant')).not.toBeNull()
+  })
+
+  it('scopes compact adjacent-tool spacing to child timelines without reducing click targets', () => {
+    const css = readFileSync('src/renderer/src/styles/subagent-sessions.css', 'utf8')
+    expect(css).toMatch(/\.child-chat-scroll\s+\.timeline\s*>\s*\.tool-call\s*\+\s*\.tool-call\s*\{\s*margin-top:\s*-12px;\s*\}/)
+    expect(css).not.toMatch(/(?:^|\})\s*\.tool-head\s*\{/)
+  })
+
   it('keeps ordinary user bubbles but fails closed on actions and attachments in read-only mode', () => {
     const onFork = vi.fn(), onRevert = vi.fn()
     const item = { ...persistedUserMessage, images: [{ type: 'image' as const, mimeType: 'image/png', data: 'AAAA' }] }

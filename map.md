@@ -22,6 +22,7 @@
 | src/shared/theme.ts | 内置主题 ID（含 division-dark）、默认主题与跨进程校验 |
 | src/shared/subagent-sessions.ts | 临时子会话显示/配额协议、摘要/文字行契约及半小时/容量硬边界；身份不冒充 SDK 历史 ID |
 | src/shared/subagents.ts | 子代理参数类型、默认值、硬边界与跨进程校验 |
+| src/shared/subagent-batches.ts | 主会话批次显示白名单：真实输入索引、最多 8 项名称/状态和有界摘要，兼容完整有序旧终态；不按重名/完成顺序猜身份，不包含临时正文或计费数据 |
 | src/shared/release-notes.ts | 关于页内置发布日志，按版本倒序维护 |
 | src/shared/terminal.ts | PTY 终端快照与增量输出契约 |
 | src/shared/branches.ts | 显式分支/工作树删除身份与非原子操作的部分成功契约 |
@@ -38,7 +39,7 @@
 | src/main/agent/agent-bridge.ts | 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；隐式最新页跳过不可显示的元数据尾部但保持物理游标和有界条目，数字分页/定位不变；运行中状态有界等待及后端私有快照/在途缓存，历史 manager 依文件签名更新而非事件无条件重读；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
 | src/main/agent/message-revert.ts | 独占写入者前提下校验完整会话与所选用户消息，用 SDK 回到实际 parent 并追加持久分支标记；保留旧树，恢复文字及图片，不操作项目文件；兼容独立 usage、context_edit 与 retain-none 压缩记录 |
 | src/main/agent/stop-for-history.ts | 捕获 SDK 子进程并等待真实退出；超时/适配不兼容拒绝历史写入，不把 RpcClient.stop 提前返回当作退出证明 |
-| src/main/agent/live-session-state.ts | 后端私有当前轮显示快照：后台 root 输出持续归并、独立实例/revision 和有界行数/字节；实时事件与快照共用稳定消息身份，不伪造 SDK 时间戳/持久 ID；字段级截断、最终空消息权威、静态安全预览；选回时随 SessionInfo 恢复，不重放请求或计费 |
+| src/main/agent/live-session-state.ts | 后端私有当前轮显示快照：后台 root 输出持续归并、独立实例/revision 和有界行数/字节；实时事件与快照共用稳定消息身份，不伪造 SDK 时间戳/持久 ID；字段级截断、最终空消息权威、静态安全预览及子代理批次名称/状态/有界摘要（明确预算裁剪，任务参数只保留名字）；选回时随 SessionInfo 恢复，不重放请求或计费 |
 | src/main/agent/session-list-cache.ts | exact cwd 的轻量会话列表缓存、在途扫描合并及并发界限；落盘软失效避免持续输出饿死扫描，显式变更硬失效防止旧行复活；不缓存 SDK 全量消息文本 |
 | src/main/agent/backend-pool.ts | 后端保留和容量管理 |
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态 |
@@ -109,10 +110,10 @@
 
 以下目录位于 `src/renderer/src/features/`：
 
-- `chat/`：ChatTimeline（含稳定的滚动占位容器，以独立 timelineReady 区分历史成功接收与空 STATE/关闭 loading，未载入或读取失败提供显式重新加载，不伪装就绪）、ChatMessage、Markdown、ToolCallItem、Composer；ChatMessage 将模型/API 错误显示为可操作的短提示，原始诊断默认折叠且历史回放不注册实时播报；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
+- `chat/`：主会话 ToolCallItem 在一条真实子代理批次记录内显示数量和各索引任务的名称/状态，有界摘要独立按普通工具渐入展开，不伪造多次 SDK 调用；ChatTimeline（含稳定的滚动占位容器，以独立 timelineReady 区分历史成功接收与空 STATE/关闭 loading，未载入或读取失败提供显式重新加载，不伪装就绪）、ChatMessage、Markdown、ToolCallItem、Composer；ChatMessage 将模型/API 错误显示为可操作的短提示，原始诊断默认折叠且历史回放不注册实时播报；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
 - `chat/ToolCallItem.tsx`：按需工具详情；生图分别展示请求型号/实际版本未知、请求操作/size/quality/引用数、输出 PNG 原图保存尺寸与缩略图上限，不把请求尺寸或质量当实际输出承诺，不补造旧历史设置，也不展示输入原图或引用路径数组。
 - `chat/ToolResultImages.tsx`：ToolCallItem 的有界静态 PNG/JPEG 输出结果预览；按详情展开/收起挂载和释放，以工具 ID/内容位置维持图片身份，固定框显示加载/失败状态；不读取原图/提供商 URL，不参与字符渐入，加载事件不滚动消息区。
-- `hooks/useSubagentSessions.ts`、`agent/subagentTimeline.ts`、`styles/subagent-sessions.css`：父行下可独立折叠的临时子会话列表（默认展开、显示数量、刷新保留原生收起状态）、选择及采集/投影隔离、真实 IPC 单槽、可见性门和页面半小时过期；App 直接复用普通 ChatTimeline/ChatMessage/ToolCallItem 的安全只读呈现与独立滚动，无额外查看面板/返回按钮，父 DOM/草稿/阅读位置保留、父控制隐藏且 inert。
+- `hooks/useSubagentSessions.ts`、`agent/subagentTimeline.ts`、`styles/subagent-sessions.css`：父行下可独立折叠的临时子会话列表（默认展开、显示数量、刷新保留原生收起状态）、选择及采集/投影隔离、真实 IPC 单槽、可见性门和页面半小时过期；App 直接复用普通 ChatTimeline/ChatMessage/ToolCallItem 的安全只读呈现与独立滚动，无额外查看面板/返回按钮，子工具连续行紧凑排列且空工具调用助手正文不制造空泡泡，真实文字/思考间距及工具点击区域保持；父 DOM/草稿/阅读位置保留、父控制隐藏且 inert。
 - `session/`：HistoryNavigator 跳转条、SessionList 会话行、QueuedMessagesCard、TaskPanel、TaskHistoryPanel；`TaskPanel` 全部完成后隐藏但混合计划保留完成行；`ComposerSupportPanels.tsx` 共用状态判定，保持任务/排队面板的网格槽位及相邻草稿身份稳定。
 - `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；分支操作菜单与删除路径确认、禁用/错误/在途门，保留重命名；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
 - `operations/`：RunMetricsStrip、权限确认、验证、运行恢复和工作流面板。RunMetricsStrip 保留在会话顶部，详情在统计条下方同宽悬浮展开，不占消息区高度；任务/排队面板仍在输入框上方。
@@ -153,7 +154,8 @@
 - `tests/unit/mcp-status-bridge.test.ts`：私有通知在正文/计费/普通 UI 前消费、cache getter 不调用 SDK/创建后端、owner/目标/backend/client/SDK-runtime fence、单调过期与墙上时钟回拨、白名单复制，以及 preload 专用请求/推送订阅。
 - `tests/renderer/McpStatusPage.test.tsx`：状态/曝光/数量和安全文案、缓存读取与 push 优先、A→B→A generation/后端替换、关闭/隐藏/切 tab、实际 IPC 槽至收口、挂起读取下独立过期和同缓存不续期；不启动 Electron/SDK/服务器。
 - `tests/unit/session-list-cache.test.ts`：列表在途去重、并发/容量、软/硬失效、持续输出和迟到扫描防护；`worktree-session-isolation.test.ts` 补充 manager 签名复用，`agent-bridge-send-queue.test.ts` 补充状态等待期限及私有缓存回归。
-- `tests/unit/live-session-state.test.ts`：后台当前轮快照、字段级截断/预算、最终空消息及工具终态、安全图片预览与生图元数据、实例身份及序列化界限；bridge 的后台切回及迟到状态竞态覆盖于 `agent-bridge-send-queue.test.ts`。
+- `tests/unit/subagent-batches.test.ts`：批次四项/重名索引、参数/进度/新旧历史终态、有界公平摘要、非法元数据、真实 final 优先、明确裁剪下保留旧完整数据与无变化引用；ToolCallItem 回归覆盖数量/逐项状态/独立摘要/安全文字及渐入。
+- `tests/unit/live-session-state.test.ts`：子代理批次后台恢复、长参数不吞名字、字段裁剪及名称来源隔离；后台当前轮快照、字段级截断/预算、最终空消息及工具终态、安全图片预览与生图元数据、实例身份及序列化界限；bridge 的后台切回及迟到状态竞态覆盖于 `agent-bridge-send-queue.test.ts`。
 - `tests/unit/session-restore-identity.test.ts`：真实投影与独立 RPC JSON 克隆、普通消息结束后落盘且没有虚构 entry_appended，STATE/cache/disk 顺序、重复恢复/分页、助手 ID 保留与迟到结束路由、同文真实重发/相同 SDK 时钟、终态变钟后的分裂收敛、明确截断字段与缓存补齐，以及 cwd/path/backend 替换隔离。`timeline.test.ts` 补充旧误标、双侧唯一、冲突/歧义复访保护及有界最新页→中段旧页→开场的身份/顺序归并，锚点逆序或重复 key 保守回退；STATE 新增行不得打乱尚未由 older 定位的开场。
 - `tests/unit/`：后端策略、队列、运行记录、迁移和 reducer 等逻辑测试；`agent-compaction-state.test.ts` 覆盖压缩生命周期、迟到快照与会话切换重置；`compaction-context-usage.test.ts` 覆盖手动/自动压缩后的用量作废、失败保留和新响应用量更新；`model-error.test.ts` 与 `agent-error-state.test.ts` 覆盖模型/API 错误分类、实时最终消息收口、默认中止过滤、压缩失败及普通/retain-none 压缩的 wire 归并。
 - `tests/unit/session-tasks.test.ts`：缺少工具开始行仍接收任务、重复结果去重、空快照/错误区分、分页及异步恢复保护、分支祖先链和独立缓存。

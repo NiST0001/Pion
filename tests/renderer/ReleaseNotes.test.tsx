@@ -32,15 +32,12 @@ it('keeps bundled versions unique and in descending numeric order', () => {
   expect(versions).toEqual(newestFirst)
 })
 
-it('prepares 0.1.70 notes while preserving existing entries and omitting local install-only versions', () => {
+it('prepares 0.1.71 notes while preserving existing entries and omitting local install-only versions', () => {
   const versions = RELEASE_NOTES.map((release) => release.version)
-  expect(versions[0]).toBe('0.1.70')
-  expect(versions[1]).toBe('0.1.69')
-  expect(versions[2]).toBe('0.1.68')
-  expect(versions[3]).toBe('0.1.67')
+  expect(versions.slice(0, 5)).toEqual(['0.1.71', '0.1.70', '0.1.69', '0.1.68', '0.1.67'])
   // Bundled upcoming notes do not assert that an official release was published.
   // Keep every already-bundled release without fabricating local install history.
-  expect(versions.slice(3)).toEqual([
+  expect(versions.slice(4)).toEqual([
     '0.1.67', '0.1.51', '0.1.50', '0.1.49', '0.1.47', '0.1.44', '0.1.41',
     '0.1.40', '0.1.38', '0.1.37', '0.1.33', '0.1.30', '0.1.27', '0.1.26'
   ])

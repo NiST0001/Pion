@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  applyPartialToolResult,
   applyToolResult,
   assistantErrorText,
   collectToolResults,
@@ -17,6 +18,9 @@ import {
   reconcileNewerTimelineItems,
   reconcileOlderTimelineItems,
   uniqueTimelineItems,
+  toolResultMatches,
+  storeTimelineCache,
+  type TimelineCacheEntry,
   wireMessageTimestamp
 } from '../../src/renderer/src/agent/timeline'
 import type { TimelineItem, ToolItem } from '../../src/renderer/src/agent/types'
@@ -426,6 +430,55 @@ describe('already-reconciled timeline anchor ordering', () => {
     const emptyCopy = { ...emptyIdentity }
     expect(orderTimelineAroundAnchors([emptyIdentity], [emptyCopy, emptyCopy]))
       .toEqual([emptyIdentity, emptyCopy, emptyCopy])
+  })
+})
+
+describe('parent batch history/cache/page projection', () => {
+  const args = { tasks: ['a', 'same', 'same', 'd'].map((name) => ({ name, task: 'PRIVATE' })) }
+  const tool: ToolItem = { id: 'batch', name: 'pion_subagents', status: 'running', isError: false,
+    live: true, ...parseToolArgs('pion_subagents', args) }
+  const tasks = tool.subagentBatch!.tasks.map((task) => ({ ...task, status: 'completed' as const, summary: `done ${task.index}` }))
+  const final = { content: [{ type: 'text', text: 'same aggregate' }], details: { subagentBatch: { version: 1, tasks } } }
+  const call: WireEntry = { type: 'message', id: 'call-entry', parentId: null, timestamp: '2026-01-01',
+    message: { role: 'assistant', content: [{ type: 'toolCall', id: tool.id, name: tool.name, arguments: args }] } }
+  const result: WireEntry = { type: 'message', id: 'result-entry', parentId: call.id, timestamp: '2026-01-01',
+    message: { role: 'toolResult', toolCallId: tool.id, ...final } }
+
+  it('replays new and ordered legacy finals with four summaries and no raw instructions', () => {
+    const old: WireEntry = { ...result, message: { role: 'toolResult', toolCallId: tool.id,
+      details: { results: tasks.map((task) => ({ name: task.name, status: task.status, text: task.summary })) } } }
+    for (const persisted of [result, old]) {
+      const rows = entriesToTimeline([call, persisted])
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ tool: { subagentBatch: { version: 1, tasks } } })
+      expect(JSON.stringify(rows)).not.toContain('PRIVATE')
+    }
+    expect(entriesToTimeline([call])[0]).toMatchObject({ tool: { subagentBatch: tool.subagentBatch } })
+  })
+
+  it('recognizes summary/status-only changes and preserves final/cache/page mounted identities', () => {
+    const done = applyToolResult(tool, final, false, 'message')
+    expect(toolResultMatches(done, final, false)).toBe(true)
+    const changed = { ...final, details: { subagentBatch: { version: 1,
+      tasks: tasks.map((task) => ({ ...task, summary: 'different summary' })) } } }
+    expect(toolResultMatches(done, changed, false)).toBe(false)
+    expect(applyPartialToolResult(done, changed)).toBe(done)
+    const mounted: TimelineItem = { kind: 'tool', id: 4242, tool: done }
+    const page = entriesToTimeline([call, result], undefined, { existingTimeline: [mounted] })
+    expect(page[0].kind === 'tool' && page[0].tool.subagentBatch).toBe(done.subagentBatch)
+    const restored = preserveTimelineToolState([mounted], page)
+    expect(restored[0].id).toBe(mounted.id)
+    expect(restored[0].kind === 'tool' && restored[0].tool).toBe(done)
+    expect(reconcileOlderTimelineItems(restored, page).items[0]).toBe(restored[0])
+    const cache = new Map<string, TimelineCacheEntry>()
+    storeTimelineCache(cache, 'parent', { items: restored, mode: 'build', apiBefore: 0, apiAfter: 2,
+      toolResults: [], complete: true, newerComplete: true, leafId: null, total: 2 })
+    expect(cache.get('parent')!.items).toBe(restored)
+    const live: TimelineItem = { kind: 'tool', id: 4243, tool }
+    const completed = reconcileOlderTimelineItems([live], [], collectToolResults([result])).items[0]
+    expect(completed).toMatchObject({ id: live.id, tool: { subagentBatch: { tasks }, resultSource: 'history' } })
+    expect(parseToolArgs('read', args)).toEqual({})
+    expect(applyToolResult({ ...tool, name: 'read', subagentBatch: undefined }, final, false).subagentBatch).toBeUndefined()
   })
 })
 

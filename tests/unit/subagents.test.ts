@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionToolContext } from '@earendil-works/pi-codi
 import { createSubagentControl, type SubagentResult } from '../../src/main/agent/subagents'
 
 import { DEFAULT_SUBAGENT_SETTINGS, type SubagentSettings } from '../../src/shared/subagents'
+import type { SubagentBatch } from '../../src/shared/subagent-batches'
 import { createSubagentSessionPublisher, type SubagentSessionObserver, type SubagentSessionPublisher } from '../../src/main/agent/subagent-session-observer'
 
 const context = { tools: [], executeTool: vi.fn(async () => { throw new Error('Unexpected tool delegation') }) } as unknown as ExtensionToolContext
@@ -59,7 +60,8 @@ it.each(['missing', 'throwing', 'invalid-identity'])('fails explicitly before mo
   const update = vi.fn()
   const result = await h.control.tool.execute('batch', { tasks: [{ name: 'one', task: 'inspect' }] }, undefined, update, context)
   expect(run).not.toHaveBeenCalled()
-  expect(result.details).toEqual({ results: [{ name: 'one', status: 'failed', text: '临时子会话不可用，未启动子代理' }] })
+  expect(result.details).toEqual({ results: [{ name: 'one', status: 'failed', text: '临时子会话不可用，未启动子代理' }],
+    subagentBatch: { version: 1, tasks: [{ index: 0, name: 'one', status: 'failed', summary: '临时子会话不可用，未启动子代理', summaryTruncated: false }] } })
   expect(update.mock.calls.some(([value]) => value.content[0].text.includes('临时子会话不可用，未启动子代理'))).toBe(true)
   expect(result.usage?.totalTokens).toBe(0)
 })
@@ -279,6 +281,112 @@ it('starts a full four-child batch before any child finishes', async () => {
   releases.reverse().forEach((release) => release())
   const result = await pending
   expect((result.details as { results: SubagentResult[] }).results.map((r) => r.name)).toEqual(['a', 'b', 'c', 'd'])
+})
+
+it('publishes four indexed child snapshots around ACK and out-of-order settlement without changing parent contracts', async () => {
+  let acknowledge!: (value: boolean) => void
+  const observer = { event: vi.fn(), running: vi.fn(), cancelling: vi.fn(), finish: vi.fn() }
+  const publisher = { reserve: vi.fn(() => new Promise<boolean>((resolve) => { acknowledge = resolve })),
+    begin: vi.fn(() => observer), halt: vi.fn() }
+  const releases: Array<(result: SubagentResult) => void> = []
+  const callbacks: Array<(text: string) => void> = []
+  const run = vi.fn((_task: { name: string }, _signal: AbortSignal, progress: (text: string) => void) => new Promise<SubagentResult>((resolve) => {
+    callbacks.push(progress)
+    releases.push(resolve)
+  }))
+  const h = setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 4 }), publisher)
+  const tasks = ['duplicate', 'duplicate', 'third', 'fourth'].map((name) => ({ name, task: 'private delegated arguments' }))
+  const update = vi.fn()
+  const operation = h.control.tool.execute('four', { tasks }, undefined, update, context)
+  await Promise.resolve()
+  const pendingSnapshot = update.mock.calls[0][0].details.subagentBatch
+  expect(pendingSnapshot).toEqual({ version: 1, tasks: tasks.map((task, index) => ({ index, name: task.name, status: 'pending' })) })
+  expect(run).not.toHaveBeenCalled()
+  acknowledge(true)
+  await Promise.resolve()
+  expect(run).toHaveBeenCalledTimes(4)
+  const runningSnapshot = update.mock.calls.at(-1)![0].details.subagentBatch
+  expect(runningSnapshot.tasks.map((task: { status: string }) => task.status)).toEqual(Array(4).fill('running'))
+  const starts = update.mock.calls.slice(1, 5).map(([value]) => value.details.subagentBatch.tasks.map((task: { status: string }) => task.status))
+  expect(starts).toEqual([
+    ['running', 'pending', 'pending', 'pending'], ['running', 'running', 'pending', 'pending'],
+    ['running', 'running', 'running', 'pending'], ['running', 'running', 'running', 'running']
+  ])
+  const usage = { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, totalTokens: 10,
+    cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 } }
+  const texts = ['a'.repeat(2048), 'b'.repeat(2049), '', 'd'.repeat(3000)]
+  const statuses = ['completed', 'failed', 'aborted', 'completed'] as const
+  const ordered = tasks.map((task, index) => ({ name: task.name, status: statuses[index], text: texts[index], usage }))
+  releases[1](ordered[1])
+  await Promise.resolve()
+  const firstSettled = update.mock.calls.at(-1)![0]
+  expect(firstSettled.details.subagentBatch.tasks.map((task: { status: string }) => task.status)).toEqual(['running', 'failed', 'running', 'running'])
+  callbacks[0]('private transient tool body')
+  releases[3](ordered[3])
+  await Promise.resolve()
+  expect(firstSettled.details.subagentBatch.tasks[3].status).toBe('running')
+  releases[2](ordered[2])
+  await Promise.resolve()
+  releases[0](ordered[0])
+  const result = await operation
+  const details = result.details as { results: SubagentResult[]; subagentBatch: SubagentBatch }
+  expect(details.results).toEqual(ordered)
+  expect(update.mock.calls.at(-1)![0].details.results).toEqual([ordered[1], ordered[3], ordered[2], ordered[0]])
+  expect(details.subagentBatch).toEqual({ version: 1, tasks: tasks.map((task, index) => ({
+    index, name: task.name, status: statuses[index], summary: texts[index].slice(0, 2048), summaryTruncated: texts[index].length > 2048
+  })) })
+  expect(result.content).toEqual([{ type: 'text', text: ordered.map((child) => `## ${child.name} [${child.status}]\n${child.text}`).join('\n\n') }])
+  expect(result.usage).toEqual({ input: 4, output: 8, cacheRead: 12, cacheWrite: 16, totalTokens: 40,
+    cost: { input: 4, output: 8, cacheRead: 12, cacheWrite: 16, total: 40 } })
+  expect(JSON.stringify(details.subagentBatch)).not.toMatch(/usage|private delegated arguments|private transient tool body/)
+  expect(pendingSnapshot.tasks.every((task: { status: string }) => task.status === 'pending')).toBe(true)
+  expect(runningSnapshot.tasks.every((task: { status: string }) => task.status === 'running')).toBe(true)
+  const snapshots = [...update.mock.calls.map(([value]) => value.details.subagentBatch), details.subagentBatch]
+  expect(new Set(snapshots).size).toBe(snapshots.length)
+  expect(new Set(snapshots.map((snapshot) => snapshot.tasks)).size).toBe(snapshots.length)
+  expect(new Set(snapshots.map((snapshot) => snapshot.tasks[0])).size).toBe(snapshots.length)
+})
+
+it('keeps running metadata and the batch slot during cancellation until runners actually settle', async () => {
+  const releases: Array<() => void> = []
+  const callbacks: Array<(text: string) => void> = []
+  const run = vi.fn((task: { name: string }, _signal: AbortSignal, progress: (text: string) => void) => new Promise<SubagentResult>((resolve) => {
+    callbacks.push(progress)
+    releases.push(() => resolve({ name: task.name, status: 'aborted', text: 'actually settled' }))
+  }))
+  const h = setup(run)
+  const update = vi.fn()
+  const controller = new AbortController()
+  const tasks = [{ name: 'same', task: 'first' }, { name: 'same', task: 'second' }]
+  const operation = h.control.tool.execute('cancel', { tasks }, controller.signal, update, context)
+  await Promise.resolve()
+  controller.abort()
+  callbacks[1]('waiting for actual cleanup')
+  expect(update.mock.calls.at(-1)![0].details.subagentBatch.tasks.map((task: { status: string }) => task.status)).toEqual(['running', 'running'])
+  await expect(h.execute()).rejects.toThrow('批次')
+  releases[1]()
+  await Promise.resolve()
+  expect(update.mock.calls.at(-1)![0].details.subagentBatch.tasks.map((task: { status: string }) => task.status)).toEqual(['running', 'aborted'])
+  releases[0]()
+  const result = await operation
+  expect((result.details as { subagentBatch: SubagentBatch }).subagentBatch.tasks.map((task) => task.status)).toEqual(['aborted', 'aborted'])
+})
+
+it('does not publish fictitious child states for validation, disabled or pre-aborted invocations', async () => {
+  const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: 'done' }))
+  const update = vi.fn()
+  const tasks = [{ name: 'one', task: 'inspect' }]
+  const invalid = setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 0 }))
+  await expect(invalid.control.tool.execute('invalid', { tasks }, undefined, update, context)).rejects.toThrow()
+  const h = setup(run)
+  await expect(h.control.tool.execute('empty', { tasks: [] }, undefined, update, context)).rejects.toThrow()
+  const controller = new AbortController()
+  controller.abort()
+  await expect(h.control.tool.execute('aborted', { tasks }, controller.signal, update, context)).rejects.toThrow('中止')
+  await h.toggle('off')
+  await expect(h.control.tool.execute('off', { tasks }, undefined, update, context)).rejects.toThrow('关闭')
+  expect(run).not.toHaveBeenCalled()
+  expect(update).not.toHaveBeenCalled()
 })
 
 it('starts siblings concurrently, preserves result order and rejects overlapping batches', async () => {

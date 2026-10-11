@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { DEFAULT_SUBAGENTS_ENABLED, DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, validateSubagentSettings, type SubagentSettings } from '../../shared/subagents'
 import { Type } from 'typebox'
 import type { SubagentSessionObserver, SubagentSessionPublisher } from './subagent-session-observer'
+import type { SubagentBatchTask } from '../../shared/subagent-batches'
 import {
   createAgentSession, DefaultResourceLoader, defineTool, SessionManager, SettingsManager,
   type AgentSession, type AgentToolResult, type ExtensionFactory, type ModelRuntime
@@ -25,6 +26,7 @@ export async function readRuntimeSubagentSettings(): Promise<SubagentSettings> {
 export interface SubagentTask { name: string; task: string }
 type Usage = NonNullable<AgentToolResult<unknown>['usage']>
 export interface SubagentResult { name: string; status: 'completed' | 'failed' | 'aborted'; text: string; usage?: Usage }
+type BatchTaskMetadata = Omit<SubagentBatchTask, 'status'> & { status: 'pending' | 'running' | SubagentResult['status'] }
 type Runner = (task: SubagentTask, signal: AbortSignal, progress: (text: string) => void, settings?: Readonly<SubagentSettings>, observer?: SubagentSessionObserver) => Promise<SubagentResult>
 const emptyUsage = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
 function addUsage(total: Usage, usage: Usage) {
@@ -125,12 +127,21 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
       signal?.addEventListener('abort', abort, { once: true })
       let timer: ReturnType<typeof setTimeout> | undefined
       const results: SubagentResult[] = []
-      const progress = (text: string) => onUpdate?.({ content: [{ type: 'text', text }], details: { results: [...results] } })
+      // Input indices, not names or completion order, identify each real child.
+      const batchTasks: BatchTaskMetadata[] = params.tasks.map((task, index) => ({ index, name: task.name, status: 'pending' }))
+      const snapshot = () => ({ version: 1 as const, tasks: batchTasks.map((task) => ({ ...task })) })
+      const progress = (text: string) => onUpdate?.({ content: [{ type: 'text', text }], details: { results: [...results], subagentBatch: snapshot() } })
+      const settled = (index: number, result: SubagentResult) => {
+        batchTasks[index] = { index, name: batchTasks[index].name, status: result.status,
+          summary: result.text.slice(0, 2048), summaryTruncated: result.text.length > 2048 }
+        results.push(result)
+      }
       try {
         const settings = Object.freeze(validateSubagentSettings(await getSettings()))
         if (!enabled || controller.signal.aborted) throw new Error('子代理调用已中止。')
         if (params.tasks.length > settings.maxParallel) throw new Error(`当前设置每批最多 ${settings.maxParallel} 个子代理，请减少任务数量。`)
         timer = setTimeout(abort, settings.timeoutMinutes * 60_000)
+        progress('等待子代理批次启动确认')
         let admitted = !publisher
         if (publisher) {
           try { admitted = await publisher.reserve(_id, params.tasks.length, controller.signal) }
@@ -138,7 +149,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
         }
         if (!enabled || controller.signal.aborted) admitted = false
         if (!admitted && publisher) progress('临时子会话准入未确认（拒绝、超时或取消），未启动此批子代理')
-        const ordered = await Promise.all(params.tasks.map(async (task) => {
+        const ordered = await Promise.all(params.tasks.map(async (task, index) => {
           let result: SubagentResult
           // Only the runtime host opts into this private display channel. Keep
           // the legacy four-argument runner call exactly unchanged otherwise.
@@ -146,7 +157,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
             if (!admitted) {
               const text = '临时子会话不可用，未启动子代理'
               result = { name: task.name, status: 'failed', text }
-              results.push(result)
+              settled(index, result)
               progress(`${task.name}：${text}`)
               return result
             }
@@ -156,7 +167,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
               if (!observer) {
                 const text = '临时子会话不可用，未启动子代理'
                 result = { name: task.name, status: 'failed', text }
-                results.push(result)
+                settled(index, result)
                 progress(`${task.name}：${text}`)
                 return result
               }
@@ -165,6 +176,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
               try { observer?.finish('aborted') } catch { /* Display-only. */ }
               throw new Error('已中止')
             }
+            batchTasks[index] = { ...batchTasks[index], status: 'running' }
             progress(`${task.name}：启动中`)
             const update = (text: string) => progress(`${task.name}：${text}`)
             result = observer ? await run(task, controller.signal, update, settings, observer)
@@ -172,7 +184,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
           } catch (error) {
             result = { name: task.name, status: controller.signal.aborted ? 'aborted' : 'failed', text: String(error).slice(0, Math.min(2000, settings.maxResultChars)) }
           }
-          results.push(result)
+          settled(index, result)
           progress(`${task.name}：${result.status}`)
           return result
         }))
@@ -180,7 +192,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
         for (const result of ordered) if (result.usage) addUsage(usage, result.usage)
         return {
           content: [{ type: 'text' as const, text: ordered.map((result) => `## ${result.name} [${result.status}]\n${result.text}`).join('\n\n') }],
-          details: { results: ordered }, usage
+          details: { results: ordered, subagentBatch: snapshot() }, usage
         }
       } finally {
         clearTimeout(timer)

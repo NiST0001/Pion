@@ -8,10 +8,12 @@ import type {
   WireEventInput,
   WireMessage
 } from '../../../shared/types'
-import { messageImages, messageText, messageThinking } from '../../../shared/types'
+import { messageImages, messageText, messageThinking, messageToolCalls } from '../../../shared/types'
+import { subagentBatchesEqual, type SubagentBatch } from '../../../shared/subagent-batches'
 import { taskSnapshotFromEntry, taskSnapshotFromResult } from '../../../shared/task-history'
 import { orderSessions, reorderSessionsByPaths } from './sessionOrder'
 import {
+  applyPartialToolResult,
   applyToolResult,
   assistantErrorText,
   collectToolResults,
@@ -282,12 +284,24 @@ export function reducer(state: AgentState, action: Action): AgentState {
           if (fields.has('thinking') && item.thinking.length > replacement.thinking.length) replacement.thinking = item.thinking
           if (fields.has('error') && (item.error?.length ?? 0) > (replacement.error?.length ?? 0)) replacement.error = item.error
         }
+        if (replacement.kind === 'tool' && item.kind === 'tool' && fields.has('subagentBatch')
+          && current.kind === 'tool' && current.tool.name === 'pion_subagents' && item.tool.name === current.tool.name
+          && (!action.cachedBackendId || action.cachedBackendId === state.liveSessionBackendId)) {
+          replacement.tool = { ...replacement.tool, subagentBatch: supplementBatch(replacement.tool.subagentBatch,
+            item.tool.subagentBatch, cachedSnapshotPayload(state, current)) }
+        }
         if (replacement.kind === 'user' && item.kind === 'user' && fields.has('text') && item.text.length > replacement.text.length) replacement.text = item.text
         return replacement
       }) : action.items
       const merged = preserve ? preserveTimelineToolState(state.timeline, incoming,
         state.status.phase !== 'stopped' && state.status.phase !== 'error'
-      ) : incoming
+      ).map((row) => {
+        if (!action.replayHistory || row.kind !== 'tool' || row.tool.name !== 'pion_subagents') return row
+        const filled = incoming.find((item) => item.kind === 'tool' && item.tool.id === row.tool.id)
+        if (filled?.kind !== 'tool' || !cachedSnapshotFields(state, row).has('subagentBatch')
+          || subagentBatchesEqual(row.tool.subagentBatch, filled.tool.subagentBatch)) return row
+        return { ...row, tool: { ...row.tool, subagentBatch: filled.tool.subagentBatch } }
+      }) : incoming
       // Only the explicit selection cache restore overrides retained reveal
       // flags. Ordinary revalidation/paging must not replay mounted history.
       const timeline = action.replayHistory ? merged.map((item) => {
@@ -487,15 +501,35 @@ function readSnapshotFields(payload: unknown): Set<string> {
   const value = payload && typeof payload === 'object'
     ? (payload as Record<string, unknown>)._pionLiveTruncatedFields : undefined
   return new Set(Array.isArray(value) ? value.filter((field) =>
-    typeof field === 'string' && ['text', 'thinking', 'error', 'diff', 'outputText'].includes(field)) : [])
+    typeof field === 'string' && ['text', 'thinking', 'error', 'diff', 'outputText', 'subagentBatch'].includes(field)) : [])
 }
 
 /** Only the exact accepted snapshot may explain why its current row is short. */
 function cachedSnapshotFields(state: AgentState, row: TimelineItem): Set<string> {
+  return readSnapshotFields(cachedSnapshotPayload(state, row))
+}
+
+function cachedSnapshotPayload(state: AgentState, row: TimelineItem): unknown {
   const live = state.session?.liveState
   if (!live || live.backendId !== state.liveSessionBackendId || live.revision !== state.liveSessionRevision
     || live.cwd !== state.status.cwd || live.sessionPath !== state.liveSessionOwnerPath
-    || (row.kind !== 'user' && row.kind !== 'assistant')) return new Set()
+    || (row.kind !== 'user' && row.kind !== 'assistant' && row.kind !== 'tool')) return undefined
+  if (row.kind === 'tool') {
+    let payload: unknown
+    let messageFinal = false
+    let executionFinal = false
+    for (const input of live.events) {
+      const event = input as WireEvent
+      if (event.type === 'message_end' && event.message.role === 'toolResult' && event.message.toolCallId === row.tool.id) {
+        payload = event.message; messageFinal = true
+      } else if (!messageFinal && !executionFinal && (event.type === 'tool_execution_end' || event.type === 'tool_execution_update')
+        && event.toolCallId === row.tool.id) {
+        payload = event.type === 'tool_execution_end' ? event.result : event.partialResult
+        executionFinal = event.type === 'tool_execution_end'
+      }
+    }
+    return payload
+  }
   const messages = live.events.flatMap((input) => {
     const event = input as WireEvent
     if (event.type !== 'message_start' && event.type !== 'message_end') return []
@@ -505,8 +539,28 @@ function cachedSnapshotFields(state: AgentState, row: TimelineItem): Set<string>
       : !identity.liveMessageId && row.messageTimestamp !== undefined && wireMessageTimestamp(event.message) === row.messageTimestamp
     return matches ? [{ type: event.type, message: event.message }] : []
   })
-  if (messages.filter((event) => event.type === 'message_start').length !== 1) return new Set()
-  return readSnapshotFields(messages.at(-1)?.message)
+  if (messages.filter((event) => event.type === 'message_start').length !== 1) return undefined
+  return messages.at(-1)?.message
+}
+
+/** Explicit budget loss can fill summaries, not override fresh child status/identity. */
+function supplementBatch(next: SubagentBatch | undefined, previous: SubagentBatch | undefined, payload: unknown): SubagentBatch | undefined {
+  if (!next || !previous || next.tasks.length !== previous.tasks.length
+    || !next.tasks.every((task, i) => task.index === previous.tasks[i].index && task.name === previous.tasks[i].name)) return next
+  const details = (payload as { details?: { subagentBatch?: unknown } } | undefined)?.details
+  const omitted = details?.subagentBatch === undefined
+  const tasks = next.tasks.map((task, i) => {
+    const old = previous.tasks[i]
+    // An omitted final cannot keep an old pending/running child alive.
+    if (omitted) return ['completed', 'failed', 'aborted'].includes(old.status) && task.status === 'unknown' ? old : task
+    if (task.summaryTruncated && (old.summary?.length ?? 0) > (task.summary?.length ?? 0)) {
+      const { summaryTruncated: _cropped, ...fresh } = task
+      return { ...fresh, summary: old.summary, ...(old.summaryTruncated !== undefined ? { summaryTruncated: old.summaryTruncated } : {}) }
+    }
+    return task
+  })
+  const result: SubagentBatch = { version: 1, tasks }
+  return subagentBatchesEqual(previous, result) ? previous : subagentBatchesEqual(next, result) ? next : result
 }
 
 function sameStrongMessageIdentity(a: TimelineItem, b: TimelineItem): boolean {
@@ -547,6 +601,7 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
   let replay = { ...state, timeline: [] as TimelineItem[] }
   const tombstones: { item: TimelineItem; fields: Set<string> }[] = []
   const truncatedFields = new Map<number, Set<string>>()
+  const batchPayloads = new Map<number, unknown>()
   const readFields = readSnapshotFields
   const currentTools = new Map(state.timeline.flatMap((row) => row.kind === 'tool' ? [[row.tool.id, row] as const] : []))
   const finalTools = new Map<string, { payload: ToolResultPayload; isError: boolean }>()
@@ -579,18 +634,25 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
         ? replay.timeline.find((row) => row.kind === 'tool' && row.tool.id === wire.toolCallId)
       : wire.type === 'message_end' || wire.type === 'message_update'
         ? before.filter((row) => row.kind === 'assistant' && row.streaming).at(-1) : undefined
-    if (target && payload) {
+    const lateToolProgress = target?.kind === 'tool' && target.tool.resultReceived
+      && (wire.type === 'tool_execution_update'
+        || (wire.type === 'tool_execution_end' && ['message', 'history'].includes(target.tool.resultSource ?? '')))
+    if (target && payload && !lateToolProgress) {
+      if (target.kind === 'tool') batchPayloads.set(target.id, payload)
       if (wire.type === 'message_update') {
         const previous = truncatedFields.get(target.id) ?? new Set<string>()
         for (const field of fields) previous.add(field)
         truncatedFields.set(target.id, previous)
       } else truncatedFields.set(target.id, fields)
     }
-    if (event.type === 'tool_execution_start') {
+    const startedCalls = wire.type === 'tool_execution_start' ? [wire.toolCallId]
+      : wire.type === 'message_end' && wire.message.role === 'assistant'
+        ? messageToolCalls(wire.message).filter((call) => call.name === 'pion_subagents').map((call) => call.id) : []
+    if (startedCalls.length > 0) {
       // Seed an identical final before replaying it, preserving the validated
       // preview objects rather than decoding the same image a second time.
       replay.timeline = replay.timeline.map((row) => {
-        if (row.kind !== 'tool' || row.tool.id !== event.toolCallId) return row
+        if (row.kind !== 'tool' || !startedCalls.includes(row.tool.id)) return row
         const current = currentTools.get(row.tool.id)
         const final = finalTools.get(row.tool.id)
         const payload = final?.payload
@@ -699,12 +761,31 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
         todos: replacement.tool.todos ?? current.tool.todos,
         imageModelInfo: replacement.tool.imageModelInfo ?? current.tool.imageModelInfo,
         imageSettingsInfo: replacement.tool.imageSettingsInfo ?? current.tool.imageSettingsInfo }
+      if (current.tool.name === 'pion_subagents' && replacement.tool.name === current.tool.name
+        && state.liveSessionBackendId === live.backendId && fields.has('subagentBatch')) {
+        replacement.tool.subagentBatch = supplementBatch(replacement.tool.subagentBatch,
+          current.tool.subagentBatch, batchPayloads.get(item.id))
+      }
+      if (current.tool.name === 'pion_subagents'
+        && subagentBatchesEqual(replacement.tool.subagentBatch, current.tool.subagentBatch)) {
+        replacement.tool.subagentBatch = current.tool.subagentBatch
+      }
+      // A retained final outranks an older/partial display replay too.
+      if (current.tool.name === 'pion_subagents' && state.liveSessionBackendId === live.backendId && current.tool.resultReceived
+        && (current.tool.resultSource === 'message' || current.tool.resultSource === 'history')
+        && replacement.tool.resultSource === 'execution') replacement.tool = current.tool
       for (const key of ['outputText', 'diff'] as const) {
         const previous = current.tool[key]
         if (fields.has(key) && previous !== undefined && (replacement.tool[key]?.length ?? 0) < previous.length) replacement.tool[key] = previous
       }
       for (const key of ['command', 'writeContent', 'path'] as const) {
         replacement.tool[key] ??= current.tool[key]
+      }
+      if (current.tool.name === 'pion_subagents') {
+        // Optional absent fields added by generic snapshot supplementation are
+        // not display changes; keep the exact final object on no-change replay.
+        replacement.tool = Object.fromEntries(Object.entries(replacement.tool).filter(([key, value]) =>
+          value !== undefined || key in current.tool)) as unknown as ToolItem
       }
       if (replacement.historical === current.historical && replacement.noReveal === current.noReveal
         && Object.keys({ ...current.tool, ...replacement.tool }).every((key) =>
@@ -900,6 +981,16 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
           ? { ...current, ...identity, messageTimestamp: wireMessageTimestamp(message) ?? current.messageTimestamp } : item) }
       }
       if (message?.role !== 'assistant') return state
+      // A call can arrive in the authoritative assistant message before its
+      // execution event (or without that event in a full display replay).
+      for (const call of messageToolCalls(message)) {
+        if (call.name !== 'pion_subagents'
+          || typeof (call as unknown as Record<string, unknown>).parentToolCallId === 'string'
+          || state.timeline.some((row) => row.kind === 'tool' && row.tool.id === call.id)) continue
+        state = { ...state, timeline: [...state.timeline, { kind: 'tool', id: nextTimelineId(),
+          tool: { id: call.id, name: call.name, status: 'running', isError: false, live: true,
+            ...parseToolArgs(call.name, call.arguments) } }] }
+      }
       const identity = liveMessageIdentity(message)
       const timestamp = wireMessageTimestamp(message)
       const target = identity.liveMessageId || identity.entryId
@@ -1019,10 +1110,12 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
       let changed = false
       const timeline = state.timeline.map((item) => {
         if (item.kind !== 'tool' || item.tool.id !== event.toolCallId || item.tool.status !== 'running') return item
+        // No image decoding or task/usage recovery in this streaming path.
+        const tool = item.tool.name === 'pion_subagents' ? applyPartialToolResult(item.tool, event.partialResult)
+          : { ...item.tool, outputText: truncate(resultText(event.partialResult as ToolResultPayload), 2000) }
+        if (tool === item.tool) return item
         changed = true
-        // Partial updates are text-only. Image validation/decoding belongs to
-        // the shared final-result projection, not the streaming hot path.
-        return { ...item, tool: { ...item.tool, outputText: truncate(resultText(event.partialResult as ToolResultPayload), 2000) } }
+        return { ...item, tool }
       })
       return changed ? { ...state, timeline } : state
     }

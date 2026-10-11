@@ -22,6 +22,7 @@ import type {
   WireEntry,
   WireEventInput
 } from '../../../shared/types'
+import type { SubagentBatch } from '../../../shared/subagent-batches'
 import type { ToolResultImage } from '../../../shared/tool-images'
 import type { GeneratedImageModelInfo, GeneratedImageSettingsInfo } from '../../../shared/image-generation'
 
@@ -57,6 +58,8 @@ export interface ToolItem {
   resultSource?: 'execution' | 'message' | 'history'
   /** Set by live tool events; absent on history replay and paged entries. */
   live?: boolean
+  /** Bounded child names/statuses only; never the temporary child transcript. */
+  subagentBatch?: SubagentBatch
   /** Pion 原生任务或旧 todo 工具结果中的完整任务快照 */
   todos?: AgentTodo[]
 }

@@ -11,6 +11,7 @@ import type {
   WireMessage
 } from '../../../shared/types'
 import { messageImages, messageText, messageThinking, messageToolCalls, messageTimestamp } from '../../../shared/types'
+import { plannedSubagentBatch, projectSubagentBatchResult, subagentBatchesEqual } from '../../../shared/subagent-batches'
 import { collectToolImages } from '../../../shared/tool-images'
 import {
   CODEX_IMAGE_REQUEST_ALIAS,
@@ -61,6 +62,10 @@ export function stableTimelineId(seed: string): number {
 export function parseToolArgs(name: string, args: unknown): Partial<ToolItem> {
   const a = (args ?? {}) as Record<string, unknown>
   const out: Partial<ToolItem> = {}
+  if (name === 'pion_subagents') {
+    const subagentBatch = plannedSubagentBatch(args)
+    return subagentBatch ? { subagentBatch } : {}
+  }
   if (name === IMAGE_GENERATION_TOOL_NAME) {
     out.imageModelInfo = generatedImageModelInfo({
       version: 2, provider: 'openai-codex',
@@ -132,6 +137,8 @@ export function toolResultMatches(tool: ToolItem, result: unknown, isError: bool
     || tool.isError !== isError || isTaskToolName(tool.name)) return false
   const payload = (result ?? {}) as ToolResultPayload
   if (tool.outputText !== resultText(payload)) return false
+  if (tool.name === 'pion_subagents' && !subagentBatchesEqual(tool.subagentBatch,
+    projectSubagentBatchResult(payload.details, tool.subagentBatch, true))) return false
   const diff = typeof payload.details?.diff === 'string' ? payload.details.diff : undefined
   if (diff !== tool.diff) return false
   const generated = payload.details?.imageGeneration
@@ -156,6 +163,17 @@ export function toolResultMatches(tool: ToolItem, result: unknown, isError: bool
   return toolResultPreviewsMatch(tool, payload.content)
 }
 
+/** Streaming text plus bounded batch state; finals are never rewound. */
+export function applyPartialToolResult(tool: ToolItem, result: unknown): ToolItem {
+  if (tool.resultReceived || tool.status !== 'running') return tool
+  const payload = (result ?? {}) as ToolResultPayload
+  const outputText = truncate(resultText(payload), 2000)
+  const subagentBatch = tool.name === 'pion_subagents'
+    ? projectSubagentBatchResult(payload.details, tool.subagentBatch, false) : tool.subagentBatch
+  if (outputText === tool.outputText && subagentBatch === tool.subagentBatch) return tool
+  return { ...tool, outputText, ...(tool.name === 'pion_subagents' ? { subagentBatch } : {}) }
+}
+
 export function applyToolResult(
   tool: ToolItem, result: unknown, isError: boolean,
   resultSource: NonNullable<ToolItem['resultSource']> = 'execution',
@@ -178,6 +196,11 @@ export function applyToolResult(
     resultSource
   }
   const details = payload.details
+  if (tool.name === 'pion_subagents') {
+    const projected = projectSubagentBatchResult(details, tool.subagentBatch, true)
+    next.subagentBatch = subagentBatchesEqual(projected, previewsFrom.subagentBatch)
+      ? previewsFrom.subagentBatch : projected
+  }
   const generated = details?.imageGeneration
   if (tool.name === IMAGE_GENERATION_TOOL_NAME) {
     // Result-owned metadata replaces any argument preview. Path-only/invalid
