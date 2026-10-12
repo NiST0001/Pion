@@ -82,7 +82,9 @@ test('boots the Electron shell with an immediately editable composer', async ({}
     })).toBe(true)
     await expect(page.locator('.workflow-panel')).toHaveCount(0)
     await expect(page.locator('.verification-panel')).toHaveCount(0)
-    const metrics = page.locator('.conversation-shell > .run-metrics-strip')
+    const metrics = page.locator('.conversation-shell > .parent-conversation-chrome > .run-metrics-strip')
+    await expect(metrics).toHaveCount(1)
+    await expect(metrics).toBeVisible()
     await expect(metrics).toContainText('23k tokens')
     // Billing is opt-in. Keep the default-hidden behavior covered instead of
     // assuming the older always-visible cost summary.

@@ -247,7 +247,7 @@
 - `tests/unit/worktree-session-isolation.test.ts`：按 SDK 会话真实 header cwd 隔离工作树，拒绝目录编码碰撞及未知归属，不迁移会话文件。
 - `tests/unit/session-sidebar-sync.test.ts`：新会话首次落盘后的项目列表推送；`optimistic-session.test.ts` 覆盖占位替换和跨项目列表隔离。
   - `historyReveal.test.tsx`、`screenTextReveal.test.tsx`：渐入行为。
-- `tests/e2e/app.spec.ts`：Electron 启动、侧栏设置/插件商店悬浮栏及列表底部避让、统计计费开关、统计按压不缩放、统计条/输入框覆盖完整消息视口、多行输入与详情展开不改变视口尺寸、详情同宽、插件卸载及 Git 审查提交场景。
+- `tests/e2e/app.spec.ts`：Electron 启动、侧栏设置/插件商店悬浮栏及列表底部避让、父会话控制层内唯一可见统计条、统计计费开关、统计按压不缩放、统计条/输入框覆盖完整消息视口、多行输入与详情展开不改变视口尺寸、详情同宽、插件卸载及 Git 审查提交场景。
 - `tests/e2e/session-scroll.spec.ts`：独立临时项目和会话，在真实 Electron DOM 中反复长/短会话切换、注入加载期间的延迟 scroll，检查后端就绪前后不存在残留空白滚动范围；不使用现有用户会话。
 - `tests/test-files.ts`：普通测试与覆盖率共用的 `TEST_FILE_PATTERNS` 和 `globSync` 自动发现；纳入嵌套 unit `.test.ts` 与 renderer `.test.ts/.test.tsx`，排除 E2E、旧覆盖率聚合入口及 helper，无需维护手工导入清单。
 - `tests/unit/test-files.test.ts`：测试发现范围、每个普通测试文件对应唯一单文件 coverage project、无自继承配置及覆盖率阈值不降低的回归。
