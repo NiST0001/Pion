@@ -894,10 +894,22 @@ describe('AgentBridge conversation-only message revert', () => {
     state.resolve(h.state)
     expect(await sending).toMatchObject({ ok: false, error: dispatchError })
     expect(h.internals.sessionOperationsInFlight).toBe(0)
-    expect(h.backend.busy).toBe(false)
-    // A rejected operation releases its reservation; it is not a permanent lock.
-    await expect(h.bridge.revertMessage(h.request, OWNER_ID)).resolves.toMatchObject({ text: h.text })
-    await finishRestart(h)
+    // The IPC reservation ends, but an invoked RPC rejection is not evidence
+    // that the backend writer stopped. Keep the unknown run, not a queued retry.
+    expect(h.backend.promptDispatch).toBeUndefined()
+    expect(h.backend.busy).toBe(true)
+    expect(h.backend.activeRunId).toEqual(expect.any(String))
+    expect(h.runStore.get(h.backend.activeRunId!)).toMatchObject({
+      state: 'interrupted', dispatchedAt: expect.any(Number),
+      prompt: { message: 'pre-dispatch prompt' }
+    })
+    expect(h.backend.pendingRunIds).toEqual([])
+    expect(h.backend.localFollowUps).toEqual([])
+    expect(h.backend.queuePause?.paused).toBe(true)
+    await expect(h.bridge.revertMessage(h.request, OWNER_ID)).rejects.toThrow('清空排队消息')
+    expect(h.client.prompt).toHaveBeenCalledTimes(1)
+    expect(h.client.stop).not.toHaveBeenCalled()
+    expect(readFileSync(h.request.sessionPath)).toEqual(before)
   })
 
   it('counts overlapping reservations until the last resolves and releases synchronous throws', async () => {

@@ -7,7 +7,7 @@
 | 路径 | 用途 |
 | --- | --- |
 | src/main/index.ts | 服务实例、Electron 窗口与应用生命周期、IPC 注册装配及尚未拆出的全局设置/验证/工作流/项目列表等路由、系统通知 |
-| src/main/ipc/agent.ts | Agent 生命周期/会话/历史/模型、权限与扩展 UI、项目信任及分支路由；显式接入同一 bridge，保留启动项目更新、子代理/消息撤销及只读 MCP 状态的主帧/owner 校验，异步会话操作通过 bridge 预留撤销互斥门控 |
+| src/main/ipc/agent.ts | editQueuedMessage按真实runId/cwd/会话取回原图片与文字，保owner/主帧校验；Agent 生命周期/会话/历史/模型、权限与扩展 UI、项目信任及分支路由；显式接入同一 bridge，保留启动项目更新、子代理/消息撤销及只读 MCP 状态的主帧/owner 校验，异步会话操作通过 bridge 预留撤销互斥门控 |
 | src/main/ipc/git.ts | Git 工作区路由注册，透传快照 ID、差异 scope、选择与冲突内容，不新建 GitService |
 | src/main/ipc/window.ts | 窗口控制、原生外观及终端路由，注入窗口查找与所属服务，保留主帧检查及 owner ID 转发 |
 | src/preload/index.ts | 暴露 window.pion 的类型化桥接 |
@@ -36,7 +36,7 @@
 
 | 路径 | 用途 |
 | --- | --- |
-| src/main/agent/agent-bridge.ts | 会话迁移区分 SDK 已分配与真实落盘，空会话显式准备目标并保原模型；持久迁移须旧 writer 真实退出、同目录暂存及 hard-link no-replace 发布，错误报告残留/部分成功，session-migration.test.ts 使用纯临时目录与模拟客户端； 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；隐式最新页跳过不可显示的元数据尾部但保持物理游标和有界条目，数字分页/定位不变；运行中状态有界等待及后端私有快照/在途缓存，历史 manager 依文件签名更新而非事件无条件重读；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；普通交互拒绝/取消不单独长期锁队列，实际tool error/超时/异常终态仍暂停、deny门独立；原生任务未完成不阻止正常收尾后派发，agent-bridge-send-queue.test.ts 覆盖RPC/完成收尾顺序与旧generation；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
+| src/main/agent/agent-bridge.ts | 会话迁移区分 SDK 已分配与真实落盘，空会话显式准备目标并保原模型；持久迁移须旧 writer 真实退出、同目录暂存及 hard-link no-replace 发布，错误报告残留/部分成功，session-migration.test.ts 使用纯临时目录与模拟客户端； 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；隐式最新页跳过不可显示的元数据尾部但保持物理游标和有界条目，数字分页/定位不变；运行中状态有界等待及后端私有快照/在途缓存，历史 manager 依文件签名更新而非事件无条件重读；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；所有prompt入口共用实际RPC pending槽，失败检查点/监听器收口释放槽不解除pause；手动空闲新消息绑定pause revision并正常全收口后恢复，不以Tab/自动/单项发送授予恢复，新错误或迟到owner不清新pause；backend-events拒含工具调用尾部充当正常final。普通交互拒绝/取消不单独长期锁队列，实际tool error/超时/异常终态仍暂停、deny门独立；原生任务未完成不阻止正常收尾后派发，agent-bridge-send-queue.test.ts 覆盖RPC/完成收尾顺序与旧generation；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
 | src/main/agent/message-revert.ts | 独占写入者前提下校验完整会话与所选用户消息，用 SDK 回到实际 parent 并追加持久分支标记；保留旧树，恢复文字及图片，不操作项目文件；兼容独立 usage、context_edit 与 retain-none 压缩记录 |
 | src/main/agent/stop-for-history.ts | 捕获 SDK 子进程并等待真实退出；超时/适配不兼容拒绝历史写入，不把 RpcClient.stop 提前返回当作退出证明 |
 | src/main/agent/live-session-state.ts | 后端私有当前轮显示快照：后台 root 输出持续归并、独立实例/revision 和有界行数/字节；实时事件与快照共用稳定消息身份，不伪造 SDK 时间戳/持久 ID；字段级截断、最终空消息权威、静态安全预览及子代理批次名称/状态/有界摘要（明确预算裁剪，任务参数只保留名字）；选回时随 SessionInfo 恢复，不重放请求或计费 |
@@ -44,7 +44,7 @@
 | src/main/agent/session-list-cache.ts | exact cwd 的轻量会话列表缓存、在途扫描合并及并发界限；落盘软失效避免持续输出饿死扫描，显式变更硬失效防止旧行复活；不缓存 SDK 全量消息文本 |
 | src/main/agent/backend-pool.ts | 后端保留和容量管理 |
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态 |
-| src/main/agent/queue-projection.ts | 本地队列与原生队列投影 |
+| src/main/agent/queue-projection.ts | 本地/原生队列与原始本地runId同位置投影，native缺身份项不可编辑；tests/renderer/queue-projection.test.tsx 联查STATE/reducer身份回填，不解析文本图片 |
 | src/main/agent/task-planning.ts | 原生任务工具与扩展；未完成目标跨消息延续，全部完成快照持久归档并可读，之后 create 建立新目标身份/编号；同目标先重开旧任务再追加，显式 clear 重置当前计划；分支完整快照提交失败回滚内存，嵌套可恢复，保留单一进行中约束 |
 | src/main/agent/wire.ts | SDK 条目映射、所选分支祖先链与模式推导、沿当前叶节点恢复最新任务快照；保留压缩边界及 token 数供实时/历史归并 |
 | src/main/agent-runtime.ts、src/main/agent/runtime-host.ts、src/main/agent/runtime-lifecycle.ts | 编译后的 SDK RPC 子进程入口、私有启动参数、项目隔离/信任与会话替换时重建内置工具；启动失败/返回先等待 owner 清理再退出；生图工具捕获所属 backend 的 SDK ModelRuntime，执行获准后才解析 Codex OAuth/刷新 |
@@ -96,6 +96,8 @@
 | src/renderer/src/features/project/SessionListControls.tsx、styles/session-list-controls.css | 项目标题筛选/排序按钮与有界自绘菜单；纯受控显示偏好、键盘焦点/portal清理；SessionListControls.test.tsx及Sidebar.test.tsx覆盖独立交互与集成 |
 | src/renderer/src/hooks/useAgent.ts | Agent hooks 汇总、启动及模型刷新；目录按 API/selection generation/cwd/path/session/backend 隔离，模型/思考/命令独立有界发布，不无限重试；迁移已准备的空会话只接管选择与目录、不读取未落盘历史，modelRefreshScope.test.tsx 覆盖迟到/挂起/选择回填 |
 | src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换/撤销、跳转窗口、任务恢复、事件驱动的索引/叶节点更新；首次实时会话建立逻辑归属并封存缓存，切换前同步保存未落盘输出，缓存带后端身份；缓存回访清除分页渐显抑制标记，首次后台快照显示恢复历史渐显，普通刷新/分页不重播；切换成功后并行补读所属显示快照，metadata 不冒充水合完成，runningPaths 延迟不单独否定已知后端缓存；同作用域历史替换保留实时尾部，拒绝复活已失效运行；撤销隔离旧请求与缓存，区分后端暂时无状态和真实选择；游标区分页末与会话末尾；跨项目选择同步登记目标 cwd，短期排队状态桥接 React 提交，取消恢复旧目录/作用域；历史读取等待有界、按 loadId/选择/scope 收口，所有清空入口同步登记作用域，过期后不追加请求，失败空壳不伪装成功缓存，空实时投影不冒充磁盘空历史、空缓存不隐藏加载及失败；显式重新加载仅重读所属历史 |
+| src/renderer/src/hooks/useQueuedMessageEdit.ts | 排队原始文字/图片取回的空草稿门、输入冻结、逻辑owner/generation/origin/真实runId隔离、受限内存保留与显式重试/放弃；queuedMessageEdit.test.tsx 覆盖取回后拒绝及迟到不覆盖，不重发旧项 |
+| src/renderer/src/styles/queue-edit.css | 排队取回/恢复提示与显式确认入口的主题/键盘/forced-colors样式 |
 | src/renderer/src/hooks/useMessageRevert.ts | 撤销确认、空草稿/附件读取门控、一次性文字/图片恢复及拒绝后的恢复重试；按逻辑选择隔离迟到结果，不持有后端或文件回滚 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步；分支/会话列表有界并发逐 cwd 发布，慢/失败项不阻挡已完成项，实时推送优先于迟到初次查询 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
@@ -116,15 +118,15 @@
 以下目录位于 `src/renderer/src/features/`：
 
 - `agent/toolActivityGroups.ts`、`chat/ToolActivityHeader.tsx`、`styles/tool-activity.css`：直接相邻工具默认一行汇总折叠；文件原始路径去重/真实调用计数/未知路径分列，非Git统计；ChatTimeline平铺稳定工具wrapper、已展开DOM保留、真实身份保组首/窗口内开闭状态，父子scope隔离及首次懒挂载；单行省略/完整tooltip、执行中和失败可见、共享行渐入不重播；平铺wrapper用grid/间距/透明度展开收起，保DOM、清理旧收起timer、减少动态效果即时，收口消除gap避免第二跳。`toolActivityGroups.test.tsx`、`ToolActivityHeader.test.tsx`、`toolActivityTimeline.test.tsx`覆盖统计边界、折叠/增量/prepend/只读/身份与样式。
-- `chat/`：Markdown 使用 layout-committed 有界活跃淡入窗口（128 批/4096 活跃字符、单回收 timer），已结束行及时释放字符节点；主会话 ToolCallItem 在一条真实子代理批次记录内显示数量和各索引任务的名称/状态，有界摘要独立按普通工具渐入展开，任务框整体接同历史行时钟等待从上往下渐显，不状态重播；行/字符线性透明度渐变与共享回收期限一致，快速增量及收口保留尚未完成的 fade/原延迟，完成前缀不重播，不伪造多次 SDK 调用；ChatTimeline（含稳定的滚动占位容器，以独立 timelineReady 区分历史成功接收与空 STATE/关闭 loading，未载入或读取失败提供显式重新加载，不伪装就绪）、ChatMessage、Markdown、ToolCallItem、Composer；ChatMessage 对首次挂载的新实时用户消息增加8px轻量发送入场并与既有透明度渐显组合，历史/只读/分页禁用、entry回填不重播、结束清理/减少动效回退；将模型/API 错误显示为可操作的短提示，原始诊断默认折叠且历史回放不注册实时播报；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件。
+- `chat/`：Markdown 使用 layout-committed 有界活跃淡入窗口（128 批/4096 活跃字符、单回收 timer），已结束行及时释放字符节点；主会话 ToolCallItem 的批次标题只开关自身子代理列表，不误开底部聚合详情；首次lazy，后续隐藏保行/摘要独立DOM状态，legacy无batch仍通用详情，ToolCallItem.test.tsx/AnimatedDisclosure.test.tsx覆盖完整收口和独立批次。其在一条真实子代理批次记录内显示数量和各索引任务的名称/状态，有界摘要独立按普通工具渐入展开，任务框整体接同历史行时钟等待从上往下渐显，不状态重播；行/字符线性透明度渐变与共享回收期限一致，快速增量及收口保留尚未完成的 fade/原延迟，完成前缀不重播，不伪造多次 SDK 调用；ChatTimeline（含稳定的滚动占位容器，以独立 timelineReady 区分历史成功接收与空 STATE/关闭 loading，未载入或读取失败提供显式重新加载，不伪装就绪）、ChatMessage、Markdown、ToolCallItem、Composer；ChatMessage 对首次挂载的新实时用户消息增加8px轻量发送入场并与既有透明度渐显组合，历史/只读/分页禁用、entry回填不重播、结束清理/减少动效回退；将模型/API 错误显示为可操作的短提示，原始诊断默认折叠且历史回放不注册实时播报；`SubagentsToggle.tsx` 是输入框内按会话隔离的子代理开关，使用与相邻控件一致的胶囊形，用实心开启色及状态文字/勾号区分悬浮，处理在途操作及失败反馈，不重建输入草稿；`composerReferences.ts` 与 `useComposerReferences.ts` 处理 @ 参考和附件，按实际图片payload顺序编号/同名独立ID，菜单与缩略图插入编号引用；程序精确span管理，正文编辑放弃改写权，非空正文删图有共享确认/旧确认revision拒绝；Composer.test.tsx、tests/unit/composerReferences.test.ts 覆盖编号/重复/删除与原文权威。
 - `chat/ToolCallItem.tsx`：按需工具详情；子代理结果有摘要时通过整条名称/状态原生按钮独立展开折叠（左侧箭头，无单独摘要按钮，无摘要静态），保父工具/同批其他项状态和既有渐显，ToolCallItem.test.tsx 覆盖名称/状态点击与Enter/Space；生图分别展示请求型号/实际版本未知、请求操作/size/quality/引用数、输出 PNG 原图保存尺寸与缩略图上限，不把请求尺寸或质量当实际输出承诺，不补造旧历史设置，也不展示输入原图或引用路径数组。
 - `chat/ToolResultImages.tsx`：ToolCallItem 的有界静态 PNG/JPEG 输出结果预览；按详情展开/收起挂载和释放，以工具 ID/内容位置维持图片身份，固定框显示加载/失败状态；不读取原图/提供商 URL，不参与字符渐入，加载事件不滚动消息区。
-- `hooks/useSubagentSessions.ts`、`agent/subagentTimeline.ts`、`styles/subagent-sessions.css`：父行下可独立折叠的临时子会话列表（默认展开、显示数量、刷新保留原生收起状态）、选择及采集/投影隔离、真实 IPC 单槽、可见性门和页面半小时过期；App 直接复用普通 ChatTimeline/ChatMessage/ToolCallItem 的安全只读呈现与独立滚动，无额外查看面板/返回按钮，子工具连续行紧凑排列且空工具调用助手正文不制造空泡泡，真实文字/思考间距及工具点击区域保持；父 DOM/草稿/阅读位置保留、父控制隐藏且 inert。
+- `hooks/useSubagentSessions.ts`、`agent/subagentTimeline.ts`、`styles/subagent-sessions.css`：父行下可独立折叠的临时子会话列表（默认展开、显示数量、刷新保留原生收起状态）、选择及采集/投影隔离、真实 IPC 单槽、可见性门和页面半小时过期；App 直接复用普通 ChatTimeline/ChatMessage/ToolCallItem 的安全只读呈现与独立滚动，无额外查看面板/返回按钮，子工具连续行紧凑排列且空工具调用助手正文不制造空泡泡，真实文字/思考间距及工具点击区域保持；父 DOM/草稿/阅读位置保留、父控制隐藏且 inert；subagent-sessions.css对父控制的aria-hidden容器及后代强制visibility:hidden，防展开排队shell覆写继承值，SubagentConversation.test.tsx检查后代computed visibility/切回同DOM展开状态（不冒称GUI验证）。
 - `utils/historyJumpAnimator.ts`：单RAF、240–480ms有界正文历史定位，实测目标/范围、scope/nonce/target有效性及取消；`historyJumpAnimator.test.tsx`和`conversationNavigation.test.tsx`覆盖双向运动/动态目标/迟到帧/手势与加载，分页/加载占位专项保减少动态效果即时路径。
-- `session/`：HistoryNavigator 跳转条（常驻高亮层240ms滑向活动entry，真实会话/可见窗口变化重置，无跨会话误滑，保轮移/hover/键盘/减少动效）、SessionList 会话行、QueuedMessagesCard（暂停时只保标题/真实未发送项，移除继续当前任务按钮，无额外失败/发送说明；未知派发保忙槽/运行恢复记录，不退回未发送队列，真实派发/启动/工具证据阻止旧queued重发；回归在agent-bridge-send-queue.test.ts）、TaskPanel、TaskHistoryPanel；`TaskPanel` 全部完成后隐藏但混合计划保留完成行；`ComposerSupportPanels.tsx` 共用状态判定，保持任务/排队面板的网格槽位及相邻草稿身份稳定。
+- `session/`：HistoryNavigator 跳转条（常驻高亮层240ms滑向活动entry，真实会话/可见窗口变化重置，无跨会话误滑，保轮移/hover/键盘/减少动效）、SessionList 会话行、QueuedMessagesCard（暂停时只保标题/真实未发送项，移除继续当前任务按钮，无额外失败/发送说明；未知派发保忙槽/运行恢复记录，不退回未发送队列，真实派发/启动/工具证据阻止旧queued重发；回归在agent-bridge-send-queue.test.ts；编辑携带真实runId与原图片回输入框、原生不可编辑、取回冻结所有条目操作，queuedMessageEdit.test.tsx 覆盖跨owner保留/恢复；确认放弃不重发）、TaskPanel、TaskHistoryPanel；`TaskPanel` 全部完成后隐藏但混合计划保留完成行；`ComposerSupportPanels.tsx` 共用状态判定，保持任务/排队面板的网格槽位及相邻草稿身份稳定。
 - `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；分支操作菜单与删除路径确认、禁用/错误/在途门，保留重命名；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
 - `operations/`：RunMetricsStrip、权限确认、验证、运行恢复和工作流面板。App 不再挂载全局 RunRecoveryBanner 或启用其 useRunRecovery 自动查询，后端中断记录/显式恢复API及pause保留；`runRecoveryBannerVisibility.test.tsx`覆盖移除全局入口的源码契约。RunMetricsStrip 保留在会话顶部，详情在统计条下方同宽悬浮展开，不占消息区高度；任务/排队面板仍在输入框上方。
-- `review/`：Git 改动列表、差异与审查界面。`ReviewPanel.tsx` 保留审查编排、提交草稿与冲突编辑；`ReviewFileTree.tsx` 管理各分组独立折叠、选中父目录展开与文件行渲染，`reviewFileTreeModel.ts` 提供纯树构建、排序、目录计数与父路径计算。文件树在状态码旁显示绿色新增/红色删减行数，直接使用快照的工作区合计（已暂存 + 未暂存，包含未跟踪文件），不额外加载 diff；缺失统计不伪造零值。ModifiedFilesCard 使用同一工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 与工具正文、用户正文和子代理摘要共用可见性观察器，按小段延迟创建动画字符，保留渐入并在结束后回收节点，实时文字仅动画新增后缀；DiffView 对长差异分页，工具内使用有界滚动区，保留全部差异的翻页访问。
+- `review/`：ModifiedFilesCard按现有Git binary证据和已知非文本后缀过滤行内列表/计数/增删，保全量审查和撤销范围；ModifiedFilesCard.test.tsx覆盖媒体/未知binary/文本候选及空卡；Git 改动列表、差异与审查界面。`ReviewPanel.tsx` 保留审查编排、提交草稿与冲突编辑；`ReviewFileTree.tsx` 管理各分组独立折叠、选中父目录展开与文件行渲染，`reviewFileTreeModel.ts` 提供纯树构建、排序、目录计数与父路径计算。文件树在状态码旁显示绿色新增/红色删减行数，直接使用快照的工作区合计（已暂存 + 未暂存，包含未跟踪文件），不额外加载 diff；缺失统计不伪造零值。ModifiedFilesCard 使用同一工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 与工具正文、用户正文和子代理摘要共用可见性观察器；工具披露门未收口时等待观察/分配首次字符，以普通透明文字保真实几何，累计更新首次完整播放、已播块只播新增后缀，保旧fade期限；非追加权威替换在门内使用最新透明正文准确测量，不保失效旧高度；按小段延迟创建动画字符，保留渐入并在结束后回收节点，实时文字仅动画新增后缀；DiffView 对长差异分页，工具内使用有界滚动区，保留全部差异的翻页访问。
 - `settings/`：设置、模型选择器与按职责拆分的页面。
   - `SettingsModal.tsx`：设置外壳、导航与操作编排，继续持有原有会话名称草稿、压缩/导出状态、诊断日志及主题保存 revision，切页不因拆分而重置宿主状态。
   - `ModelsPage.tsx`、`SessionPage.tsx`、`SecurityPage.tsx`：模型与提供商、会话行为与工具、安全信任与权限页面；新增页面通过受控 props 回调操作，不反向依赖弹窗。
@@ -137,7 +139,7 @@
 - `browser/BrowserPanel.tsx`：首开 lazy 后保持挂载的 webview 面板，地址栏/前进后退/刷新停止、标题/加载与安全错误提示，IME 及导航请求失效保护；初始空白不自动联网，隐藏不重置页面，无 Pion guest preload；显式链接请求等待 guest ready，只消费最新请求，新点击同 URL 可再导航，不在重渲染/重开时重放。
 - `browser/BrowserNavigationContext.ts`：仅宿主 renderer 的链接导航 Context；普通 Markdown HTTP(S) 链接阻止默认开窗，经 App 打开同一 BrowserPanel，非法链接/无 Provider 不退回外部窗口，只读子会话不可导航，不新增 IPC 或 guest API。
 - `common/PionSelect.tsx`、`styles/pion-select.css`：主题一致的自绘 combobox/listbox，分组、禁用、键盘/typeahead/IME，body portal 视口翻转及仅菜单滚动；菜单 Escape 不关闭设置，触发器保持焦点，保留 fieldset 禁用及 forced-colors/减少动效，设置中不使用系统原生 select。`tests/renderer/PionSelect.test.tsx` 覆盖交互、定位、作用域清理及样式契约。
-- `common/`：通用对话框、空状态和扩展 UI；`AnimatedDisclosure.tsx` 按需挂载详情，提供可反转的短收起过渡，结束后释放 DOM，兼容减少动态效果。
+- `common/`：通用对话框、空状态和扩展 UI；`AnimatedDisclosure.tsx` 按需挂载详情，提供可反转的短收起过渡，默认结束后释放DOM；retainContent用于有状态批次，首次懒挂载后隐藏保DOM/摘要状态，close立即inert，减少动效即时隐藏/快速重开清计时器。`DisclosureRevealGate.tsx`共享展开文字阶段门（200ms布局收口/减少动效即时/嵌套祖先AND/owned清理）；AnimatedDisclosure与ChatTimeline工具组接入，motion.css仅暂停门内行动画，ReviewRevealText延迟观察/字符分配，不重挂DOM或暂停字符回收时钟；AnimatedDisclosure/ReviewRevealText/ToolCallItem/toolActivityTimeline回归覆盖阶段先后。
 
 ## 样式与渐入
 
@@ -147,7 +149,7 @@
 - `styles/dock.css`、`styles/terminal.css`：模块化工作区、拖动反馈、分隔条及终端面板。
 - `styles/subagent-sessions.css`：子会话列表使用可收缩名称列与 max-content 单行状态列，面板缩窄仅省略标题；`SessionList.test.tsx` 登记样式约束回归，不把 JSDOM 断言当实机几何验证。
 - `styles/browser.css`：浏览器地址栏/工具条、主题/高对比度回退，拖动与 resize 期间临时隐藏 guest、保留实例。
-- `styles/window-effects.css`：连续工作区底色与局部磨砂；悬浮输入框/统计条、侧栏底部设置/插件商店栏、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
+- `styles/window-effects.css`：连续工作区底色与局部磨砂；悬浮输入框/统计条、侧栏底部设置/插件商店栏、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景；session-list-menu与pion-select-popup（含子代理模型portal）沿native-surface开关用58%主题背景同源局部过滤，关闭/减少透明度/高对比回退不透明，不改文字opacity与选择行为，windowEffects.test.tsx登记CSS契约。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。
 - `styles/motion.css`：通用动效、详情网格高度过渡、工具箭头旋转及减少动态效果适配。
 - `utils/screenTextReveal.tsx`、`utils/historyReveal.ts`：文字渐入调度与历史行启用；静态前缀保留为文本节点，扫描跳过已启用字符的重复几何测量。
@@ -184,7 +186,7 @@
   - `sessionRestoreIdentity.test.tsx`：实际历史 hook/订阅/reducer 及消息组件的 A→B→A 恢复；STATE/cache/有界最新页先后、长轮多批工具与 loadOlder/视口填充、跳转中窗后的 loadNewer、重复 STATE/捕获的 prepend action、新 STATE 行、后台同文重发及相同 SDK 时钟；在 older 前后核对全轮顺序、entry 回填、工具终态及 React key/已连接 DOM 保留；完成后切换与后台完成矩阵覆盖可恢复/超限缓存及真实旧游标，分别检查最终回复完整存在和无后继可显内容时的末位，区分错位与真正丢行；合成 RPC/分页/布局不替代真实 GUI 或现场 IPC 诊断。
   - `sessionTasks.test.tsx`：任务记录在历史页之外的恢复、跳转保留面板节点、请求期间实时清空、跨会话迟到结果、缓存无需重绘时恢复快照，以及复制/分叉/删除的任务作用域重置和取消保留。
   - `conversationFollow.test.tsx`：用户离开/接近/回到末尾时的新输出行为、无 scroll 事件时恢复跟随、连续手势和延迟布局；程序化定位不代表用户恢复跟随。
-  - `ChatTimeline.test.tsx`：空历史的未接收/加载/失败/成功空分支区分、显式重新加载及失败时保留已显示消息。
+  - `ChatTimeline.test.tsx`：消息区常驻竖向scroll/stable gutter的样式及加载期间容器身份契约，空历史的未接收/加载/失败/成功空分支区分、显式重新加载及失败时保留已显示消息。
   - `historyPaging.test.tsx`：无 scroll 事件的边界输入、在途去重、嵌套输出区、失败重试、旧填充请求隔离，以及跳转后连续加载多页直到真实会话末尾；区分历史追加与实时追加，覆盖最终错误与分页返回竞态、实时行身份及顺序归并；固定物理分支切片驱动 older 插入/纯迁移/仅回填，按 DOM 位移验证在途上滚、阅读锚点、补偿不连锁分页及显式跳转释放占位。
   - `conversationNavigation.test.tsx`：密集短消息定位、底部位置受限时保持明确点击目标；浮层余量变化补偿与无遮挡历史参考点；同长度替换、布局变化和索引迟到刷新活动标记，不提前选择下一轮；历史跳转、同会话替换、尺寸变化和程序化滚动不恢复跟随。
   - `conversationOverlays.test.tsx`：统计条/输入区域尺寸观测、详情展开不改变余量、条件挂载与 observer 清理、草稿节点身份保持。

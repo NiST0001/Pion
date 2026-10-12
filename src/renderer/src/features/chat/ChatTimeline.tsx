@@ -8,6 +8,7 @@ import { ModifiedFilesCard } from '../review/ModifiedFilesCard'
 import { ChatMessage } from './ChatMessage'
 import { ToolCallItem } from './ToolCallItem'
 import { ToolActivityHeader } from './ToolActivityHeader'
+import { DisclosureRevealGate } from '../common/DisclosureRevealGate'
 import { groupToolActivity, summarizeToolActivity, type ToolTimelineItem } from '../../agent/toolActivityGroups'
 import {
   assignPendingLineDelays,
@@ -77,7 +78,9 @@ function ToolActivityItem({ item, visible, readOnly }: { item: ToolTimelineItem;
   return <div className="tool-activity-item" data-open={visible}
     hidden={!visible && !present} inert={!visible} aria-hidden={!visible || undefined}>
     <div className="tool-activity-inner">
-      {(visible || mounted.current) && <ToolCallItem tool={item.tool} historical={item.historical} noReveal={item.noReveal} readOnly={readOnly} />}
+      <DisclosureRevealGate open={visible}>
+        {(visible || mounted.current) && <ToolCallItem tool={item.tool} historical={item.historical} noReveal={item.noReveal} readOnly={readOnly} />}
+      </DisclosureRevealGate>
     </div>
   </div>
 }

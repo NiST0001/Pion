@@ -1,7 +1,7 @@
 import type { ReactElement } from 'react'
 import { FileText, ImagePlus, Loader2, X } from 'lucide-react'
 import type { ImageContent } from '../../../../shared/types'
-import { referenceToken } from './composerReferences'
+import { attachmentReferenceToken, referenceToken } from './composerReferences'
 import type { ReferenceAttachment } from './composerReferences'
 
 export function ComposerAttachments({
@@ -9,12 +9,16 @@ export function ComposerAttachments({
   pendingImages,
   reading,
   error,
+  disabled,
+  onInsertToken,
   onRemove
 }: {
   references: ReferenceAttachment[]
   pendingImages: ImageContent[]
   reading: boolean
   error: string
+  disabled: boolean
+  onInsertToken: (id: string) => void
   onRemove: (id: string) => void
 }): ReactElement {
   return (
@@ -31,13 +35,22 @@ export function ComposerAttachments({
           >
             {reference.kind === 'image' ? (
               <>
-                <img
-                  src={`data:${reference.image.mimeType};base64,${reference.image.data}`}
-                  alt={`待发送图像 ${pendingImages.indexOf(reference.image) + 1}`}
-                />
-                <span className="composer-attachment-index" aria-hidden="true">
-                  {pendingImages.indexOf(reference.image) + 1}
-                </span>
+                <button
+                  type="button"
+                  className="composer-reference-trigger"
+                  style={{ width: '100%', height: '100%', padding: 0, borderRadius: 'inherit' }}
+                  disabled={disabled}
+                  title={`插入 ${attachmentReferenceToken(reference)} · ${reference.name}`}
+                  aria-label={`引用图像 ${reference.imageNumber}`}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => onInsertToken(reference.id)}
+                >
+                  <img
+                    src={`data:${reference.image.mimeType};base64,${reference.image.data}`}
+                    alt={`待发送图像 ${reference.imageNumber}`}
+                  />
+                  <span className="composer-attachment-index">图像 {reference.imageNumber}</span>
+                </button>
               </>
             ) : (
               <>
@@ -50,7 +63,7 @@ export function ComposerAttachments({
               className="composer-attachment-remove"
               title={reference.kind === 'image' ? '移除图像' : `移除 ${reference.name}`}
               aria-label={reference.kind === 'image'
-                ? `移除第 ${pendingImages.indexOf(reference.image) + 1} 张图像`
+                ? `移除第 ${reference.imageNumber} 张图像`
                 : `移除参考 ${reference.name}`}
               onClick={() => onRemove(reference.id)}
             >

@@ -1,7 +1,7 @@
 import type { ReactElement } from 'react'
 import { AtSign, FileText } from 'lucide-react'
 import type { SlashCommandInfo } from '../../../../shared/types'
-import { referenceToken } from './composerReferences'
+import { attachmentReferenceToken } from './composerReferences'
 import type { ReferenceAttachment } from './composerReferences'
 
 export function ReferenceMenu({
@@ -11,7 +11,7 @@ export function ReferenceMenu({
 }: {
   references: ReferenceAttachment[]
   onOpenPicker: () => void
-  onInsertToken: (name: string) => void
+  onInsertToken: (id: string) => void
 }): ReactElement {
   return (
     <div id="reference-menu" className="reference-menu" role="listbox" aria-label="参考文件">
@@ -32,9 +32,9 @@ export function ReferenceMenu({
           key={reference.id}
           className="reference-menu-option"
           role="option"
-          title={`插入 ${referenceToken(reference.name)}`}
+          title={`插入 ${attachmentReferenceToken(reference)} · ${reference.name}`}
           onMouseDown={(event) => event.preventDefault()}
-          onClick={() => onInsertToken(reference.name)}
+          onClick={() => onInsertToken(reference.id)}
         >
           {reference.kind === 'image' ? (
             <img
@@ -43,8 +43,8 @@ export function ReferenceMenu({
               alt=""
             />
           ) : <FileText size={13} />}
-          <span>{referenceToken(reference.name)}</span>
-          <small>已添加</small>
+          <span>{attachmentReferenceToken(reference)}</span>
+          <small>{reference.kind === 'image' ? reference.name : '已添加'}</small>
         </button>
       ))}
       <div className="reference-menu-hint">支持图像、文本和常见代码文件；文件内容会随本次消息发送。</div>

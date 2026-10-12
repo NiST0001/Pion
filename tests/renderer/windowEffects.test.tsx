@@ -56,6 +56,20 @@ it('anchors scrollable leaf frosting to the border box rather than scrolling pse
   expect(fallback).toContain('backdrop-filter: none')
 })
 
+it('frosts sort and shared-select portal dropdowns at input tint without fading text', () => {
+  const css = readFileSync('src/renderer/src/styles/window-effects.css', 'utf8')
+  const [normal, fallback] = css.split('@media (prefers-reduced-transparency')
+  const dropdown = normal.match(/html\[data-native-surface='true'\] :is\(\.session-list-menu, \.pion-select-popup\) \{([^}]+)\}/)?.[1]
+  expect(dropdown).toBeDefined()
+  expect(dropdown).toContain('color-mix(in srgb, var(--bg-elev) 58%, transparent)')
+  expect(dropdown).toContain("backdrop-filter: url('#pion-panel-frost')")
+  expect(dropdown).not.toContain('opacity:')
+  expect(dropdown).not.toContain('::before')
+  for (const name of ['session-list-menu', 'pion-select-popup']) expect(fallback).toContain(`.${name}`)
+  expect(fallback).toContain('background: var(--bg-elev)')
+  expect(fallback).toContain('backdrop-filter: none')
+})
+
 it('keeps a continuous conversation base and frosts the floating input and summary', () => {
   const css = readFileSync('src/renderer/src/styles/window-effects.css', 'utf8')
   expect(css).not.toContain('.dock-workspace > .main { background: transparent; }')

@@ -141,6 +141,11 @@ export interface BackendRecord {
   /** Last raw queue snapshot emitted by the Pi subprocess. */
   rawQueue?: { steering: string[]; followUp: string[] }
   localQueueDispatchPromise?: Promise<void>
+  /** Actual prompt RPC receipt slot, shared by direct/queued/recovery paths. */
+  promptDispatch?: { promise: Promise<unknown>; runId: string; settledGeneration?: number }
+  normalQueueSettledRunId?: string
+  /** Explicit direct-input recovery intent, never granted by automatic queues. */
+  queueRecovery?: { runId: string; pauseRevision: number; sourceRunId?: string }
   /** A local follow-up has been removed from the queue and is awaiting settle. */
   localQueueDispatching?: boolean
   /** A failed/aborted turn blocks automatic replay until the user explicitly promotes one item. */

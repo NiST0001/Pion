@@ -129,7 +129,10 @@
 
 .chat-scroll {
   flex: 1;
-  overflow-y: auto;
+  /* History window replacement can temporarily stop overflowing. Keep the
+     vertical rail and its gutter so the transcript never changes width. */
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
   padding: 22px 18px 10px;
 }
 

@@ -4,6 +4,24 @@ import { ChevronDown, ChevronUp, FileDiff, RotateCcw } from 'lucide-react'
 import type { FileChange } from '../../agent/types'
 
 const DEFAULT_VISIBLE_FILES = 3
+// Do not offer a text-diff action for media, even text-based SVG images.
+// Git's binary evidence additionally covers binary files with unknown suffixes.
+const NON_TEXT_EXTENSIONS = new Set([
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'svg', 'avif', 'heic', 'heif', 'tif', 'tiff', 'psd', 'exr', 'raw',
+  'mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v', 'mpeg', 'mpg', 'wmv', 'flv', '3gp',
+  'mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'aiff', 'opus', 'mid', 'midi',
+  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp',
+  'zip', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'tar', 'zst',
+  'exe', 'dll', 'so', 'dylib', 'bin', 'wasm', 'o', 'obj', 'a', 'lib', 'class', 'jar',
+  'woff', 'woff2', 'ttf', 'otf', 'eot', 'db', 'sqlite', 'sqlite3', 'blend', 'fbx', 'glb'
+])
+
+function canPreviewChange(change: FileChange): boolean {
+  if (change.binary) return false
+  const name = change.path.split(/[\\/]/).pop() ?? ''
+  const suffix = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : ''
+  return !NON_TEXT_EXTENSIONS.has(suffix)
+}
 
 interface ModifiedFilesCardProps {
   changes: FileChange[]
@@ -29,31 +47,32 @@ export function ModifiedFilesCard({
   onSelect
 }: ModifiedFilesCardProps): ReactElement | null {
   const [expanded, setExpanded] = useState(false)
-  const signature = changes.map((change) => `${change.path}:${change.additions}:${change.deletions}`).join('|')
+  const previewable = useMemo(() => changes.filter(canPreviewChange), [changes])
+  const signature = previewable.map((change) => `${change.path}:${change.additions}:${change.deletions}`).join('|')
 
   useEffect(() => {
     setExpanded(false)
   }, [signature])
 
-  const totals = useMemo(() => changes.reduce(
+  const totals = useMemo(() => previewable.reduce(
     (total, change) => ({
       additions: total.additions + change.additions,
       deletions: total.deletions + change.deletions
     }),
     { additions: 0, deletions: 0 }
-  ), [changes])
+  ), [previewable])
 
-  if (changes.length === 0) return null
-  const visibleChanges = expanded ? changes : changes.slice(0, DEFAULT_VISIBLE_FILES)
-  const hiddenCount = Math.max(0, changes.length - visibleChanges.length)
+  if (previewable.length === 0) return null
+  const visibleChanges = expanded ? previewable : previewable.slice(0, DEFAULT_VISIBLE_FILES)
+  const hiddenCount = Math.max(0, previewable.length - visibleChanges.length)
 
   return (
     <section className="modified-files-card" aria-label={workspace ? '工作区已修改文件' : '本轮工具记录'}>
       <header className="modified-files-head">
         <span className="modified-files-icon"><FileDiff size={15} /></span>
         <span className="modified-files-title">
-          <strong>{workspace ? '工作区已编辑' : '本轮记录'} {changes.length} 个文件</strong>
-          <span className="modified-files-total" title={workspace ? '与审查栏相同：已暂存 + 未暂存，包含未跟踪文件；非本轮独有修改' : '仅当前已加载的 edit/write 工具记录，非工作区总量'}>
+          <strong>{workspace ? '工作区已编辑' : '本轮记录'} {previewable.length} 个文件</strong>
+          <span className="modified-files-total" title={workspace ? '仅可查看文本文件：已暂存 + 未暂存，包含未跟踪文件；排除媒体/二进制，非全部工作区文件或本轮独有修改' : '仅可查看文件的当前已加载 edit/write 工具记录，排除媒体/二进制，非工作区总量'}>
             <b className="stat-add">+{totals.additions}</b>
             <b className="stat-del">−{totals.deletions}</b>
           </span>
@@ -116,7 +135,7 @@ export function ModifiedFilesCard({
         ))}
       </div>
 
-      {(hiddenCount > 0 || expanded) && changes.length > DEFAULT_VISIBLE_FILES && (
+      {(hiddenCount > 0 || expanded) && previewable.length > DEFAULT_VISIBLE_FILES && (
         <button
           type="button"
           className="modified-files-expand"

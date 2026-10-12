@@ -102,20 +102,37 @@ describe('QueuedMessagesCard', () => {
         steering={['原生插入']}
         followUp={['原生稍后', '本地稍后']}
         nativeFollowUpCount={1}
+        followUpRunIds={[null, 'local-real-id']}
         onEditItem={onEditItem}
         onRemoveItem={onRemoveItem}
       />
     )
 
     // steering 项和 Pi 原生 followUp 项不可编辑/删除，本地项两个按钮都在
-    expect(screen.getAllByRole('button', { name: /编辑第/ })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /编辑第/ })).toHaveLength(3)
+    expect(screen.getByRole('button', { name: '编辑第 1 条排队消息' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '编辑第 2 条排队消息' })).toBeDisabled()
     expect(screen.getAllByRole('button', { name: /删除第/ })).toHaveLength(1)
 
     fireEvent.click(screen.getByRole('button', { name: '编辑第 3 条排队消息' }))
-    expect(onEditItem).toHaveBeenCalledWith(expect.objectContaining({ kind: 'followUp', index: 1, text: '本地稍后' }))
+    expect(onEditItem).toHaveBeenCalledWith(expect.objectContaining({ kind: 'followUp', index: 1, text: '本地稍后', runId: 'local-real-id' }))
 
     fireEvent.click(screen.getByRole('button', { name: '删除第 3 条排队消息' }))
     expect(onRemoveItem).toHaveBeenCalledWith('followUp', 1)
+  })
+
+  it('does not guess an edit identity from local position or identical text', () => {
+    const edit = vi.fn()
+    const { rerender } = render(<QueuedMessagesCard sessionKey="same-text"
+      followUp={['same', 'same']} followUpRunIds={['first', 'second']} onEditItem={edit} />)
+    fireEvent.click(screen.getByRole('button', { name: '编辑第 2 条排队消息' }))
+    expect(edit).toHaveBeenLastCalledWith(expect.objectContaining({ runId: 'second' }))
+    rerender(<QueuedMessagesCard sessionKey="same-text" followUp={['same']}
+      followUpRunIds={['second']} onEditItem={edit} />)
+    fireEvent.click(screen.getByRole('button', { name: '编辑第 1 条排队消息' }))
+    expect(edit).toHaveBeenLastCalledWith(expect.objectContaining({ runId: 'second', index: 0 }))
+    rerender(<QueuedMessagesCard sessionKey="same-text" followUp={['same']} onEditItem={edit} />)
+    expect(screen.getByRole('button', { name: '编辑第 1 条排队消息' })).toBeDisabled()
   })
 
   it('can collapse the message list and persists the session preference', () => {

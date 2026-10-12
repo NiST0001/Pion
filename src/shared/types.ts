@@ -6,6 +6,27 @@
  * wire format into the `WireEvent` subset defined here.
  */
 
+export interface QueuedMessageEditRequest {
+  runId: string
+  cwd: string
+  sessionFile?: string
+}
+
+export interface QueuedMessageEditResult {
+  runId: string
+  text: string
+  images: ImageContent[]
+}
+
+export interface QueuedMessagesSnapshot {
+  steering: string[]
+  followUp: string[]
+  nativeFollowUpCount: number
+  /** Parallel to followUp; native or non-editable entries have null identity. */
+  followUpRunIds?: (string | null)[]
+  queuePause?: QueuePause
+}
+
 export interface QueuePause {
   paused: boolean
   revision: number
@@ -125,6 +146,7 @@ export interface SessionInfo {
   messageCount: number
   pendingMessageCount?: number
   queuePause?: QueuePause
+  queuedMessages?: QueuedMessagesSnapshot
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +209,7 @@ export type WireEvent =
   | { type: 'tool_execution_start'; toolCallId: string; parentToolCallId?: string; toolName: string; args: unknown }
   | { type: 'tool_execution_update'; toolCallId: string; parentToolCallId?: string; toolName: string; partialResult: unknown }
   | { type: 'tool_execution_end'; toolCallId: string; parentToolCallId?: string; toolName: string; result: unknown; isError: boolean }
-  | { type: 'queue_update'; steering: string[]; followUp: string[]; nativeFollowUpCount?: number; queuePause?: QueuePause }
+  | { type: 'queue_update'; steering: string[]; followUp: string[]; nativeFollowUpCount?: number; followUpRunIds?: (string | null)[]; queuePause?: QueuePause }
   | { type: 'compaction_start'; reason: string }
   | { type: 'compaction_end'; reason: string; result: unknown; aborted: boolean; willRetry: boolean; errorMessage?: string }
   | { type: 'session_info_changed'; name?: string }

@@ -108,7 +108,12 @@ export function reducer(state: AgentState, action: Action): AgentState {
       return {
         ...projected,
         session: incoming,
-        queuedMessages: { ...projected.queuedMessages, queuePause },
+        queuedMessages: { ...(!older && incoming?.queuedMessages
+          ? incoming.queuedMessages : sameSession ? projected.queuedMessages
+            : { steering: [], followUp: [], nativeFollowUpCount: 0 }), queuePause },
+        queued: !older && incoming?.queuedMessages
+          ? { steering: incoming.queuedMessages.steering.length, followUp: incoming.queuedMessages.followUp.length }
+          : sameSession ? projected.queued : { steering: 0, followUp: 0 },
         busy,
         compacting,
         liveSessionLifecycleRevision: projectable ? live.revision : state.liveSessionLifecycleRevision,
@@ -1155,7 +1160,12 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
       return {
         ...state,
         queued: { steering: steering.length, followUp: followUp.length },
-        queuedMessages: { steering, followUp, nativeFollowUpCount, queuePause }
+        queuedMessages: { steering, followUp, nativeFollowUpCount, queuePause,
+          followUpRunIds: followUp.map((_, index) => {
+            const id = event.followUpRunIds?.[index]
+            return index >= nativeFollowUpCount && followUp.length === event.followUp.length
+              && typeof id === 'string' && id.length > 0 ? id : null
+          }) }
       }
     }
 

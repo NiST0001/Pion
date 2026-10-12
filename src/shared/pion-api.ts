@@ -20,6 +20,8 @@ import type {
   ExtensionUiResponse,
   ForkMessageOption,
   ImageContent,
+  QueuedMessageEditRequest,
+  QueuedMessageEditResult,
   MessageRevertRequest,
   MessageRevertResult,
   ModelOption,
@@ -92,6 +94,8 @@ export interface PionApi {
   sendQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void>
   /** Remove a Pion-owned queued message; native Pi queue entries are rejected. */
   removeQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void>
+  /** Atomically take one genuinely unsent local prompt back into the draft. */
+  editQueuedMessage(request: QueuedMessageEditRequest): Promise<QueuedMessageEditResult>
   /** Move the active session into another project's bucket; returns the new path. */
   migrateSessionToProject(cwd: string): Promise<string | null>
   /** Abort the current run. */

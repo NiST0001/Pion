@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
+import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { initialState, type AgentState } from '../../src/renderer/src/agent/types'
@@ -119,6 +120,8 @@ function expectNoParentBackendAction(actions: ReturnType<typeof setup>['actions'
   expect(actions.start).not.toHaveBeenCalled()
   expect(actions.reloadTimeline).not.toHaveBeenCalled()
   expect(actions.send).not.toHaveBeenCalled()
+  expect(actions.queue).not.toHaveBeenCalled()
+  expect(actions.abort).not.toHaveBeenCalled()
 }
 
 describe('App readonly subagent conversation in the ordinary chat surface', () => {
@@ -143,7 +146,8 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
       projectTrust: null, toolPermissionRequests: [], extensionUiRequests: []
     }) }))
     vi.doMock('../../src/renderer/src/hooks/useMessageRevert', () => ({ useMessageRevert: () => ({
-      draftFrozen: false, canRevert: false
+      draftFrozen: false, canRevert: false,
+      onDraftAvailabilityChange: vi.fn(), onRestoreDraftConsumed: vi.fn()
     }) }))
     vi.doMock('../../src/renderer/src/hooks/useSessionModes', () => ({ useSessionModes: () => ({
       handleModeChange: vi.fn(), requestYoloMode: vi.fn()
@@ -162,7 +166,10 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     }))
     vi.doMock('../../src/renderer/src/features/operations/RunRecoveryBanner', () => ({ RunRecoveryBanner: () => null }))
     ;({ App } = await import('../../src/renderer/src/App'))
-  })
+    // The real App imports the complete renderer graph; concurrent suites can
+    // exceed the default 30s transform hook limit. Keep this bounded and local;
+    // render failures and per-test deadlines still fail normally.
+  }, 90_000)
   afterAll(() => {
     for (const module of mockModules) vi.doUnmock(module)
     vi.resetModules()
@@ -213,6 +220,7 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     thinking.open = true
     fireEvent(thinking, new Event('toggle'))
     expect(thinking).toHaveAttribute('open')
+    fireEvent.click(within(child).getByRole('button', { name: '展开工具调用（1次）' }))
     const tool = within(child).getByRole('button', { name: '展开读取工具详情' })
     fireEvent.click(tool)
     expect(child.querySelector('.tool-body .tool-output')).toHaveTextContent('读取工具的纯文字结果')
@@ -279,6 +287,7 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     const thinking = child.querySelector<HTMLDetailsElement>('details.thinking')!
     thinking.open = true
     fireEvent(thinking, new Event('toggle'))
+    fireEvent.click(within(child).getByRole('button', { name: '展开工具调用（1次）' }))
     fireEvent.click(within(child).getByRole('button', { name: '展开读取工具详情' }))
     const toolBody = child.querySelector('.tool-body')!
     expect(child.querySelector('.row-assistant')).toHaveClass('streaming-reveal')
@@ -406,6 +415,50 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     expect(screen.getByTestId('parent-history')).toBeVisible()
     expect(f.state.timeline).toBe(originalTimeline)
     expectNoParentBackendAction(f.actions)
+  })
+
+  it('hides explicitly-visible expanded queue descendants in child view without remounting or collapsing them', async () => {
+    // Ancestor-based toBeVisible alone misses CSS visibility inheritance:
+    // an expanded shell explicitly sets visible and can escape a hidden parent.
+    const styles = document.createElement('style')
+    styles.textContent = '.task-panel-list-shell { visibility: visible; }\n'
+      + readFileSync('src/renderer/src/styles/subagent-sessions.css', 'utf8')
+    document.head.append(styles)
+    try {
+      const f = setup()
+      const view = render(<App />)
+      await paint()
+      const panel = view.container.querySelector<HTMLElement>('.queue-panel')!
+      if (!panel.classList.contains('expanded')) fireEvent.click(panel.querySelector('.task-panel-head')!)
+      await paint()
+      const shell = panel.querySelector<HTMLElement>('.task-panel-list-shell')!
+      const item = panel.querySelector<HTMLElement>('.queue-item')!
+      const input = view.container.querySelector<HTMLTextAreaElement>('.composer textarea')!
+      fireEvent.change(input, { target: { value: '保留父草稿' } })
+      expect(panel).toHaveClass('expanded')
+      expect(getComputedStyle(shell).visibility).toBe('visible')
+      fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
+      await paint()
+      expect(view.container.querySelector('.queue-panel')).toBe(panel)
+      expect(view.container.querySelector('.queue-item')).toBe(item)
+      expect(panel).toHaveClass('expanded')
+      expect(panel.closest('.composer-dock')).toHaveAttribute('inert')
+      expect(getComputedStyle(shell).visibility).toBe('hidden')
+      expect(getComputedStyle(item).visibility).toBe('hidden')
+      for (const control of item.querySelectorAll('button')) {
+        expect(getComputedStyle(control).visibility).toBe('hidden')
+      }
+      fireEvent.click(row(view.container, parentPath))
+      await paint()
+      expect(view.container.querySelector('.queue-panel')).toBe(panel)
+      expect(view.container.querySelector('.queue-item')).toBe(item)
+      expect(panel).toHaveClass('expanded')
+      expect(getComputedStyle(shell).visibility).toBe('visible')
+      expect(view.container.querySelector('.composer textarea')).toBe(input)
+      expect(input).toHaveValue('保留父草稿')
+      expectNoParentBackendAction(f.actions)
+      expect(f.fallback.size).toBe(0)
+    } finally { styles.remove() }
   })
 
   it('closes child viewing before switching to another ordinary session, without starting or reloading a project', async () => {

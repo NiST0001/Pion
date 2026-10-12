@@ -10,7 +10,11 @@ import type {
 } from 'react'
 import type { ImageContent } from '../../../../shared/types'
 import {
+  attachmentReferenceToken,
   buildReferenceMessage,
+  numberImageReferences,
+  rebaseImageReferenceTokens,
+  remapImageReferenceTokens,
   createReferenceId,
   fileToImageContent,
   readReferenceFile,
@@ -18,7 +22,7 @@ import {
   referenceToken,
   removeReferenceToken
 } from './composerReferences'
-import type { ReferenceAttachment } from './composerReferences'
+import type { ImageReferenceToken, ReferenceAttachment } from './composerReferences'
 
 interface UseComposerReferencesOptions {
   valueRef: MutableRefObject<string>
@@ -30,6 +34,13 @@ interface UseComposerReferencesOptions {
 }
 
 type ComposerReference = ReferenceAttachment & { restored?: boolean }
+
+interface ImageRemovalConfirmation {
+  reference: ComposerReference
+  references: ComposerReference[]
+  text: string
+  revision: number
+}
 
 function autoSize(element: HTMLTextAreaElement): void {
   element.style.height = 'auto'
@@ -49,23 +60,57 @@ export function useComposerReferences({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const referencesRef = useRef<ComposerReference[]>([])
   const pendingReadsRef = useRef(0)
+  const imageTokensRef = useRef<ImageReferenceToken[]>([])
+  const tokenTextRef = useRef('')
+  const draftRevisionRef = useRef(0)
+  const [imageRemovalConfirmation, setImageRemovalConfirmation] = useState<ImageRemovalConfirmation | null>(null)
+  const imageRemovalRef = useRef<ImageRemovalConfirmation | null>(null)
+
+  const editReferenceText = useCallback((next: string): void => {
+    // A DOM change provides no trustworthy edit range, even for same-value
+    // replacement or repeated tokens. Never guess provenance from a text diff.
+    imageTokensRef.current = []
+    tokenTextRef.current = next
+    draftRevisionRef.current++
+  }, [])
+
+  const resetReferenceTokens = useCallback((): void => {
+    imageTokensRef.current = []
+    tokenTextRef.current = valueRef.current
+    draftRevisionRef.current++
+  }, [valueRef])
   const optionsRef = useRef({ disabled, onDraftAvailabilityChange })
   optionsRef.current = { disabled, onDraftAvailabilityChange }
 
   const replaceReferences = useCallback((references: ComposerReference[]): void => {
-    referencesRef.current = references
+    const numbered = numberImageReferences(references)
+    if (tokenTextRef.current !== valueRef.current) editReferenceText(valueRef.current)
+    const remapped = remapImageReferenceTokens(valueRef.current, imageTokensRef.current, numbered)
+    imageTokensRef.current = remapped.tokens
+    tokenTextRef.current = remapped.text
+    if (remapped.text !== valueRef.current) {
+      valueRef.current = remapped.text
+      setValue(remapped.text)
+      requestAnimationFrame(() => {
+        if (textareaRef.current) autoSize(textareaRef.current)
+      })
+    }
+    referencesRef.current = numbered
+    draftRevisionRef.current++
     optionsRef.current.onDraftAvailabilityChange(false)
-    setPendingReferences(references)
-  }, [])
+    setPendingReferences(numbered)
+  }, [editReferenceText, setValue, textareaRef, valueRef])
 
   const beginRead = useCallback((): void => {
     pendingReadsRef.current += 1
+    draftRevisionRef.current++
     optionsRef.current.onDraftAvailabilityChange(false)
     setReadingReferences(true)
   }, [])
 
   const finishRead = useCallback((): void => {
     pendingReadsRef.current -= 1
+    draftRevisionRef.current++
     setReadingReferences(pendingReadsRef.current > 0)
     optionsRef.current.onDraftAvailabilityChange(
       pendingReadsRef.current === 0 && referencesRef.current.length === 0 && valueRef.current === ''
@@ -80,6 +125,7 @@ export function useComposerReferences({
   }), [])
 
   const restoreImages = useCallback((images: ImageContent[]): void => {
+    resetReferenceTokens()
     replaceReferences(images.map((image, index) => ({
       id: createReferenceId(),
       kind: 'image',
@@ -90,7 +136,7 @@ export function useComposerReferences({
       restored: true
     })))
     setReferenceError('')
-  }, [replaceReferences])
+  }, [replaceReferences, resetReferenceTokens])
 
   const buildMessage = useCallback((text: string): string => {
     let imageIndex = 0
@@ -152,6 +198,11 @@ export function useComposerReferences({
               ? `${textReferences.map((reference) => referenceToken(reference.name)).join(' ')} `
               : ''
             const nextValue = triggerValue.slice(0, start) + replacement
+            imageTokensRef.current = rebaseImageReferenceTokens(
+              imageTokensRef.current, start, triggerValue.length, replacement.length
+            )
+            tokenTextRef.current = nextValue
+            draftRevisionRef.current++
             valueRef.current = nextValue
             optionsRef.current.onDraftAvailabilityChange(false)
             setValue(nextValue)
@@ -213,7 +264,7 @@ export function useComposerReferences({
     if (optionsRef.current.disabled) return
     const reference = referencesRef.current.find((item) => item.id === id)
     if (!reference) return
-    if (!reference.restored) {
+    if (reference.kind === 'text' && !reference.restored) {
       const nextValue = removeReferenceToken(valueRef.current, reference.name)
       if (nextValue !== valueRef.current) {
         valueRef.current = nextValue
@@ -227,10 +278,45 @@ export function useComposerReferences({
     replaceReferences(referencesRef.current.filter((item) => item.id !== id))
   }, [replaceReferences, setValue, textareaRef, valueRef])
 
+  const cancelImageRemoval = useCallback((): void => {
+    imageRemovalRef.current = null
+    setImageRemovalConfirmation(null)
+  }, [])
+
+  const requestRemoveReference = useCallback((id: string): void => {
+    if (optionsRef.current.disabled) return
+    const reference = referencesRef.current.find((item) => item.id === id)
+    if (!reference) return
+    // Historical labels and abandoned bindings cannot be inferred from prose.
+    // Confirm every image deletion with nonempty text, including whitespace.
+    if (reference.kind === 'image' && valueRef.current !== '') {
+      const confirmation = {
+        reference, references: referencesRef.current, text: valueRef.current, revision: draftRevisionRef.current
+      }
+      imageRemovalRef.current = confirmation
+      setImageRemovalConfirmation(confirmation)
+      return
+    }
+    removeReference(id)
+  }, [removeReference, valueRef])
+
+  const confirmImageRemoval = useCallback((): void => {
+    const confirmation = imageRemovalRef.current
+    cancelImageRemoval()
+    if (!confirmation || optionsRef.current.disabled || pendingReadsRef.current > 0
+      || confirmation.revision !== draftRevisionRef.current
+      || confirmation.text !== valueRef.current
+      || confirmation.references !== referencesRef.current
+      || !referencesRef.current.some((reference) => reference.id === confirmation.reference.id
+        && reference === confirmation.reference)) return
+    removeReference(confirmation.reference.id)
+  }, [cancelImageRemoval, removeReference, valueRef])
+
   const clearReferences = useCallback((): void => {
+    resetReferenceTokens()
     replaceReferences([])
     setReferenceError('')
-  }, [replaceReferences])
+  }, [replaceReferences, resetReferenceTokens])
 
   const openReferencePicker = useCallback((): void => {
     if (optionsRef.current.disabled) return
@@ -238,13 +324,25 @@ export function useComposerReferences({
     fileInputRef.current?.click()
   }, [])
 
-  const insertReferenceToken = useCallback((name: string): void => {
+  const insertReferenceToken = useCallback((id: string): void => {
     if (optionsRef.current.disabled) return
+    const reference = referencesRef.current.find((item) => item.id === id)
+    if (!reference) return
     const current = valueRef.current
+    if (tokenTextRef.current !== current) editReferenceText(current)
     const match = current.match(REFERENCE_TRIGGER_RE)
-    if (!match || match.index === undefined) return
-    const start = match.index + match[1].length
-    const nextValue = `${current.slice(0, start)}${referenceToken(name)} `
+    const start = match && match.index !== undefined ? match.index + match[1].length : current.length
+    const spacing = !match && current && !/\s$/.test(current) ? ' ' : ''
+    const prefix = current.slice(0, start) + spacing
+    const token = attachmentReferenceToken(reference)
+    const replacement = `${spacing}${token} `
+    const nextValue = current.slice(0, start) + replacement
+    imageTokensRef.current = rebaseImageReferenceTokens(imageTokensRef.current, start, current.length, replacement.length)
+    tokenTextRef.current = nextValue
+    draftRevisionRef.current++
+    if (reference.kind === 'image') {
+      imageTokensRef.current.push({ id, start: prefix.length, end: prefix.length + token.length, token })
+    }
     valueRef.current = nextValue
     optionsRef.current.onDraftAvailabilityChange(false)
     setValue(nextValue)
@@ -255,9 +353,11 @@ export function useComposerReferences({
       element.focus()
       element.setSelectionRange(nextValue.length, nextValue.length)
     })
-  }, [setValue, textareaRef, valueRef])
+  }, [editReferenceText, setValue, textareaRef, valueRef])
 
   return {
+    editReferenceText,
+    resetReferenceTokens,
     pendingReferences,
     pendingImages,
     getReferenceDraft,
@@ -270,7 +370,10 @@ export function useComposerReferences({
     handlePaste,
     handleFileInputChange,
     handleDrop,
-    removeReference,
+    removeReference: requestRemoveReference,
+    imageRemovalConfirmation,
+    confirmImageRemoval,
+    cancelImageRemoval,
     clearReferences,
     openReferencePicker,
     insertReferenceToken

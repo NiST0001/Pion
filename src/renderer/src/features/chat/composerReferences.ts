@@ -36,6 +36,8 @@ export type ReferenceAttachment =
       mimeType: string
       size: number
       image: ImageContent
+      /** Current position in the outgoing image payload, never file identity. */
+      imageNumber?: number
     }
   | {
       id: string
@@ -70,6 +72,59 @@ function isTextReferenceFile(file: File): boolean {
     || TEXT_REFERENCE_FILENAMES.has(file.name.toLocaleLowerCase())
 }
 
+export function numberImageReferences<T extends ReferenceAttachment>(references: T[]): T[] {
+  let imageNumber = 0
+  return references.map((reference) => reference.kind === 'image'
+    ? { ...reference, imageNumber: ++imageNumber }
+    : reference)
+}
+
+export function attachmentReferenceToken(reference: ReferenceAttachment): string {
+  return reference.kind === 'image' ? `@"图像 ${reference.imageNumber}"` : referenceToken(reference.name)
+}
+
+/** Only explicitly inserted spans are owned by the composer; ordinary prose is never parsed. */
+export interface ImageReferenceToken {
+  id: string
+  start: number
+  end: number
+  token: string
+}
+
+/** Only programmatic edits with an exact replacement range may move owned spans. */
+export function rebaseImageReferenceTokens(
+  tokens: ImageReferenceToken[], start: number, oldEnd: number, replacementLength: number
+): ImageReferenceToken[] {
+  const delta = replacementLength - (oldEnd - start)
+  return tokens.flatMap((binding) => {
+    if (binding.end <= start) return [binding]
+    if (binding.start >= oldEnd) return [{ ...binding, start: binding.start + delta, end: binding.end + delta }]
+    // An exact replacement overlapping a token relinquishes its ownership.
+    return []
+  })
+}
+
+export function remapImageReferenceTokens(
+  text: string, tokens: ImageReferenceToken[], references: ReferenceAttachment[]
+): { text: string; tokens: ImageReferenceToken[] } {
+  const replacements = new Map(references.filter((reference) => reference.kind === 'image')
+    .map((reference) => [reference.id, attachmentReferenceToken(reference)]))
+  let next = ''
+  let cursor = 0
+  const bindings: ImageReferenceToken[] = []
+  for (const binding of tokens) {
+    if (text.slice(binding.start, binding.end) !== binding.token) continue
+    next += text.slice(cursor, binding.start)
+    const token = replacements.get(binding.id)
+    if (token) {
+      bindings.push({ ...binding, start: next.length, end: next.length + token.length, token })
+      next += token
+    }
+    cursor = binding.end
+  }
+  return { text: next + text.slice(cursor), tokens: bindings }
+}
+
 export function referenceToken(name: string): string {
   return `@${name.replace(/\s+/g, '_')}`
 }
@@ -80,7 +135,7 @@ export function referenceToken(name: string): string {
  * words with spaces). Both half-width @ and full-width ＠ count. Latin letters
  * and digits before @ do not trigger, so email addresses stay inert.
  */
-export const REFERENCE_TRIGGER_RE = /(^|[\s\p{P}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])[@＠]([^\s]*)$/u
+export const REFERENCE_TRIGGER_RE = /(^|[\s\p{P}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}])[@＠]("[^"\n]*|[^\s]*)$/u
 
 export function removeReferenceToken(message: string, name: string): string {
   const token = referenceToken(name).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

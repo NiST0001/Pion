@@ -6,6 +6,7 @@ import { useAgent } from './hooks/useAgent'
 import { useSubagentSessions } from './hooks/useSubagentSessions'
 import { createSubagentTimelineProjector } from './agent/subagentTimeline'
 import { useMessageRevert } from './hooks/useMessageRevert'
+import { useQueuedMessageEdit } from './hooks/useQueuedMessageEdit'
 import { useRunTelemetry } from './hooks/useRunTelemetry'
 import { useVerification } from './hooks/useVerification'
 import { useAppInteractionState } from './hooks/useAppInteractionState'
@@ -44,6 +45,7 @@ import { QueuedMessagesCard } from './features/session/QueuedMessagesCard'
 import { ComposerSupportPanels } from './features/session/ComposerSupportPanels'
 import { ChatTimeline } from './features/chat/ChatTimeline'
 import { Composer } from './features/chat/Composer'
+import { ConfirmDialog } from './features/common/ConfirmDialog'
 import { SubagentsToggle } from './features/chat/SubagentsToggle'
 import { FavoriteSessions, ProjectList, SidebarToolbar } from './features/project/Sidebar'
 import { ReviewPanel } from './features/review/ReviewPanel'
@@ -365,6 +367,27 @@ export function App(): ReactElement {
           ? '请先处理或移除排队消息'
           : state.timelineLoading || state.timelineError ? '请先等待会话历史加载完成' : undefined
   })
+
+  const queueEditor = useQueuedMessageEdit({
+    scope: JSON.stringify([state.status.cwd, state.session?.sessionId ?? state.session?.sessionFile]),
+    selectionRef,
+    disabled: viewingChild || messageRevert.draftFrozen || !state.status.cwd || !state.session,
+    origin: state.liveSessionBackendId ?? state.session?.liveState?.backendId,
+    validOwner: () => state.status.phase === 'running' && !!state.session
+      && selectionRef.current.cwd === state.status.cwd
+      && selectionRef.current.ownerPath === state.session.sessionFile
+      && selectionRef.current.sessionPath === state.session.sessionFile
+      && selectionRef.current.sessionId === state.session.sessionId,
+    editQueuedMessage: actions.editQueuedMessage
+  })
+  const onDraftAvailabilityChange = useCallback((available: boolean): void => {
+    messageRevert.onDraftAvailabilityChange(available)
+    queueEditor.onDraftAvailabilityChange(available)
+  }, [messageRevert.onDraftAvailabilityChange, queueEditor.onDraftAvailabilityChange])
+  const onRestoreDraftConsumed = useCallback((id: string, restored: boolean): void => {
+    messageRevert.onRestoreDraftConsumed(id, restored)
+    queueEditor.onRestoreDraftConsumed(id, restored)
+  }, [messageRevert.onRestoreDraftConsumed, queueEditor.onRestoreDraftConsumed])
 
   const handleToggleFavorite = useCallback((path: string): void => {
     setFavoriteSessionPaths((current) => current.includes(path)
@@ -716,6 +739,7 @@ export function App(): ReactElement {
     // Use the same workspace snapshot as Review, not a partial tool transcript.
     if (gitWorkspace.snapshot) return gitWorkspace.snapshot.files.map((file) => ({
       path: file.path,
+      binary: file.binary,
       kind: 'edit',
       additions: file.additions ?? 0,
       deletions: file.deletions ?? 0
@@ -1039,10 +1063,10 @@ export function App(): ReactElement {
                 starting={state.status.phase === 'starting'}
                 cwd={state.status.cwd}
                 hasSessions={state.sessions.length > 1}
-                canFork={!messageRevert.draftFrozen && state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
+                canFork={!queueEditor.frozen && !messageRevert.draftFrozen && state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
                 onFork={handleFork}
-                canRevert={messageRevert.canRevert}
-                onRevert={messageRevert.requestRevert}
+                canRevert={!queueEditor.frozen && messageRevert.canRevert}
+                onRevert={(entryId) => { if (!queueEditor.frozen) messageRevert.requestRevert(entryId) }}
                 revertDisabledReason={messageRevert.disabledReason}
 
                 agentActivity={agentActivity}
@@ -1089,29 +1113,40 @@ export function App(): ReactElement {
                   steering={queuedMessages.steering}
                   followUp={queuedMessages.followUp}
                   nativeFollowUpCount={queuedMessages.nativeFollowUpCount}
+                  followUpRunIds={queuedMessages.followUpRunIds}
+                  controlsDisabled={queueEditor.frozen}
                   queuePause={queuedMessages.queuePause}
                   agentBusy={state.busy}
                   onSendItem={(kind, index) => actions.sendQueuedMessage(kind, index).catch((error: unknown) => {
                     console.error('[pion] 直接发送排队消息失败', error)
                   })}
-                  onEditItem={(item) => actions.removeQueuedMessage(item.kind, item.index)
-                    .then(() => setPrefill(item.text))
-                    .catch((error: unknown) => {
-                      console.error('[pion] 编辑排队消息失败', error)
-                    })}
+                  onEditItem={(item) => {
+                    if (item.runId) flushSync(() => { void queueEditor.edit(item.runId!) })
+                  }}
                   onRemoveItem={(kind, index) => actions.removeQueuedMessage(kind, index).catch((error: unknown) => {
                     console.error('[pion] 删除排队消息失败', error)
                   })}
                 />}
             />
+            {queueEditor.error && <div className="queue-edit-notice" role="status">
+              <span>{queueEditor.error}</span>
+              {queueEditor.canRestore && <button type="button" onClick={queueEditor.restoreRetained}>
+                恢复编辑内容
+              </button>}
+              {queueEditor.canRetry && <button type="button" onClick={() => {
+                flushSync(() => { void queueEditor.retry() })
+              }}>重试取回</button>}
+              {queueEditor.canClose && <button type="button" onClick={queueEditor.requestClose}>放弃本次取回</button>}
+            </div>}
+            <ConfirmDialog {...queueEditor.closeConfirmation} />
             <Composer
               busy={state.busy}
-              disabled={viewingChild || !state.status.cwd || messageRevert.draftFrozen}
+              disabled={viewingChild || !state.status.cwd || messageRevert.draftFrozen || queueEditor.frozen}
               sendDisabled={state.status.phase === 'starting' || state.status.phase === 'error' || projectTrust?.decision === 'ask'}
               prefill={prefill}
-              restoreDraft={messageRevert.restoreDraft}
-              onDraftAvailabilityChange={messageRevert.onDraftAvailabilityChange}
-              onRestoreDraftConsumed={messageRevert.onRestoreDraftConsumed}
+              restoreDraft={messageRevert.restoreDraft ?? queueEditor.restoreDraft}
+              onDraftAvailabilityChange={onDraftAvailabilityChange}
+              onRestoreDraftConsumed={onRestoreDraftConsumed}
               history={messageHistory}
               commands={composerCommands}
               contextPressure={displayedRun?.contextPressure}
@@ -1255,7 +1290,10 @@ export function App(): ReactElement {
           }
         }}
         confirmations={{
-          messageRevert: messageRevert.confirmation,
+          messageRevert: messageRevert.confirmation && {
+            ...messageRevert.confirmation,
+            onConfirm: () => { if (!queueEditor.frozen) messageRevert.confirmation?.onConfirm() }
+          },
           rollback: {
             open: rollbackConfirmOpen,
             error: rollbackError,

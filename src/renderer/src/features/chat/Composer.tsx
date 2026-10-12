@@ -7,6 +7,7 @@ import { REFERENCE_TRIGGER_RE } from './composerReferences'
 import { ComposerAttachments } from './ComposerAttachments'
 import { ReferenceMenu, SlashCommandMenu } from './ComposerMenus'
 import { useComposerReferences } from './useComposerReferences'
+import { ConfirmDialog } from '../common/ConfirmDialog'
 
 interface ComposerProps {
   busy: boolean
@@ -16,7 +17,7 @@ interface ComposerProps {
   sendDisabled: boolean
   prefill: string
   /** One-shot, non-destructive restoration; ids must be unique for this Composer. */
-  restoreDraft?: { id: string; text: string; images: ImageContent[] }
+  restoreDraft?: { id: string; text: string; images: ImageContent[]; valid?: () => boolean }
   /** True only for exactly empty text (whitespace is a draft), no attachments or reads. */
   onDraftAvailabilityChange?: (available: boolean) => void
   onRestoreDraftConsumed?: (id: string, restored: boolean) => void
@@ -88,6 +89,8 @@ export function Composer({
   const {
     pendingReferences,
     pendingImages,
+    editReferenceText,
+    resetReferenceTokens,
     getReferenceDraft,
     restoreImages,
     buildMessage,
@@ -98,6 +101,9 @@ export function Composer({
     handleFileInputChange,
     handleDrop,
     removeReference,
+    imageRemovalConfirmation,
+    confirmImageRemoval,
+    cancelImageRemoval,
     clearReferences,
     openReferencePicker,
     insertReferenceToken
@@ -113,6 +119,7 @@ export function Composer({
       resetHistoryNavigation()
       restoredTextRef.current = null
       valueRef.current = prefill
+      resetReferenceTokens()
       markDraftUnavailable()
       setValue(prefill)
       textareaRef.current?.focus()
@@ -123,14 +130,15 @@ export function Composer({
         }
       })
     }
-  }, [prefill, resetHistoryNavigation, markDraftUnavailable])
+  }, [prefill, resetHistoryNavigation, resetReferenceTokens, markDraftUnavailable])
 
   useEffect(() => {
     if (!restoreDraft || consumedRestoresRef.current.has(restoreDraft.id)) return
     // Consume refusals too: clearing a newer draft must not revive an old undo.
     consumedRestoresRef.current.add(restoreDraft.id)
     const references = getReferenceDraft()
-    const restored = valueRef.current === '' && references.references.length === 0 && !references.reading
+    const restored = restoreDraft.valid?.() !== false
+      && valueRef.current === '' && references.references.length === 0 && !references.reading
     if (restored) {
       resetHistoryNavigation()
       restoredTextRef.current = restoreDraft.text
@@ -181,6 +189,7 @@ export function Composer({
           historyIndexRef.current = null
           restoredTextRef.current = null
           valueRef.current = historyDraftRef.current
+          resetReferenceTokens()
           markDraftUnavailable()
           setValue(historyDraftRef.current)
           requestAnimationFrame(() => {
@@ -197,6 +206,7 @@ export function Composer({
       const nextValue = history[nextIndex]
       restoredTextRef.current = null
       valueRef.current = nextValue
+      resetReferenceTokens()
       markDraftUnavailable()
       setValue(nextValue)
       requestAnimationFrame(() => {
@@ -207,7 +217,7 @@ export function Composer({
       })
       return true
     },
-    [history, markDraftUnavailable]
+    [history, resetReferenceTokens, markDraftUnavailable]
   )
 
   const clearValue = useCallback((): void => {
@@ -225,10 +235,11 @@ export function Composer({
   }
 
   const referenceMatch = value.match(REFERENCE_TRIGGER_RE)
-  const referenceQuery = referenceMatch?.[2].toLocaleLowerCase() ?? null
+  const referenceQuery = referenceMatch?.[2].replace(/^"/, '').toLocaleLowerCase() ?? null
   const referenceOptions = referenceQuery === null
     ? []
-    : pendingReferences.filter((reference) => reference.name.toLocaleLowerCase().includes(referenceQuery)).slice(0, 8)
+    : pendingReferences.filter((reference) => reference.name.toLocaleLowerCase().includes(referenceQuery)
+      || (reference.kind === 'image' && `图像 ${reference.imageNumber}`.includes(referenceQuery))).slice(0, 8)
 
   const slashMatch = value.match(/^\s*\/([^\s]*)$/)
   const slashQuery = slashMatch?.[1].toLocaleLowerCase() ?? null
@@ -380,6 +391,7 @@ export function Composer({
     const nextValue = `/${command.name} `
     restoredTextRef.current = null
     valueRef.current = nextValue
+    resetReferenceTokens()
     markDraftUnavailable()
     setValue(nextValue)
     setCommandIndex(0)
@@ -394,6 +406,15 @@ export function Composer({
 
   return (
     <footer className="composer">
+      <ConfirmDialog
+        open={imageRemovalConfirmation !== null}
+        title="移除图像？"
+        message="移除后剩余图片将重新编号。原文和历史图像标签不会自动修改，请核对正文中的历史编号，避免指向另一张图片。"
+        detail="仅本次显式插入、且正文未被编辑过的图像引用会同步更新。草稿或附件读取发生变化后，旧确认将失效。"
+        confirmLabel="确认移除"
+        onConfirm={confirmImageRemoval}
+        onCancel={cancelImageRemoval}
+      />
       <div className={`composer-row composer-mode-${mode}`}>
         <div className="composer-input-main">
           {showReferenceMenu && (
@@ -428,6 +449,7 @@ export function Composer({
               if (disabled) return
               resetHistoryNavigation()
               const nextValue = event.target.value
+              editReferenceText(nextValue)
               valueRef.current = nextValue
               markDraftUnavailable()
               setValue(nextValue)
@@ -458,7 +480,9 @@ export function Composer({
               pendingImages={pendingImages}
               reading={readingReferences}
               error={referenceError}
+              disabled={disabled}
               onRemove={removeReference}
+              onInsertToken={insertReferenceToken}
             />
           )}
           <div className="composer-inline-controls">

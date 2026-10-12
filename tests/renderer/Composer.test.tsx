@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest'
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import type { ComponentProps } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ImageContent } from '../../src/shared/types'
 import { Composer } from '../../src/renderer/src/features/chat/Composer'
+import { useComposerReferences } from '../../src/renderer/src/features/chat/useComposerReferences'
 
 describe('Composer input references and local slash commands', () => {
   afterEach(() => {
@@ -335,6 +336,21 @@ describe('Composer controlled draft restoration', () => {
     expect(h.consumed).toHaveBeenCalledTimes(1)
   })
 
+  it('checks restore owner validity before applying text or images and consumes a stale restore once', () => {
+    const h = setup()
+    const valid = vi.fn(() => false)
+    const draft = { id: 'stale-owner', text: 'old owner', images: [firstImage], valid }
+    h.update({ restoreDraft: draft })
+    expect(valid).toHaveBeenCalledTimes(1)
+    expect(h.input).toHaveValue('')
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    expect(h.consumed).toHaveBeenCalledExactlyOnceWith(draft.id, false)
+    valid.mockReturnValue(true)
+    h.update({ restoreDraft: { ...draft } })
+    expect(valid).toHaveBeenCalledTimes(1)
+    expect(h.input).toHaveValue('')
+  })
+
   it.each(['Enter', 'Tab'])('submits an images-only restored draft with %s and no invented text', (key) => {
     const h = setup({ busy: key === 'Tab' })
     h.update({ restoreDraft: { id: 'images-only', text: '', images: [firstImage, firstImage] } })
@@ -354,8 +370,12 @@ describe('Composer controlled draft restoration', () => {
     const text = '  preserve   spacing\n'
     h.update({ restoreDraft: { id: 'remove-image', text, images: [firstImage] } })
     h.availability.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('原文和历史图像标签不会自动修改')
+    expect(screen.getByAltText('待发送图像 1')).toBeInTheDocument()
+    expect(h.availability).not.toHaveBeenCalled()
     act(() => {
-      fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+      fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
       expect(h.availability).toHaveBeenLastCalledWith(false)
     })
     expect(h.input).toHaveValue(text)
@@ -378,6 +398,168 @@ describe('Composer controlled draft restoration', () => {
     expect(await screen.findByAltText('待发送图像 2')).toBeInTheDocument()
     fireEvent.keyDown(h.input, { key: 'Enter' })
     expect(h.onSend).toHaveBeenCalledExactlyOnceWith('[图像 2: 剪贴板图像]', [firstImage, secondImage])
+  })
+
+  it('distinguishes duplicate files and clipboard images, and renumbers only inserted tokens after removal', async () => {
+    clipboard(vi.fn().mockResolvedValue(firstImage))
+    const h = setup()
+    fireEvent.change(h.picker, { target: { files: [
+      new File(['first'], 'same.png', { type: 'image/png' }),
+      new File(['second'], 'same.png', { type: 'image/png' })
+    ] } })
+    expect(await screen.findByText('2 张图像待发送')).toBeInTheDocument()
+    fireEvent.change(h.input, { target: { value: '图像 1 是正文 @"图像 1"；看 @' } })
+    expect(screen.getByRole('option', { name: '@"图像 1"same.png' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: '@"图像 2"same.png' }))
+    expect(h.input).toHaveValue('图像 1 是正文 @"图像 1"；看 @"图像 2" ')
+    // Surrounding user edits abandon provenance instead of guessing token identity.
+    fireEvent.change(h.input, { target: { value: `补充 ${h.input.value}` } })
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    expect(h.input).toHaveValue('补充 图像 1 是正文 @"图像 1"；看 @"图像 2" ')
+    fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
+    expect(h.input).toHaveValue('补充 图像 1 是正文 @"图像 1"；看 @"图像 2" ')
+    fireEvent.paste(h.input, { clipboardData: { items: [], getData: () => '' } })
+    expect(await screen.findByText('2 张图像待发送')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '引用图像 2' }))
+    expect(h.input).toHaveValue('补充 图像 1 是正文 @"图像 1"；看 @"图像 2" @"图像 2" ')
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    const [text, images] = h.onSend.mock.calls[0]
+    expect(images).toHaveLength(2)
+    expect(images[1]).toEqual(firstImage)
+    expect(text).toContain('[图像 1: same.png]')
+    expect(text).toContain('[图像 2: 剪贴板图像]')
+    expect(text).not.toContain('[图像 3:')
+  })
+
+  it('offers restored duplicate images by number and removes only their newly inserted references', () => {
+    const h = setup()
+    const text = '权威原文 [图像 1: original.png]'
+    h.update({ restoreDraft: { id: 'restore-numbered', text, images: [firstImage, firstImage] } })
+    fireEvent.change(h.input, { target: { value: `${text} @"图像 2` } })
+    expect(screen.queryByRole('option', { name: '@"图像 1"恢复的图像 1' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: '@"图像 2"恢复的图像 2' }))
+    expect(h.input).toHaveValue(`${text} @"图像 2" `)
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
+    expect(h.input).toHaveValue(`${text} @"图像 1" `)
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
+    expect(h.input).toHaveValue(`${text}  `)
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith(text, [])
+  })
+
+  it('requires confirmation for historical labels and cancellation preserves both images and exact text', () => {
+    const h = setup()
+    const text = '  @图像1 / @"图像 1"\n[图像 1: old.png]  '
+    h.update({ restoreDraft: { id: 'historical-labels', text, images: [firstImage, secondImage] } })
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    expect(screen.getAllByRole('img')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(h.input).toHaveValue(text)
+    expect(screen.getAllByRole('img')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
+    expect(h.input).toHaveValue(text)
+    expect(screen.getByAltText('待发送图像 1')).toHaveAttribute('src', `data:image/jpeg;base64,${secondImage.data}`)
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith(text, [secondImage])
+  })
+
+  it('never turns remaining repeated user tokens into controlled bindings after a user change', () => {
+    const h = setup()
+    h.update({ restoreDraft: { id: 'repeated-token', text: '', images: [firstImage, secondImage] } })
+    fireEvent.click(screen.getByRole('button', { name: '引用图像 1' }))
+    const token = '@"图像 1"'
+    fireEvent.change(h.input, { target: { value: `${token} ${token}` } })
+    fireEvent.change(h.input, { target: { value: token } })
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    expect(h.input).toHaveValue(token)
+    expect(screen.getAllByRole('img')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
+    expect(h.input).toHaveValue(token)
+  })
+
+  it('abandons owned bindings on even a same-value change notification', () => {
+    const valueRef = { current: '' }
+    const setValue = vi.fn()
+    const { result } = renderHook(() => useComposerReferences({
+      valueRef, setValue, textareaRef: { current: null }, disabled: false, onDraftAvailabilityChange: vi.fn()
+    }))
+    act(() => result.current.restoreImages([firstImage, secondImage]))
+    const id = result.current.pendingReferences[0].id
+    act(() => result.current.insertReferenceToken(id))
+    const original = valueRef.current
+    // Invoke the notification directly: React's DOM value tracker suppresses
+    // synthetic same-value change events, but the hook must not infer identity.
+    act(() => result.current.editReferenceText(original))
+    act(() => result.current.removeReference(id))
+    expect(result.current.pendingReferences).toHaveLength(2)
+    act(() => result.current.confirmImageRemoval())
+    expect(result.current.pendingReferences).toHaveLength(1)
+    expect(valueRef.current).toBe(original)
+  })
+
+  it('preserves exact bindings across multiple programmatic thumbnail insertions and remaps only those spans', () => {
+    const h = setup()
+    const original = '原文 @"图像 1" '
+    h.update({ restoreDraft: { id: 'programmatic-spans', text: original, images: [firstImage, secondImage] } })
+    fireEvent.click(screen.getByRole('button', { name: '引用图像 1' }))
+    fireEvent.click(screen.getByRole('button', { name: '引用图像 2' }))
+    expect(h.input).toHaveValue(`${original}@"图像 1" @"图像 2" `)
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
+    expect(h.input).toHaveValue(`${original} @"图像 1" `)
+  })
+
+  it('invalidates an image confirmation when text changes and returns to the same value', () => {
+    const h = setup()
+    const text = 'old @图像1'
+    h.update({ restoreDraft: { id: 'confirmation-text-revision', text, images: [firstImage, secondImage] } })
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    fireEvent.change(h.input, { target: { value: 'changed' } })
+    fireEvent.change(h.input, { target: { value: text } })
+    fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
+    expect(h.input).toHaveValue(text)
+    expect(screen.getAllByRole('img')).toHaveLength(2)
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('does not apply an old confirmation to a new same-scope restored image', () => {
+    const h = setup()
+    h.update({ restoreDraft: { id: 'old-confirmation-image', text: 'old', images: [firstImage] } })
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    h.update({ restoreDraft: { id: 'new-confirmation-image', text: 'new', images: [secondImage] } })
+    fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
+    expect(h.input).toHaveValue('new')
+    expect(screen.getByAltText('待发送图像 1')).toHaveAttribute('src', `data:image/jpeg;base64,${secondImage.data}`)
+  })
+
+  it.each(['begin', 'finish'])('invalidates an image confirmation when an attachment read reaches %s', async (phase) => {
+    const read = deferred<ImageContent | null>()
+    clipboard(() => read.promise)
+    const h = setup()
+    h.update({ restoreDraft: { id: `confirmation-read-${phase}`, text: 'old', images: [firstImage] } })
+    if (phase === 'finish') fireEvent.paste(h.input, { clipboardData: { items: [], getData: () => '' } })
+    fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    if (phase === 'begin') fireEvent.paste(h.input, { clipboardData: { items: [], getData: () => '' } })
+    await act(async () => read.resolve(null))
+    fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
+    expect(h.input).toHaveValue('old')
+    expect(screen.getByAltText('待发送图像 1')).toBeInTheDocument()
+  })
+
+  it('keeps Enter, Shift+Enter and IME behavior with numbered image candidates open', () => {
+    const h = setup()
+    h.update({ restoreDraft: { id: 'number-menu-enter', text: '', images: [firstImage, secondImage] } })
+    fireEvent.change(h.input, { target: { value: '看 @图像' } })
+    expect(screen.getByRole('option', { name: '@"图像 2"恢复的图像 2' })).toBeInTheDocument()
+    fireEvent.keyDown(h.input, { key: 'Enter', shiftKey: true })
+    fireEvent.keyDown(h.input, { key: 'Enter', isComposing: true })
+    expect(h.onSend).not.toHaveBeenCalled()
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('看 @图像', [firstImage, secondImage])
   })
 
   it.each(['newer draft', '  \n\t '])('protects existing text %j, including whitespace, and consumes refusals', (text) => {
@@ -581,6 +763,7 @@ describe('Composer controlled draft restoration', () => {
     expect(h.onSend).not.toHaveBeenCalled()
     expect(h.onQueue).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
+    fireEvent.click(screen.getByRole('button', { name: '确认移除' }))
     expect(screen.queryByRole('img')).not.toBeInTheDocument()
   })
 

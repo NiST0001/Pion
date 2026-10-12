@@ -44,6 +44,15 @@ const liveTool: ToolItem = {
   live: true
 }
 
+// Batch-only fixtures explicitly open their lazy list; ordinary tools and
+// initial-closed regressions must continue using render directly.
+function renderOpenedBatch(element: Parameters<typeof render>[0]) {
+  const view = render(element)
+  fireEvent.click(screen.getByRole('button', { name: '展开子代理工具详情' }))
+  expect(screen.getByRole('button', { name: '收起子代理工具详情' })).toHaveAttribute('aria-expanded', 'true')
+  return view
+}
+
 describe('ToolCallItem', () => {
   const batchTool: ToolItem = {
     id: 'batch-call', name: 'pion_subagents', status: 'done', isError: false,
@@ -59,8 +68,149 @@ describe('ToolCallItem', () => {
     }
   }
 
-  it('expands from the whole task heading without a separate summary button or affecting other tasks', () => {
+  it('keeps the initial closed batch lazy without mounting rows, summaries or aggregate details', () => {
     const { container } = render(<ToolCallItem tool={batchTool} noReveal />)
+    expect(screen.getByRole('button', { name: '展开子代理工具详情' })).toHaveAttribute('aria-expanded', 'false')
+    expect(container.querySelector('.animated-disclosure')).not.toBeInTheDocument()
+    expect(container.querySelectorAll('.tool-subagent-batch, .tool-subagent-row, .tool-subagent-summary, .tool-body')).toHaveLength(0)
+    expect(screen.queryByRole('list')).not.toBeInTheDocument()
+    expect(container).not.toHaveTextContent('original aggregate output')
+  })
+
+  it('controls each real batch from its own header without opening the last batch or generic details', () => {
+    const second: ToolItem = { ...batchTool, id: 'second-batch', subagentBatch: { version: 1, tasks: [
+      { index: 0, name: '第二批任务', status: 'completed', summary: '第二批摘要' }
+    ] } }
+    const { container } = render(<><ToolCallItem tool={batchTool} noReveal /><ToolCallItem tool={second} noReveal /></>)
+    const heads = screen.getAllByRole('button', { name: '展开子代理工具详情' })
+    const calls = container.querySelectorAll('.tool-call')
+    fireEvent.click(heads[0])
+    expect(heads[0]).toHaveAttribute('aria-expanded', 'true')
+    expect(heads[1]).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('list', { name: '子代理任务（4 项）' })).toBeVisible()
+    expect(calls[1].querySelector('.tool-subagent-batch')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
+    expect(heads[0]).toHaveAttribute('aria-expanded', 'true')
+    fireEvent.click(heads[0])
+    expect(heads[0]).toHaveAttribute('aria-expanded', 'false')
+    expect(calls[0].querySelector('.tool-subagent-batch')?.closest('.animated-disclosure')).toHaveAttribute('inert')
+    fireEvent.click(heads[1])
+    expect(heads[0]).toHaveAttribute('aria-expanded', 'false')
+    expect(heads[1]).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('list', { name: '子代理任务（1 项）' })).toBeVisible()
+    expect(screen.queryByRole('list', { name: '子代理任务（4 项）' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：第二批任务' }))
+    expect(screen.getByText('第二批摘要')).toBeVisible()
+    expect(heads[1]).toHaveAttribute('aria-expanded', 'true')
+    expect(container.querySelectorAll('.tool-body')).toHaveLength(0)
+  })
+
+  it.each([false, true])('retains the same rows and open summaries after a complete batch close and reopen (reduced=%s)', (reduced) => {
+    vi.useFakeTimers()
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: reduced })))
+    try {
+      const { container } = renderOpenedBatch(<ToolCallItem tool={batchTool} noReveal />)
+      const head = screen.getByRole('button', { name: '收起子代理工具详情' })
+      const list = container.querySelector('.tool-subagent-batch')!
+      const disclosure = list.closest<HTMLElement>('.animated-disclosure')!
+      const rows = Array.from(container.querySelectorAll('.tool-subagent-row'))
+      expect(rows).toHaveLength(4)
+      expect(container.querySelectorAll('.animated-disclosure')).toHaveLength(1)
+      const toggle = screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' })
+      fireEvent.click(toggle)
+      const summary = container.querySelector('.tool-subagent-summary')!
+      fireEvent.click(head)
+      expect(head).toHaveAttribute('aria-expanded', 'false')
+      expect(disclosure).toHaveAttribute('inert')
+      expect(disclosure).toHaveAttribute('aria-hidden', 'true')
+      expect(container.querySelector('.tool-subagent-batch')).toBe(list)
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(screen.queryByRole('button', { name: '收起第 1 项子代理结果摘要：检查入口' })).not.toBeInTheDocument()
+      if (!reduced) {
+        expect(disclosure).not.toHaveAttribute('hidden')
+        act(() => vi.advanceTimersByTime(199))
+        expect(disclosure).not.toHaveAttribute('hidden')
+        act(() => vi.advanceTimersByTime(1))
+      }
+      expect(disclosure).toHaveAttribute('hidden')
+      expect(disclosure.style.display).toBe('none')
+      expect(container.querySelector('.tool-subagent-summary')).toBe(summary)
+      fireEvent.click(head)
+      expect(disclosure).not.toHaveAttribute('hidden')
+      expect(disclosure).not.toHaveAttribute('inert')
+      expect(disclosure).toHaveAttribute('aria-hidden', 'false')
+      expect(disclosure.style.display).toBe('')
+      expect(container.querySelector('.tool-subagent-batch')).toBe(list)
+      Array.from(container.querySelectorAll('.tool-subagent-row')).forEach((row, index) => expect(row).toBe(rows[index]))
+      expect(screen.getByRole('button', { name: '收起第 1 项子代理结果摘要：检查入口' })).toBe(toggle)
+      expect(container.querySelector('.tool-subagent-summary')).toBe(summary)
+      expect(summary).toBeVisible()
+      expect(container.querySelector('.tool-body')).not.toBeInTheDocument()
+      expect(container).not.toHaveTextContent('original aggregate output')
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+
+  it('keeps running, partial and terminal updates closed, preserving same-index row identity once mounted', () => {
+    vi.useFakeTimers()
+    try {
+      const task = { index: 0, name: '同一任务', status: 'running' as const, summary: '进行中摘要' }
+      const running: ToolItem = { ...batchTool, status: 'running', subagentBatch: { version: 1, tasks: [task] } }
+      const partial: ToolItem = { ...running, subagentBatch: { version: 1, tasks: [
+        { ...task, summary: '部分摘要' }, { index: 1, name: '新增任务', status: 'pending' }
+      ] } }
+      const done: ToolItem = { ...partial, status: 'done', subagentBatch: { version: 1, tasks: [
+        { ...task, status: 'completed', summary: '最终摘要' }, { index: 1, name: '新增任务', status: 'failed' }
+      ] } }
+      const { container, rerender } = render(<ToolCallItem tool={running} noReveal />)
+      const head = screen.getByRole('button', { name: '展开子代理工具详情' })
+      for (const tool of [partial, done]) {
+        rerender(<ToolCallItem tool={tool} noReveal />)
+        expect(head).toHaveAttribute('aria-expanded', 'false')
+        expect(container.querySelector('.tool-subagent-batch')).not.toBeInTheDocument()
+      }
+      rerender(<ToolCallItem tool={running} noReveal />)
+      fireEvent.click(head)
+      const row = container.querySelector('.tool-subagent-row')!
+      fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：同一任务' }))
+      fireEvent.click(head)
+      act(() => vi.advanceTimersByTime(200))
+      for (const tool of [partial, done]) {
+        rerender(<ToolCallItem tool={tool} noReveal />)
+        expect(head).toHaveAttribute('aria-expanded', 'false')
+        expect(container.querySelector('.tool-subagent-row')).toBe(row)
+        expect(row.closest('.animated-disclosure')).toHaveAttribute('hidden')
+        expect(screen.queryByRole('list')).not.toBeInTheDocument()
+      }
+      expect(container.querySelectorAll('.tool-subagent-row')).toHaveLength(2)
+      fireEvent.click(head)
+      expect(screen.getByRole('button', { name: '收起第 1 项子代理结果摘要：同一任务' })).toHaveAttribute('aria-expanded', 'true')
+      expect(screen.getByText('最终摘要')).toBeVisible()
+      expect(screen.getByText('新增任务')).toBeVisible()
+      expect(container.querySelector('.tool-subagent-row')).toBe(row)
+      expect(container.querySelector('.tool-body')).not.toBeInTheDocument()
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+
+  it('toggles the batch title with native Enter and Space without opening generic details', async () => {
+    const user = userEvent.setup()
+    const { container } = render(<ToolCallItem tool={batchTool} noReveal />)
+    const head = screen.getByRole('button', { name: '展开子代理工具详情' })
+    head.focus()
+    await user.keyboard('{Enter}')
+    expect(head).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('list')).toBeVisible()
+    await user.keyboard(' ')
+    expect(head).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('list')).not.toBeInTheDocument()
+    await user.keyboard('{Enter}')
+    expect(head).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('list')).toBeVisible()
+    expect(head).toHaveFocus()
+    expect(container.querySelector('.tool-body')).not.toBeInTheDocument()
+  })
+
+  it('expands from the whole task heading without a separate summary button or affecting other tasks', () => {
+    const { container } = renderOpenedBatch(<ToolCallItem tool={batchTool} noReveal />)
     const toggle = screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' })
     expect(toggle).toHaveClass('tool-subagent-row-head', 'tool-subagent-row-toggle')
     expect(toggle).toContainElement(screen.getByText('检查入口'))
@@ -70,7 +220,7 @@ describe('ToolCallItem', () => {
     fireEvent.click(screen.getByText('检查入口'))
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('button', { name: '展开第 3 项子代理结果摘要：检查样式' })).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.getByRole('button', { name: '展开子代理工具详情' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: '收起子代理工具详情' })).toHaveAttribute('aria-expanded', 'true')
     fireEvent.click(screen.getByText('已完成'))
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByText('执行中').closest('button')).toBeNull()
@@ -78,7 +228,7 @@ describe('ToolCallItem', () => {
 
   it('supports native Enter and Space toggling of the focused task heading', async () => {
     const user = userEvent.setup()
-    render(<ToolCallItem tool={batchTool} noReveal />)
+    renderOpenedBatch(<ToolCallItem tool={batchTool} noReveal />)
     const toggle = screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' })
     toggle.focus()
     await user.keyboard('{Enter}')
@@ -88,11 +238,14 @@ describe('ToolCallItem', () => {
     expect(toggle).toHaveFocus()
   })
 
-  it('shows all four real batch tasks and mixed states without expanding aggregate details', () => {
+  it('opens all four real batch tasks and mixed states only from the batch header, without aggregate details', () => {
     const { container } = render(<ToolCallItem tool={batchTool} noReveal />)
     const head = screen.getByRole('button', { name: '展开子代理工具详情' })
     expect(head).toHaveTextContent('子代理 · 4 项')
     expect(head).toHaveAttribute('aria-expanded', 'false')
+    expect(container.querySelector('.tool-subagent-batch')).not.toBeInTheDocument()
+    fireEvent.click(head)
+    expect(head).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByRole('list', { name: '子代理任务（4 项）' })).toBeVisible()
     expect(screen.getAllByRole('listitem')).toHaveLength(4)
     for (const name of ['检查入口', '检查状态', '检查样式', '检查历史']) {
@@ -108,7 +261,7 @@ describe('ToolCallItem', () => {
   it.each([false, true])('defers whole historical batch frames to the header-first shared settle scan (readOnly=%s)', (readOnly) => {
     vi.spyOn(performance, 'now').mockReturnValue(1000)
     resetLineRevealClock()
-    const { container, rerender } = render(<ToolCallItem tool={batchTool} historical readOnly={readOnly} />)
+    const { container, rerender } = renderOpenedBatch(<ToolCallItem tool={batchTool} historical readOnly={readOnly} />)
     const head = container.querySelector<HTMLElement>('.tool-head')!
     const rows = Array.from(container.querySelectorAll<HTMLElement>('.tool-subagent-row'))
     const lines = [head, ...rows]
@@ -143,7 +296,7 @@ describe('ToolCallItem', () => {
   })
 
   it.each([false, true])('suppresses all batch frame markers and delay refs with noReveal (historical=%s)', (historical) => {
-    const { container } = render(<ToolCallItem tool={batchTool} historical={historical} readOnly noReveal />)
+    const { container } = renderOpenedBatch(<ToolCallItem tool={batchTool} historical={historical} readOnly noReveal />)
     assignPendingLineDelays(container)
     expect(container.querySelectorAll('.screen-text-reveal-line')).toHaveLength(0)
     expect(container.querySelectorAll('[data-line-reveal-ready]')).toHaveLength(0)
@@ -153,7 +306,7 @@ describe('ToolCallItem', () => {
 
   it('restores a freshly mounted cached batch on the history clock without replaying same-scope refreshes', () => {
     vi.spyOn(performance, 'now').mockReturnValue(1000)
-    const { container, rerender } = render(<ToolCallItem tool={batchTool} historical />)
+    const { container, rerender } = renderOpenedBatch(<ToolCallItem tool={batchTool} historical />)
     resetLineRevealClock()
     assignPendingLineDelays(container)
     const oldRows = Array.from(container.querySelectorAll<HTMLElement>('.tool-subagent-row'))
@@ -165,6 +318,7 @@ describe('ToolCallItem', () => {
     rerender(<></>)
     resetLineRevealClock()
     rerender(<ToolCallItem tool={{ ...batchTool }} historical />)
+    fireEvent.click(screen.getByRole('button', { name: '展开子代理工具详情' }))
     const restoredRows = Array.from(container.querySelectorAll<HTMLElement>('.tool-subagent-row'))
     restoredRows.forEach((row, index) => {
       expect(row).not.toBe(oldRows[index])
@@ -178,7 +332,7 @@ describe('ToolCallItem', () => {
   it('assigns live frame refs even for a newly received non-streaming final batch, without requeuing updates', () => {
     vi.spyOn(performance, 'now').mockReturnValue(1000)
     resetLineRevealClock()
-    const { container, rerender } = render(<ToolCallItem tool={batchTool} />)
+    const { container, rerender } = renderOpenedBatch(<ToolCallItem tool={batchTool} />)
     const head = container.querySelector<HTMLElement>('.tool-head')!
     const rows = Array.from(container.querySelectorAll<HTMLElement>('.tool-subagent-row'))
     const lines = [head, ...rows]
@@ -195,21 +349,18 @@ describe('ToolCallItem', () => {
     expect(container.querySelector('.tool-subagent-summary')).toHaveTextContent('入口结果')
   })
 
-  it('opens individual bounded summaries without opening or remounting aggregate details', () => {
-    const { container } = render(<ToolCallItem tool={batchTool} noReveal />)
-    const head = screen.getByRole('button', { name: '展开子代理工具详情' })
+  it('opens individual bounded summaries without closing the batch or mounting aggregate details', () => {
+    const { container } = renderOpenedBatch(<ToolCallItem tool={batchTool} noReveal />)
+    const head = screen.getByRole('button', { name: '收起子代理工具详情' })
     fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
     expect(screen.getByText('入口结果')).toBeVisible()
     expect(screen.getByText('摘要已截断')).toBeVisible()
-    expect(head).toHaveAttribute('aria-expanded', 'false')
+    expect(head).toHaveAttribute('aria-expanded', 'true')
     expect(container.querySelector('.tool-body')).not.toBeInTheDocument()
-    fireEvent.click(head)
-    const body = container.querySelector('.tool-body')
-    expect(body).toHaveTextContent('original aggregate output')
     fireEvent.click(screen.getByRole('button', { name: '展开第 3 项子代理结果摘要：检查样式' }))
     expect(screen.getByText('入口结果')).toBeVisible()
     expect(screen.getByText('样式结果')).toBeVisible()
-    expect(container.querySelector('.tool-body')).toBe(body)
+    expect(container.querySelector('.tool-body')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '收起子代理工具详情' })).toHaveAttribute('aria-expanded', 'true')
   })
 
@@ -218,7 +369,7 @@ describe('ToolCallItem', () => {
       ...batchTool,
       subagentBatch: { version: 1, tasks: batchTool.subagentBatch!.tasks.map((task) => ({ ...task, name: '同名任务' })) }
     }
-    const { container, rerender } = render(<ToolCallItem tool={duplicate} noReveal />)
+    const { container, rerender } = renderOpenedBatch(<ToolCallItem tool={duplicate} noReveal />)
     expect(screen.getAllByText('同名任务')).toHaveLength(4)
     const rows = Array.from(container.querySelectorAll('.tool-subagent-row'))
     expect(rows.map((row) => row.getAttribute('data-subagent-index'))).toEqual(['0', '1', '2', '3'])
@@ -247,12 +398,19 @@ describe('ToolCallItem', () => {
       const tool: ToolItem = { ...batchTool, live: true, subagentBatch: { version: 1, tasks: [
         { index: 0, name: '历史摘要', status: 'completed', summary }
       ] } }
-      const { container } = render(<div className="chat-scroll"><ToolCallItem tool={tool} historical /></div>)
+      const { container } = renderOpenedBatch(<div className="chat-scroll"><ToolCallItem tool={tool} historical /></div>)
       expect(targets).toHaveLength(0)
       expect(container.querySelector('.tool-subagent-summary')).not.toBeInTheDocument()
       fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：历史摘要' }))
       const body = container.querySelector('.tool-subagent-summary')!
       expect(body.textContent).toBe(summary)
+      expect(targets).toHaveLength(0)
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(199))
+      expect(targets).toHaveLength(0)
+      expect(body.textContent).toBe(summary)
+      act(() => vi.advanceTimersByTime(1))
+      expect(container.querySelector('.tool-subagent-summary')).toBe(body)
       expect(targets).toHaveLength(Math.ceil(Array.from(summary).length / REVIEW_REVEAL_CHUNK_SIZE))
       expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
       act(() => intersect([{ target: targets[0], isIntersecting: true }]))
@@ -265,6 +423,33 @@ describe('ToolCallItem', () => {
       expect(body.closest('.animated-disclosure')).toHaveAttribute('inert')
       act(() => vi.advanceTimersByTime(200))
       expect(container.querySelector('.tool-subagent-summary')).not.toBeInTheDocument()
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+
+  it.each([false, true])('waits for both nested batch and summary gates, including a newer parent reopen (reopenParent=%s)', (reopenParent) => {
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    try {
+      const { container } = renderOpenedBatch(<ToolCallItem tool={batchTool} />)
+      const head = screen.getByRole('button', { name: '收起子代理工具详情' })
+      if (!reopenParent) act(() => vi.advanceTimersByTime(100))
+      fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
+      const body = container.querySelector('.tool-subagent-summary pre')!
+      if (reopenParent) {
+        act(() => vi.advanceTimersByTime(50))
+        fireEvent.click(head)
+        act(() => vi.advanceTimersByTime(50))
+        fireEvent.click(head)
+      }
+      // Both cases now start at t=100. The last opening settles at t=300:
+      // the child in the first case, the reopened parent in the second.
+      act(() => vi.advanceTimersByTime(199))
+      expect(body.textContent).toBe('入口结果')
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(1))
+      expect(container.querySelector('.tool-subagent-summary pre')).toBe(body)
+      expect(body.querySelectorAll('.screen-text-reveal-live')).toHaveLength(4)
+      expect(head).toHaveAttribute('aria-expanded', 'true')
     } finally { cleanup(); vi.useRealTimers() }
   })
 
@@ -284,9 +469,11 @@ describe('ToolCallItem', () => {
     try {
       const task = { index: 0, name: '增量摘要', status: 'running' as const, summary: 'old' }
       const tool: ToolItem = { ...batchTool, status: 'running', live: true, subagentBatch: { version: 1, tasks: [task] } }
-      const { container, rerender } = render(<ToolCallItem tool={tool} />)
+      const { container, rerender } = renderOpenedBatch(<ToolCallItem tool={tool} />)
       fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：增量摘要' }))
       const body = container.querySelector('.tool-subagent-summary pre')!
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(200))
       const first = body.querySelector<HTMLElement>('.screen-text-reveal-live')!
       const delay = first.style.getPropertyValue('--screen-text-reveal-delay')
       act(() => vi.advanceTimersByTime(30))
@@ -307,10 +494,11 @@ describe('ToolCallItem', () => {
   it.each([false, true])('does not animate readonly live summary or reduced-motion summary: reduced=%s', (reduced) => {
     vi.stubGlobal('IntersectionObserver', undefined)
     if (reduced) vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
-    const { container } = render(<ToolCallItem tool={{ ...batchTool, live: true }} readOnly={!reduced} />)
+    const { container } = renderOpenedBatch(<ToolCallItem tool={{ ...batchTool, live: true }} readOnly={!reduced} />)
     fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
     expect(container.querySelector('.tool-subagent-summary pre')?.textContent).toBe('入口结果')
     expect(container.querySelector('.tool-subagent-summary [data-screen-reveal-character]')).toBeNull()
+    expect(container.querySelector('.tool-subagent-summary pre [style*="opacity: 0"]')).not.toBeInTheDocument()
     cleanup()
   })
 
@@ -322,9 +510,11 @@ describe('ToolCallItem', () => {
       const tool: ToolItem = { ...batchTool, status: 'running', live: true, subagentBatch: { version: 1, tasks: [
         { index: 0, name: '实时摘要', status: 'running', summary }
       ] } }
-      const { container, rerender } = render(<ToolCallItem tool={tool} />)
+      const { container, rerender } = renderOpenedBatch(<ToolCallItem tool={tool} />)
       fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：实时摘要' }))
       const body = container.querySelector('.tool-subagent-summary pre')!
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(200))
       expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(Array.from(summary).length)
       act(() => vi.advanceTimersByTime(868))
       const firstChunk = body.querySelector('span')
@@ -352,24 +542,31 @@ describe('ToolCallItem', () => {
     { historical: false, live: true, noReveal: true }
   ])('keeps suppressed summaries as raw text: %j', ({ historical, live, noReveal }) => {
     const tool = { ...batchTool, live }
-    const { container } = render(<ToolCallItem tool={tool} historical={historical} noReveal={noReveal} />)
+    const { container } = renderOpenedBatch(<ToolCallItem tool={tool} historical={historical} noReveal={noReveal} />)
     fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
     expect(container.querySelector('.tool-subagent-summary pre')?.textContent).toBe('入口结果')
     expect(container.querySelector('.tool-subagent-summary pre > span')).not.toBeInTheDocument()
+    expect(container.querySelector('.tool-subagent-summary pre [style*="opacity: 0"]')).not.toBeInTheDocument()
     expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
   })
 
   it('fades a newly received terminal summary even without a streaming-output flag', () => {
-    const { container } = render(<ToolCallItem tool={{ ...batchTool, live: false }} />)
-    fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
-    expect(container.querySelector('.tool-subagent-summary pre')?.textContent).toBe('入口结果')
-    expect(container.querySelectorAll('.tool-subagent-summary [data-screen-reveal-character]')).toHaveLength(4)
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    try {
+      const { container } = renderOpenedBatch(<ToolCallItem tool={{ ...batchTool, live: false }} />)
+      fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
+      expect(container.querySelector('.tool-subagent-summary pre')?.textContent).toBe('入口结果')
+      expect(container.querySelectorAll('.tool-subagent-summary [data-screen-reveal-character]')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(200))
+      expect(container.querySelectorAll('.tool-subagent-summary [data-screen-reveal-character]')).toHaveLength(4)
+    } finally { cleanup(); vi.useRealTimers() }
   })
 
   it('uses a numbered display fallback for whitespace names without changing task identity', () => {
     const task = { index: 0, name: ' \t ', status: 'completed' as const, summary: '空白名称摘要' }
     const tool: ToolItem = { ...batchTool, subagentBatch: { version: 1, tasks: [task] } }
-    const { container, rerender } = render(<ToolCallItem tool={tool} noReveal />)
+    const { container, rerender } = renderOpenedBatch(<ToolCallItem tool={tool} noReveal />)
     expect(screen.getByText('子代理 1')).toBeVisible()
     const row = container.querySelector('.tool-subagent-row')
     fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：子代理 1' }))
@@ -388,12 +585,13 @@ describe('ToolCallItem', () => {
         { index: 1, name: '未知任务', status: 'unknown' }
       ] }
     }
-    const { container } = render(<ToolCallItem tool={tool} historical readOnly noReveal={noReveal} />)
+    const { container } = renderOpenedBatch(<ToolCallItem tool={tool} historical readOnly noReveal={noReveal} />)
     expect(screen.getByText('已停止')).toBeVisible()
     expect(screen.getByText('未知')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: /展开第 1 项子代理结果摘要/ }))
     expect(container.querySelector('.tool-subagent-summary pre')?.textContent).toBe(tool.subagentBatch!.tasks[0].summary)
-    fireEvent.click(screen.getByRole('button', { name: '展开子代理工具详情' }))
+    expect(screen.getByRole('button', { name: '收起子代理工具详情' })).toHaveAttribute('aria-expanded', 'true')
+    expect(container.querySelector('.tool-body')).not.toBeInTheDocument()
     expect(container.querySelectorAll('img, a')).toHaveLength(0)
     expect(container).not.toHaveTextContent('张图片')
   })
@@ -405,7 +603,7 @@ describe('ToolCallItem', () => {
         ...(index === 7 ? { summary: '', summaryTruncated: true } : {})
       }))
     } }
-    const { container } = render(<ToolCallItem tool={tool} noReveal />)
+    const { container } = renderOpenedBatch(<ToolCallItem tool={tool} noReveal />)
     expect(screen.getAllByRole('listitem')).toHaveLength(8)
     expect(screen.getByText('任务 8')).toBeVisible()
     expect(screen.getByText('摘要已截断')).toBeVisible()
@@ -413,12 +611,28 @@ describe('ToolCallItem', () => {
   })
 
   it('retains generic legacy subagent details without guessing a task count', () => {
-    const { container } = render(<ToolCallItem tool={{ ...batchTool, subagentBatch: undefined }} historical readOnly noReveal />)
-    const head = screen.getByRole('button', { name: '展开子代理工具详情' })
-    expect(head).toHaveTextContent(/^子代理$/)
-    expect(container.querySelector('.tool-subagent-batch')).not.toBeInTheDocument()
-    fireEvent.click(head)
-    expect(container.querySelector('.tool-body')).toHaveTextContent('original aggregate output')
+    vi.useFakeTimers()
+    try {
+      const { container } = render(<ToolCallItem tool={{ ...batchTool, subagentBatch: undefined }} historical readOnly noReveal />)
+      const head = screen.getByRole('button', { name: '展开子代理工具详情' })
+      expect(head).toHaveTextContent(/^子代理$/)
+      expect(head).toHaveAttribute('aria-expanded', 'false')
+      expect(container.querySelector('.tool-subagent-batch')).not.toBeInTheDocument()
+      expect(container.querySelector('.tool-body')).not.toBeInTheDocument()
+      fireEvent.click(head)
+      const body = container.querySelector('.tool-body')!
+      expect(head).toHaveAttribute('aria-expanded', 'true')
+      expect(body).toHaveTextContent('original aggregate output')
+      fireEvent.click(head)
+      expect(head).toHaveAttribute('aria-expanded', 'false')
+      expect(body.closest('.animated-disclosure')).toHaveAttribute('inert')
+      act(() => vi.advanceTimersByTime(200))
+      expect(container.querySelector('.tool-body')).not.toBeInTheDocument()
+      fireEvent.click(head)
+      expect(container.querySelector('.tool-body')).toHaveTextContent('original aggregate output')
+      expect(container.querySelector('.tool-body')).not.toBe(body)
+      expect(container.querySelector('.tool-subagent-batch')).not.toBeInTheDocument()
+    } finally { cleanup(); vi.useRealTimers() }
   })
 
   it('preserves the ordinary aggregate detail cap and read-only image suppression', () => {
@@ -449,11 +663,16 @@ describe('ToolCallItem', () => {
   })
 
   it('reveals live tool headers and details as streamed text arrives', () => {
-    const { container } = render(<ToolCallItem tool={liveTool} />)
-
-    const head = screen.getByRole('button', { name: '展开终端工具详情' })
-    fireEvent.click(head)
-    expect(container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(6)
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    try {
+      const { container } = render(<ToolCallItem tool={liveTool} />)
+      const head = screen.getByRole('button', { name: '展开终端工具详情' })
+      fireEvent.click(head)
+      expect(container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(200))
+      expect(container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(6)
+    } finally { cleanup(); vi.useRealTimers() }
   })
 
   it('animates details closed before releasing their DOM', () => {
@@ -474,6 +693,8 @@ describe('ToolCallItem', () => {
     try {
       const { container, rerender } = render(<ToolCallItem tool={liveTool} />)
       fireEvent.click(screen.getByRole('button', { name: '展开终端工具详情' }))
+      expect(container.querySelector('.tool-output [data-screen-reveal-character]')).not.toBeInTheDocument()
+      act(() => vi.advanceTimersByTime(200))
       act(() => vi.advanceTimersByTime(600))
       const body = container.querySelector('.tool-output')
       expect(body?.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
@@ -491,6 +712,8 @@ describe('ToolCallItem', () => {
       const { container, rerender } = render(<ToolCallItem tool={liveTool} />)
       fireEvent.click(screen.getByRole('button', { name: '展开终端工具详情' }))
       const body = container.querySelector('.tool-output')!
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(200))
       const first = body.querySelector<HTMLElement>('[data-screen-reveal-character]')!
       const delay = first.style.getPropertyValue('--screen-text-reveal-delay')
       act(() => vi.advanceTimersByTime(100))
@@ -505,6 +728,117 @@ describe('ToolCallItem', () => {
       expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
       rerender(<ToolCallItem tool={{ ...liveTool, outputText: 'output newer!', status: 'running' }} />)
       expect(Array.from(body.querySelectorAll('[data-screen-reveal-character]')).map((node) => node.textContent)).toEqual(['!'])
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+
+  it.each([false, true])('keeps ordinary detail geometry as text until the opening settles (historical=%s)', (historical) => {
+    vi.useFakeTimers()
+    const targets: Element[] = []
+    let intersect!: (entries: Array<{ target: Element; isIntersecting: boolean }>) => void
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: typeof intersect) { intersect = callback }
+      observe(target: Element) { targets.push(target) }
+      unobserve() {}
+      disconnect() {}
+    })
+    try {
+      const { container } = render(<div className="chat-scroll"><ToolCallItem tool={liveTool} historical={historical} /></div>)
+      fireEvent.click(screen.getByRole('button', { name: '展开终端工具详情' }))
+      const body = container.querySelector('.tool-body')!
+      const output = body.querySelector('.tool-output')!
+      expect(output.textContent).toBe('output')
+      expect(output.querySelector('span')).toHaveStyle({ opacity: '0' })
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      expect(targets).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(199))
+      expect(output.textContent).toBe('output')
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      expect(targets).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(1))
+      expect(container.querySelector('.tool-body')).toBe(body)
+      expect(body.querySelector('.tool-output')).toBe(output)
+      expect(targets.length).toBeGreaterThan(0)
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      act(() => intersect(targets.map((target) => ({ target, isIntersecting: true }))))
+      expect(output.querySelectorAll(historical ? '.screen-text-reveal-history' : '.screen-text-reveal-live')).toHaveLength(6)
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+
+  it.each([false, true])('preserves diff rows through the detail gate (historical=%s)', (historical) => {
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    try {
+      const tool: ToolItem = { ...liveTool, name: 'edit', diff: '-1 before\n+1 after' }
+      const { container } = render(<ToolCallItem tool={tool} historical={historical} />)
+      fireEvent.click(screen.getByRole('button', { name: '展开编辑工具详情' }))
+      const body = container.querySelector('.tool-body')!
+      const rows = Array.from(body.querySelectorAll('tr'))
+      expect(rows).toHaveLength(2)
+      expect(body).toHaveTextContent('before')
+      expect(body).toHaveTextContent('after')
+      act(() => vi.advanceTimersByTime(199))
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(1))
+      expect(container.querySelector('.tool-body')).toBe(body)
+      expect(Array.from(body.querySelectorAll('tr'))).toEqual(rows)
+      // Live diffs remain static by the existing ToolDetails contract.
+      if (historical) expect(body.querySelector('[data-screen-reveal-character]')).toBeInTheDocument()
+      else expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+
+  it('cancels a pre-settle detail fade and gives a quick reopen its own full gate', () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    try {
+      const { container } = render(<ToolCallItem tool={liveTool} />)
+      fireEvent.click(screen.getByRole('button', { name: '展开终端工具详情' }))
+      const body = container.querySelector('.tool-body')!
+      act(() => vi.advanceTimersByTime(100))
+      fireEvent.click(screen.getByRole('button', { name: '收起终端工具详情' }))
+      act(() => vi.advanceTimersByTime(100))
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      fireEvent.click(screen.getByRole('button', { name: '展开终端工具详情' }))
+      act(() => vi.advanceTimersByTime(199))
+      expect(container.querySelector('.tool-body')).toBe(body)
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(1))
+      expect(body.querySelectorAll('.screen-text-reveal-live')).toHaveLength(6)
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+
+  it('releases the complete accumulated output when tokens arrive before the first gate opens', () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    try {
+      const { container, rerender } = render(<ToolCallItem tool={liveTool} />)
+      fireEvent.click(screen.getByRole('button', { name: '展开终端工具详情' }))
+      const output = container.querySelector('.tool-output')!
+      act(() => vi.advanceTimersByTime(100))
+      rerender(<ToolCallItem tool={{ ...liveTool, outputText: 'output new' }} />)
+      act(() => vi.advanceTimersByTime(99))
+      rerender(<ToolCallItem tool={{ ...liveTool, outputText: 'output newer' }} />)
+      expect(output.textContent).toBe('output newer')
+      expect(output.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(1))
+      expect(container.querySelector('.tool-output')).toBe(output)
+      expect(Array.from(output.querySelectorAll('.screen-text-reveal-live'), (node) => node.textContent).join('')).toBe('output newer')
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+
+  it.each(['noReveal', 'reduced', 'static'] as const)('does not delay static tool details for a text effect (%s)', (mode) => {
+    vi.useFakeTimers()
+    if (mode === 'reduced') vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
+    try {
+      const { container } = render(<ToolCallItem tool={{ ...liveTool, live: mode !== 'static' }} noReveal={mode === 'noReveal'} />)
+      fireEvent.click(screen.getByRole('button', { name: '展开终端工具详情' }))
+      const output = container.querySelector('.tool-output')!
+      expect(output.textContent).toBe('output')
+      expect(output.querySelector('[style*="opacity: 0"]')).not.toBeInTheDocument()
+      expect(output.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      act(() => vi.advanceTimersByTime(200))
+      expect(container.querySelector('.tool-output')).toBe(output)
+      expect(output.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
     } finally { cleanup(); vi.useRealTimers() }
   })
 
@@ -758,18 +1092,24 @@ describe('ToolCallItem', () => {
   })
 
   it('keeps images out of character reveal while preserving mixed-result text animation', () => {
-    const { container, rerender } = render(<ToolCallItem tool={{ ...imageTool, outputText: 'output' }} />)
-    fireEvent.click(screen.getByRole('button', { name: '展开生图工具详情' }))
-    const gallery = screen.getByRole('group', { name: '工具结果图片预览' })
-    const image = screen.getByRole('img')
-    expect(container.querySelector('.tool-output [data-screen-reveal-character]')).toBeInTheDocument()
-    expect(gallery.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
-    fireEvent.load(image)
-    rerender(<ToolCallItem tool={{ ...imageTool, outputText: 'output', path: 'images/result.png' }} />)
-    expect(screen.getByRole('group', { name: '工具结果图片预览' })).toBe(gallery)
-    expect(screen.getByRole('img')).toBe(image)
-    expect(image.parentElement).toHaveAttribute('data-image-state', 'loaded')
-    expect(container.querySelector('.tool-path')).toHaveTextContent('images/result.png')
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    try {
+      const { container, rerender } = render(<ToolCallItem tool={{ ...imageTool, outputText: 'output' }} />)
+      fireEvent.click(screen.getByRole('button', { name: '展开生图工具详情' }))
+      const gallery = screen.getByRole('group', { name: '工具结果图片预览' })
+      const image = screen.getByRole('img')
+      expect(container.querySelector('.tool-output [data-screen-reveal-character]')).not.toBeInTheDocument()
+      act(() => vi.advanceTimersByTime(200))
+      expect(container.querySelector('.tool-output [data-screen-reveal-character]')).toBeInTheDocument()
+      expect(gallery.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      fireEvent.load(image)
+      rerender(<ToolCallItem tool={{ ...imageTool, outputText: 'output', path: 'images/result.png' }} />)
+      expect(screen.getByRole('group', { name: '工具结果图片预览' })).toBe(gallery)
+      expect(screen.getByRole('img')).toBe(image)
+      expect(image.parentElement).toHaveAttribute('data-image-state', 'loaded')
+      expect(container.querySelector('.tool-path')).toHaveTextContent('images/result.png')
+    } finally { cleanup(); vi.useRealTimers() }
   })
 
   it('preserves loaded image nodes on part reordering and quick disclosure reversal', () => {

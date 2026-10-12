@@ -180,6 +180,7 @@ export function useAgent() {
     queue,
     sendQueuedMessage,
     removeQueuedMessage,
+    editQueuedMessage,
     abort,
     rollbackRunCheckpoint,
     newSession: createNewSession
@@ -290,6 +291,7 @@ export function useAgent() {
       queue,
       sendQueuedMessage,
       removeQueuedMessage,
+      editQueuedMessage,
       abort,
       rollbackRunCheckpoint,
       newSession,
@@ -329,6 +331,7 @@ export function useAgent() {
       setModelProviderEnabled
     }),
     [
+      editQueuedMessage,
       revertMessage,
       bootstrap,
       start,

@@ -128,6 +128,8 @@ export type TimelineItem = (
 // ---------------------------------------------------------------------------
 
 export interface FileChange {
+  /** Existing Git snapshot binary evidence; absent for plain tool records. */
+  binary?: boolean
   path: string
   kind: 'edit' | 'write'
   diff?: string
@@ -196,7 +198,7 @@ export interface AgentState {
   /** Counts retained for status/telemetry compatibility. */
   queued: { steering: number; followUp: number }
   /** Text snapshots used by the composer-side queue card. */
-  queuedMessages: { steering: string[]; followUp: string[]; nativeFollowUpCount: number; queuePause?: import('../../../shared/types').QueuePause }
+  queuedMessages: import('../../../shared/types').QueuedMessagesSnapshot
 }
 
 export const initialState: AgentState = {

@@ -203,17 +203,15 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
         )}
       </button>
 
-      {batch && <ul className="tool-subagent-batch" aria-label={`子代理任务（${batch.tasks.length} 项）`}>
-        {batch.tasks.map((task) => <SubagentBatchRow key={`${tool.id}:${task.index}`} task={task} mode={readOnly && !historical ? undefined : frameMode} frameMode={frameMode} />)}
-      </ul>}
-
-      <AnimatedDisclosure open={open}>
-        <ToolDetails toolId={tool.id} name={tool.name} diff={tool.diff} command={tool.command}
+      <AnimatedDisclosure open={open} retainContent={Boolean(batch)}>
+        {batch ? <ul className="tool-subagent-batch" aria-label={`子代理任务（${batch.tasks.length} 项）`}>
+          {batch.tasks.map((task) => <SubagentBatchRow key={`${tool.id}:${task.index}`} task={task} mode={readOnly && !historical ? undefined : frameMode} frameMode={frameMode} />)}
+        </ul> : <ToolDetails toolId={tool.id} name={tool.name} diff={tool.diff} command={tool.command}
           outputText={tool.outputText} writeContent={tool.writeContent}
           readOnly={readOnly} images={readOnly ? undefined : tool.images}
           imageNotice={readOnly ? undefined : tool.imageNotice} imageModelInfo={tool.imageModelInfo}
           imageSettingsInfo={tool.imageSettingsInfo}
-          mode={detailMode} />
+          mode={detailMode} />}
       </AnimatedDisclosure>
     </div>
   )

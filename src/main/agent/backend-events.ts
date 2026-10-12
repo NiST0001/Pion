@@ -1,6 +1,18 @@
 import type { AgentMode } from '../../shared/types'
 import type { BackendRecord } from './types'
 
+// Inspect only content discriminants, never tool arguments, text or media.
+// Oversized/malformed content cannot supply positive completion evidence.
+const MAX_COMPLETION_CONTENT_PARTS = 4096
+function hasNoTrailingToolCall(content: unknown): boolean {
+  if (content === undefined || typeof content === 'string') return true
+  if (!Array.isArray(content) || content.length > MAX_COMPLETION_CONTENT_PARTS) return false
+  for (const part of content) {
+    if (!part || typeof part !== 'object' || !['text', 'thinking', 'image'].includes(part.type)) return false
+  }
+  return true
+}
+
 export interface BackendEventEffect {
   type: string | undefined
   runningStateChanged: boolean
@@ -32,7 +44,7 @@ export function applyBackendEvent(
   }
   if (type === 'agent_end') {
     const endEvent = event as {
-      messages?: Array<{ role?: string; stopReason?: string }>
+      messages?: Array<{ role?: string; stopReason?: string; content?: unknown }>
       willRetry?: boolean
     }
     backend.awaitingRetry = Boolean(endEvent.willRetry)
@@ -43,11 +55,13 @@ export function applyBackendEvent(
       const tail = [...(endEvent.messages ?? [])].reverse()
         .find((message) => message.role === 'assistant' || message.role === 'user')
       const assistant = tail?.role === 'assistant' ? tail : undefined
+      // A tool-call assistant is not a final response, even if stopReason is
+      // mislabeled "stop" or tool results follow it; require a later normal final.
       backend.completionState = assistant?.stopReason === 'aborted'
         ? 'aborted'
         : assistant?.stopReason === 'error'
           ? 'failed'
-          : assistant?.stopReason === 'stop' && !backend.turnInterrupted
+          : assistant?.stopReason === 'stop' && !backend.turnInterrupted && hasNoTrailingToolCall(assistant.content)
             ? 'completed'
             : 'interrupted'
     }

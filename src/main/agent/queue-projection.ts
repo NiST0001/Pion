@@ -3,6 +3,7 @@ export interface QueueSnapshot {
   followUp: string[]
   /** Leading followUp entries owned by Pi's native queue (not Pion-editable). */
   nativeFollowUpCount?: number
+  followUpRunIds?: (string | null)[]
 }
 
 /**
@@ -13,7 +14,8 @@ export interface QueueSnapshot {
 export function projectQueueSnapshot(
   raw: QueueSnapshot,
   directSteering: string[],
-  localFollowUps: string[]
+  localFollowUps: string[],
+  localFollowUpRunIds: (string | null)[] = []
 ): { queue: QueueSnapshot; directSteering: string[] } {
   const hiddenCounts = new Map<string, number>()
   for (const message of directSteering) {
@@ -44,7 +46,11 @@ export function projectQueueSnapshot(
     queue: {
       steering,
       followUp: [...raw.followUp, ...localFollowUps],
-      nativeFollowUpCount: raw.followUp.length
+      nativeFollowUpCount: raw.followUp.length,
+      followUpRunIds: [
+        ...raw.followUp.map(() => null),
+        ...localFollowUps.map((_, index) => localFollowUpRunIds[index] ?? null)
+      ]
     },
     directSteering: retainedDirectSteering
   }

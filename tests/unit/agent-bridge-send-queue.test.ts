@@ -24,6 +24,7 @@ interface BridgeHarness {
   resumeRun(runId: string): Promise<RunOperation>
   startVerificationRepair(sessionPath: string, cwd: string, message: string): Promise<RunOperation | null>
   sendQueuedMessage(kind: 'followUp', index: number): Promise<void>
+  editQueuedMessage(request: import('../../src/shared/types').QueuedMessageEditRequest, ownerId: number): import('../../src/shared/types').QueuedMessageEditResult
   dispatchNextLocalFollowUp(backend: BackendRecord): void
   restoreQueuedRuns(backend: BackendRecord): void
   createRun(backend: BackendRecord, state: null, message: string, images: [], kind: 'follow-up', phase: 'queued'): RunOperation
@@ -61,7 +62,7 @@ async function harness() {
   const bridge = Object.assign(Object.create(AgentBridge.prototype), {
     activeKey: backend.key, activeCwd: root, runStore,
     sessionSelectionGeneration: 0, historyRevision: 0, yoloSessions: new Set(),
-    win: { webContents: { send: wireSend } },
+    win: { webContents: { id: 7, send: wireSend } },
     backendPool: pool, desiredModes: new Map([[backend.key, 'build']]),
     sessionCompletedListeners: new Set(), runCompletedListeners: new Set(), unreadSessionPaths: new Set(),
     ensureActiveBackend: vi.fn(async () => backend),
@@ -93,6 +94,61 @@ function deferred<T>() {
 async function dispatchGap() {
   for (let index = 0; index < 12; index += 1) await Promise.resolve()
 }
+
+describe('AgentBridge queue draft retrieval', () => {
+  it('takes root images in order by real id after queue positions drift without dispatch or clearing pause', async () => {
+    const h = await harness()
+    const first = h.addQueued('same')
+    const second = h.addQueued('same')
+    const images = [
+      { type: 'image' as const, data: 'first-original', mimeType: 'image/png' },
+      { type: 'image' as const, data: 'second-original', mimeType: 'image/jpeg' }
+    ]
+    h.runStore.update(second.id, (run) => { run.prompt.images = images; run.usageBackendId = 'old-actor' })
+    h.backend.localFollowUps![1].images = [] // projection is not the attachment source
+    h.backend.queuePause = { paused: true, revision: 9, pausedRunId: 'owner' }
+    const scope = { cwd: h.backend.cwd, sessionFile: h.backend.sessionPath }
+    h.bridge.editQueuedMessage({ ...scope, runId: first.id }, 7)
+    const payload = h.bridge.editQueuedMessage({ ...scope, runId: second.id }, 7)
+    expect(payload).toEqual({ runId: second.id, text: 'same', images })
+    expect(payload.images).not.toBe(images)
+    expect(payload.images[0]).not.toBe(images[0])
+    expect(h.backend.localFollowUps).toEqual([])
+    expect(h.backend.pendingRunIds).not.toContain(second.id)
+    expect(h.backend.queuePause).toEqual({ paused: true, revision: 9, pausedRunId: 'owner' })
+    expect(h.runStore.get(second.id)?.state).toBe('discarded')
+    expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.steer).not.toHaveBeenCalled()
+    expect(h.getState).not.toHaveBeenCalled()
+    // A lost IPC response can be retried without restoring the item to dispatch.
+    expect(h.bridge.editQueuedMessage({ ...scope, runId: second.id }, 7)).toEqual(payload)
+    expect(h.backend.localFollowUps).toEqual([])
+    await h.runStore.flush()
+  })
+
+  it('rejects wrong owner/scope, native identities, attempted runs and items already shifted for dispatch', async () => {
+    const h = await harness()
+    const run = h.addQueued('same')
+    const request = { runId: run.id, cwd: h.backend.cwd }
+    expect(() => h.bridge.editQueuedMessage(request, 8)).toThrow()
+    expect(() => h.bridge.editQueuedMessage({ ...request, cwd: '/other' }, 7)).toThrow()
+    expect(() => h.bridge.editQueuedMessage({ ...request, sessionFile: '/other.jsonl' }, 7)).toThrow()
+    expect(() => h.bridge.editQueuedMessage({ ...request, runId: 'native' }, 7)).toThrow()
+    h.bridge.activeKey = 'other-backend'
+    expect(() => h.bridge.editQueuedMessage(request, 7)).toThrow()
+    h.bridge.activeKey = h.backend.key
+    h.runStore.update(run.id, (current) => { current.dispatchedAt = 1 })
+    expect(() => h.bridge.editQueuedMessage(request, 7)).toThrow()
+    h.runStore.update(run.id, (current) => { current.dispatchedAt = undefined })
+    const item = h.backend.localFollowUps!.shift()!
+    expect(() => h.bridge.editQueuedMessage(request, 7)).toThrow()
+    h.backend.localFollowUps!.push(item)
+    h.runStore.update(run.id, (current) => { current.state = 'running' })
+    expect(() => h.bridge.editQueuedMessage(request, 7)).toThrow()
+    expect(h.backend.localFollowUps).toHaveLength(1)
+    expect(h.prompt).not.toHaveBeenCalled()
+  })
+})
 
 describe('AgentBridge latest history window', () => {
   // Wire-shaped fixtures enter at the SDK manager boundary; all parent links
@@ -575,7 +631,7 @@ describe('AgentBridge send and local queue', () => {
   it.each([
     ['cancel', 'unknown'], ['deny', 'unknown'], ['cancel', 'tool-error'], ['deny', 'tool-error'],
     ['cancel', 'timeout'], ['deny', 'timeout']
-  ] as const)('ordinary %s does not clear an existing %s queue pause', async (response, failure) => {
+  ] as const)('ordinary %s preserves the bound %s pause until manual recovery normally settles', async (response, failure) => {
     const h = await interactionHarness()
     vi.useFakeTimers()
     await h.bridge.send('first')
@@ -588,9 +644,12 @@ describe('AgentBridge send and local queue', () => {
       await vi.advanceTimersByTimeAsync(1_000)
     }
     h.emit('agent_settled')
-    const pause = { ...h.backend.queuePause! }
+    const oldPause = { ...h.backend.queuePause! }
     await dispatchGap()
-    await h.bridge.send('unrelated')
+    await h.bridge.send('manual recovery')
+    const recoveryId = h.backend.activeRunId!
+    const pause = { ...h.backend.queuePause! }
+    expect(pause).toMatchObject({ paused: true, revision: oldPause.revision + 1, pausedRunId: recoveryId })
     h.emit('agent_start')
     const queued = h.addQueued('later')
     if (response === 'cancel') await h.interactionBridge.resolveExtensionUiRequest(h.ask(), { cancelled: true })
@@ -599,9 +658,9 @@ describe('AgentBridge send and local queue', () => {
     h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
     h.emit('agent_settled')
     await dispatchGap()
-    expect(h.backend.queuePause).toEqual(pause)
-    expect(h.prompt).toHaveBeenCalledTimes(2)
-    expect(h.runStore.get(queued.id)?.state).toBe('queued')
+    expect(h.backend.queuePause?.paused).toBe(false)
+    expect(h.prompt).toHaveBeenCalledTimes(3)
+    expect(h.runStore.get(queued.id)?.state).toBe('dispatching')
     await h.runStore.flush()
   })
 
@@ -718,27 +777,124 @@ describe('AgentBridge send and local queue', () => {
     await h.runStore.flush()
   })
 
-  it('persists an empty-queue pause and does not clear it on unrelated successful input', async () => {
+  it('persists an empty-queue pause until idle manual input normally settles', async () => {
     const h = await harness()
     await h.bridge.send('interrupted task')
     const original = h.backend.activeRunId!
     h.emit('agent_start')
     h.emit('agent_settled')
     expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: original })
-    await h.bridge.send('unrelated input')
+    await h.runStore.flush()
+    const pausedStore = new RunStore(h.runStore.filePath)
+    await pausedStore.load()
+    expect(pausedStore.getQueuePause(h.backend)).toMatchObject({ paused: true, pausedRunId: original })
+    await h.bridge.send('new manual input')
+    expect(h.backend.queuePause?.paused).toBe(true)
     h.emit('agent_start')
     const queued = h.addQueued('keep waiting')
     h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
     h.emit('agent_settled')
     await dispatchGap()
-    expect(h.prompt).toHaveBeenCalledTimes(2)
-    expect(h.runStore.get(queued.id)?.state).toBe('queued')
-    expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: original })
+    expect(h.prompt).toHaveBeenCalledTimes(3)
+    expect(h.runStore.get(queued.id)?.state).toBe('dispatching')
+    expect(h.backend.queuePause?.paused).toBe(false)
     await h.runStore.flush()
     const restored = new RunStore(h.runStore.filePath)
     await restored.load()
-    expect(restored.getQueuePause(h.backend)).toMatchObject({ paused: true, pausedRunId: original })
+    expect(restored.getQueuePause(h.backend)?.paused).toBe(false)
   })
+
+  it.each(['checkpoint', 'listener'] as const)(
+    'clears an empty-queue recovery pause only after the last %s closes with RPC already settled', async last => {
+      const h = await harness()
+      await h.bridge.send('interrupted task')
+      h.emit('agent_start')
+      h.emit('agent_settled')
+      await dispatchGap()
+      const checkpoint = deferred<void>()
+      const listener = deferred<void>()
+      const completedListener = vi.fn(() => listener.promise)
+      Object.assign(h.bridge, {
+        refreshRunCheckpoint: vi.fn(() => checkpoint.promise),
+        runCompletedListeners: new Set([completedListener])
+      })
+      await h.bridge.send('manual recovery')
+      expect(h.backend.promptDispatch).toBeUndefined()
+      const pause = h.backend.queuePause!
+      h.emit('agent_start')
+      h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+      h.emit('agent_settled')
+      await dispatchGap()
+      expect(h.backend.localFollowUps).toEqual([])
+      expect(h.backend.queuePause).toEqual(pause)
+      expect(h.backend.runCompletionPromise).toBeDefined()
+      expect(completedListener).not.toHaveBeenCalled()
+      if (last === 'checkpoint') listener.resolve()
+      checkpoint.resolve()
+      await dispatchGap()
+      expect(completedListener).toHaveBeenCalledTimes(1)
+      if (last === 'listener') {
+        expect(h.backend.queuePause).toEqual(pause)
+        expect(h.backend.runCompletionPromise).toBeDefined()
+        listener.resolve()
+        await dispatchGap()
+      }
+      expect(h.backend.runCompletionPromise).toBeUndefined()
+      expect(h.backend.queuePause).toMatchObject({ paused: false, revision: pause.revision + 1 })
+      expect(h.backend.localQueueBlocked).toBe(false)
+      expect(h.prompt).toHaveBeenCalledTimes(2)
+      await h.runStore.flush()
+      const restored = new RunStore(h.runStore.filePath)
+      await restored.load()
+      expect(restored.getQueuePause(h.backend)?.paused).toBe(false)
+    }
+  )
+
+  it.each(['error', 'revision', 'owner', 'client', 'generation', 'promise'] as const)(
+    'does not clear an empty-queue recovery pause when %s changes before final cleanup', async change => {
+      const h = await harness()
+      await h.bridge.send('interrupted task')
+      h.emit('agent_start')
+      h.emit('agent_settled')
+      await dispatchGap()
+      const listener = deferred<void>()
+      Object.assign(h.bridge, { runCompletedListeners: new Set([() => listener.promise]) })
+      await h.bridge.send('manual recovery')
+      expect(h.backend.promptDispatch).toBeUndefined()
+      h.emit('agent_start')
+      h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+      h.emit('agent_settled')
+      await dispatchGap()
+      expect(h.backend.runCompletionPromise).toBeDefined()
+      expect(h.backend.localFollowUps).toEqual([])
+      if (change === 'error') {
+        listener.reject(new Error('completion listener failed'))
+        await dispatchGap()
+      } else if (change === 'revision') {
+        h.backend.queuePause = { ...h.backend.queuePause!, revision: h.backend.queuePause!.revision + 1 }
+      } else if (change === 'owner') {
+        h.pool.set(h.backend.key, { ...h.backend })
+      } else if (change === 'client') {
+        h.backend.client = { ...h.backend.client } as unknown as NonNullable<typeof h.backend.client>
+      } else if (change === 'generation') {
+        h.emit('compaction_start')
+        h.emit('compaction_end')
+      } else {
+        h.backend.runCompletionPromise = Promise.resolve()
+      }
+      const pause = h.backend.queuePause!
+      listener.resolve()
+      await dispatchGap()
+      expect(h.backend.queuePause).toEqual(pause)
+      expect(h.backend.queuePause?.paused).toBe(true)
+      if (change === 'error' || change === 'revision') {
+        expect(h.backend.runCompletionPromise).toBeUndefined()
+      }
+      if (change === 'owner') expect(h.pool.get(h.backend.key)?.queuePause).toEqual(pause)
+      expect(h.prompt).toHaveBeenCalledTimes(2)
+      await h.runStore.flush()
+    }
+  )
 
   it('manual promotion authorizes one item without releasing other restored queue items', async () => {
     const h = await harness()
@@ -971,12 +1127,17 @@ describe('AgentBridge send and local queue', () => {
     h.emit('agent_settled')
     await dispatchGap()
     await h.bridge.send('new run')
+    expect(h.backend.localFollowUps?.map(item => item.text)).toEqual(['new run'])
+    // Only a real new lifecycle, not a second send during pending RPC, owns busy.
+    h.emit('agent_start')
     const activeId = h.backend.activeRunId
     result.resolve('handled')
     await first
     expect(h.backend.activeRunId).toBe(activeId)
     expect(h.backend.busy).toBe(true)
-    expect(h.runStore.get(activeId!)?.state).toBe('dispatching')
+    expect(activeId).toBeUndefined()
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    expect(h.backend.localFollowUps?.map(item => item.text)).toEqual(['new run'])
     await h.runStore.flush()
   })
 
@@ -1075,7 +1236,11 @@ describe('AgentBridge send and local queue', () => {
         h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
         h.emit('agent_settled')
         await dispatchGap()
-        if (phase === 'new-run') await h.bridge.send('new run')
+        if (phase === 'new-run') {
+          await h.bridge.send('new run')
+          expect(h.backend.localFollowUps?.map(item => item.text)).toEqual(['new run'])
+          h.emit('agent_start')
+        }
       }
       const activeId = h.backend.activeRunId
       result.reject(new Error('late rejection'))
@@ -1285,7 +1450,9 @@ describe('AgentBridge send and local queue', () => {
     expect(h.runStore.get(first.id)).toMatchObject({ state: 'interrupted', dispatchedAt: expect.any(Number) })
     expect(h.backend.busy).toBe(true)
     expect(h.backend.queuePause?.paused).toBe(true)
-    expect(h.backend.directSteering).toEqual([])
+    expect(h.backend.directSteering).toEqual(['same'])
+    const snapshots = h.wireSend.mock.calls.map(([, event]) => event).filter(event => event.type === 'queue_update')
+    expect(snapshots.at(-1)?.steering).toEqual([])
     await h.runStore.flush()
   })
 
@@ -1363,6 +1530,117 @@ describe('AgentBridge send and local queue', () => {
     else expect(restored.get(old.id)?.[evidence]).toBe(1)
     expect(h.prompt).not.toHaveBeenCalled()
     await restored.flush()
+  })
+
+  it.each(['send', 'idle queue', 'promoted'] as const)('holds the actual %s RPC through an early SDK settle', async path => {
+    const h = await harness()
+    const receipt = deferred<Disposition>()
+    h.prompt.mockImplementationOnce(() => receipt.promise)
+    let sending: Promise<void>
+    if (path === 'promoted') {
+      h.addQueued('first')
+      sending = h.bridge.sendQueuedMessage('followUp', 0)
+    } else sending = path === 'send' ? h.bridge.send('first') : h.bridge.queue('first')
+    await dispatchGap()
+    await h.bridge.queue('second')
+    h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    expect(h.backend.promptDispatch).toBeDefined()
+    expect(h.backend.busy).toBe(true)
+    receipt.resolve('started')
+    await sending
+    await dispatchGap()
+    expect(h.backend.promptDispatch).toBeUndefined()
+    expect(h.prompt).toHaveBeenCalledTimes(path === 'promoted' ? 1 : 2)
+    await h.runStore.flush()
+  })
+
+  it.each(['RPC first', 'settled first'] as const)('recovers old pause only after explicit direct input really closes (%s)', async order => {
+    const h = await harness()
+    await h.bridge.send('original')
+    const originalId = h.backend.activeRunId!
+    h.emit('agent_start')
+    h.emit('tool_execution_start', { toolCallId: 'bad', toolName: 'read', args: { path: 'file' } })
+    h.emit('tool_execution_end', { toolCallId: 'bad', toolName: 'read', isError: true, result: {} })
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    expect(h.backend.queuePause?.paused).toBe(true)
+    const queued = h.addQueued('next')
+    const receipt = deferred<Disposition>()
+    h.prompt.mockImplementationOnce(() => receipt.promise)
+    const resumed = h.bridge.send('new direct input')
+    await dispatchGap()
+    const resumedId = h.backend.activeRunId!
+    expect(resumedId).not.toBe(originalId)
+    expect(h.runStore.get(resumedId)?.recoveredFromRunId).toBe(originalId)
+    expect(h.backend.queuePause?.paused).toBe(true)
+    if (order === 'RPC first') { receipt.resolve('started'); await resumed }
+    h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    if (order === 'settled first') {
+      expect(h.backend.queuePause?.paused).toBe(true)
+      expect(h.prompt).toHaveBeenCalledTimes(2)
+      receipt.resolve('started')
+      await resumed
+      await dispatchGap()
+    }
+    expect(h.backend.queuePause?.paused).toBe(false)
+    expect(h.prompt).toHaveBeenCalledTimes(3)
+    expect(h.runStore.get(originalId)?.prompt.message).toBe('original')
+    expect(h.backend.activeRunId).toBe(queued.id)
+    await h.runStore.flush()
+  })
+
+  it('cannot dispatch the next item if the pending RPC rejects after an apparent normal settle', async () => {
+    const h = await harness()
+    const receipt = deferred<Disposition>()
+    h.prompt.mockImplementationOnce(() => receipt.promise)
+    const sending = h.bridge.send('first')
+    const failure = expect(sending).rejects.toThrow('transport failed')
+    await dispatchGap()
+    await h.bridge.queue('second')
+    h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    receipt.reject(new Error('transport failed'))
+    await failure
+    await dispatchGap()
+    expect(h.backend.queuePause?.paused).toBe(true)
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    expect(h.backend.localFollowUps?.map(item => item.text)).toEqual(['second'])
+    await h.runStore.flush()
+  })
+
+  it('does not turn Tab or a newer pause revision into permission to resume', async () => {
+    const h = await harness()
+    await h.bridge.send('original')
+    h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'error', content: [] }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    await h.bridge.queue('queued is not recovery')
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    const receipt = deferred<Disposition>()
+    h.prompt.mockImplementationOnce(() => receipt.promise)
+    const manual = h.bridge.send('manual')
+    await dispatchGap()
+    h.emit('agent_start')
+    h.backend.queuePause = { ...h.backend.queuePause!, revision: h.backend.queuePause!.revision + 1 }
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+    h.emit('agent_settled')
+    receipt.resolve('started')
+    await manual
+    await dispatchGap()
+    expect(h.backend.queuePause?.paused).toBe(true)
+    expect(h.prompt).toHaveBeenCalledTimes(2)
+    await h.runStore.flush()
   })
 
   it('ignores late handled responses from a replaced backend', async () => {

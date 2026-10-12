@@ -9,6 +9,7 @@ import type {
   ExtensionUiResponse,
   ImageContent,
   MessageRevertRequest,
+  QueuedMessageEditRequest,
   ModelProviderAuthType,
   RunTelemetryQuery,
   ToolPermissionResolution,
@@ -27,7 +28,7 @@ interface AgentIpcDependencies {
 // run sets backend.busy. Reads and undo itself are deliberately not reservations.
 const SESSION_OPERATIONS = new Set<string>([
   IPC.AgentStart, IPC.AgentStop, IPC.AgentSend, IPC.AgentQueue, IPC.AgentSendQueued,
-  IPC.AgentRemoveQueued, IPC.AgentMigrateProject, IPC.AgentAbort, IPC.AgentRollbackCheckpoint,
+  IPC.AgentRemoveQueued, IPC.AgentEditQueued, IPC.AgentMigrateProject, IPC.AgentAbort, IPC.AgentRollbackCheckpoint,
   IPC.AgentResumeRun, IPC.AgentDiscardRunRecovery, IPC.AgentRestoreRecoveredCheckpoint,
   IPC.AgentNewSession, IPC.AgentFork, IPC.AgentSwitchSession, IPC.AgentDeleteSession,
   IPC.AgentCopySession, IPC.AgentForkSession, IPC.AgentSetMode, IPC.AgentSetYolo,
@@ -68,6 +69,10 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
     IPC.AgentRemoveQueued,
     (_event, kind: 'steering' | 'followUp', index: number) => bridge.removeQueuedMessage(kind, index)
   )
+  ipcMain.handle(IPC.AgentEditQueued, (event, request: QueuedMessageEditRequest) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口编辑排队消息')
+    return bridge.editQueuedMessage(request, event.sender.id)
+  })
   ipcMain.handle(IPC.AgentMigrateProject, (_event, cwd: string) => bridge.migrateSessionToProject(cwd))
   ipcMain.handle(IPC.AgentAbort, () => bridge.abort())
   ipcMain.handle(IPC.AgentRunCheckpoint, () => bridge.getRunCheckpoint())

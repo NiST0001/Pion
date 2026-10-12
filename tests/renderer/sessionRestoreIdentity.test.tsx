@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useCallback, useReducer, useRef, createRef } from 'react'
-import { act, cleanup, render, renderHook } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LiveSessionProjection } from '../../src/main/agent/live-session-state'
 import { reducer } from '../../src/renderer/src/agent/reducer'
@@ -438,7 +438,14 @@ function timelineView(h: Harness) {
   }
   const keyedNodes = () => {
     const rows = h.result.current.state.timeline
-    const nodes = [...view.container.querySelectorAll<HTMLElement>('.timeline > *')]
+    // Group summaries are display-only rows, not SDK timeline entries. Open
+    // every lazy group before checking the actual tool cards and their identity.
+    for (const header of view.container.querySelectorAll<HTMLElement>('.tool-activity-header[aria-expanded="false"]')) {
+      fireEvent.click(header)
+    }
+    const nodes = [...view.container.querySelectorAll<HTMLElement>('.timeline > :not(.tool-activity-header)')]
+      .map((node) => node.classList.contains('tool-activity-item')
+        ? node.querySelector<HTMLElement>('.tool-call')! : node)
     expect(nodes, 'one actual DOM row for every timeline row').toHaveLength(rows.length)
     expect(new Set(rows.map((row) => row.id)).size, 'keys cannot collapse in the lookup map').toBe(rows.length)
     const keyed = new Map(rows.map((row, index) => {

@@ -15,6 +15,16 @@
    timeline gap and -8px tool margins, -12px leaves a 4px inter-tool gap. */
 .child-chat-scroll .timeline > .tool-call + .tool-call { margin-top: -12px; }
 
+/* visibility is inheritable but children can override it (expanded panel
+   shells do). Hide each retained parent control, not just its ancestor.
+   Keep geometry/DOM intact; App separately applies inert and aria-hidden. */
+.parent-conversation-chrome[aria-hidden="true"],
+.parent-conversation-chrome[aria-hidden="true"] *,
+.composer-dock[aria-hidden="true"],
+.composer-dock[aria-hidden="true"] * {
+  visibility: hidden !important;
+}
+
 @media (forced-colors: active) {
   .side-subagent-session.active { background: Highlight; color: HighlightText; }
   html.pion-keyboard-focus .side-subagent-session:focus-visible,

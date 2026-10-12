@@ -16,8 +16,14 @@ function flushFrames() {
   act(() => {
     const queued = [...frames.values()]
     frames.clear()
-    queued.forEach((callback) => callback(0))
+    vi.advanceTimersByTime(20)
+    queued.forEach((callback) => callback(performance.now()))
   })
+}
+
+function settleFrames() {
+  for (let count = 0; frames.size && count < 60; count++) flushFrames()
+  expect(frames.size, 'bounded scroll animation reaches its actual terminal frame').toBe(0)
 }
 
 // Like loadingScroll's clamped geometry, but attach both refs in a mounted
@@ -150,14 +156,15 @@ describe('message revert navigation', () => {
     fireEvent.scroll(h.element)
     h.update({ busy: true })
     expect(h.surface.style.minHeight).toBe('')
+    settleFrames()
     expect(h.element.scrollTop).toBe(Math.max(0, height - 400))
-    flushFrames()
     expect(h.loadOlder).toHaveBeenCalledTimes(height < 400 ? 1 : 0)
     expect(h.loadNewer).toHaveBeenCalledTimes(height < 400 ? 1 : 0)
 
     // Undo deliberately navigated to the new tail, including late image/layout
     // growth. Fresh upward input on that branch must still pause live following.
     h.resizeContent(2000)
+    settleFrames()
     expect(h.element.scrollTop).toBe(1600)
     h.scrollUp(600)
     h.update({ height: 2400, timeline: [shared, tail], timelineMutation: 'append' })
@@ -213,7 +220,7 @@ describe('message revert navigation', () => {
     h.update({ historyJump: { entryId: 'shared', nonce: 1 } })
     const row = h.content.querySelector<HTMLElement>('[data-entry-id="shared"]')!
     if (applied) {
-      flushFrames()
+      settleFrames()
       expect(h.element.scrollTop).toBe(98)
       expect(row.classList.contains('history-jump-target')).toBe(true)
       expect(h.getByTestId('visible-entry').textContent).toBe('shared')

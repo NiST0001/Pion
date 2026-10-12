@@ -3,6 +3,8 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup, fireEvent, render } from '@testing-library/react'
 import { createRef } from 'react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChatTimeline } from '../../src/renderer/src/features/chat/ChatTimeline'
 import type { ChatTimelineProps } from '../../src/renderer/src/features/chat/ChatTimeline'
@@ -70,6 +72,17 @@ describe('ChatTimeline empty history state', () => {
     expect(view.getByRole('img', { name: '工具结果预览 1' })).toHaveAttribute('src', 'data:image/png;base64,AAAA')
     expect(view.getByRole('button', { name: '分叉' })).toBeInTheDocument()
     expect(view.getByRole('button', { name: '撤销' })).toBeInTheDocument()
+  })
+
+  it('keeps the vertical scrollbar gutter through short or loading history windows', () => {
+    const css = readFileSync(resolve('src/renderer/src/styles/chat.css'), 'utf8')
+    const scrollRule = css.match(/\.chat-scroll\s*\{([^}]*)\}/)?.[1]
+    expect(scrollRule).toContain('overflow-y: scroll;')
+    expect(scrollRule).toContain('scrollbar-gutter: stable;')
+    const view = render(<ChatTimeline {...emptyTimelineProps()} />)
+    const main = view.getByRole('main')
+    view.rerender(<ChatTimeline {...emptyTimelineProps()} timelineLoading historySelected timelineReady={false} />)
+    expect(view.getByRole('main')).toBe(main)
   })
 
   it('keeps a hidden timeline mounted, inert and geometrically present with its own scroll ref', () => {
@@ -161,7 +174,7 @@ describe('ChatTimeline empty history state', () => {
     props.timeline = [{ kind: 'user', id: 2, text: '当前消息', live: true }]
     const view = render(<ChatTimeline {...props} busy agentActivity historySelected timelineReady={false}
       timelineError="会话历史未载入，请重新加载。" workingStatus={{ label: '组织回复中...' }} />)
-    expect(view.getByText('当前消息')).toBeInTheDocument()
+    expect(view.container.querySelector('.row-user .bubble-content')).toHaveTextContent(/^当前消息$/)
     expect(view.getByRole('status')).toHaveTextContent('组织回复中...')
     expect(view.queryByText('会话历史未加载完成')).not.toBeInTheDocument()
     expect(view.queryByRole('button', { name: '重新加载' })).not.toBeInTheDocument()
@@ -191,7 +204,7 @@ describe('ChatTimeline empty history state', () => {
     const props = emptyTimelineProps()
     props.timeline = [{ kind: 'user', id: 1, text: '保留消息', historical: true }]
     const view = render(<ChatTimeline {...props} historySelected timelineReady={false} timelineError="读取失败" />)
-    expect(view.getByText('保留消息')).toBeInTheDocument()
+    expect(view.container.querySelector('.row-user .bubble-content')).toHaveTextContent(/^保留消息$/)
     expect(view.queryByText('会话历史未加载完成')).not.toBeInTheDocument()
   })
 })

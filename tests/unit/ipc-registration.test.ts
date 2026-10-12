@@ -153,7 +153,7 @@ const agentRoutes: RouteCase<AgentBridge>[] = [
 // These routes intentionally turn both synchronous results and throws into promises.
 const reservedAgentChannels = new Set<string>([
   IPC.AgentStart, IPC.AgentStop, IPC.AgentSend, IPC.AgentQueue, IPC.AgentSendQueued,
-  IPC.AgentRemoveQueued, IPC.AgentMigrateProject, IPC.AgentAbort, IPC.AgentRollbackCheckpoint,
+  IPC.AgentRemoveQueued, IPC.AgentEditQueued, IPC.AgentMigrateProject, IPC.AgentAbort, IPC.AgentRollbackCheckpoint,
   IPC.AgentResumeRun, IPC.AgentDiscardRunRecovery, IPC.AgentRestoreRecoveredCheckpoint,
   IPC.AgentNewSession, IPC.AgentFork, IPC.AgentSwitchSession, IPC.AgentDeleteSession,
   IPC.AgentCopySession, IPC.AgentForkSession, IPC.AgentSetMode, IPC.AgentSetYolo,
@@ -228,12 +228,41 @@ describe('branch deletion IPC registration', () => {
   })
 })
 
+describe('queued message editing IPC registration', () => {
+  const request = { cwd, sessionFile: sessionPath, runId: 'queued-run' }
+
+  it('forwards exact request and owner under session reservation without other service access', async () => {
+    const result = { ...request, text: 'draft', images: [] }
+    const editQueuedMessage = vi.fn().mockReturnValue(result)
+    const h = agentHarness({ editQueuedMessage })
+    await expect(h.invoke(IPC.AgentEditQueued, mainEvent(73), request)).resolves.toBe(result)
+    expect(editQueuedMessage).toHaveBeenCalledExactlyOnceWith(request, 73)
+    expect(editQueuedMessage.mock.contexts[0]).toBe(h.bridge)
+    expect(h.withSessionOperation).toHaveBeenCalledExactlyOnceWith(expect.any(Function))
+    expect(h.projects.touchCanonical).not.toHaveBeenCalled()
+  })
+
+  it('rejects iframe access before editing the queue', async () => {
+    const editQueuedMessage = vi.fn()
+    const h = agentHarness({ editQueuedMessage })
+    await expect(h.invoke(IPC.AgentEditQueued, mainEvent(73, true), request)).rejects.toThrow('只允许主窗口编辑排队消息')
+    expect(editQueuedMessage).not.toHaveBeenCalled()
+  })
+
+  it('preserves bridge owner and run validation failures', async () => {
+    const error = new Error('queued run ownership rejected')
+    const editQueuedMessage = vi.fn(() => { throw error })
+    const h = agentHarness({ editQueuedMessage })
+    await expect(h.invoke(IPC.AgentEditQueued, mainEvent(), request)).rejects.toThrow(error)
+  })
+})
+
 describe('agent IPC registration', () => {
   it('registers exactly the agent domain without touching services at registration time', () => {
     const h = agentHarness()
     expect([...h.handlers.keys()].sort()).toEqual([...new Set([
       ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
-      IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete,
+      IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete, IPC.AgentEditQueued,
       IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels
     ])].sort())
     expect(h.listeners.size).toBe(0)
@@ -754,7 +783,7 @@ it('composes the three registrars without duplicate channels', () => {
   })
   const expected = new Set([
     ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
-    IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete,
+    IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete, IPC.AgentEditQueued,
     IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels,
     ...gitRoutes.map(([channel]) => channel), ...effectRoutes.map(([channel]) => channel),
     ...terminalRoutes.map(([channel]) => channel), IPC.WindowState

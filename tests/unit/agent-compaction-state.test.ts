@@ -6,6 +6,75 @@ import { applyBackendEvent } from '../../src/main/agent/backend-events'
 import type { BackendRecord } from '../../src/main/agent/types'
 
 describe('agent compaction state', () => {
+  it.each([false, true])('rejects a stop tail containing a real toolCall (tool result present: %s)', (hasResult) => {
+    const backend = { key: 'scope', busy: true, compacting: false } as BackendRecord
+    const messages = [
+      { role: 'user', content: 'read the file' },
+      { role: 'assistant', stopReason: 'stop', content: [
+        { type: 'text', text: 'Reading now' },
+        { type: 'toolCall', id: 'read-1', name: 'read', arguments: { path: 'file.ts' } }
+      ] },
+      ...(hasResult ? [{ role: 'toolResult', toolCallId: 'read-1', content: 'file contents' }] : [])
+    ]
+    const end = applyBackendEvent(backend, { type: 'agent_end', messages, willRetry: false }, new Map())
+    expect(end.sessionCompleted).toBe(false)
+    expect(backend).toMatchObject({ busy: true, completionState: 'interrupted' })
+    expect(applyBackendEvent(backend, { type: 'agent_settled' }, new Map()).sessionCompleted).toBe(false)
+    expect(backend.busy).toBe(false)
+  })
+
+  it.each([undefined, '', [], [{ type: 'text', text: 'done' }], [{ type: 'thinking', thinking: 'done' }],
+    [{ type: 'text', text: '我会继续读文件，todo: toolCall' }],
+    Array.from({ length: 4096 }, () => ({ type: 'text' }))])(
+    'allows a normal stop including an authoritative empty final (case %#)', (content) => {
+      const backend = { key: 'scope', busy: true } as BackendRecord
+      applyBackendEvent(backend, { type: 'agent_end', willRetry: false, messages: [
+        { role: 'assistant', stopReason: 'toolUse', content: [
+          { type: 'toolCall', id: 'read-1', name: 'read', arguments: { path: 'file.ts' } }
+        ] },
+        { role: 'toolResult', toolCallId: 'read-1', content: 'file contents' },
+        { role: 'assistant', stopReason: 'stop', content }
+      ] }, new Map())
+      expect(backend.busy).toBe(true)
+      expect(applyBackendEvent(backend, { type: 'agent_settled' }, new Map()).sessionCompleted).toBe(true)
+      expect(backend.completionState).toBe('completed')
+    }
+  )
+
+  it.each([false, null, {}, [null], [false], [{ type: false }], [{ type: 'toolCall', id: false }],
+    Array.from({ length: 4097 }, () => ({ type: 'text' }))])(
+    'fails closed for malformed or oversized completion content (%#)', (content) => {
+      const backend = { key: 'scope', busy: true } as BackendRecord
+      applyBackendEvent(backend, { type: 'agent_end', messages: [
+        { role: 'assistant', stopReason: 'stop', content }
+      ] }, new Map())
+      expect(applyBackendEvent(backend, { type: 'agent_settled' }, new Map()).sessionCompleted).toBe(false)
+      expect(backend.completionState).toBe('interrupted')
+    }
+  )
+
+  it('does not inspect tool arguments, text or media when rejecting a trailing toolCall', () => {
+    const backend = { key: 'scope', busy: true } as BackendRecord
+    const part = {
+      type: 'toolCall',
+      get arguments(): never { throw new Error('must not inspect arguments') },
+      get text(): never { throw new Error('must not inspect text') },
+      get data(): never { throw new Error('must not inspect media') }
+    }
+    applyBackendEvent(backend, { type: 'agent_end', messages: [
+      { role: 'assistant', stopReason: 'stop', content: [part] }
+    ] }, new Map())
+    expect(applyBackendEvent(backend, { type: 'agent_settled' }, new Map()).sessionCompleted).toBe(false)
+  })
+
+  it.each([false, null, true, 1])('does not accept a non-string stopReason (%s)', (stopReason) => {
+    const backend = { key: 'scope', busy: true } as BackendRecord
+    applyBackendEvent(backend, { type: 'agent_end', messages: [
+      { role: 'assistant', stopReason, content: [] }
+    ] }, new Map())
+    expect(applyBackendEvent(backend, { type: 'agent_settled' }, new Map()).sessionCompleted).toBe(false)
+  })
+
   it('cannot borrow an earlier assistant stop after a newly consumed steering/user message', () => {
     const backend = { key: 'scope', busy: true } as BackendRecord
     applyBackendEvent(backend, { type: 'agent_end', messages: [
@@ -261,14 +330,18 @@ describe('agent compaction state', () => {
     expect(queued.queuedMessages).toEqual({
       steering: ['检查入口'],
       followUp: ['完成后运行测试'],
-      nativeFollowUpCount: 0
+      followUpRunIds: [null],
+      nativeFollowUpCount: 0,
+      queuePause: undefined
     })
 
     const settled = reducer(queued, { type: 'event', event: { type: 'agent_settled' } })
     expect(settled.queuedMessages).toEqual({
       steering: ['检查入口'],
       followUp: ['完成后运行测试'],
-      nativeFollowUpCount: 0
+      followUpRunIds: [null],
+      nativeFollowUpCount: 0,
+      queuePause: undefined
     })
   })
 

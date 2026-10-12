@@ -121,6 +121,16 @@ export function useAgentRunActions({
     [api]
   )
 
+  const editQueuedMessage = useCallback(
+    async (runId: string) => {
+      if (!api || !state.status.cwd) throw new Error('请等待所选会话就绪后再编辑')
+      // Capture the logical scope when the user clicks; main checks the actual
+      // current backend without starting a backend or dispatching any prompt.
+      return api.editQueuedMessage({ runId, cwd: state.status.cwd, sessionFile: state.session?.sessionFile })
+    },
+    [api, state.status.cwd, state.session?.sessionFile]
+  )
+
   const abort = useCallback(async (): Promise<void> => {
     if (!api) return
     await api.abort()
@@ -155,6 +165,7 @@ export function useAgentRunActions({
     queue,
     sendQueuedMessage,
     removeQueuedMessage,
+    editQueuedMessage,
     abort,
     rollbackRunCheckpoint,
     newSession

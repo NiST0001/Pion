@@ -10,6 +10,7 @@ interface QueueItem {
   kind: QueueKind
   text: string
   index: number
+  runId: string | null
 }
 
 function displayText(text: string): string {
@@ -23,6 +24,8 @@ export function QueuedMessagesCard({
   steering = [],
   followUp = [],
   nativeFollowUpCount = 0,
+  controlsDisabled = false,
+  followUpRunIds = [],
   agentBusy = false,
   queuePause,
   onSendItem,
@@ -34,6 +37,8 @@ export function QueuedMessagesCard({
   followUp?: string[]
   /** Leading followUp entries owned by Pi's native queue (not Pion-editable). */
   nativeFollowUpCount?: number
+  controlsDisabled?: boolean
+  followUpRunIds?: (string | null)[]
   agentBusy?: boolean
   queuePause?: QueuePause
   onSendItem?: (kind: QueueKind, index: number) => void | Promise<void>
@@ -41,8 +46,9 @@ export function QueuedMessagesCard({
   onRemoveItem?: (kind: QueueKind, index: number) => void | Promise<void>
 }): ReactElement | null {
   const items: QueueItem[] = [
-    ...steering.map((text, index) => ({ kind: 'steering' as const, text, index })),
-    ...followUp.map((text, index) => ({ kind: 'followUp' as const, text, index }))
+    ...steering.map((text, index) => ({ kind: 'steering' as const, text, index, runId: null })),
+    ...followUp.map((text, index) => ({ kind: 'followUp' as const, text, index,
+      runId: index >= nativeFollowUpCount ? followUpRunIds[index] ?? null : null }))
   ]
   const [expanded, setExpanded] = useState(() => loadPanelExpanded('queue', sessionKey))
   const [sendingKey, setSendingKey] = useState<string | null>(null)
@@ -117,7 +123,7 @@ export function QueuedMessagesCard({
               const editable = !isSteering && item.index >= nativeFollowUpCount
               return (
                 <div
-                  key={`${item.kind}-${item.index}-${item.text}`}
+                  key={item.runId ?? `${item.kind}-${item.index}-${item.text}`}
                   className={`task-item queue-item ${isSteering ? 'queue-item-steering' : 'queue-item-follow-up'}`}
                   role="listitem"
                   data-queue-index={index + 1}
@@ -132,12 +138,13 @@ export function QueuedMessagesCard({
                     <span className="queue-item-kind">{isSteering ? '插入' : '稍后'}</span>
                     <span className="queue-item-text">{text}</span>
                   </span>
-                  {editable && onEditItem && (
+                  {onEditItem && (
                     <button
                       type="button"
                       className="queue-item-action"
                       aria-label={`编辑第 ${index + 1} 条排队消息`}
-                      title="退回到输入框编辑"
+                      title={item.runId ? '退回到输入框编辑' : '这条消息暂不支持编辑'}
+                      disabled={controlsDisabled || !editable || !item.runId || sendingKey !== null}
                       onClick={(event) => {
                         event.stopPropagation()
                         void onEditItem(item)
@@ -152,6 +159,7 @@ export function QueuedMessagesCard({
                       className="queue-item-action queue-item-remove"
                       aria-label={`删除第 ${index + 1} 条排队消息`}
                       title="删除这条排队消息"
+                      disabled={controlsDisabled || sendingKey !== null}
                       onClick={(event) => {
                         event.stopPropagation()
                         void onRemoveItem(item.kind, item.index)
@@ -165,7 +173,7 @@ export function QueuedMessagesCard({
                     className="queue-item-send"
                     aria-label={`直接发送第 ${index + 1} 条排队消息`}
                     title="直接发送"
-                    disabled={!onSendItem || sendingKey !== null}
+                    disabled={controlsDisabled || !onSendItem || sendingKey !== null}
                     onClick={(event) => {
                       event.stopPropagation()
                       void handleSendItem(item)

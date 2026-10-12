@@ -100,6 +100,15 @@ html[data-native-surface='true'] :is(.picker-menu, .reference-menu,
   content: none;
 }
 
+/* Portal dropdowns are scrollable leaves too. Match the input's 58% tint;
+   filter their border box so the background cannot scroll away with options.
+   This remains opt-in through the existing native-surface setting. */
+html[data-native-surface='true'] :is(.session-list-menu, .pion-select-popup) {
+  isolation: isolate;
+  background: color-mix(in srgb, var(--bg-elev) 58%, transparent);
+  backdrop-filter: url('#pion-panel-frost');
+}
+
 /* Both rows now float above the same scrolling conversation, like their
    expanded panels. Keep their lighter tints without disabling local frost. */
 html[data-native-surface='true'] .run-metrics-strip {
@@ -141,6 +150,8 @@ html[data-native-surface='true'] .task-history-run { background: transparent; }
   html[data-native-surface='true'] .picker-menu,
   html[data-native-surface='true'] .reference-menu,
   html[data-native-surface='true'] .slash-command-menu,
+  html[data-native-surface='true'] .session-list-menu,
+  html[data-native-surface='true'] .pion-select-popup,
   html[data-native-surface='true'] .modal,
   html[data-native-surface='true'] .operations-modal,
   html[data-native-surface='true'] .confirm-dialog,
