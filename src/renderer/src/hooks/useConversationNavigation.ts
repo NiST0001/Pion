@@ -93,6 +93,7 @@ export function useConversationNavigation({
     controller: ReturnType<typeof createEndFollowAnimator>
   } | null>(null)
   const cancelEndFollow = useCallback(() => { endFollow.current?.controller.cancel() }, [])
+  const panelPinSnapshot = useRef<{ element: HTMLElement; panelsVisible?: boolean; height: number; top: string; bottom: string; scope: string } | null>(null)
   // This is provisional blank space, not an estimate of the entire history.
   // Keep its extent while the user is scrolling; actual content can fill it
   // naturally; an explicit jump or return to the end releases unused space.
@@ -234,6 +235,7 @@ export function useConversationNavigation({
   useLayoutEffect(() => {
     const element = scrollRef.current
     if (!viewportActive || !element) return
+    const wasLoading = loadingRef.current
     loadingRef.current = timelineLoading
     hasContentRef.current = timelineLength > 0
     scrollSurfaceRef.current?.style.setProperty('--chat-viewport-height', `${element.clientHeight}px`)
@@ -335,10 +337,12 @@ export function useConversationNavigation({
       element.scrollTop += displacement
     } else if (timelineMutation === 'replace') {
       // Cache refreshes and new array references are not a request to go live.
-      if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)
-        && (!endFollow.current?.controller.isAnimating() || previousHeight !== element.scrollHeight)) {
-        cancelEndFollow()
-        element.scrollTop = element.scrollHeight
+      if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)) {
+        // Same-session STATE/cache replacement may contain live growth. It must
+        // not finish an in-flight curve by snapping to the new end.
+        if (previousHeight > 0 && previousTimelineLength.current > 0 && !wasLoading && !timelineLoading
+          && contentHeight >= previousContentHeight.current) requestEndFollow(element)
+        else { cancelEndFollow(); element.scrollTop = element.scrollHeight }
       }
     } else if (timelineMutation === 'append') {
       // Follow the newest message only while the user is already near the
@@ -430,11 +434,21 @@ export function useConversationNavigation({
   // synchronize an existing follow intent without waiting for a resize delivery.
   useLayoutEffect(() => {
     const element = scrollRef.current
-    if (!viewportActive || !element || pendingJumpNonce.current !== null || !nearBottomRef.current || hasNewerHistory() || (loadingRef.current && !hasContentRef.current)) return
+    if (!viewportActive || !element) { panelPinSnapshot.current = null; return }
+    const style = getComputedStyle(element)
+    const scope = JSON.stringify([projectCwd, sessionPath, historyResetRevision])
+    const snapshot = { element, panelsVisible, height: element.clientHeight, top: style.paddingTop, bottom: style.paddingBottom, scope }
+    const previous = panelPinSnapshot.current
+    panelPinSnapshot.current = snapshot
+    // A callback identity/render alone is not a clearance change. Otherwise
+    // this immediate pin can overwrite the smooth frame just scheduled above.
+    if (previous && previous.element === element && previous.panelsVisible === panelsVisible
+      && previous.height === snapshot.height && previous.top === snapshot.top && previous.bottom === snapshot.bottom && previous.scope === scope) return
+    if (pendingJumpNonce.current !== null || !nearBottomRef.current || hasNewerHistory() || (loadingRef.current && !hasContentRef.current)) return
     cancelEndFollow()
     element.scrollTop = element.scrollHeight
     lastScrollTop.current = element.scrollTop
-  }, [scrollRef, panelsVisible, hasNewerHistory, viewportActive, cancelEndFollow])
+  }, [scrollRef, panelsVisible, hasNewerHistory, viewportActive, projectCwd, sessionPath, historyResetRevision, cancelEndFollow])
 
   useEffect(() => {
     scheduleVisibleHistoryUpdate()

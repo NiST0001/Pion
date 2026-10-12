@@ -130,6 +130,18 @@ it('moves through intermediate offsets on growth, retargets continuously and nev
   expect(h.props.loadNewer).not.toHaveBeenCalled()
 })
 
+it('continues growth across same-session replacements and callback identity refreshes without an immediate pin', () => {
+  const h = setup()
+  h.append(48)
+  h.frame()
+  const before = h.element.scrollTop
+  h.rerender({ ...h.props, timeline: [{ kind: 'assistant', id: 1, text: 'replacement output', thinking: '', streaming: true }],
+    timelineMutation: 'replace', hasNewerHistory: () => false })
+  expect(h.element.scrollTop).toBe(before)
+  h.settle()
+  expect(h.element.scrollTop).toBe(1648)
+})
+
 it('cancels pending growth as soon as a user starts reading and rejects a late frame', () => {
   const h = setup()
   h.append(48)
@@ -142,10 +154,10 @@ it('cancels pending growth as soon as a user starts reading and rejects a late f
 
 it('uses immediate positioning for reduced motion without scheduling growth animation', () => {
   const h = setup()
-  vi.spyOn(window, 'matchMedia').mockImplementation((media) => ({
+  vi.stubGlobal('matchMedia', vi.fn((media: string) => ({
     media, matches: media === '(prefers-reduced-motion: reduce)', onchange: null,
     addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(() => true)
-  }))
+  })))
   h.append(48)
   expect(h.element.scrollTop).toBe(1648)
 })

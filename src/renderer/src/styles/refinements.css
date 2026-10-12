@@ -188,8 +188,14 @@ body {
 }
 
 .bubble-user {
-  background: transparent;
+  background: color-mix(in srgb, var(--user-bubble) 55%, transparent);
   border-top-right-radius: 5px;
+}
+
+@media (forced-colors: active) {
+  .bubble-user {
+    background: Canvas;
+  }
 }
 
 .message-images {

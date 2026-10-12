@@ -120,11 +120,16 @@ describe('ChatMessage', () => {
     expect(view.container.querySelector('[data-screen-reveal-character]')).toBeNull()
   })
 
-  it('keeps user backgrounds transparent in both stylesheet layers without changing padding', () => {
-    for (const path of ['chat.css', 'refinements.css']) {
+  it('keeps user backgrounds translucent without fading content or changing padding, with system-color fallback', () => {
+    for (const [path, padding] of [['chat.css', '10px 14px'], ['refinements.css', '11px 15px']]) {
       const css = readFileSync(`src/renderer/src/styles/${path}`, 'utf8')
-      expect(css).toMatch(/\.bubble-user\s*\{\s*background: transparent;/)
-      expect(css).not.toMatch(/\.bubble-user\s*\{[^}]*background: var\(--user-bubble\)/)
+      const userBubble = css.match(/\.bubble-user\s*\{([^}]*)\}/)?.[1]
+      expect(userBubble).toContain('background: color-mix(in srgb, var(--user-bubble) 55%, transparent);')
+      expect(userBubble).not.toMatch(/(?:opacity|padding|filter)\s*:/)
+      expect(css.match(/\.bubble\s*\{([^}]*)\}/)?.[1]).toContain(`padding: ${padding};`)
+      expect(css).toMatch(/@media \(forced-colors: active\)\s*\{\s*\.bubble-user\s*\{\s*background: Canvas;/)
+      expect(css).not.toMatch(/\.bubble-content\s*\{[^}]*opacity\s*:/)
+      expect(css).not.toMatch(/\.message-image\s*\{[^}]*opacity\s*:/)
     }
   })
 

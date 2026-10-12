@@ -85,7 +85,19 @@ describe('end-follow animator', () => {
     expect(h.time - growthStopped).toBeLessThanOrEqual(320)
   })
 
-  it('does not extend the quiet deadline for repeated unchanged requests', () => {
+  it('starts gently and finishes along the same curve without a separate final jump', () => {
+    const h = setup()
+    h.animator.request()
+    h.step()
+    expect(h.position - 100).toBeLessThan(5)
+    settle(h)
+    const deltas = h.writes.map((value, index) => value - (index === 0 ? 100 : h.writes[index - 1]))
+    expect(deltas.at(-1)).toBeLessThan(deltas.at(-2)!)
+    expect(deltas.at(-1)).toBeLessThan(2)
+    expect(h.position).toBe(200)
+  })
+
+  it('does not restart the interpolation for repeated unchanged requests', () => {
     const h = setup()
     h.animator.request()
     for (let i = 0; i < 18; i++) {

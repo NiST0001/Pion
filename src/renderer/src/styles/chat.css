@@ -158,7 +158,7 @@
 }
 
 .bubble-user {
-  background: transparent;
+  background: color-mix(in srgb, var(--user-bubble) 55%, transparent);
   border-top-right-radius: 4px;
   display: flex;
   flex-direction: column;
@@ -344,6 +344,10 @@ html.pion-keyboard-focus .bubble-error-details summary:focus-visible {
 }
 
 @media (forced-colors: active) {
+  .bubble-user {
+    background: Canvas;
+  }
+
   .bubble-error {
     border-color: CanvasText;
     border-left-color: Highlight;

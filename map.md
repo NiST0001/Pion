@@ -99,8 +99,8 @@
 | src/renderer/src/hooks/useMessageRevert.ts | 撤销确认、空草稿/附件读取门控、一次性文字/图片恢复及拒绝后的恢复重试；按逻辑选择隔离迟到结果，不持有后端或文件回滚 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步；分支/会话列表有界并发逐 cwd 发布，慢/失败项不阻挡已完成项，实时推送优先于迟到初次查询 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
-| src/renderer/src/utils/endFollowAnimator.ts | 可续接目标的单 RAF 末尾跟随控制器，输出换行/正文增高平滑上移，静止后有界收口；取消 generation 拒迟到写，减少动态效果即时；endFollowAnimator.test.tsx 数值/调度回归 |
-| src/renderer/src/hooks/useConversationNavigation.ts | 输出增长仅在既有末尾跟随意图下平滑追尾；用户手势/项目会话切换/跳转/隐藏即取消，分页补偿、首次恢复及浮层clearance保持即时；用户滚动优先、加载空白占位、按保留行位移补偿向前分页（含只迁移未新增行）、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别；真实会话末尾选最后已挂载用户轮次，包含无持久 ID 的实时行；仅以所属索引与挂载行均唯一的实际 SDK 消息时钟作显示桥接，歧义清除旧标记、不补造撤销 ID；加载占位/分页末尾除外；历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
+| src/renderer/src/utils/endFollowAnimator.ts | 可续接目标、保速度连续的单段 Hermite 曲线/单 RAF 末尾跟随控制器，输出换行/正文增高平滑上移，同曲线有界收口、不追加末段跳变；取消 generation 拒迟到写，减少动态效果即时；endFollowAnimator.test.tsx 数值/调度回归 |
+| src/renderer/src/hooks/useConversationNavigation.ts | 输出增长仅在既有末尾跟随意图下平滑追尾；同会话STATE替换及单纯回调身份变化不以即时定位覆盖动画，浮层重定位核对真实clearance变化；用户手势/项目会话切换/跳转/隐藏即取消，分页补偿、首次恢复及浮层clearance保持即时；用户滚动优先、加载空白占位、按保留行位移补偿向前分页（含只迁移未新增行）、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别；真实会话末尾选最后已挂载用户轮次，包含无持久 ID 的实时行；仅以所属索引与挂载行均唯一的实际 SDK 消息时钟作显示桥接，歧义清除旧标记、不补造撤销 ID；加载占位/分页末尾除外；历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
 | src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让，权限请求及会话提问面板复用底部余量定位在输入框上方；全局认证仍居中，不测量展开详情、不重挂载消息或草稿 |
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |

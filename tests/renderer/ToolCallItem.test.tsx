@@ -319,15 +319,21 @@ describe('ToolCallItem', () => {
 
   it.each([
     { historical: true, live: true, noReveal: true },
-    { historical: false, live: true, noReveal: true },
-    { historical: false, live: false, noReveal: false }
-  ])('keeps suppressed or non-live summaries as raw text: %j', ({ historical, live, noReveal }) => {
+    { historical: false, live: true, noReveal: true }
+  ])('keeps suppressed summaries as raw text: %j', ({ historical, live, noReveal }) => {
     const tool = { ...batchTool, live }
     const { container } = render(<ToolCallItem tool={tool} historical={historical} noReveal={noReveal} />)
     fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
     expect(container.querySelector('.tool-subagent-summary pre')?.textContent).toBe('入口结果')
     expect(container.querySelector('.tool-subagent-summary pre > span')).not.toBeInTheDocument()
     expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+  })
+
+  it('fades a newly received terminal summary even without a streaming-output flag', () => {
+    const { container } = render(<ToolCallItem tool={{ ...batchTool, live: false }} />)
+    fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
+    expect(container.querySelector('.tool-subagent-summary pre')?.textContent).toBe('入口结果')
+    expect(container.querySelectorAll('.tool-subagent-summary [data-screen-reveal-character]')).toHaveLength(4)
   })
 
   it('uses a numbered display fallback for whitespace names without changing task identity', () => {
