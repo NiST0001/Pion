@@ -135,7 +135,8 @@
   padding: 6px 0;
 }
 
-.history-navigator-strip.wheel-scrolling {
+.history-navigator-strip.wheel-scrolling,
+.history-navigator-active-carrier.wheel-scrolling {
   animation: history-navigator-smooth-scroll 260ms cubic-bezier(0.18, 0.74, 0.22, 1) both;
 }
 
@@ -197,10 +198,32 @@ html.pion-keyboard-focus .history-navigator-marker:focus-visible {
   opacity: 0.95;
 }
 
-.history-navigator-marker.active {
-  background: var(--accent);
-  opacity: 1;
+/* One persistent accent moves between slots; the buttons retain their real
+   active identity without painting a second, instantly relocated accent. */
+.history-navigator-active-indicator {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 8px;
+  width: 14px;
+  height: 3px;
+  pointer-events: none;
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
 }
+
+.history-navigator-active-indicator[hidden] { display: none; }
+
+.history-navigator-active-bar {
+  display: block;
+  width: 14px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--accent);
+  transform-origin: left center;
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.history-navigator.busy .history-navigator-active-indicator { opacity: 0.28; }
 
 .history-navigator.busy .history-navigator-marker {
   cursor: wait;
@@ -308,12 +331,33 @@ html.pion-keyboard-focus .history-navigator-marker:focus-visible {
   }
 }
 
+@media (forced-colors: active) {
+  .history-navigator-marker {
+    background: GrayText;
+    forced-color-adjust: none;
+  }
+
+  .history-navigator-active-bar {
+    background: Highlight;
+    forced-color-adjust: none;
+  }
+
+  html.pion-keyboard-focus .history-navigator-marker:focus-visible {
+    outline: 1px solid Highlight;
+    outline-offset: 2px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .history-navigator-strip.wheel-scrolling {
+  .history-navigator-strip.wheel-scrolling,
+  .history-navigator-active-carrier.wheel-scrolling {
     animation: none;
   }
 
-  .history-navigator-preview {
+  .history-navigator-preview,
+  .history-navigator-marker,
+  .history-navigator-active-indicator,
+  .history-navigator-active-bar {
     transition: none;
   }
 

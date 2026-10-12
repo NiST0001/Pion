@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { useReducer, useRef, type Dispatch } from 'react'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { SessionEntriesPage, SessionMeta, WireEntry, WireMessage } from '../../src/shared/types'
 import { useHistoryPaging } from '../../src/renderer/src/hooks/useHistoryPaging'
 import { useConversationNavigation } from '../../src/renderer/src/hooks/useConversationNavigation'
@@ -49,10 +49,14 @@ function ToolHistoryRows({ items }: { items: TimelineItem[] }) {
     : <div key={item.id}>{item.kind === 'compaction' ? item.summary : item.text}</div>)}</div>
 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers() })
+// Pagination/ownership fixtures intentionally assert immediate positioning.
+// Normal-motion curves and cancellation are covered by navigation/animator tests.
+beforeEach(() => vi.stubGlobal('matchMedia', vi.fn((query: string) => ({ matches: query === '(prefers-reduced-motion: reduce)' }))))
+afterEach(() => { cleanup(); document.body.replaceChildren(); vi.restoreAllMocks(); vi.useRealTimers(); vi.unstubAllGlobals() })
 
 function scroller(initialHeight = 1000) {
   const element = document.createElement('div')
+  document.body.append(element)
   let height = initialHeight, top = 0
   Object.defineProperties(element, {
     clientHeight: { value: 400 }, scrollHeight: { get: () => height },

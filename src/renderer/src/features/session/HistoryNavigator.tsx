@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type {
   CSSProperties,
   PointerEvent as ReactPointerEvent,
@@ -71,11 +71,14 @@ export function HistoryNavigator({
   const [availableHeight, setAvailableHeight] = useState(0)
   const [windowStart, setWindowStart] = useState(() => Math.max(0, landmarks.length - configuredLimit))
   const [wheelMotion, setWheelMotion] = useState<{
+    sessionPath: string
     nonce: number
     offset: number
   } | null>(null)
   const navigatorRef = useRef<HTMLElement>(null)
   const trackRef = useRef<HTMLDivElement>(null)
+  const indicatorRef = useRef<HTMLDivElement>(null)
+  const previousIndicatorRef = useRef<{ rail: string; entryId: string | undefined } | null>(null)
   const previousSessionPathRef = useRef<string | undefined>(undefined)
   const previousLandmarkCountRef = useRef(landmarks.length)
   const previousActiveEntryRef = useRef(activeEntryId)
@@ -143,8 +146,6 @@ export function HistoryNavigator({
     previousLandmarkCountRef.current = landmarks.length
   }, [activeEntryId, index?.sessionPath, landmarks, maximumWindowStart, visibleLimit])
 
-  if (!index || landmarks.length < 2) return null
-
   const visibleStart = clamp(windowStart, 0, maximumWindowStart)
   const markers = landmarks.slice(visibleStart, visibleStart + visibleLimit)
   const markerPitch = MARKER_HEIGHT + gap
@@ -153,6 +154,28 @@ export function HistoryNavigator({
     + Math.max(0, markers.length - 1) * gap
   const hasBefore = visibleStart > 0
   const hasAfter = visibleStart + markers.length < landmarks.length
+  const activeSlot = markers.findIndex((landmark) => landmark.entryId === activeEntryId)
+  const railWheelMotion = wheelMotion?.sessionPath === index?.sessionPath ? wheelMotion : null
+  // A slot only has meaning within this real session and bounded rail window.
+  // Wheel browsing, resizing and index reorder snap rather than sliding from an
+  // unrelated old slot; successive selections on the same rail retarget in place.
+  const indicatorRail = JSON.stringify([index?.sessionPath, gap, visibleLimit, markers.map((marker) => marker.entryId)])
+  useLayoutEffect(() => {
+    const indicator = indicatorRef.current
+    const previous = previousIndicatorRef.current
+    const entryId = activeSlot >= 0 ? activeEntryId : undefined
+    if (indicator) {
+      const animate = entryId !== undefined && previous?.entryId !== undefined
+        && previous.rail === indicatorRail
+      indicator.style.transition = animate ? '' : 'none'
+      indicator.style.transform = `translateY(${TRACK_VERTICAL_PADDING / 2 + Math.max(0, activeSlot) * markerPitch}px)`
+      // Commit a reset before a subsequent selection can restore the transition.
+      if (!animate) void indicator.offsetHeight
+    }
+    previousIndicatorRef.current = { rail: indicatorRail, entryId }
+  }, [activeEntryId, activeSlot, indicatorRail, markerPitch])
+
+  if (!index || landmarks.length < 2) return null
 
   /** Map against the bars' rendered span, not the full-height rail. */
   const nearestIndexAt = (clientY: number): number => {
@@ -210,6 +233,7 @@ export function HistoryNavigator({
     windowStartRef.current = next
     setWindowStart(next)
     setWheelMotion({
+      sessionPath: index.sessionPath,
       nonce: ++wheelSequenceRef.current,
       offset: movedSteps * markerPitch
     })
@@ -285,12 +309,30 @@ export function HistoryNavigator({
         }}
       >
         <div
-          key={`${index.sessionPath}:${wheelMotion?.nonce ?? 'steady'}`}
-          className={`history-navigator-strip${wheelMotion ? ' wheel-scrolling' : ''}`}
+          ref={indicatorRef}
+          className="history-navigator-active-indicator"
+          aria-hidden="true"
+          hidden={activeSlot < 0}
+          data-entry-id={activeSlot >= 0 ? activeEntryId : undefined}
+        >
+          <div
+            key={railWheelMotion?.nonce ?? 'steady'}
+            className={`history-navigator-active-carrier${railWheelMotion ? ' wheel-scrolling' : ''}`}
+            style={{ '--history-wheel-offset': `${railWheelMotion?.offset ?? 0}px` } as CSSProperties}
+          >
+            <span
+              className="history-navigator-active-bar"
+              style={{ transform: `scaleX(${waveScale(activeSlot, hoverIndex).toFixed(3)})` }}
+            />
+          </div>
+        </div>
+        <div
+          key={`${index.sessionPath}:${railWheelMotion?.nonce ?? 'steady'}`}
+          className={`history-navigator-strip${railWheelMotion ? ' wheel-scrolling' : ''}`}
           style={{
             gap: `${gap}px`,
             '--history-divider-offset': `${gap / 2}px`,
-            '--history-wheel-offset': `${wheelMotion?.offset ?? 0}px`
+            '--history-wheel-offset': `${railWheelMotion?.offset ?? 0}px`
           } as CSSProperties}
         >
           {markers.map((landmark, markerIndex) => {
@@ -311,6 +353,7 @@ export function HistoryNavigator({
                   data-entry-id={landmark.entryId}
                   data-entry-index={landmark.entryIndex}
                   style={{ transform: `scaleX(${scale.toFixed(3)})` }}
+                  aria-current={active ? 'true' : undefined}
                   aria-label={`跳到第 ${landmark.ordinal} 条历史消息：${landmark.snippet}`}
                   disabled={busy}
                   onFocus={() => showMarkerPreview(markerIndex)}

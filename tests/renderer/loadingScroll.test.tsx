@@ -4,12 +4,17 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { useConversationNavigation } from '../../src/renderer/src/hooks/useConversationNavigation'
 import type { TimelineItem } from '../../src/renderer/src/agent/types'
 
-beforeEach(() => vi.useFakeTimers())
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+// These cases verify loading-space ownership, independently of the motion curve.
+beforeEach(() => {
+  vi.useFakeTimers()
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => ({ matches: query === '(prefers-reduced-motion: reduce)' })))
+})
+afterEach(() => { cleanup(); document.body.replaceChildren(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 const item: TimelineItem = { kind: 'user', id: 1, text: 'loaded' }
 
 function setup(loading: boolean, content = 0) {
   const element = document.createElement('div')
+  document.body.append(element)
   const surface = document.createElement('div')
   const timeline = document.createElement('div')
   timeline.className = 'timeline'

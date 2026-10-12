@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { useConversationNavigation } from '../../src/renderer/src/hooks/useConversationNavigation'
 import type { TimelineItem } from '../../src/renderer/src/agent/types'
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
+afterEach(() => { cleanup(); document.body.replaceChildren(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 function setup() {
   let clock = 0, nextFrame = 0
@@ -18,7 +18,7 @@ function setup() {
     frames.clear()
     ready.forEach(callback => callback(clock))
   })
-  const settle = () => { for (let n = 0; n < 24; n++) frame() }
+  const settle = () => { for (let n = 0; n < 40; n++) frame() }
   let height = 2000, top = 0
   let resize = () => {}
   vi.stubGlobal('ResizeObserver', class {
@@ -27,6 +27,7 @@ function setup() {
     disconnect() {}
   })
   const element = document.createElement('div')
+  document.body.append(element)
   Object.defineProperties(element, {
     clientHeight: { value: 400 }, scrollHeight: { get: () => height },
     scrollTop: { get: () => top, set: (value: number) => { top = Math.max(0, Math.min(height - 400, value)) } }

@@ -352,7 +352,7 @@ export class AgentBridge {
   }
 
   private recoverPromptFailure(
-    backend: BackendRecord, lease: { owns: () => boolean }, run: RunOperation | undefined, error: unknown
+    backend: BackendRecord, lease: { owns: () => boolean }, run: RunOperation | null | undefined, error: unknown
   ): void {
     if (!lease.owns() || (run && (backend.activeRunId !== run.id
       || this.runStore.get(run.id)?.state !== 'dispatching'))) return

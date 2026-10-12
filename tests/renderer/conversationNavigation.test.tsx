@@ -11,16 +11,25 @@ import { HistoryNavigator } from '../../src/renderer/src/features/session/Histor
 vi.mock('../../src/renderer/src/utils/historyReveal', () => ({ armPendingHistoryRevealRows: vi.fn(), armHistoryRevealRow: vi.fn() }))
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.replaceChildren() })
 
+function settleFrames(frames: FrameRequestCallback[]) {
+  for (let time = 0; frames.length && time <= 1000; time += 20) {
+    act(() => frames.splice(0).forEach((callback) => callback(time)))
+  }
+}
+
 function markerFixture() {
   const frames = new Map<number, FrameRequestCallback>()
   let frameId = 0
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.set(++frameId, callback); return frameId })
   vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id) })
+  let time = 0
   const flush = () => act(() => {
     const pending = [...frames.values()]
     frames.clear()
-    pending.forEach((callback) => callback(0))
+    time += 20
+    pending.forEach((callback) => callback(time))
   })
+  const finish = () => { for (let index = 0; frames.size && index < 50; index++) flush() }
   let resize = () => {}
   vi.stubGlobal('ResizeObserver', class {
     constructor(callback: () => void) { resize = callback }
@@ -63,10 +72,106 @@ function markerFixture() {
   element.scrollTop = 500
   act(() => hook.result.current.handleTimelineScroll())
   flush()
-  return { ...hook, options, element, rows, positions, frames, flush, resize: () => act(() => resize()) }
+  return { ...hook, options, element, rows, positions, frames, flush, finish, resize: () => act(() => resize()) }
 }
 
 describe('conversation navigation', () => {
+  it('animates a mounted jump frame by frame, remeasures layout and does not page or pin during motion', () => {
+    const f = markerFixture()
+    const jumped = { ...f.options, historyJump: { entryId: 'entry-1', nonce: 1 } }
+    f.rerender(jumped)
+    f.flush() // locate actual row; no immediate scroll
+    expect(f.element.scrollTop).toBe(500)
+    f.flush() // curve origin
+    f.flush()
+    expect(f.element.scrollTop).toBeGreaterThan(500)
+    expect(f.element.scrollTop).toBeLessThan(648)
+    f.positions[1] = 1200
+    f.element.style.paddingTop = '50px'
+    f.element.style.setProperty('--conversation-top-clearance', '50px')
+    const beforeResize = f.element.scrollTop
+    f.resize()
+    f.rerender({ ...jumped, timeline: [...jumped.timeline], timelineMutation: 'prepend', panelsVisible: true })
+    expect(f.element.scrollTop).toBe(beforeResize)
+    f.finish()
+    expect(f.element.scrollTop).toBeCloseTo(1200 - (50 + 350 * 0.38))
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-1')
+    act(() => f.result.current.handleTimelineScroll())
+    expect(f.options.loadOlder).not.toHaveBeenCalled()
+    expect(f.options.loadNewer).not.toHaveBeenCalled()
+  })
+
+  it('continues a new jump from the current offset and does not animate an already aligned target again', () => {
+    const f = markerFixture()
+    f.rerender({ ...f.options, historyJump: { entryId: 'entry-1', nonce: 1 } })
+    f.flush()
+    f.flush()
+    f.flush()
+    const interrupted = f.element.scrollTop
+    const late = [...f.frames.values()]
+    f.rerender({ ...f.options, historyJump: { entryId: 'entry-0', nonce: 2 } })
+    act(() => late.forEach((callback) => callback(1000)))
+    expect(f.element.scrollTop).toBe(interrupted)
+    f.flush()
+    expect(f.element.scrollTop).toBe(interrupted)
+    f.finish()
+    expect(f.element.scrollTop).toBe(248)
+    f.rerender({ ...f.options, historyJump: { entryId: 'entry-0', nonce: 3 } })
+    f.flush()
+    expect(f.element.scrollTop).toBe(248)
+    expect(f.frames.size).toBe(0)
+  })
+
+  it.each(['wheel', 'touch', 'pointer', 'PageUp'] as const)('cancels jump motion on %s and rejects a captured late frame', (gesture) => {
+    const f = markerFixture()
+    f.rerender({ ...f.options, historyJump: { entryId: 'entry-1', nonce: 1 } })
+    f.flush()
+    f.flush()
+    f.flush()
+    const late = [...f.frames.values()]
+    const stopped = f.element.scrollTop
+    act(() => {
+      if (gesture === 'wheel') f.element.dispatchEvent(new WheelEvent('wheel', { deltaY: -20 }))
+      else if (gesture === 'touch') f.element.dispatchEvent(new Event('touchstart'))
+      else if (gesture === 'pointer') f.element.dispatchEvent(new Event('pointerdown'))
+      else f.element.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp' }))
+      late.forEach((callback) => callback(1000))
+    })
+    f.finish()
+    expect(f.element.scrollTop).toBe(stopped)
+  })
+
+  it.each(['scope', 'reset', 'hidden', 'removed target', 'unmount'] as const)('fences late jump frames after %s', (change) => {
+    const f = markerFixture()
+    const jumped = { ...f.options, historyJump: { entryId: 'entry-1', nonce: 1 } }
+    f.rerender(jumped)
+    f.flush()
+    f.flush()
+    const late = [...f.frames.values()]
+    if (change === 'scope') f.rerender({ ...jumped, projectCwd: '/new-project' })
+    else if (change === 'reset') f.rerender({ ...jumped, historyResetRevision: 1 })
+    else if (change === 'hidden') f.rerender({ ...jumped, viewportActive: false })
+    else if (change === 'removed target') f.rows[1].remove()
+    else f.unmount()
+    const stopped = f.element.scrollTop
+    act(() => late.forEach((callback) => callback(1000)))
+    expect(f.element.scrollTop).toBe(stopped)
+  })
+
+  it('waits for a target page DOM before moving and honors reduced motion', async () => {
+    const f = markerFixture()
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true } as MediaQueryList)))
+    f.rows[1].remove()
+    const jumped = { ...f.options, timelineLoading: true, historyJump: { entryId: 'entry-1', nonce: 1 } }
+    f.rerender(jumped)
+    f.flush()
+    expect(f.element.scrollTop).toBe(500)
+    await act(async () => { f.rows[0].parentElement!.append(f.rows[1]); await Promise.resolve() })
+    f.flush()
+    expect(f.element.scrollTop).toBe(648)
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-1')
+  })
+
   it.each(['wheel', 'touch', 'PageUp'] as const)('binds a conditionally mounted viewport and pauses on %s before any scroll event', (gesture) => {
     const frames = new Map<number, FrameRequestCallback>()
     let frameId = 0
@@ -343,7 +448,8 @@ describe('conversation navigation', () => {
     f.positions[1] = 2920
     f.rerender({ ...f.options, historyJump: { entryId: 'entry-0', nonce: 1 } })
     f.flush()
-    f.flush()
+    expect(f.element.scrollTop).toBe(500)
+    f.finish()
     expect(f.element.scrollTop).toBe(2600)
     expect(f.result.current.visibleHistoryEntryId).toBe('entry-0')
     act(() => f.result.current.handleTimelineScroll())
@@ -410,7 +516,7 @@ describe('conversation navigation', () => {
     const f = markerFixture()
     const jumped = { ...f.options, historyJump: { entryId: 'entry-1', nonce: 1 } }
     f.rerender(jumped)
-    f.flush()
+    f.finish()
     const position = f.element.scrollTop
     f.positions[1] = 2000
     f.rerender({ ...jumped, timeline: [...jumped.timeline], historyIndexSessionPath: '/a' })
@@ -467,6 +573,7 @@ describe('conversation navigation', () => {
     Object.defineProperties(element, { scrollHeight: { value: 2000 }, clientHeight: { value: 400 } })
     const target = document.createElement('div')
     target.dataset.entryId = 'target'
+    document.body.append(element)
     target.getBoundingClientRect = () => ({ top: 600 - element.scrollTop } as DOMRect)
     element.append(target)
     renderHook(() => useConversationNavigation({
@@ -474,7 +581,7 @@ describe('conversation navigation', () => {
       timelineMutation: 'replace', busy: false, historyJump: { entryId: 'target', nonce: 1 },
       loadOlder: vi.fn(async () => {}), loadNewer: vi.fn(async () => {})
     }))
-    act(() => frames.splice(0).forEach((callback) => callback(0)))
+    settleFrames(frames)
     expect(element.scrollTop).toBeCloseTo(600 - (50 + (400 - 50 - 120) * 0.38))
   })
 
@@ -515,6 +622,7 @@ describe('conversation navigation', () => {
     Object.defineProperties(element, { scrollHeight: { value: 2000 }, clientHeight: { value: 400 } })
     const target = document.createElement('div')
     target.dataset.entryId = 'near-end'
+    document.body.append(element)
     target.getBoundingClientRect = () => ({ top: 1702 - element.scrollTop } as DOMRect)
     element.append(target)
     const options: Parameters<typeof useConversationNavigation>[0] = {
@@ -523,7 +631,7 @@ describe('conversation navigation', () => {
       loadOlder: vi.fn(async () => undefined), loadNewer: vi.fn(async () => undefined)
     }
     const { result, rerender } = renderHook((props) => useConversationNavigation(props), { initialProps: options })
-    act(() => frames.splice(0).forEach((callback) => callback(0)))
+    settleFrames(frames)
     act(() => result.current.handleTimelineScroll())
     rerender({ ...options, timeline: [...options.timeline], panelsVisible: true })
     expect(element.scrollTop).toBe(1550)
@@ -546,6 +654,7 @@ describe('conversation navigation', () => {
     previous.className = target.className = 'row-user'
     previous.dataset.entryId = 'previous'
     target.dataset.entryId = 'clicked'
+    document.body.append(element)
     previous.getBoundingClientRect = () => ({ top: 860 - element.scrollTop } as DOMRect)
     target.getBoundingClientRect = () => ({ top: 880 - element.scrollTop } as DOMRect)
     element.append(previous, target)
@@ -555,7 +664,7 @@ describe('conversation navigation', () => {
       loadOlder: vi.fn(async () => undefined), loadNewer: vi.fn(async () => undefined)
     }
     const { result, rerender } = renderHook((props) => useConversationNavigation(props), { initialProps: options })
-    act(() => frames.splice(0).forEach((callback) => callback(0)))
+    settleFrames(frames)
     expect(element.scrollTop).toBe(600) // target cannot reach the anchor at the document's end
     expect(target).toHaveProperty('className', 'row-user history-jump-target')
     act(() => result.current.handleTimelineScroll())
@@ -577,6 +686,7 @@ describe('conversation navigation', () => {
     vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined)
     const element = document.createElement('div')
     Object.defineProperties(element, { scrollHeight: { value: 2000 }, clientHeight: { value: 400 } })
+    document.body.append(element)
     const rows = ['previous', 'clicked'].map((id, index) => {
       const row = document.createElement('div')
       row.className = 'row-user'
@@ -591,7 +701,7 @@ describe('conversation navigation', () => {
       loadOlder: async () => undefined, loadNewer: async () => undefined
     }
     const { result } = renderHook(() => useConversationNavigation(options))
-    act(() => frames.splice(0).forEach((callback) => callback(0)))
+    settleFrames(frames)
     expect(rows[1].getBoundingClientRect().top).toBe(152)
     act(() => result.current.handleTimelineScroll())
     act(() => frames.splice(0).forEach((callback) => callback(0)))
@@ -612,6 +722,7 @@ describe('conversation navigation', () => {
     })
     const target = document.createElement('div')
     target.dataset.entryId = 'old-message'
+    document.body.append(element)
     target.getBoundingClientRect = () => ({ top: 652 - element.scrollTop } as DOMRect)
     element.append(target)
     const timeline: TimelineItem[] = []
@@ -623,7 +734,7 @@ describe('conversation navigation', () => {
       loadOlder: vi.fn(async () => undefined), loadNewer: vi.fn(async () => undefined)
     }
     const { rerender } = renderHook((props) => useConversationNavigation(props), { initialProps: options })
-    act(() => { frames.splice(0).forEach((callback) => callback(0)) })
+    settleFrames(frames)
     expect(element.scrollTop).toBe(500)
     // A same-session refresh may replace the array while keeping mutation=replace.
     rerender({ ...options, timeline: [...timeline] })
