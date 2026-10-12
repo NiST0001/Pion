@@ -122,8 +122,12 @@ describe('ToolActivityHeader', () => {
 
 describe('tool activity style contracts (static, not GUI validation)', () => {
   it('keeps wrappers mounted but explicitly removes hidden wrappers from layout', () => {
-    expect(css).toMatch(/\.tool-activity-item\s*\{\s*display:\s*flow-root;\s*margin:\s*-8px 0;/)
-    expect(css).toMatch(/\.tool-activity-item\s*>\s*\.tool-call\s*\{\s*margin:\s*0;/)
+    expect(css).toMatch(/\.tool-activity-item\s*\{\s*display:\s*grid;\s*grid-template-rows:\s*0fr;\s*margin:\s*-12px 0;/)
+    expect(css).toMatch(/\.tool-activity-inner\s*>\s*\.tool-call\s*\{\s*margin:\s*0;/)
+    expect(css).toContain('grid-template-rows 180ms var(--motion-ease-out)')
+    expect(css).toContain('margin 180ms var(--motion-ease-out)')
+    expect(css).toContain('@starting-style')
+    expect(css).toMatch(/\.tool-activity-inner\s*\{\s*min-height:\s*0;\s*overflow:\s*hidden;/)
     expect(css).toMatch(/\.tool-activity-item\[hidden\]\s*\{\s*display:\s*none;/)
     expect(css).toMatch(/\.child-chat-scroll \.timeline > \.tool-activity-item \+ \.tool-activity-item\s*\{\s*margin-top:\s*-12px;/)
   })

@@ -1,11 +1,35 @@
-/* Wrappers retain mounted tools when the separate summary row is closed. */
+/* Flat keyed wrappers retain cards. Collapsed margins cancel the timeline's
+   24px gap, so retiring a zero-height row causes no second layout jump. */
 .tool-activity-item {
-  display: flow-root;
-  margin: -8px 0;
+  display: grid;
+  grid-template-rows: 0fr;
+  margin: -12px 0;
+  opacity: 0;
+  transition: grid-template-rows 180ms var(--motion-ease-out),
+    margin 180ms var(--motion-ease-out), opacity 140ms ease;
 }
 
-.tool-activity-item > .tool-call {
+.tool-activity-item[data-open='true'] {
+  grid-template-rows: 1fr;
+  margin: -8px 0;
+  opacity: 1;
+}
+
+.tool-activity-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tool-activity-inner > .tool-call {
   margin: 0;
+}
+
+@starting-style {
+  .tool-activity-item[data-open='true'] {
+    grid-template-rows: 0fr;
+    margin: -12px 0;
+    opacity: 0;
+  }
 }
 
 .tool-activity-item[hidden] {
@@ -77,7 +101,8 @@ html.pion-keyboard-focus .tool-activity-header:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .tool-activity-chevron {
+  .tool-activity-chevron,
+  .tool-activity-item {
     transition: none;
   }
 

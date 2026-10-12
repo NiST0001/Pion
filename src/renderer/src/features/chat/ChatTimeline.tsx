@@ -61,9 +61,24 @@ export interface ChatTimelineProps {
 // Flat sibling keys prevent prepend/merged groups from reparenting their DOM.
 function ToolActivityItem({ item, visible, readOnly }: { item: ToolTimelineItem; visible: boolean; readOnly: boolean }) {
   const mounted = useRef(false)
-  useLayoutEffect(() => { if (visible) mounted.current = true }, [visible])
-  return <div className="tool-activity-item" hidden={!visible} inert={!visible} aria-hidden={!visible || undefined}>
-    {(visible || mounted.current) && <ToolCallItem tool={item.tool} historical={item.historical} noReveal={item.noReveal} readOnly={readOnly} />}
+  const [present, setPresent] = useState(visible)
+  useLayoutEffect(() => {
+    if (visible) { mounted.current = true; setPresent(true); return }
+    if (!present) return
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      setPresent(false)
+      return
+    }
+    // Keep the closing layout until grid/margins finish (180ms). Cleanup on
+    // reopen/unmount prevents a previous close from hiding the new disclosure.
+    const timer = window.setTimeout(() => setPresent(false), 200)
+    return () => window.clearTimeout(timer)
+  }, [visible, present])
+  return <div className="tool-activity-item" data-open={visible}
+    hidden={!visible && !present} inert={!visible} aria-hidden={!visible || undefined}>
+    <div className="tool-activity-inner">
+      {(visible || mounted.current) && <ToolCallItem tool={item.tool} historical={item.historical} noReveal={item.noReveal} readOnly={readOnly} />}
+    </div>
   </div>
 }
 

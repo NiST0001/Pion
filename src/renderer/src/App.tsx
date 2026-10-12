@@ -7,7 +7,6 @@ import { useSubagentSessions } from './hooks/useSubagentSessions'
 import { createSubagentTimelineProjector } from './agent/subagentTimeline'
 import { useMessageRevert } from './hooks/useMessageRevert'
 import { useRunTelemetry } from './hooks/useRunTelemetry'
-import { useRunRecovery } from './hooks/useRunRecovery'
 import { useVerification } from './hooks/useVerification'
 import { useAppInteractionState } from './hooks/useAppInteractionState'
 import { useConversationNavigation } from './hooks/useConversationNavigation'
@@ -60,7 +59,6 @@ import { HistoryNavigator } from './features/session/HistoryNavigator'
 import { ToolPermissionModal } from './features/operations/ToolPermissionModal'
 import { ExtensionUiModal } from './features/common/ExtensionUiModal'
 import { RunMetricsStrip } from './features/operations/RunMetricsStrip'
-import { RunRecoveryBanner } from './features/operations/RunRecoveryBanner'
 import { WorkbenchDialogs } from './app/WorkbenchDialogs'
 import type { OperationsPanelKind } from './features/operations/OperationsModal'
 import { readSessionPreviewDensity, saveSessionPreviewDensity } from './utils/sessionPreview'
@@ -164,12 +162,6 @@ export function App(): ReactElement {
     }, 0)
     return { duration, usage }
   }, [runTelemetry.runs])
-  const runRecovery = useRunRecovery({
-    hasBridge,
-    enabled: policyResourcesEnabled,
-    sessionPath: resourceSessionPath,
-    cwd: resourceCwd
-  })
   const verification = useVerification({
     hasBridge,
     enabled: operationResourcesEnabled && operationsPanel === 'verification',
@@ -998,16 +990,6 @@ export function App(): ReactElement {
             busy={projectTrustBusy || state.busy || state.status.phase === 'starting'}
             error={projectTrustError}
             onDecision={(decision) => void handleProjectTrustChange(decision)}
-          />
-
-          <RunRecoveryBanner
-            candidates={runRecovery.candidates}
-            busyId={runRecovery.busyId}
-            agentBusy={state.busy}
-            error={runRecovery.error}
-            onResume={(runId) => void runRecovery.resume(runId)}
-            onDiscard={(runId) => void runRecovery.discard(runId)}
-            onRestoreCheckpoint={(runId) => void runRecovery.restoreCheckpoint(runId)}
           />
 
           <div ref={conversationShellRef} className={`conversation-shell${viewingChild ? ' is-subagent-view' : ''}${historyNavigatorVisible ? ' has-history-navigator' : ''}${(hasTaskPanel || hasQueuedMessages) ? ' has-composer-panels' : ''}`}>
