@@ -20,7 +20,9 @@
   overflow: hidden;
 }
 
-.tool-activity-inner > .tool-call {
+/* The reveal gate keeps text behind the layout phase without adding spacing. */
+.tool-activity-inner > .tool-call,
+.tool-activity-inner > .disclosure-reveal-gate > .tool-call {
   margin: 0;
 }
 

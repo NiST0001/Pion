@@ -6,7 +6,7 @@ import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import type { SessionEntry } from '@earendil-works/pi-coding-agent'
 import type { BackendRecord } from '../../src/main/agent/types'
 import type { RunOperation } from '../../src/shared/operations'
-import type { SessionEntriesPage, SessionHistoryIndex, SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
+import type { ImageContent, SessionEntriesPage, SessionHistoryIndex, SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
 import { RunStore } from '../../src/main/run-store'
 import { SessionListCache } from '../../src/main/agent/session-list-cache'
 import { PendingRequestStore } from '../../src/main/agent/pending-requests'
@@ -20,7 +20,7 @@ function messageOf(event: WireEventInput): WireMessage {
 type Disposition = 'started' | 'queued' | 'handled'
 interface BridgeHarness {
   send(message: string): Promise<void>
-  queue(message: string): Promise<void>
+  queue(message: string, images?: ImageContent[]): Promise<void>
   resumeRun(runId: string): Promise<RunOperation>
   startVerificationRepair(sessionPath: string, cwd: string, message: string): Promise<RunOperation | null>
   sendQueuedMessage(kind: 'followUp', index: number): Promise<void>
@@ -147,6 +147,229 @@ describe('AgentBridge queue draft retrieval', () => {
     expect(() => h.bridge.editQueuedMessage(request, 7)).toThrow()
     expect(h.backend.localFollowUps).toHaveLength(1)
     expect(h.prompt).not.toHaveBeenCalled()
+  })
+})
+
+describe('AgentBridge immediate Tab enqueue', () => {
+  const images: ImageContent[] = [
+    { type: 'image', data: 'first-original', mimeType: 'image/png' },
+    { type: 'image', data: 'second-original', mimeType: 'image/jpeg' }
+  ]
+
+  it.each([
+    'busy', 'compacting', 'localQueueDispatching', 'localQueueDispatchPromise',
+    'promptDispatch', 'runCompletionPromise', 'queuePause', 'localQueueBlocked', 'localFollowUps'
+  ] as const)('takes an editable image draft immediately with %s occupied and no SDK receipt', async guard => {
+    const h = await harness()
+    // Enqueue/edit is isolated from the automatic pump in this fixture.
+    h.backend.queueAutoReady = false
+    const never = new Promise<void>(() => undefined)
+    if (guard === 'localFollowUps') h.addQueued('older')
+    else if (guard === 'queuePause') h.backend.queuePause = { paused: true, revision: 11, reason: 'existing pause' }
+    else if (guard === 'promptDispatch') h.backend.promptDispatch = { promise: never, runId: 'current' }
+    else if (guard === 'runCompletionPromise' || guard === 'localQueueDispatchPromise') h.backend[guard] = never
+    else h.backend[guard] = true
+    const pause = h.backend.queuePause
+    const beforeIds = h.backend.localFollowUps!.map(item => item.runId)
+    h.getState.mockReturnValue(new Promise(() => undefined))
+    const internals = h.bridge as unknown as {
+      reserveDispatch(backend: BackendRecord): unknown
+      syncBackendSession(backend: BackendRecord): Promise<void>
+    }
+    const reserve = vi.spyOn(internals, 'reserveDispatch')
+    const sync = vi.spyOn(internals, 'syncBackendSession').mockReturnValue(never)
+    let closed = false
+    const queued = h.bridge.queue('draft with images', images).then(() => { closed = true })
+    await dispatchGap()
+    expect(closed).toBe(true)
+    await queued
+    expect(h.getState).not.toHaveBeenCalled()
+    expect(reserve).not.toHaveBeenCalled()
+    expect(sync).not.toHaveBeenCalled()
+    expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.steer).not.toHaveBeenCalled()
+    const item = h.backend.localFollowUps!.at(-1)!
+    expect(h.backend.localFollowUps!.map(current => current.runId)).toEqual([...beforeIds, item.runId])
+    expect(h.runStore.get(item.runId)).toMatchObject({
+      id: item.runId, state: 'queued', prompt: { message: 'draft with images', images }
+    })
+    expect(h.runStore.get(item.runId)?.dispatchedAt).toBeUndefined()
+    expect(h.runStore.get(item.runId)?.prompt.images).not.toBe(images)
+    const payload = h.bridge.editQueuedMessage({ runId: item.runId, cwd: h.backend.cwd }, 7)
+    expect(payload).toEqual({ runId: item.runId, text: 'draft with images', images })
+    expect(payload.images).not.toBe(images)
+    expect(payload.images[0]).not.toBe(images[0])
+    expect(h.backend.localFollowUps!.map(current => current.runId)).toEqual(beforeIds)
+    expect(h.backend.queuePause).toBe(pause)
+    expect(h.getState).not.toHaveBeenCalled()
+    expect(h.prompt).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
+  it.each(['agent_start', 'compaction_start', 'normal settle'] as const)(
+    'appends an idle state-read draft after %s changes generation without stealing execution', async boundary => {
+      const h = await harness()
+      const internals = h.bridge as unknown as { reserveDispatch(backend: BackendRecord): unknown }
+      const reserve = vi.spyOn(internals, 'reserveDispatch')
+      const receipt = deferred<typeof h.state>()
+      h.getState.mockReturnValueOnce(receipt.promise)
+      const queued = h.bridge.queue('pending read draft', images)
+      await dispatchGap()
+      expect(h.getState).toHaveBeenCalledTimes(1)
+      expect(reserve).not.toHaveBeenCalled()
+      if (boundary === 'normal settle') {
+        // A real root run can finish while a previously idle state receipt is pending.
+        // Its actual checkpoint receipt still holds completion, preventing an automatic pump.
+        Object.assign(h.bridge, { refreshRunCheckpoint: vi.fn(() => new Promise<void>(() => undefined)) })
+        const run = h.bridge.createRun(h.backend, null, 'independent root', [], 'follow-up', 'queued')
+        h.runStore.update(run.id, current => { current.state = 'running' })
+        h.backend.activeRunId = run.id
+        h.emit('agent_start')
+        h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+        h.emit('agent_settled')
+        await dispatchGap()
+        // The captured SDK receipt still reports streaming; it must enqueue, not execute.
+        receipt.resolve({ ...h.state, isStreaming: true })
+      } else {
+        h.emit(boundary)
+        receipt.resolve({ ...h.state })
+      }
+      await queued
+      const item = h.backend.localFollowUps!.at(-1)!
+      expect(h.backend.localFollowUps).toEqual([{ runId: item.runId, text: 'pending read draft', images }])
+      expect(h.runStore.get(item.runId)).toMatchObject({ state: 'queued', prompt: { message: 'pending read draft', images } })
+      expect(h.runStore.get(item.runId)?.dispatchedAt).toBeUndefined()
+      expect(reserve).not.toHaveBeenCalled()
+      expect(h.prompt).not.toHaveBeenCalled()
+      expect(h.steer).not.toHaveBeenCalled()
+      await h.runStore.flush()
+    }
+  )
+
+  it.each(['owner', 'client'] as const)('rejects an idle state receipt after %s replacement without adding the draft', async replacement => {
+    const h = await harness()
+    const receipt = deferred<typeof h.state>()
+    h.getState.mockReturnValueOnce(receipt.promise)
+    const queued = h.bridge.queue('stale owner draft', images)
+    const rejected = expect(queued).rejects.toThrow('Agent 会话已关闭')
+    await dispatchGap()
+    if (replacement === 'owner') h.pool.set(h.backend.key, { ...h.backend })
+    else h.backend.client = { ...h.backend.client } as BackendRecord['client']
+    receipt.resolve({ ...h.state })
+    await rejected
+    expect(h.runs()).toEqual([])
+    expect(h.backend.localFollowUps).toEqual([])
+    expect(h.pool.get(h.backend.key)?.localFollowUps).toEqual([])
+    expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.steer).not.toHaveBeenCalled()
+  })
+
+  it('appends image Tabs to an existing paused queue without granting recovery or clearing older items', async () => {
+    const h = await harness()
+    const older = h.addQueued('older')
+    const pause = { paused: true, revision: 13, pausedRunId: 'failed-root', reason: 'tool failure' }
+    h.backend.queuePause = pause
+    h.backend.localQueueBlocked = true
+    h.getState.mockReturnValue(new Promise(() => undefined))
+    await h.bridge.queue('new draft', images)
+    const newer = h.backend.localFollowUps![1]
+    expect(h.backend.queuePause).toEqual(pause)
+    expect(h.backend.localQueueBlocked).toBe(true)
+    expect(h.backend.queueRecovery).toBeUndefined()
+    expect(h.backend.localFollowUps).toEqual([
+      { runId: older.id, text: 'older', images: [] }, { runId: newer.runId, text: 'new draft', images }
+    ])
+    expect(h.runStore.get(older.id)?.state).toBe('queued')
+    expect(h.runStore.get(newer.runId)?.state).toBe('queued')
+    expect(h.getState).not.toHaveBeenCalled()
+    expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.steer).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
+  it('keeps two busy image Tabs FIFO until every normal stop, settle and actual RPC receipt closes', async () => {
+    const h = await harness()
+    const originalReceipt = deferred<Disposition>()
+    const firstReceipt = deferred<Disposition>()
+    const secondReceipt = deferred<Disposition>()
+    h.prompt.mockImplementationOnce(() => originalReceipt.promise)
+      .mockImplementationOnce(() => firstReceipt.promise)
+      .mockImplementationOnce(() => secondReceipt.promise)
+    const original = h.bridge.send('original')
+    await dispatchGap()
+    await h.bridge.queue('same', images)
+    const first = h.backend.localFollowUps![0]
+    const reversed = [...images].reverse()
+    await h.bridge.queue('same', reversed)
+    const second = h.backend.localFollowUps![1]
+    expect(first.runId).not.toBe(second.runId)
+    expect(h.backend.localFollowUps).toEqual([
+      { runId: first.runId, text: 'same', images }, { runId: second.runId, text: 'same', images: reversed }
+    ])
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+    await dispatchGap()
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    h.emit('agent_settled')
+    await dispatchGap()
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    originalReceipt.resolve('started')
+    await original
+    await dispatchGap()
+    expect(h.prompt.mock.calls[1]).toEqual(['same', images])
+    expect(h.backend.activeRunId).toBe(first.runId)
+    expect(h.backend.localFollowUps!.map(item => item.runId)).toEqual([second.runId])
+    h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    expect(h.prompt).toHaveBeenCalledTimes(2)
+    const firstDispatch = h.backend.localQueueDispatchPromise!
+    firstReceipt.resolve('started')
+    await firstDispatch
+    await dispatchGap()
+    expect(h.prompt).toHaveBeenCalledTimes(3)
+    expect(h.prompt.mock.calls[2]).toEqual(['same', reversed])
+    expect(h.backend.activeRunId).toBe(second.runId)
+    expect(h.backend.localFollowUps).toEqual([])
+    const secondDispatch = h.backend.localQueueDispatchPromise!
+    secondReceipt.resolve('started')
+    await secondDispatch
+    expect(h.runStore.get(first.runId)?.prompt.images).toEqual(images)
+    expect(h.runStore.get(second.runId)?.prompt.images).toEqual(reversed)
+    await h.runStore.flush()
+  })
+
+  it('does not let Tab steal an automatic dispatcher lease while real mode application awaits its RPC', async () => {
+    const h = await harness()
+    const first = h.addQueued('already shifted')
+    h.backend.modePrimed = 'plan'
+    const modeReceipt = deferred<Disposition>()
+    const promptReceipt = deferred<Disposition>()
+    h.prompt.mockImplementationOnce(() => modeReceipt.promise).mockImplementationOnce(() => promptReceipt.promise)
+    h.bridge.dispatchNextLocalFollowUp(h.backend)
+    await dispatchGap()
+    const dispatch = h.backend.localQueueDispatchPromise!
+    expect(h.prompt.mock.calls).toEqual([['/plan exit']])
+    expect(h.backend.localFollowUps).toEqual([])
+    expect(h.runStore.get(first.id)?.state).toBe('queued')
+    await h.bridge.queue('new image Tab', images)
+    const second = h.backend.localFollowUps![0]
+    expect(h.backend.localQueueDispatchPromise).toBe(dispatch)
+    expect(h.getState).toHaveBeenCalledTimes(1)
+    expect(h.backend.localFollowUps).toEqual([{ runId: second.runId, text: 'new image Tab', images }])
+    modeReceipt.resolve('started')
+    await dispatchGap()
+    expect(h.prompt.mock.calls).toEqual([['/plan exit'], ['already shifted', []]])
+    expect(h.backend.activeRunId).toBe(first.id)
+    expect(h.runStore.get(first.id)?.dispatchedAt).toEqual(expect.any(Number))
+    expect(h.backend.localFollowUps!.map(item => item.runId)).toEqual([second.runId])
+    promptReceipt.resolve('started')
+    await dispatch
+    expect(h.prompt).toHaveBeenCalledTimes(2)
+    expect(h.runStore.get(second.runId)).toMatchObject({ state: 'queued', prompt: { message: 'new image Tab', images } })
+    await h.runStore.flush()
   })
 })
 
@@ -1282,6 +1505,11 @@ describe('AgentBridge send and local queue', () => {
       if (queued) {
         expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual([queued.id])
         expect(h.runStore.get(queued.id)?.state).toBe('queued')
+      } else if (path === 'queue') {
+        expect(await observed).toBeUndefined()
+        expect(h.runs()).toHaveLength(1)
+        expect(h.runs()[0]).toMatchObject({ state: 'queued', prompt: { message: 'stale input', images: [] } })
+        expect(h.backend.localFollowUps).toEqual([{ runId: h.runs()[0].id, text: 'stale input', images: [] }])
       } else expect(h.runs()).toEqual([])
       await h.runStore.flush()
     }

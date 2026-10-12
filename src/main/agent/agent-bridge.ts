@@ -3064,42 +3064,46 @@ export class AgentBridge {
     this.dispatchNextLocalFollowUp(backend)
   }
 
-  /** Queue a follow-up while running; starts this session's backend if needed. */
+  private hasFollowUpWork(backend: BackendRecord): boolean {
+    return Boolean(backend.busy || backend.compacting || backend.localQueueDispatching
+      || backend.localQueueDispatchPromise || backend.promptDispatch || backend.runCompletionPromise
+      || backend.queuePause?.paused || backend.localQueueBlocked || backend.localFollowUps?.length)
+  }
+
+  /** Tab appends immediately during a reply; idle Tab starts one new reply. */
   async queue(message: string, images: ImageContent[] = []): Promise<void> {
     const backend = await this.ensureActiveBackend()
-    const lease = this.reserveDispatch(backend)
-    const state = await backend.client.getState().catch(() => null)
-    this.assertDispatchLease(lease)
     this.assertHistoryAvailable()
-    if (
-      state?.isStreaming
-      || state?.isCompacting
-      || backend.busy
-      || backend.compacting
-      || backend.localQueueDispatching
-      || backend.localQueueDispatchPromise
-      || backend.promptDispatch
-      || backend.runCompletionPromise
-      || backend.queuePause?.paused
-      || backend.localQueueBlocked
-      || (backend.localFollowUps?.length ?? 0) > 0
-    ) {
+    if (this.hasFollowUpWork(backend)) {
+      // Pure enqueue does not need an SDK state receipt or a dispatch lease.
+      // A normal start/settle during an RPC read must not reject a Tab draft,
+      // and an occupied RPC must not delay taking its text and image payload.
+      this.enqueueCapturedBackend(backend, null, message, images)
+      return
+    }
+    const client = backend.client
+    const state = await client.getState().catch(() => null)
+    if (!this.backendStillOwned(backend) || backend.client !== client) throw new Error('Agent 会话已关闭')
+    this.assertHistoryAvailable()
+    if (state?.isStreaming || state?.isCompacting || this.hasFollowUpWork(backend)) {
       this.enqueueCapturedBackend(backend, state, message, images)
-    } else {
-      // Reserve the backend across checkpoint/mode preparation and the RPC
-      // dispatch gap; prompt resolves before Pi emits agent_start.
-      backend.busy = true
-      let run: RunOperation | undefined
-      try {
-        this.resetRunCheckpoint(backend)
-        await this.applyDesiredMode(backend, lease)
-        this.assertDispatchLease(lease)
-        run = this.createRun(backend, state, message, images, 'follow-up', 'dispatching')
-        await this.dispatchPrompt(backend, run.id, message, images, lease)
-      } catch (error) {
-        this.recoverPromptFailure(backend, lease, run, error)
-        throw error
-      }
+      return
+    }
+    // Only actual idle execution reserves a fresh lease, after the state read.
+    // Subsequent execution still rejects lifecycle changes; pure queueing does
+    // not borrow that stricter execution-generation authority.
+    const lease = this.reserveDispatch(backend)
+    backend.busy = true
+    let run: RunOperation | undefined
+    try {
+      this.resetRunCheckpoint(backend)
+      await this.applyDesiredMode(backend, lease)
+      this.assertDispatchLease(lease)
+      run = this.createRun(backend, state, message, images, 'follow-up', 'dispatching')
+      await this.dispatchPrompt(backend, run.id, message, images, lease)
+    } catch (error) {
+      this.recoverPromptFailure(backend, lease, run, error)
+      throw error
     }
     await this.syncBackendSession(backend)
   }

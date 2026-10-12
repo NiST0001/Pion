@@ -275,6 +275,64 @@ describe('tool activity timeline integration', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it.each([false, true])('resets gated card margins without changing adjacent-tool spacing (child=%s)', (child) => {
+    const chatCss = readFileSync(resolve('src/renderer/src/styles/chat.css'), 'utf8')
+    const refinementsCss = readFileSync(resolve('src/renderer/src/styles/refinements.css'), 'utf8')
+    const groupCss = readFileSync(resolve('src/renderer/src/styles/tool-activity.css'), 'utf8')
+    const rule = (css: string, selector: string) => {
+      const start = css.indexOf(`${selector} {`)
+      expect(start).toBeGreaterThanOrEqual(0)
+      return css.slice(start, css.indexOf('}', start) + 1)
+    }
+    const resetRule = groupCss.match(/\.tool-activity-inner > \.tool-call[^{}]*\{\s*margin:\s*0;\s*\}/)![0]
+    const style = document.createElement('style')
+    // Project the real spacing rules, avoiding unsupported theme/@starting-style
+    // syntax in JSDOM. Higher-specificity owned rules follow global defaults;
+    // selectors must also match the actual gated DOM, not just source strings.
+    style.textContent = [rule(chatCss, '.timeline'), rule(chatCss, '.tool-call'),
+      rule(refinementsCss, '.timeline'), rule(refinementsCss, '.tool-call'),
+      rule(groupCss, '.tool-activity-item'), rule(groupCss, ".tool-activity-item[data-open='true']"),
+      resetRule, rule(groupCss, '.child-chat-scroll .timeline > .tool-activity-item + .tool-activity-item')].join('\n')
+    document.head.append(style)
+    try {
+      vi.useFakeTimers()
+      const view = render(<div className={child ? 'child-chat-scroll' : undefined}>
+        <ChatTimeline {...props([tool(1, 'bash'), tool(2, 'bash'), tool(3, 'bash')])} readOnly={child} />
+      </div>)
+      fireEvent.click(view.getByRole('button', { name: '展开工具调用（3次）' }))
+      const cards = [...view.container.querySelectorAll<HTMLElement>('.tool-call')]
+      expect(cards).toHaveLength(3)
+      const ownedReset = [...style.sheet!.cssRules].find((entry) =>
+        'selectorText' in entry && (entry as CSSStyleRule).selectorText.includes('.tool-activity-inner > .tool-call')) as CSSStyleRule
+      expect(ownedReset).toBeDefined()
+      // CSSOM may serialize a zero length as 0px rather than the source's 0.
+      expect(ownedReset.style.margin).toMatch(/^0(?:px)?$/)
+      const checkSpacing = () => {
+        cards.forEach((card, index) => {
+          expect(view.container.querySelectorAll('.tool-call')[index]).toBe(card)
+          expect(card.parentElement).toHaveClass('disclosure-reveal-gate')
+          expect(card.parentElement!.parentElement).toHaveClass('tool-activity-inner')
+          expect(card.matches(ownedReset.selectorText)).toBe(true)
+          expect(getComputedStyle(card).marginTop).toBe('0px')
+          expect(getComputedStyle(card).marginBottom).toBe('0px')
+        })
+        const first = cards[0].closest('.tool-activity-item')!
+        const second = cards[1].closest('.tool-activity-item')!
+        const gap = parseFloat(getComputedStyle(first.parentElement!).gap)
+        expect(gap).toBe(24)
+        expect(gap + parseFloat(getComputedStyle(first).marginBottom)
+          + parseFloat(getComputedStyle(second).marginTop)).toBe(child ? 4 : 8)
+      }
+      checkSpacing() // Includes the 200ms layout-only phase.
+      act(() => vi.advanceTimersByTime(200))
+      fireEvent.click(view.getAllByRole('button', { name: '展开终端工具详情' })[0])
+      act(() => vi.advanceTimersByTime(200))
+      checkSpacing() // Opening a nested detail must not reinstate global margins.
+    } finally {
+      style.remove()
+    }
+  })
+
   it('keeps grid expansion independent of line-only reveal pausing in the CSS source contract', () => {
     // Source contracts only: JSDOM does not exercise GPU compositing or measure FPS.
     const motionCss = readFileSync(resolve('src/renderer/src/styles/motion.css'), 'utf8')
