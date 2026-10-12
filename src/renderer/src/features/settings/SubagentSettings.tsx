@@ -3,8 +3,8 @@ import type { ModelOption } from '../../../../shared/types'
 import { DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, validateSubagentSettings, type SubagentSettings as Settings } from '../../../../shared/subagents'
 
 const FIELDS: { key: keyof typeof SUBAGENT_LIMITS; label: string; description: string }[] = [
-  { key: 'maxParallel', label: '每批最大子代理数', description: '同批并行执行的数量，1–8 个；数量越多，额外模型用量可能越高。' },
-  { key: 'timeoutMinutes', label: '每批超时（分钟）', description: '1–30 分钟；超时会中止该批子任务，不代表任务已完成。' },
+  { key: 'maxParallel', label: '每批最大子代理数', description: '同批并行执行的数量，1–100 个；数量越多，额外模型用量可能越高。' },
+  { key: 'timeoutMinutes', label: '每批超时（分钟）', description: '1–300 分钟；超时会中止该批子任务，不代表任务已完成。' },
   { key: 'maxTurns', label: '每个子代理最多轮数', description: '1–64 轮；到达上限后停止并报告未完成事项。' },
   { key: 'maxResultChars', label: '每个结果最多字符', description: '1000–32000 字符；超出时明确标记截断，不影响用量统计。' }
 ]
@@ -17,6 +17,10 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const independentDirectory = typeof api?.getSubagentModels === 'function'
+  const [directory, setDirectory] = useState<ModelOption[]>([])
+  const [modelsLoading, setModelsLoading] = useState(independentDirectory)
+  const [modelsError, setModelsError] = useState('')
   const mounted = useRef(true)
   const inFlight = useRef(false)
   const owner = useRef(api)
@@ -45,6 +49,38 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
     return () => { ++generation.current; mounted.current = false }
   }, [api, available])
 
+  useEffect(() => {
+    const capturedApi = api
+    const revision = generation.current
+    let active = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const current = () => active && mounted.current && owner.current === capturedApi && generation.current === revision
+    setDirectory([])
+    setModelsError('')
+    setModelsLoading(independentDirectory)
+    if (independentDirectory) {
+      timer = setTimeout(() => {
+        if (!current()) return
+        active = false
+        setModelsLoading(false)
+        setModelsError('读取模型目录超时，请重新打开设置重试；已选默认模型保持不变。')
+      }, 10_000)
+      void capturedApi!.getSubagentModels().then((value) => {
+        if (!current()) return
+        if (!Array.isArray(value) || value.length > 4096 || value.some((model) =>
+          !model || typeof model.provider !== 'string' || !model.provider || typeof model.id !== 'string' || !model.id)) {
+          throw new Error('模型目录无效')
+        }
+        setDirectory(value)
+      }).catch(() => {
+        if (current()) setModelsError('读取模型目录失败，请重新打开设置重试；已选默认模型保持不变。')
+      }).finally(() => {
+        if (current()) { setModelsLoading(false); if (timer) clearTimeout(timer) }
+      })
+    }
+    return () => { active = false; if (timer) clearTimeout(timer) }
+  }, [api, independentDirectory, available])
+
   const save = async () => {
     if (!available || loading || inFlight.current) return
     let next: Settings
@@ -69,21 +105,22 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
 
   const selection = settings.defaultModel ?? null
   const modelValue = selection ? JSON.stringify([selection.provider, selection.id]) : 'inherit'
+  const candidates = independentDirectory ? directory : models
   const groups = new Map<string, ModelOption[]>()
-  for (const model of models) {
+  for (const model of candidates) {
     const group = groups.get(model.provider) ?? []
     if (!group.some((entry) => entry.id === model.id)) group.push(model)
     groups.set(model.provider, group)
   }
-  const missingSelection = selection && !models.some((model) => model.provider === selection.provider && model.id === selection.id)
+  const missingSelection = selection && !candidates.some((model) => model.provider === selection.provider && model.id === selection.id)
 
   return <form className="settings-section subagent-settings" onSubmit={(event) => { event.preventDefault(); void save() }}>
     <div className="settings-section-title">子代理</div>
     <p className="setting-desc">全局参数，保存后从下一批任务开始使用，不中断当前批次。子代理默认开启，可在输入框按会话关闭；重建后端会恢复默认开启。权限与检查点规则不变。</p>
     <label className="setting-row">
-      <span><span className="setting-label">默认子代理模型</span><span className="setting-desc subagent-setting-description">每任务可由主会话指定，优先于默认；不同模型可能产生不同费用。</span></span>
+      <span><span className="setting-label">默认子代理模型</span><span className="setting-desc subagent-setting-description">用户在会话中指定的子代理模型优先；未指定时使用此默认模型，未设置才继承主会话模型。不同模型可能产生不同费用。</span></span>
       <select className="setting-input" aria-label="默认子代理模型" value={modelValue}
-        disabled={loading || saving || !available}
+        disabled={loading || saving || modelsLoading || !available}
         onChange={(event) => {
           const value = event.target.value
           let defaultModel: Settings['defaultModel'] = null
@@ -101,6 +138,9 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
         </optgroup>)}
       </select>
     </label>
+    {modelsLoading && <p className="setting-desc" role="status">正在读取已配置的可用模型…</p>}
+    {modelsError && <p className="settings-inline-error" role="alert">{modelsError}</p>}
+    {independentDirectory && !modelsLoading && !modelsError && candidates.length === 0 && <p className="setting-desc">暂无已配置的可用模型，请先在提供商设置中配置模型；已选默认模型保持不变。</p>}
     {FIELDS.map(({ key, label, description }) => <label className="setting-row" key={key}>
       <span><span className="setting-label">{label}</span><span className="setting-desc subagent-setting-description">{description}</span></span>
       <input className="setting-input" type="number" aria-label={label} required step={1}

@@ -417,6 +417,25 @@ describe('bounded backend live projection', () => {
     expect(unnamed.snapshot('/project').events).toEqual([])
   })
 
+  it('keeps 100 worst-case encoded names and fair summaries within a native-only update budget', () => {
+    const state = new LiveSessionProjection()
+    const tasks = Array.from({ length: 100 }, () => ({ name: '\u0000'.repeat(80), task: 'private task body' }))
+    state.record({ type: 'tool_execution_start', toolCallId: 'hundred', toolName: 'pion_subagents', args: { tasks } })
+    const batch = { version: 1, tasks: tasks.map(({ name }, index) => ({ index, name, status: 'running', summary: '\u0000'.repeat(2048) })) }
+    state.record({ type: 'tool_execution_update', toolCallId: 'hundred', partialResult: { details: { subagentBatch: batch, privateBody: 'private child body' } } })
+    const snapshot = state.snapshot('/project')
+    const event = snapshot.events[1] as Extract<WireEvent, { type: 'tool_execution_update' }>
+    const details = (event.partialResult as WireMessage).details as { subagentBatch: { tasks: { index: number; summary: string }[] } }
+    expect(details.subagentBatch.tasks).toHaveLength(100)
+    expect(details.subagentBatch.tasks.map((task) => task.index)).toEqual(Array.from({ length: 100 }, (_, i) => i))
+    expect(details.subagentBatch.tasks.every((task) => task.summary.length > 0)).toBe(true)
+    expect(Buffer.byteLength(details.subagentBatch.tasks.map((task) => task.summary).join(''))).toBeLessThanOrEqual(16 * 1024)
+    expect((event.partialResult as WireMessage)._pionLiveTruncatedFields).toBeUndefined()
+    expect(Buffer.byteLength(JSON.stringify(event.partialResult))).toBeLessThan(192 * 1024)
+    expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeLessThan(LIVE_MAX_BYTES)
+    expect(JSON.stringify(snapshot)).not.toContain('private')
+  })
+
   it('charges encoded batch metadata to result budgets and preserves statuses when dropping summaries', () => {
     const state = new LiveSessionProjection()
     const tasks = Array.from({ length: 8 }, (_, index) => ({ name: `worker-${index}` }))

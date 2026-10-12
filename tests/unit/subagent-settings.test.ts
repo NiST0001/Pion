@@ -10,6 +10,16 @@ vi.mock('electron', () => ({ app: { getPath: () => '/unused' } }))
 const roots: string[] = []
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))) })
 
+it('accepts 1–100 children and 1–300 minutes without changing defaults', () => {
+  expect(DEFAULT_SUBAGENT_SETTINGS).toMatchObject({ maxParallel: 3, timeoutMinutes: 10 })
+  for (const [maxParallel, timeoutMinutes] of [[1, 1], [100, 300]]) {
+    expect(validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel, timeoutMinutes }))
+      .toMatchObject({ maxParallel, timeoutMinutes })
+  }
+  expect(() => validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 101 })).toThrow()
+  expect(() => validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, timeoutMinutes: 301 })).toThrow()
+})
+
 it('rejects child frames and windows other than the owning main window', () => {
   const frame = {}
   const event = { sender: { id: 10, mainFrame: frame }, senderFrame: frame } as unknown as Electron.IpcMainInvokeEvent
@@ -78,7 +88,7 @@ it('persists global defaults atomically and existing runtimes read the next save
   expect(await store.get()).toEqual(last)
   expect(await readRuntimeSubagentSettings()).toEqual(last)
   expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(last)
-  expect(() => store.set({ ...last, maxParallel: 99 })).toThrow()
+  expect(() => store.set({ ...last, maxParallel: 101 })).toThrow()
   expect(await store.get()).toEqual(last)
   await writeFile(path, '{broken', 'utf8')
   await expect(readRuntimeSubagentSettings()).rejects.toThrow('无法读取子代理设置')

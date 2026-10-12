@@ -23,6 +23,21 @@ const message = (type: string, text: string, thinking = '') => ({ type, message:
   content: [{ type: 'text', text, textSignature: 'secret-signature' }, { type: 'thinking', thinking, thinkingSignature: 'secret-signature' },
     { type: 'image', data: 'secret-image' }], usage: { secret: 'secret-usage' }, systemPrompt: 'secret-system' } })
 
+it('uses one mock RPC ACK for 100 display slots, rejects 101, and keeps the terminal TTL', async () => {
+  vi.useFakeTimers()
+  const h = await setup()
+  expect(await h.publisher.reserve('oversized', 101)).toBe(false)
+  const before = h.input.mock.calls.length
+  expect(await h.publisher.reserve('hundred', 100)).toBe(true)
+  expect(h.input).toHaveBeenCalledTimes(before + 1)
+  const children = Array.from({ length: 100 }, (_, i) => h.publisher.begin({ name: `worker-${i}` }, 'hundred'))
+  expect(children.every(Boolean)).toBe(true)
+  expect(h.publisher.begin({ name: 'extra' }, 'hundred')).toBeUndefined()
+  for (const child of children) child!.finish('completed')
+  await vi.advanceTimersByTimeAsync(SUBAGENT_SESSION_RETENTION_MS)
+  expect(SUBAGENT_SESSION_RETENTION_MS).toBe(30 * 60_000)
+})
+
 it('publishes true parent identity and independent runtime/child UUIDs only on the private widget', async () => {
   const h = await setup()
   expect(h.last()).toMatchObject({ nonce: 'private-nonce', source: 'sdk:pion_subagents', parentToolCallId: 'actual-parent-tool-call',
@@ -290,7 +305,7 @@ it('requires a reserved ACK and consumes the exact admitted count only for the c
   const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => '/session' }, ui: { input, setWidget } }
   const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
   expect(publisher.begin({ name: 'early' }, 'call')).toBeUndefined()
-  for (const count of [0, 9, 1.5, NaN]) expect(await publisher.reserve('call', count)).toBe(false)
+  for (const count of [0, 101, 1.5, NaN]) expect(await publisher.reserve('call', count)).toBe(false)
   expect(input).not.toHaveBeenCalled()
   expect(await publisher.reserve('call', 2)).toBe(true)
   expect(input).toHaveBeenCalledOnce()

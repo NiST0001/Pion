@@ -228,7 +228,7 @@ describe('ToolCallItem', () => {
       act(() => intersect([{ target: targets[0], isIntersecting: true }]))
       expect(body.querySelectorAll('.screen-text-reveal-history')).toHaveLength(REVIEW_REVEAL_CHUNK_SIZE)
       expect(body.querySelectorAll('.screen-text-reveal-live')).toHaveLength(0)
-      act(() => vi.advanceTimersByTime(300))
+      act(() => vi.advanceTimersByTime(468))
       expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
       fireEvent.click(screen.getByRole('button', { name: '收起第 1 项子代理结果摘要：历史摘要' }))
       expect(container.querySelector('.tool-subagent-summary')).toBe(body)
@@ -250,7 +250,7 @@ describe('ToolCallItem', () => {
       fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：实时摘要' }))
       const body = container.querySelector('.tool-subagent-summary pre')!
       expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(Array.from(summary).length)
-      act(() => vi.advanceTimersByTime(600))
+      act(() => vi.advanceTimersByTime(868))
       const firstChunk = body.querySelector('span')
       const appended: ToolItem = { ...tool, subagentBatch: { version: 1, tasks: [
         { ...tool.subagentBatch!.tasks[0], summary: summary + 'new' }
@@ -399,6 +399,30 @@ describe('ToolCallItem', () => {
       expect(container.querySelector('.tool-output')).toBe(body)
       expect(body?.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
       expect(body).toHaveTextContent('output')
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+
+  it('keeps unfinished tool output fades and their DOM identity across fast streamed updates', () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    try {
+      const { container, rerender } = render(<ToolCallItem tool={liveTool} />)
+      fireEvent.click(screen.getByRole('button', { name: '展开终端工具详情' }))
+      const body = container.querySelector('.tool-output')!
+      const first = body.querySelector<HTMLElement>('[data-screen-reveal-character]')!
+      const delay = first.style.getPropertyValue('--screen-text-reveal-delay')
+      act(() => vi.advanceTimersByTime(100))
+      rerender(<ToolCallItem tool={{ ...liveTool, outputText: 'output new' }} />)
+      act(() => vi.advanceTimersByTime(100))
+      rerender(<ToolCallItem tool={{ ...liveTool, outputText: 'output newer' }} />)
+      expect(body.querySelector('[data-screen-reveal-character]')).toBe(first)
+      expect(first).toHaveClass('screen-text-reveal-live')
+      expect(first.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(12)
+      act(() => vi.advanceTimersByTime(900))
+      expect(body.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+      rerender(<ToolCallItem tool={{ ...liveTool, outputText: 'output newer!', status: 'running' }} />)
+      expect(Array.from(body.querySelectorAll('[data-screen-reveal-character]')).map((node) => node.textContent)).toEqual(['!'])
     } finally { cleanup(); vi.useRealTimers() }
   })
 

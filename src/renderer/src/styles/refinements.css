@@ -888,6 +888,12 @@ button.tool-head.screen-text-reveal-line {
   opacity: 0;
 }
 
+/* Settled-only lines created during stream closure also skip new motion. */
+.screen-text-reveal-line.screen-text-reveal-static[data-line-reveal-ready="true"] {
+  opacity: 1;
+  animation: none;
+}
+
 /* Lines older than the reveal window skip the cascade entirely. */
 .screen-text-reveal-line-history.screen-text-reveal-static[data-line-reveal-ready="true"] {
   opacity: 1;
@@ -897,12 +903,12 @@ button.tool-head.screen-text-reveal-line {
 /* The animation only starts once the line's fixed delay has been assigned
    (ref callback while streaming, settle scan while reading history). */
 .screen-text-reveal-line[data-line-reveal-ready="true"] {
-  animation: screen-text-reveal 90ms cubic-bezier(0.22, 1, 0.36, 1)
+  animation: screen-text-reveal 280ms linear
     var(--screen-text-reveal-delay, 0ms) both;
 }
 
 .screen-text-reveal-line-live[data-line-reveal-ready="true"] {
-  animation-duration: 180ms;
+  animation-duration: 560ms;
 }
 
 .screen-text-reveal-history {
@@ -911,12 +917,12 @@ button.tool-head.screen-text-reveal-line {
 
 .screen-text-reveal-history.screen-text-reveal-armed,
 .screen-text-reveal-live {
-  animation: screen-text-reveal 52ms cubic-bezier(0.22, 1, 0.36, 1)
+  animation: screen-text-reveal 220ms linear
     var(--screen-text-reveal-delay, 0ms) both;
 }
 
 .screen-text-reveal-live {
-  animation-duration: 104ms;
+  animation-duration: 440ms;
 }
 
 /* History rows stay layout-stable; only their visible reveal elements

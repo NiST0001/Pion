@@ -195,6 +195,8 @@ export interface PionApi {
 
   // model & thinking --------------------------------------------------------
   getAvailableModels(): Promise<ModelOption[]>
+  /** Unfiltered local SDK availability directory, independent of the active session. */
+  getSubagentModels(): Promise<ModelOption[]>
   /** Complete provider directory and non-secret auth status from Pi ModelRuntime. */
   listModelProviders(): Promise<ModelProviderInfo[]>
   /** Only hide/show picker models; preserve SDK configuration, credentials and active sessions. */

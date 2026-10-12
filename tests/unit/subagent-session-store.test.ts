@@ -7,6 +7,16 @@ import {
 } from '../../src/shared/subagent-sessions'
 import type { SubagentSessionNotice } from '../../src/shared/subagent-sessions'
 
+it('admits 100 but not 101 children without increasing the 256-record capacity', () => {
+  const { store } = fixture(false)
+  expect(reserve(store, scope, { parentToolCallId: 'oversized' }, 101)).toBe(false)
+  expect(reserve(store, scope, { parentToolCallId: 'hundred' }, 100)).toBe(true)
+  expect(reserve(store, scope, { parentToolCallId: 'hundred-again' }, 100)).toBe(true)
+  expect(reserve(store, scope, { parentToolCallId: 'capacity' }, 100)).toBe(false)
+  expect(SUBAGENT_SESSION_MAX_RECORDS).toBe(256)
+  expect(SUBAGENT_SESSION_RETENTION_MS).toBe(30 * 60_000)
+})
+
 const stores: SubagentSessionStore[] = []
 const scope = { backendId: 'backend-1', nonce: 'private-nonce', cwd: '/project', parentSessionPath: '/sessions/parent.jsonl' }
 function packet(overrides: Partial<SubagentSessionNotice> = {}): SubagentSessionNotice {
@@ -62,7 +72,7 @@ describe('SubagentSessionStore batch display admission', () => {
   it.each([
     { version: 2 }, { nonce: 'wrong' }, { runtimeId: '' }, { parentToolCallId: '' },
     { runtimeId: 'x'.repeat(257) }, { parentToolCallId: 'x'.repeat(257) },
-    { count: 0 }, { count: 9 }, { count: 1.5 }, { count: NaN }, { extra: true }
+    { count: 0 }, { count: 101 }, { count: 1.5 }, { count: NaN }, { extra: true }
   ])('rejects invalid admission before calling the native probe (%j)', (change) => {
     const { store } = fixture(false)
     const allow = vi.fn(() => true)

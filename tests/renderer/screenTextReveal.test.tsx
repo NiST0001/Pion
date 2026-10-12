@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest'
-import { render } from '@testing-library/react'
+import { act, render } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Markdown } from '../../src/renderer/src/features/chat/Markdown'
 import {
   appendedCharacterCount,
@@ -11,9 +11,14 @@ import {
   resetLineRevealClock,
   RevealText,
   takeLineRevealSlot,
+  SCREEN_TEXT_REVEAL_DURATION_MS,
+  SCREEN_TEXT_REVEAL_LINE_DURATION_MS,
+  SCREEN_TEXT_REVEAL_LINE_LIVE_DURATION_MS,
   SCREEN_TEXT_REVEAL_LIVE_DURATION_MS,
   SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS
 } from '../../src/renderer/src/utils/screenTextReveal'
+
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('screen text reveal', () => {
   it('wraps every character without changing the rendered text', () => {
@@ -24,6 +29,23 @@ describe('screen text reveal', () => {
     expect(characters).toHaveLength(3)
     expect(characters.map((element) => element.textContent)).toEqual(['A', '\n', '好'])
     expect(characters.every((element) => element.classList.contains('screen-text-reveal-live'))).toBe(true)
+  })
+
+  it('bounds active fades and timers without delaying or losing overflowing text', () => {
+    vi.useFakeTimers()
+    const { container, unmount } = render(<RevealText text={'x'.repeat(5000)} mode="live" />)
+    expect(container.textContent).toBe('x'.repeat(5000))
+    expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(4096)
+    expect(vi.getTimerCount()).toBe(1)
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
+    const batch = render(<RevealText text="" mode="live" />)
+    for (let count = 1; count <= 130; count++) batch.rerender(<RevealText text={'x'.repeat(count)} mode="live" />)
+    expect(batch.container.textContent).toBe('x'.repeat(130))
+    expect(batch.container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(128)
+    expect(vi.getTimerCount()).toBe(1)
+    batch.unmount()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('keeps a long settled prefix as text rather than thousands of character spans', () => {
@@ -85,7 +107,7 @@ describe('screen text reveal', () => {
 
     view.rerender(<Markdown text="你好世界" revealMode="live" />)
     expect([...view.container.querySelectorAll('.screen-text-reveal-live')]
-      .map((element) => element.textContent)).toEqual(['世', '界'])
+      .map((element) => element.textContent)).toEqual(['你', '好', '世', '界'])
     expect(view.container).toHaveTextContent('你好世界')
   })
 
@@ -129,13 +151,41 @@ describe('screen text reveal', () => {
     // Static contract only: this does not claim real browser animation timing.
     const css = readFileSync('src/renderer/src/styles/refinements.css', 'utf8')
     expect(css).toContain(`.screen-text-reveal-live {\n  animation-duration: ${SCREEN_TEXT_REVEAL_LIVE_DURATION_MS}ms;`)
-    expect(css).toContain('.screen-text-reveal-line-live[data-line-reveal-ready="true"] {\n  animation-duration: 180ms;')
-    expect(css).toContain('animation: screen-text-reveal 90ms')
-    expect(css).toContain('animation: screen-text-reveal 52ms')
+    expect(css).toContain(`.screen-text-reveal-line-live[data-line-reveal-ready="true"] {\n  animation-duration: ${SCREEN_TEXT_REVEAL_LINE_LIVE_DURATION_MS}ms;`)
+    expect(css).toContain(`animation: screen-text-reveal ${SCREEN_TEXT_REVEAL_LINE_DURATION_MS}ms linear`)
+    expect(css).toContain(`animation: screen-text-reveal ${SCREEN_TEXT_REVEAL_DURATION_MS}ms linear`)
     expect(SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS).toBe(360)
     const reducedMotion = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)', css.indexOf('.screen-text-reveal-line {')))
     expect(reducedMotion).toContain('.screen-text-reveal-line-live[data-line-reveal-ready="true"]')
     expect(reducedMotion).toContain('animation: none;')
+  })
+
+  it('preserves in-flight suffix nodes and delays across rapid appends, then retires only expired windows', () => {
+    vi.useFakeTimers()
+    const view = render(<RevealText text="ab" mode="live" />)
+    const old = [...view.container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+    const delays = old.map((node) => node.style.getPropertyValue('--screen-text-reveal-delay'))
+    act(() => vi.advanceTimersByTime(100))
+    view.rerender(<RevealText text="abcd" mode="live" revealCount={2} />)
+    act(() => vi.advanceTimersByTime(100))
+    view.rerender(<RevealText text="abcdef" mode="live" revealCount={2} />)
+    const active = [...view.container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+    expect(active).toHaveLength(6)
+    expect(active[0]).toBe(old[0])
+    expect(active[1]).toBe(old[1])
+    expect(active.slice(0, 2).map((node) => node.style.getPropertyValue('--screen-text-reveal-delay'))).toEqual(delays)
+    expect(vi.getTimerCount()).toBe(1)
+    act(() => vi.advanceTimersByTime(311))
+    expect([...view.container.querySelectorAll('[data-screen-reveal-character]')].map((node) => node.textContent).join('')).toBe('cdef')
+    view.rerender(<RevealText text="abcdefg" mode="live" revealCount={1} />)
+    expect(view.container.querySelector('[data-screen-reveal-character]')?.textContent).toBe('c')
+    act(() => vi.advanceTimersByTime(900))
+    expect(view.container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+    expect(view.container.textContent).toBe('abcdefg')
+    view.rerender(<RevealText text="abcdefgh" mode="live" revealCount={1} />)
+    expect([...view.container.querySelectorAll('[data-screen-reveal-character]')].map((node) => node.textContent)).toEqual(['h'])
+    view.unmount()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('animates only the appended suffix of a live value', () => {

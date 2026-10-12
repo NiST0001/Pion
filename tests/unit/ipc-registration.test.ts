@@ -234,7 +234,7 @@ describe('agent IPC registration', () => {
     expect([...h.handlers.keys()].sort()).toEqual([...new Set([
       ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
       IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete,
-      IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled
+      IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels
     ])].sort())
     expect(h.listeners.size).toBe(0)
     expect(h.withSessionOperation).not.toHaveBeenCalled()
@@ -339,6 +339,19 @@ describe('agent IPC registration', () => {
     expect(bridge.setYoloMode).toHaveBeenCalledExactlyOnceWith(expected)
     expect(h.withSessionOperation).toHaveBeenCalledExactlyOnceWith(expect.any(Function))
     await expect(result).resolves.toBeUndefined()
+  })
+
+  it('reads the independent subagent directory with main-frame and owner checks but no session reservation', async () => {
+    const result = [{ provider: 'configured', id: 'child' }]
+    const getSubagentModels = vi.fn().mockResolvedValue(result)
+    const h = agentHarness({ getSubagentModels })
+    await expect(h.invoke(IPC.AgentSubagentModels, mainEvent(73))).resolves.toEqual(result)
+    expect(getSubagentModels).toHaveBeenCalledExactlyOnceWith(73)
+    expect(h.withSessionOperation).not.toHaveBeenCalled()
+    expect(() => h.invoke(IPC.AgentSubagentModels, mainEvent(73, true))).toThrow('只允许主窗口')
+    expect(getSubagentModels).toHaveBeenCalledTimes(1)
+    getSubagentModels.mockRejectedValueOnce(new Error('owner rejected'))
+    await expect(h.invoke(IPC.AgentSubagentModels, mainEvent(99))).rejects.toThrow('owner rejected')
   })
 
   it.each([
@@ -742,7 +755,7 @@ it('composes the three registrars without duplicate channels', () => {
   const expected = new Set([
     ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
     IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete,
-    IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled,
+    IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels,
     ...gitRoutes.map(([channel]) => channel), ...effectRoutes.map(([channel]) => channel),
     ...terminalRoutes.map(([channel]) => channel), IPC.WindowState
   ])

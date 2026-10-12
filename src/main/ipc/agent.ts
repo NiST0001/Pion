@@ -144,6 +144,10 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
     return bridge.setSubagentsMode(enabled, sessionId, event.sender.id)
   })
   ipcMain.handle(IPC.AgentModels, () => bridge.getModels())
+  ipcMain.handle(IPC.AgentSubagentModels, (event) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取子代理模型目录')
+    return bridge.getSubagentModels(event.sender.id)
+  })
   ipcMain.handle(IPC.AgentModelProviders, () => bridge.getModelProviders())
   // Shell display preference only; never a backend/provider-auth mutation.
   ipcMain.handle(IPC.AgentSetModelProviderEnabled, (event, providerId: string, enabled: boolean) => {

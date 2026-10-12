@@ -1,3 +1,4 @@
+import type { BrowserWindow } from 'electron'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -27,6 +28,51 @@ afterEach(async () => {
 })
 
 describe('AgentBridge provider authentication', () => {
+  it('reads the independent SDK directory without a backend and rejects wrong or replaced owners', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-subagent-models-'))
+    roots.push(root)
+    let resolve!: (models: { provider: string; id: string }[]) => void
+    const pending = new Promise<{ provider: string; id: string }[]>((done) => { resolve = done })
+    const listAvailableModels = vi.fn().mockResolvedValueOnce([{ provider: 'hidden', id: 'child' }]).mockReturnValueOnce(pending)
+    const service = { listAvailableModels, invalidate: vi.fn(), login: vi.fn(), listProviders: vi.fn() } as unknown as ProviderAuthService
+    const bridge = new AgentBridge(new RunStore(join(root, 'runs.json')), undefined,
+      new ProviderConfigStore(join(root, 'agent')), service)
+    const window = () => ({ webContents: { id: 73, send: vi.fn(), isDestroyed: () => false }, isDestroyed: () => false }) as unknown as BrowserWindow
+    const first = window()
+    bridge.bind(first)
+    await expect(bridge.getSubagentModels(99)).rejects.toThrow('所属主窗口')
+    expect(listAvailableModels).not.toHaveBeenCalled()
+    await expect(bridge.getSubagentModels(73)).resolves.toEqual([{ provider: 'hidden', id: 'child' }])
+    const late = bridge.getSubagentModels(73)
+    bridge.bind(window())
+    resolve([{ provider: 'old', id: 'late' }])
+    await expect(late).rejects.toThrow('所属主窗口')
+    expect(service.login).not.toHaveBeenCalled()
+    expect(service.listProviders).not.toHaveBeenCalled()
+  })
+
+  it('shares a pending directory read until actual settlement, including after owner replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-subagent-model-slot-'))
+    roots.push(root)
+    let resolve!: (models: []) => void
+    const pending = new Promise<[]>((done) => { resolve = done })
+    const service = { listAvailableModels: vi.fn().mockReturnValueOnce(pending).mockResolvedValue([]), invalidate: vi.fn() } as unknown as ProviderAuthService
+    const bridge = new AgentBridge(new RunStore(join(root, 'runs.json')), undefined,
+      new ProviderConfigStore(join(root, 'agent')), service)
+    const window = () => ({ webContents: { id: 73, send: vi.fn(), isDestroyed: () => false }, isDestroyed: () => false }) as unknown as BrowserWindow
+    bridge.bind(window())
+    const old = bridge.getSubagentModels(73)
+    const stale = expect(old).rejects.toThrow('所属主窗口')
+    bridge.bind(window())
+    const current = bridge.getSubagentModels(73)
+    expect(service.listAvailableModels).toHaveBeenCalledTimes(1)
+    resolve([])
+    await stale
+    await expect(current).resolves.toEqual([])
+    await bridge.getSubagentModels(73)
+    expect(service.listAvailableModels).toHaveBeenCalledTimes(2)
+  })
+
   it('routes Pi secret prompts through the existing extension UI queue', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pion-provider-auth-'))
     roots.push(root)

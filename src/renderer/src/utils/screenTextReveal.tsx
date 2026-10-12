@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactElement } from 'react'
+import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react'
 
 export const SCREEN_TEXT_REVEAL_ATTRIBUTE = 'data-screen-reveal-character'
 export const SCREEN_TEXT_REVEAL_CHARACTER_CLASS = 'screen-text-reveal-character'
@@ -13,10 +13,13 @@ export const SCREEN_TEXT_REVEAL_STATIC_CLASS = 'screen-text-reveal-static'
 // Fade durations match refinements.css; cleanup must outlast the last delay.
 export const SCREEN_TEXT_REVEAL_STAGGER_MS = 1.2
 export const SCREEN_TEXT_REVEAL_MAX_DELAY_MS = 180
-export const SCREEN_TEXT_REVEAL_DURATION_MS = 52
+export const SCREEN_TEXT_REVEAL_DURATION_MS = 220
 export const SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS = 2.4
 export const SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS = 360
-export const SCREEN_TEXT_REVEAL_LIVE_DURATION_MS = 104
+export const SCREEN_TEXT_REVEAL_LIVE_DURATION_MS = 440
+export const SCREEN_TEXT_REVEAL_LINE_DURATION_MS = 280
+export const SCREEN_TEXT_REVEAL_LINE_LIVE_DURATION_MS = 560
+export const SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS = 68
 export const SCREEN_TEXT_REVEAL_LINE_STAGGER_MS = 20
 export const SCREEN_TEXT_REVEAL_LINE_LIVE_STAGGER_MS = 40
 export type TextRevealMode = 'history' | 'live'
@@ -131,6 +134,10 @@ export function RevealLines({
   )
 }
 
+type LiveFadeRange = { start: number; end: number; expiresAt: number }
+const MAX_LIVE_FADE_RANGES = 128
+const MAX_LIVE_FADE_CHARACTERS = 4096
+
 export function RevealText({
   text,
   mode,
@@ -138,37 +145,77 @@ export function RevealText({
 }: {
   text: string
   mode: TextRevealMode
-  /** For live output, only the newest characters receive the animation. */
+  /** For live output, only appended characters start a new animation. */
   revealCount?: number
 }): ReactElement {
   const characters = Array.from(text)
-  const start = mode === 'history'
-    ? 0
-    : Math.max(0, characters.length - Math.max(0, revealCount ?? characters.length))
+  const committed = useRef({ text: '', mode })
+  const [ranges, setRanges] = useState<LiveFadeRange[]>([])
+  const [reducedMotion] = useState(() => typeof window !== 'undefined'
+    && (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false))
+  const changed = committed.current.text !== text || committed.current.mode !== mode
+  const append = committed.current.mode === mode && text.startsWith(committed.current.text)
+  const previousLength = append ? characterCount(committed.current.text) : 0
+  const start = Math.max(previousLength,
+    characters.length - Math.max(0, revealCount ?? characters.length))
+  // A render only projects the pending suffix. Commit records its deadline;
+  // discarded/concurrent renders never consume or restart a fade window.
+  const retainedRanges = append ? ranges.filter((range) => range.expiresAt > now()) : []
+  const remainingCharacters = MAX_LIVE_FADE_CHARACTERS
+    - retainedRanges.reduce((count, range) => count + range.end - range.start, 0)
+  const pending = mode === 'live' && changed && start < characters.length && !reducedMotion
+    && retainedRanges.length < MAX_LIVE_FADE_RANGES && remainingCharacters > 0
+    ? { start, end: Math.min(characters.length, start + remainingCharacters), expiresAt: 0 } : undefined
+  const visibleRanges = mode === 'live' && !reducedMotion
+    ? [...retainedRanges, ...(pending ? [pending] : [])] : []
 
-  return (
-    <>
-      {characters.slice(0, start).join('')}
-      {characters.slice(start).map((character, delayIndex) => {
-        const index = start + delayIndex
-        const style = mode === 'live'
-          ? { '--screen-text-reveal-delay': `${Math.min(delayIndex * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)}ms` } as CSSProperties
-          : undefined
-        return (
-          <span
-            key={`${index}:${character}`}
-            className={`${SCREEN_TEXT_REVEAL_CHARACTER_CLASS} ${mode === 'history'
-              ? SCREEN_TEXT_REVEAL_HISTORY_CLASS
-              : SCREEN_TEXT_REVEAL_LIVE_CLASS}`}
-            data-screen-reveal-character="true"
-            style={style}
-          >
-            {character}
-          </span>
-        )
-      })}
-    </>
-  )
+  useLayoutEffect(() => {
+    if (!changed || (committed.current.text === text && committed.current.mode === mode)) return
+    committed.current = { text, mode }
+    const committedAt = now()
+    setRanges((current) => {
+      const retained = append && mode === 'live' && !reducedMotion
+        ? current.filter((range) => range.expiresAt > committedAt) : []
+      return pending ? [...retained, { ...pending, expiresAt: committedAt
+        + Math.min((pending.end - pending.start - 1) * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)
+        + SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS }] : retained
+    })
+  }, [text, mode, changed, append, start, reducedMotion])
+
+  useLayoutEffect(() => {
+    if (!ranges.length) return
+    // One timer per component, not one timer per character or token. Expired
+    // ranges become plain text; still-fading ranges keep their keys and delay.
+    const timer = window.setTimeout(() => {
+      const currentTime = now()
+      setRanges((current) => current.filter((range) => range.expiresAt > currentTime))
+    }, Math.max(0, Math.ceil(ranges.reduce((earliest, range) => Math.min(earliest, range.expiresAt), Infinity) - now())))
+    return () => window.clearTimeout(timer)
+  }, [ranges])
+
+  const nodes: Array<ReactElement | string> = []
+  let plain = ''
+  let rangeIndex = 0
+  characters.forEach((character, index) => {
+    while (rangeIndex < visibleRanges.length && visibleRanges[rangeIndex].end <= index) rangeIndex++
+    const range = visibleRanges[rangeIndex]
+    const animated = !reducedMotion && (mode === 'history' || (range && range.start <= index && index < range.end))
+    if (!animated) { plain += character; return }
+    if (plain) { nodes.push(plain); plain = '' }
+    nodes.push(<span
+      key={`${index}:${character}`}
+      className={`${SCREEN_TEXT_REVEAL_CHARACTER_CLASS} ${mode === 'history'
+        ? SCREEN_TEXT_REVEAL_HISTORY_CLASS : SCREEN_TEXT_REVEAL_LIVE_CLASS}`}
+      data-screen-reveal-character="true"
+      style={mode === 'live' ? { '--screen-text-reveal-delay': `${Math.min((index - range.start) * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)}ms` } as CSSProperties : undefined}
+      onAnimationEnd={mode === 'live' && index === range.end - 1 ? (event) => {
+        if (event.animationName !== 'screen-text-reveal' || event.target !== event.currentTarget) return
+        setRanges((current) => current.filter((candidate) => candidate.start !== range.start || candidate.end !== range.end))
+      } : undefined}
+    >{character}</span>)
+  })
+  if (plain) nodes.push(plain)
+  return <>{nodes}</>
 }
 
 function isVisible(element: HTMLElement, containerRect: DOMRect): boolean {

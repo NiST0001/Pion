@@ -125,9 +125,9 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
     expect(h.runStore.update).not.toHaveBeenCalled()
     expect(h.forbidden).not.toHaveBeenCalled()
   })
-  it('reserves through real private input/ACK without generic UI, live or billing projection', () => {
+  it.each([1, 8, 9, 100])('reserves %i tasks through private input/ACK without generic UI, live or billing projection', (count) => {
     const h = fixture(false), revision = h.backend.liveState!.revision
-    h.emit(admission())
+    h.emit(admission({ count }))
     expect(h.respondToExtensionUi).toHaveBeenCalledExactlyOnceWith(h.client, 'admission', { value: 'reserved' })
     expect(h.backend.liveState!.revision).toBe(revision)
     expect(h.trackBackendEvent).not.toHaveBeenCalled()
@@ -140,7 +140,7 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
   it.each([
     { method: 'confirm' }, { type: 'message_update', usage: { input: 99 } }, { parentToolCallId: 'iframe' },
     { placeholder: 'not-json' }, { placeholder: 'x'.repeat(4097) },
-    admission({ nonce: 'other' }), admission({ count: 0 }), admission({ count: 9 }), admission({ count: 1.5 }),
+    admission({ nonce: 'other' }), admission({ count: 0 }), admission({ count: 101 }), admission({ count: 1.5 }),
     admission({ extra: true }), admission({ runtimeId: 'x'.repeat(257) }), admission({ parentToolCallId: 'x\0y' })
   ])('swallows invalid reserved admission without generic UI or billing: %j', (invalid) => {
     const h = fixture(false), revision = h.backend.liveState!.revision

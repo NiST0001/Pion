@@ -38,10 +38,10 @@ it('rejects invalid values and preserves editable values after a save failure', 
   const { container } = render(<SubagentSettings />)
   const count = screen.getByRole('spinbutton', { name: '每批最大子代理数' })
   await waitFor(() => expect(count).toBeEnabled())
-  fireEvent.change(count, { target: { value: '9' } })
+  fireEvent.change(count, { target: { value: '101' } })
   fireEvent.submit(container.querySelector('form')!)
   expect(save).not.toHaveBeenCalled()
-  expect(screen.getByRole('alert')).toHaveTextContent('1–8')
+  expect(screen.getByRole('alert')).toHaveTextContent('1–100')
   fireEvent.change(count, { target: { value: '4' } })
   fireEvent.submit(container.querySelector('form')!)
   expect(await screen.findByRole('alert')).toHaveTextContent('磁盘写入失败')
@@ -157,6 +157,84 @@ it.each(['resolve', 'reject'] as const)('keeps the real save slot until stale ow
   fireEvent.submit(container.querySelector('form')!)
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('下一批'))
   expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 4 })
+})
+
+it('uses the independent SDK directory with empty or stale parent candidates', async () => {
+  const getSubagentModels = vi.fn().mockResolvedValue([{ provider: 'configured', id: 'child', name: 'SDK Child' }])
+  const getAvailableModels = vi.fn()
+  const save = vi.fn().mockImplementation(async (settings) => settings)
+  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(DEFAULT_SUBAGENT_SETTINGS),
+    setSubagentSettings: save, getSubagentModels, getAvailableModels } as unknown as PionApi
+  const { rerender } = render(<SubagentSettings models={[]} />)
+  const select = screen.getByRole('combobox', { name: '默认子代理模型' })
+  await waitFor(() => expect(select).toBeEnabled())
+  expect(screen.getByRole('option', { name: 'SDK Child' })).toBeInTheDocument()
+  rerender(<SubagentSettings models={[{ provider: 'stale', id: 'parent' }]} />)
+  expect(screen.queryByRole('option', { name: 'parent' })).not.toBeInTheDocument()
+  fireEvent.change(select, { target: { value: JSON.stringify(['configured', 'child']) } })
+  fireEvent.click(screen.getByRole('button', { name: '保存子代理设置' }))
+  await waitFor(() => expect(save).toHaveBeenCalledWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'configured', id: 'child' } }))
+  expect(getSubagentModels).toHaveBeenCalledOnce()
+  expect(getAvailableModels).not.toHaveBeenCalled()
+})
+
+it.each(['resolve', 'reject'] as const)('ignores old owner directory %s after the new owner loads', async (outcome) => {
+  let resolve!: (models: { provider: string; id: string }[]) => void
+  let reject!: (reason: Error) => void
+  const pending = new Promise<{ provider: string; id: string }[]>((done, fail) => { resolve = done; reject = fail })
+  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(DEFAULT_SUBAGENT_SETTINGS),
+    setSubagentSettings: vi.fn(), getSubagentModels: vi.fn().mockReturnValue(pending) } as unknown as PionApi
+  const { rerender } = render(<SubagentSettings />)
+  const saved = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'new', id: 'child' } }
+  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(saved), setSubagentSettings: vi.fn(),
+    getSubagentModels: vi.fn().mockResolvedValue([{ provider: 'new', id: 'child' }]) } as unknown as PionApi
+  rerender(<SubagentSettings />)
+  const select = screen.getByRole('combobox', { name: '默认子代理模型' })
+  await waitFor(() => expect(select).toBeEnabled())
+  await act(async () => { if (outcome === 'resolve') resolve([{ provider: 'old', id: 'stale' }]); else reject(new Error('old failure')) })
+  expect(select).toHaveValue(JSON.stringify(['new', 'child']))
+  expect(screen.queryByRole('option', { name: 'stale' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+
+it('reports independent directory failure without replacing a saved default or using parent candidates', async () => {
+  const saved = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'saved', id: 'child' } }
+  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(saved), setSubagentSettings: vi.fn(),
+    getSubagentModels: vi.fn().mockRejectedValue(new Error('private details')) } as unknown as PionApi
+  render(<SubagentSettings models={[{ provider: 'parent', id: 'stale' }]} />)
+  const select = screen.getByRole('combobox', { name: '默认子代理模型' })
+  await waitFor(() => expect(select).toBeEnabled())
+  expect(select).toHaveValue(JSON.stringify(['saved', 'child']))
+  expect(screen.getByRole('alert')).toHaveTextContent('读取模型目录失败')
+  expect(screen.getByRole('alert')).not.toHaveTextContent('private details')
+  expect(screen.queryByRole('option', { name: 'stale' })).not.toBeInTheDocument()
+})
+
+it('bounds directory waiting and ignores a response after the deadline', async () => {
+  vi.useFakeTimers()
+  try {
+    let resolve!: (models: { provider: string; id: string }[]) => void
+    const pending = new Promise<{ provider: string; id: string }[]>((done) => { resolve = done })
+    window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(DEFAULT_SUBAGENT_SETTINGS), setSubagentSettings: vi.fn(),
+      getSubagentModels: vi.fn().mockReturnValue(pending) } as unknown as PionApi
+    render(<SubagentSettings />)
+    await act(async () => { await Promise.resolve() })
+    const select = screen.getByRole('combobox', { name: '默认子代理模型' })
+    expect(select).toBeDisabled()
+    await act(async () => { vi.advanceTimersByTime(10_000) })
+    expect(select).toBeEnabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('超时')
+    await act(async () => resolve([{ provider: 'late', id: 'ignored' }]))
+    expect(screen.queryByRole('option', { name: 'ignored' })).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('超时')
+  } finally { vi.useRealTimers() }
+})
+
+it('reports an empty independent directory instead of silently showing only inheritance', async () => {
+  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(DEFAULT_SUBAGENT_SETTINGS), setSubagentSettings: vi.fn(),
+    getSubagentModels: vi.fn().mockResolvedValue([]) } as unknown as PionApi
+  render(<SubagentSettings />)
+  expect(await screen.findByText(/暂无已配置的可用模型/)).toBeInTheDocument()
 })
 
 it('allows explicit repair after a load failure without automatically saving defaults', async () => {

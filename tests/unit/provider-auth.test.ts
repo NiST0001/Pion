@@ -1,4 +1,4 @@
-import { CredentialSynchronizationError, SettingsManager, type ModelRuntime } from '@earendil-works/pi-coding-agent'
+import { CredentialSynchronizationError, SettingsManager, ModelRuntime } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it, vi } from 'vitest'
 import { ProviderAuthService } from '../../src/main/provider-auth'
 
@@ -42,6 +42,34 @@ function runtimeFixture(overrides: Partial<ModelRuntime> = {}): ModelRuntime {
 }
 
 describe('ProviderAuthService', () => {
+  it('reads the unfiltered local SDK availability snapshot without auth, network or secret projection', async () => {
+    const getAvailableSnapshot = vi.fn().mockReturnValue([
+      { provider: 'hidden-provider', id: 'configured', name: 'Configured', contextWindow: 123, reasoning: true,
+        apiKey: 'private', baseUrl: 'private-url' }
+    ])
+    const runtime = runtimeFixture({ getAvailableSnapshot })
+    const create = vi.spyOn(ModelRuntime, 'create').mockResolvedValue(runtime)
+    try {
+      const service = new ProviderAuthService()
+      expect(await service.listAvailableModels()).toEqual([
+        { provider: 'hidden-provider', id: 'configured', name: 'Configured', contextWindow: 123, reasoning: true }
+      ])
+      await service.listAvailableModels()
+      expect(create).toHaveBeenCalledExactlyOnceWith({ allowModelNetwork: false })
+      expect(getAvailableSnapshot).toHaveBeenCalledTimes(2)
+      expect(runtime.listCredentials).not.toHaveBeenCalled()
+      expect(runtime.login).not.toHaveBeenCalled()
+      expect(runtime.logout).not.toHaveBeenCalled()
+    } finally { create.mockRestore() }
+  })
+
+  it('fails explicitly on an oversized local model directory', async () => {
+    const runtime = runtimeFixture({ getAvailableSnapshot: vi.fn().mockReturnValue(Array(4097).fill({ provider: 'one', id: 'model' })) })
+    const service = new ProviderAuthService(async () => runtime)
+    await expect(service.listAvailableModels()).rejects.toThrow('目录过大')
+    expect(runtime.login).not.toHaveBeenCalled()
+  })
+
   it('projects Pi provider methods and status without credential values', async () => {
     const service = new ProviderAuthService(async () => runtimeFixture())
 

@@ -1,3 +1,5 @@
+import { SUBAGENT_LIMITS } from './subagents'
+
 /** Pure, bounded parent-tool projection. Never retain child bodies, usage or raw args. */
 export interface SubagentBatchTask {
   index: number
@@ -19,7 +21,7 @@ function validName(value: unknown): value is string {
 /** SDK argument order is the only planned identity; task instructions are discarded. */
 export function plannedSubagentBatch(args: unknown): SubagentBatch | undefined {
   const tasks = record(args)?.tasks
-  if (!Array.isArray(tasks) || tasks.length < 1 || tasks.length > 8) return undefined
+  if (!Array.isArray(tasks) || tasks.length < 1 || tasks.length > SUBAGENT_LIMITS.maxParallel.max) return undefined
   const projected: SubagentBatchTask[] = []
   for (let index = 0; index < tasks.length; index++) {
     const name = record(tasks[index])?.name
@@ -62,7 +64,7 @@ export function projectSubagentBatchResult(
   const legacy = !explicit && final && Array.isArray(source?.results)
   const tasks = explicit ? batch?.tasks : legacy ? source?.results : undefined
   let next: SubagentBatch | undefined
-  if ((!explicit || batch?.version === 1) && Array.isArray(tasks) && tasks.length > 0 && tasks.length <= 8
+  if ((!explicit || batch?.version === 1) && Array.isArray(tasks) && tasks.length > 0 && tasks.length <= SUBAGENT_LIMITS.maxParallel.max
     && (!known || tasks.length === known.tasks.length)) {
     const projected: SubagentBatchTask[] = []
     let budget = 16 * 1024

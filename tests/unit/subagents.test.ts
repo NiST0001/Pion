@@ -28,6 +28,62 @@ function setup(run: Parameters<typeof createSubagentControl>[0] = async (task) =
   }
 }
 
+it('honors 300-minute timeout while retaining the real pending batch gate until the runner settles', async () => {
+  vi.useFakeTimers()
+  let finish!: (value: SubagentResult) => void
+  let childSignal!: AbortSignal
+  const run = vi.fn((_task: SubagentTask, signal: AbortSignal) => {
+    childSignal = signal
+    return new Promise<SubagentResult>((resolve) => { finish = resolve })
+  })
+  const h = setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, timeoutMinutes: 300 }))
+  const tasks = [{ name: 'one', task: 'inspect' }]
+  const pending = h.control.tool.execute('long', { tasks }, undefined, undefined, context)
+  await Promise.resolve()
+  await vi.advanceTimersByTimeAsync(300 * 60_000 - 1)
+  expect(childSignal.aborted).toBe(false)
+  await vi.advanceTimersByTimeAsync(1)
+  expect(childSignal.aborted).toBe(true)
+  await expect(h.control.tool.execute('overlap', { tasks }, undefined, undefined, context)).rejects.toThrow('已有子代理批次')
+  finish({ name: 'one', status: 'aborted', text: 'finished' })
+  await pending
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it('requires an explicit user choice to override the settings model in AI guidance and tool description', async () => {
+  const h = setup()
+  const { systemPrompt } = await h.handlers.get('before_agent_start')!({ systemPrompt: 'base' })
+  for (const text of [systemPrompt, h.control.tool.description]) {
+    expect(text).toContain('omit task.model')
+    expect(text).toContain('never choose a model autonomously or use null to bypass')
+    expect(text).toContain('null is only for an explicit user choice to inherit the parent')
+  }
+})
+
+it('admits 100 children through one ACK, bounds metadata and rejects 101 before ACK', async () => {
+  let ack!: (value: boolean) => void
+  const observer = { event: vi.fn(), running: vi.fn(), cancelling: vi.fn(), finish: vi.fn() }
+  const publisher = { reserve: vi.fn(() => new Promise<boolean>((resolve) => { ack = resolve })), begin: vi.fn(() => observer), halt: vi.fn() }
+  const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: '界'.repeat(2048) }))
+  const h = setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 100, timeoutMinutes: 300 }), publisher)
+  const tasks = Array.from({ length: 100 }, (_, i) => ({ name: `worker-${i}`, task: 'inspect' }))
+  const operation = h.control.tool.execute('hundred', { tasks }, undefined, undefined, context)
+  await Promise.resolve()
+  expect(publisher.reserve).toHaveBeenCalledWith('hundred', 100, expect.any(AbortSignal))
+  expect(run).not.toHaveBeenCalled()
+  expect(publisher.begin).not.toHaveBeenCalled()
+  ack(true)
+  const result = await operation
+  expect(run).toHaveBeenCalledTimes(100)
+  expect(publisher.begin).toHaveBeenCalledTimes(100)
+  const batch = (result.details as { subagentBatch: SubagentBatch }).subagentBatch
+  expect(batch.tasks).toHaveLength(100)
+  expect(batch.tasks.every((task) => task.summary!.length > 0 && task.summaryTruncated)).toBe(true)
+  expect(Buffer.byteLength(batch.tasks.map((task) => task.summary).join(''))).toBeLessThanOrEqual(16 * 1024)
+  await expect(h.control.tool.execute('too-many', { tasks: [...tasks, tasks[0]] }, undefined, undefined, context)).rejects.toThrow('安全上限')
+  expect(publisher.reserve).toHaveBeenCalledOnce()
+})
+
 it('only opts into the fifth runner argument through the host publisher and keeps transcript out of tool results', async () => {
   const observer = { event: vi.fn(), running: vi.fn(), cancelling: vi.fn(), finish: vi.fn() }
   const publisher = { reserve: vi.fn(async () => true), begin: vi.fn(() => observer), halt: vi.fn() }
@@ -249,7 +305,7 @@ it('does not restore ON guidance if switched off while settings are loading', as
   expect(h.tools()).not.toContain('pion_subagents')
 })
 
-it.each([1, 2, 4, 8])('guides batch width using the current configured limit %i', async (maxParallel) => {
+it.each([1, 2, 4, 8, 100])('guides batch width using the current configured limit %i', async (maxParallel) => {
   const h = setup(undefined, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel }))
   await h.toggle('on')
   const { systemPrompt } = await h.handlers.get('before_agent_start')!({ systemPrompt: 'base' })
@@ -533,7 +589,8 @@ it('advertises exact ID priorities and a bounded diverse partial catalog only in
   const { systemPrompt } = await h.handlers.get('before_agent_start')!({ systemPrompt: 'base' })
   expect(systemPrompt).toContain('explicit task.model overrides the batch default')
   expect(systemPrompt).toContain('null explicitly uses the parent model')
-  expect(systemPrompt).toContain('Respect user-specified models')
+  expect(systemPrompt).toContain('If the user has not explicitly specified a child model, omit task.model')
+  expect(systemPrompt).toContain('never choose a model autonomously or use null to bypass the settings default')
   expect(systemPrompt).toContain('No silent fallback')
   expect(systemPrompt).toContain('cost is not authorization')
   const section = systemPrompt.match(/Available child models.*?: (\[.*?\])\./)![1]

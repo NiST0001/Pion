@@ -19,6 +19,19 @@ function row(state: AgentState) {
 const start = () => event(initialState, { type: 'tool_execution_start', toolCallId: 'batch', toolName: 'pion_subagents', args })
 
 describe('bounded parent subagent batches', () => {
+  it('projects 100 real indices with fair bounded summaries and rejects 101', () => {
+    const tasks = Array.from({ length: 100 }, (_, index) => ({ name: `task-${index}`, task: 'private instruction' }))
+    const planned = plannedSubagentBatch({ tasks })!
+    expect(planned.tasks).toHaveLength(100)
+    expect(plannedSubagentBatch({ tasks: [...tasks, tasks[0]] })).toBeUndefined()
+    const rows = planned.tasks.map((task) => ({ ...task, status: 'completed', summary: '界'.repeat(2048) }))
+    const projected = projectSubagentBatchResult({ subagentBatch: { version: 1, tasks: rows } }, planned, true)!
+    expect(projected.tasks.map((task) => task.index)).toEqual(Array.from({ length: 100 }, (_, i) => i))
+    expect(projected.tasks.every((task) => task.summary!.length > 0 && task.summaryTruncated)).toBe(true)
+    expect(Buffer.byteLength(projected.tasks.map((task) => task.summary).join(''))).toBeLessThanOrEqual(16 * 1024)
+    expect(projectSubagentBatchResult({ subagentBatch: { version: 1, tasks: [...rows, rows[0]] } }, undefined, true)).toBeUndefined()
+    expect(JSON.stringify(projected)).not.toContain('private instruction')
+  })
   it('projects all four planned identities without instructions, even duplicate names', () => {
     expect(planned.tasks.map((task) => task.index)).toEqual([0, 1, 2, 3])
     expect(planned.tasks.every((task) => task.status === 'pending')).toBe(true)

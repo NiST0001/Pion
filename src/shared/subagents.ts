@@ -27,8 +27,8 @@ export interface SubagentSettings {
 }
 
 export const SUBAGENT_LIMITS = {
-  maxParallel: { min: 1, max: 8 },
-  timeoutMinutes: { min: 1, max: 30 },
+  maxParallel: { min: 1, max: 100 },
+  timeoutMinutes: { min: 1, max: 300 },
   maxTurns: { min: 1, max: 64 },
   maxResultChars: { min: 1000, max: 32000 }
 } as const

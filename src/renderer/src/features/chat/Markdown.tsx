@@ -13,6 +13,9 @@ import {
   SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS,
   SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS,
   SCREEN_TEXT_REVEAL_LIVE_CLASS,
+  SCREEN_TEXT_REVEAL_LIVE_DURATION_MS,
+  SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS,
+  SCREEN_TEXT_REVEAL_STATIC_CLASS,
   SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS,
   SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS
 } from '../../utils/screenTextReveal'
@@ -147,42 +150,42 @@ function lineWrapper(
   }
 }
 
-/** Per-render bookkeeping for live mode. Only the line currently being
-    streamed (the last one) wraps characters into spans; completed lines
-    render as plain text so long messages stay cheap to re-render. */
+// A bounded batch window, not one timer per character. Deadlines are stamped
+// only after commit; subsequent tokens keep the original class and delay.
+interface LiveFadeBatch {
+  ordinal: number
+  start: number
+  end: number
+  expiresAt: number
+}
 interface LiveTailTracker {
-  /** Tail line length committed by the previous render. */
   committed: { ordinal: number, length: number } | null
-  /** Tail line measured by this render, committed by the layout effect. */
   current: { ordinal: number, length: number } | null
-  /** Line nodes in document order, collected during the walk. */
+  batches: LiveFadeBatch[]
+  pending: LiveFadeBatch[]
+  allowNew: boolean
   lines: Array<HastNode & { children: HastNode[] }>
 }
+const MAX_LIVE_FADE_BATCHES = 128
+const MAX_LIVE_FADE_CHARACTERS = 4096
 
-/** Wrap every character of the tail line in a stable per-position span; only
-    characters beyond the committed length carry the fade class. */
 function wrapLiveLineChars(
   node: HastNode & { children: HastNode[] },
   state: { seen: number },
-  startFrom: number
+  batches: LiveFadeBatch[]
 ): void {
   for (let index = 0; index < node.children.length; index++) {
     const child = node.children[index]
     if (isTextNode(child)) {
       const replacement: HastNode[] = Array.from(child.value).map((character, offset) => {
         const absoluteIndex = state.seen + offset
-        const isNew = absoluteIndex >= startFrom
+        const batch = batches.find((candidate) => absoluteIndex >= candidate.start && absoluteIndex < candidate.end)
         return {
           type: 'element',
           tagName: 'span',
           properties: {
-            className: [
-              SCREEN_TEXT_REVEAL_CHARACTER_CLASS,
-              ...(isNew ? [SCREEN_TEXT_REVEAL_LIVE_CLASS] : [])
-            ],
-            ...(isNew
-              ? { style: `--screen-text-reveal-delay:${Math.min((absoluteIndex - startFrom) * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)}ms` }
-              : {})
+            className: [SCREEN_TEXT_REVEAL_CHARACTER_CLASS, ...(batch ? [SCREEN_TEXT_REVEAL_LIVE_CLASS] : [])],
+            ...(batch ? { style: `--screen-text-reveal-delay:${Math.min((absoluteIndex - batch.start) * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)}ms` } : {})
           },
           children: [{ type: 'text', value: character }]
         }
@@ -191,9 +194,14 @@ function wrapLiveLineChars(
       node.children.splice(index, 1, ...replacement)
       index += replacement.length - 1
     } else if (hasChildren(child)) {
-      wrapLiveLineChars(child, state, startFrom)
+      wrapLiveLineChars(child, state, batches)
     }
   }
+}
+
+function textLength(node: HastNode): number {
+  if (isTextNode(node)) return Array.from(node.value).length
+  return node.children?.reduce((sum, child) => sum + textLength(child), 0) ?? 0
 }
 
 function hasBlockChild(node: HastNode): boolean {
@@ -242,14 +250,31 @@ function rehypeLineReveal(mode: TextRevealMode, liveTail?: LiveTailTracker) {
     const root = tree as HastNode
     wrapLineTree(root, mode, liveTail)
     if (mode !== 'live' || !liveTail || liveTail.lines.length === 0) return
-    const tail = liveTail.lines[liveTail.lines.length - 1]
     const ordinal = liveTail.lines.length - 1
-    const startFrom = liveTail.committed?.ordinal === ordinal
-      ? liveTail.committed.length
-      : 0
-    const state = { seen: 0 }
-    wrapLiveLineChars(tail, state, startFrom)
-    liveTail.current = { ordinal, length: state.seen }
+    if (!liveTail.allowNew) {
+      liveTail.lines.forEach((line, index) => {
+        if (index > (liveTail.committed?.ordinal ?? -1)) {
+          const classes = line.properties?.className as string[]
+          line.properties = { ...line.properties, className: [...classes, SCREEN_TEXT_REVEAL_STATIC_CLASS] }
+        }
+      })
+    }
+    const length = textLength(liveTail.lines[ordinal])
+    const start = liveTail.committed?.ordinal === ordinal ? liveTail.committed.length : 0
+    const remaining = MAX_LIVE_FADE_CHARACTERS - liveTail.batches.reduce((sum, batch) => sum + batch.end - batch.start, 0)
+    if (liveTail.allowNew && length > start && remaining > 0 && liveTail.batches.length < MAX_LIVE_FADE_BATCHES) {
+      liveTail.pending.push({ ordinal, start, end: Math.min(length, start + remaining), expiresAt: 0 })
+    }
+    const batches = [...liveTail.batches, ...liveTail.pending]
+    liveTail.lines.forEach((line, lineOrdinal) => {
+      const lineBatches = batches.filter((batch) => batch.ordinal === lineOrdinal)
+      // Keep the current tail's positional spans stable even after cleanup.
+      // Completed lines retain spans only while their fades are unfinished.
+      if (lineOrdinal === ordinal || lineBatches.length > 0) {
+        wrapLiveLineChars(line, { seen: 0 }, lineBatches)
+      }
+    })
+    liveTail.current = { ordinal, length }
   }
 }
 
@@ -352,23 +377,43 @@ export const Markdown = memo(function Markdown({
   readOnly?: boolean
   revealMode?: TextRevealMode
 }): React.ReactElement {
-  // Live mode additionally fades newly streamed characters, but only inside
-  // the line currently being streamed (the last one). Completed lines render
-  // as plain text so long answers stay cheap to re-render on every token.
-  // The committed tail is read during render and written back only after
-  // commit, so StrictMode double renders cannot skip or replay the fade.
-  const committedTailRef = useRef<{ ordinal: number, length: number } | null>(null)
-  const liveTail: LiveTailTracker = { committed: committedTailRef.current, current: null, lines: [] }
+  const committedRef = useRef<{
+    text: string
+    tail: { ordinal: number, length: number } | null
+    batches: LiveFadeBatch[]
+  } | null>(null)
+  const [, refresh] = useState(0)
+  const committed = committedRef.current
+  const continues = committed !== null && text.startsWith(committed.text)
+  const now = performance.now()
+  const batches = continues ? committed.batches.filter((batch) => batch.expiresAt > now) : []
+  const allowNew = revealMode === 'live' && !readOnly
+    && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  const effectiveMode = batches.length > 0 ? 'live' : revealMode
+  const liveTail: LiveTailTracker = {
+    committed: continues ? committed.tail : null,
+    current: null, batches, pending: [], allowNew, lines: []
+  }
   useLayoutEffect(() => {
-    committedTailRef.current = liveTail.current
+    const commitTime = performance.now()
+    const nextBatches = [...liveTail.batches, ...liveTail.pending.map((batch) => ({
+      ...batch,
+      expiresAt: commitTime + SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS
+        + Math.min((batch.end - batch.start - 1) * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)
+    }))]
+    committedRef.current = { text, tail: liveTail.current ?? (continues ? committed.tail : null), batches: nextBatches }
+    if (nextBatches.length === 0) return
+    const deadline = Math.min(...nextBatches.map((batch) => batch.expiresAt))
+    const timer = window.setTimeout(() => refresh((value) => value + 1), Math.max(1, Math.ceil(deadline - performance.now())))
+    return () => window.clearTimeout(timer)
   })
 
   return (
     <div className="markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={revealMode
-          ? [rehypeHighlight, rehypeLineReveal(revealMode, liveTail)]
+        rehypePlugins={effectiveMode
+          ? [rehypeHighlight, rehypeLineReveal(effectiveMode, liveTail)]
           : [rehypeHighlight]}
         components={readOnly ? READ_ONLY_MARKDOWN_COMPONENTS : MARKDOWN_COMPONENTS}
         skipHtml={readOnly}

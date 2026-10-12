@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises'
 import { BrowserWindow } from 'electron'
 import { subagentSettingsFilePath } from '../subagent-settings'
-import { DEFAULT_SUBAGENTS_ENABLED } from '../../shared/subagents'
+import { DEFAULT_SUBAGENTS_ENABLED, SUBAGENT_LIMITS } from '../../shared/subagents'
 import { IPC_EVENTS } from '../../shared/ipc'
 import type { McpStatusSnapshot, McpStatusTarget } from '../../shared/mcp'
 import {
@@ -2149,7 +2149,7 @@ export class AgentBridge {
           if (Object.keys(parsed).every((key) => ['version', 'nonce', 'runtimeId', 'parentToolCallId', 'count'].includes(key))
             && parsed.version === 1 && bounded(parsed.nonce, 256) && parsed.nonce === backend.subagentViewNonce
             && bounded(parsed.runtimeId, 256) && bounded(parsed.parentToolCallId, 256)
-            && Number.isSafeInteger(parsed.count) && (parsed.count as number) >= 1 && (parsed.count as number) <= 8) {
+            && Number.isSafeInteger(parsed.count) && (parsed.count as number) >= 1 && (parsed.count as number) <= SUBAGENT_LIMITS.maxParallel.max) {
             admission = { version: 1, nonce: parsed.nonce, runtimeId: parsed.runtimeId,
               parentToolCallId: parsed.parentToolCallId, count: parsed.count as number }
           }
@@ -3651,6 +3651,31 @@ export class AgentBridge {
     // A malformed shell preference is not evidence that the SDK has no models.
     // Surface the read error without replacing configuration or active models.
     return this.providerVisibility ? this.providerVisibility.filterModels(models) : models
+  }
+
+  // Page deadlines stop waiting, not SDK initialization. Keep the actual read
+  // shared until it settles, including across window/renderer replacements.
+  private subagentModelsRead: Promise<ModelOption[]> | null = null
+
+  async getSubagentModels(ownerId: number): Promise<ModelOption[]> {
+    const capturedWindow = this.win
+    const assertOwner = (): void => {
+      if (!capturedWindow || this.win !== capturedWindow || capturedWindow.webContents.id !== ownerId
+        || capturedWindow.isDestroyed?.() || capturedWindow.webContents.isDestroyed?.()) {
+        throw new Error('只允许所属主窗口读取子代理模型目录')
+      }
+    }
+    assertOwner()
+    if (!this.subagentModelsRead) {
+      if (!this.providerMutationInFlight) this.providerAuthService.invalidate()
+      const pending = this.providerAuthService.listAvailableModels()
+      this.subagentModelsRead = pending
+      const clear = () => { if (this.subagentModelsRead === pending) this.subagentModelsRead = null }
+      void pending.then(clear, clear)
+    }
+    const models = await this.subagentModelsRead
+    assertOwner()
+    return models
   }
 
   async getModelProviders(): Promise<ModelProviderInfo[]> {

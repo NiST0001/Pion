@@ -5,7 +5,8 @@ import {
 } from '@earendil-works/pi-coding-agent'
 import type {
   ModelProviderAuthType,
-  ModelProviderInfo
+  ModelProviderInfo,
+  ModelOption
 } from '../shared/types'
 
 export type ProviderLoginInteraction = Parameters<ModelRuntime['login']>[2]
@@ -19,7 +20,7 @@ type SettingsFactory = () => LoginSettings
 /**
  * Thin adapter over Pi's canonical ModelRuntime provider/auth APIs.
  *
- * It deliberately returns only credential metadata. Secrets stay inside Pi's
+ * It deliberately returns only public model and credential metadata. Secrets stay inside Pi's
  * AuthStorage and are never projected through Electron IPC.
  */
 export class ProviderAuthService {
@@ -46,6 +47,20 @@ export class ProviderAuthService {
     })
     this.runtimePromise = pending
     return pending
+  }
+
+  /** Local SDK availability via the existing offline runtime factory; no login or model request. */
+  async listAvailableModels(): Promise<ModelOption[]> {
+    const runtime = await this.runtime()
+    const models = runtime.getAvailableSnapshot()
+    if (models.length > 4096) throw new Error('可用模型目录过大')
+    return models.map((model) => ({
+      provider: model.provider,
+      id: model.id,
+      name: model.name,
+      contextWindow: model.contextWindow,
+      reasoning: model.reasoning
+    }))
   }
 
   async listProviders(): Promise<ModelProviderInfo[]> {

@@ -2,6 +2,7 @@ import {
   SUBAGENT_SESSION_WIDGET_KEY, SUBAGENT_SESSION_RETENTION_MS, SUBAGENT_SESSION_MAX_ROWS,
   SUBAGENT_SESSION_MAX_CHARS, SUBAGENT_SESSION_MAX_PACKET_CHARS, SUBAGENT_SESSION_MAX_RECORDS
 } from '../../shared/subagent-sessions'
+import { SUBAGENT_LIMITS } from '../../shared/subagents'
 import type {
   SubagentSessionNotice, SubagentSessionRow, SubagentSessionSnapshot, SubagentSessionSummary,
   SubagentSessionList, SubagentSessionStatus, SubagentSessionAdmission
@@ -120,7 +121,7 @@ export class SubagentSessionStore {
       || request.version !== 1 || !string(scope.backendId, 256) || !string(scope.nonce, 256)
       || !string(scope.cwd, 4096) || (scope.parentSessionPath !== undefined && !string(scope.parentSessionPath, 4096))
       || request.nonce !== scope.nonce || !string(request.runtimeId, 256) || !string(request.parentToolCallId, 256)
-      || !Number.isSafeInteger(request.count) || request.count < 1 || request.count > 8) return false
+      || !Number.isSafeInteger(request.count) || request.count < 1 || request.count > SUBAGENT_LIMITS.maxParallel.max) return false
     let backend = this.backends.get(scope.backendId)
     const key = JSON.stringify([scope.backendId, request.runtimeId, request.parentToolCallId])
     if (this.creationClosed || this.admittedBatches.has(key) || this.admittedBatches.size >= MAX_TOMBSTONES

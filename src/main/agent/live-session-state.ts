@@ -8,6 +8,9 @@ export const LIVE_MAX_ROWS = 256
 export const LIVE_MAX_BYTES = 4 * 1024 * 1024
 const VALUE_BYTES = 32 * 1024
 const RESULT_BYTES = 768 * 1024
+// Only large native batches need more than the ordinary 32 KiB update budget:
+// 100 escaped names + the unchanged 16 KiB summary budget (JSON may expand 6x).
+const LARGE_BATCH_UPDATE_BYTES = 192 * 1024
 const ROW_OVERHEAD = 1024
 // Reserve wrappers, bounded identities/errors and snapshot scope metadata as well as text.
 const MESSAGE_OVERHEAD = 16 * 1024
@@ -237,7 +240,9 @@ export class LiveSessionProjection {
       const row = this.rows.find((r) => r.role === 'tool' && r.id === event.toolCallId)
       if (!row || row.finalResult) return
       const end = event.type === 'tool_execution_end'
-      const payload = this.message({ ...object(end ? event.result : event.partialResult), role: 'toolResult' }, end ? RESULT_BYTES : VALUE_BYTES, end, row.toolName, row.batch)
+      const updateBudget = row.toolName === 'pion_subagents' && (row.batch?.tasks.length ?? 0) > 8
+        ? LARGE_BATCH_UPDATE_BYTES : VALUE_BYTES
+      const payload = this.message({ ...object(end ? event.result : event.partialResult), role: 'toolResult' }, end ? RESULT_BYTES : updateBudget, end, row.toolName, row.batch)
       row.batch = object(payload.details).subagentBatch as SubagentBatch | undefined
       this.replace(row, [row.events[0], { type: event.type, toolCallId: row.id!, toolName: row.toolName ?? '', ...(end ? { result: payload, isError: Boolean(event.isError) } : { partialResult: payload }) } as WireEventInput])
       if (end) row.finalResult = true

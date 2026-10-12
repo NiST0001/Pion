@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { SUBAGENT_LIMITS } from '../../shared/subagents'
 import {
   SUBAGENT_SESSION_MAX_CHARS, SUBAGENT_SESSION_MAX_PACKET_CHARS, SUBAGENT_SESSION_MAX_ROWS,
   SUBAGENT_SESSION_RETENTION_MS, SUBAGENT_SESSION_ADMISSION_TITLE, type SubagentSessionAdmission,
@@ -78,7 +79,7 @@ export function createSubagentSessionPublisher(options: {
       let timer: ReturnType<typeof setTimeout> | undefined
       const abort = () => controller?.abort()
       try {
-        if (signal?.aborted || !Number.isSafeInteger(count) || count < 1 || count > 8) return false
+        if (signal?.aborted || !Number.isSafeInteger(count) || count < 1 || count > SUBAGENT_LIMITS.maxParallel.max) return false
         prune()
         if (slots.size + count > MAX_RUNTIME_CHILDREN) return false
         const owner = capture(parentToolCallId, count)

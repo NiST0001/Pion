@@ -2,7 +2,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'rea
 import {
   appendedCharacterCount, armScreenTextReveal, RevealText,
   SCREEN_TEXT_REVEAL_DURATION_MS, SCREEN_TEXT_REVEAL_MAX_DELAY_MS,
-  SCREEN_TEXT_REVEAL_LIVE_DURATION_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS,
+  SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS,
   type TextRevealMode
 } from '../../utils/screenTextReveal'
 
@@ -75,11 +75,11 @@ const RevealChunk = memo(function RevealChunk({ text, mode, revealCount }: {
       const container = element.closest<HTMLElement>('.review-detail-body, .chat-scroll') ?? element
       armScreenTextReveal(container, element)
     }
-    // Animation events reclaim first; allow the entire bounded stagger + fade
-    // to finish before the fallback (including the slower streamed suffix).
-    const duration = mode === 'live' ? SCREEN_TEXT_REVEAL_LIVE_DURATION_MS : SCREEN_TEXT_REVEAL_DURATION_MS
-    const maxDelay = mode === 'live' ? SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS : SCREEN_TEXT_REVEAL_MAX_DELAY_MS
-    const timer = window.setTimeout(() => setPhase('done'), maxDelay + duration + 68)
+    // Live RevealText owns its independent suffix windows. Keep it mounted so
+    // another token cannot recycle an older fade before that fade completes.
+    if (mode === 'live') return
+    const timer = window.setTimeout(() => setPhase('done'),
+      SCREEN_TEXT_REVEAL_MAX_DELAY_MS + SCREEN_TEXT_REVEAL_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS)
     return () => window.clearTimeout(timer)
   }, [phase, text, mode])
 
@@ -87,7 +87,7 @@ const RevealChunk = memo(function RevealChunk({ text, mode, revealCount }: {
     onAnimationEnd={(event) => {
       // Earlier characters finish first; only the final fading character can
       // reclaim the whole chunk without interrupting its remaining suffix.
-      if (event.animationName === 'screen-text-reveal'
+      if (mode === 'history' && event.animationName === 'screen-text-reveal'
         && event.target === ref.current?.lastElementChild) setPhase('done')
     }}>
     {phase === 'animating'

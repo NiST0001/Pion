@@ -302,7 +302,8 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     expect(child.querySelector('.tool-body')).toBe(toolBody)
     expect(bubble).toHaveTextContent('已有回复新增后缀')
     expect(thinking.querySelector('pre')).toHaveTextContent('已有思考新增思考')
-    expect([...thinking.querySelectorAll('[data-screen-reveal-character]')].map((node) => node.textContent).join('')).toBe('新增思考')
+    // The old prefix is still inside its original fade window, not replayed.
+    expect([...thinking.querySelectorAll('[data-screen-reveal-character]')].map((node) => node.textContent).join('')).toBe('已有思考新增思考')
 
     const oldPending = deferred<SubagentSessionSnapshot | null>()
     const terminalPending = deferred<SubagentSessionSnapshot | null>()

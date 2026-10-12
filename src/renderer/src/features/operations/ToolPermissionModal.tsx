@@ -143,7 +143,7 @@ export function ToolPermissionModal({
             >
               <Check size={13} /> 仅这一次
             </button>
-            {request.risks.length === 0 && (
+            {request.canRemember && request.risks.length === 0 && (
               <button
                 type="button"
                 disabled={busy}
@@ -152,7 +152,7 @@ export function ToolPermissionModal({
                 当前会话允许
               </button>
             )}
-            {request.canRemember && (
+            {request.canRemember && request.risks.length === 0 && (
               <button
                 type="button"
                 className="tool-permission-allow-project"

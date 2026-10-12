@@ -10,6 +10,8 @@ import { reducer } from '../../src/renderer/src/agent/reducer'
 import { entriesToTimeline } from '../../src/renderer/src/agent/timeline'
 import { initialState } from '../../src/renderer/src/agent/types'
 import { ChatMessage } from '../../src/renderer/src/features/chat/ChatMessage'
+import { Markdown } from '../../src/renderer/src/features/chat/Markdown'
+import { SCREEN_TEXT_REVEAL_LIVE_DURATION_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS, SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS } from '../../src/renderer/src/utils/screenTextReveal'
 import { ChatTimeline } from '../../src/renderer/src/features/chat/ChatTimeline'
 import type { ChatTimelineProps } from '../../src/renderer/src/features/chat/ChatTimeline'
 import {
@@ -30,6 +32,7 @@ describe('ChatMessage', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
     vi.useRealTimers()
   })
 
@@ -462,7 +465,8 @@ describe('ChatMessage', () => {
     expect(getByRole('status')).toBe(announcement)
     expect(announcement.firstChild).toBe(announcementNode)
     expect(announcement.textContent).toBe(announcementText)
-    expect(scheduleAnnouncement).not.toHaveBeenCalled()
+    // Nonzero fade cleanup timers are independent of accessibility announcements.
+    expect(scheduleAnnouncement.mock.calls.filter(([, delay]) => delay === 0)).toHaveLength(0)
     expect(container.querySelector('.bubble-error-summary')).toBe(summary)
     expect(message?.childNodes).toHaveLength(messageNodes.length)
     messageNodes.forEach((node, index) => expect(message?.childNodes[index]).toBe(node))
@@ -479,7 +483,7 @@ describe('ChatMessage', () => {
     expect(getByRole('status')).toBe(announcement)
     expect(announcement.firstChild).toBe(announcementNode)
     expect(announcement.textContent).toBe(announcementText)
-    expect(scheduleAnnouncement).not.toHaveBeenCalled()
+    expect(scheduleAnnouncement.mock.calls.filter(([, delay]) => delay === 0)).toHaveLength(0)
     expect(message?.childNodes).toHaveLength(messageNodes.length)
     messageNodes.forEach((node, index) => expect(message?.childNodes[index]).toBe(node))
     expect(details).toHaveAttribute('open')
@@ -490,7 +494,7 @@ describe('ChatMessage', () => {
     expect(summary).toHaveTextContent('模型认证失败')
     expect(summary).toHaveTextContent('请在设置中重新登录，或检查 API Key 后重试。')
     expect(announcement.textContent).toBe(announcementText)
-    expect(scheduleAnnouncement).toHaveBeenCalledExactlyOnceWith(expect.any(Function), 0)
+    expect(scheduleAnnouncement.mock.calls.filter(([, delay]) => delay === 0)).toHaveLength(1)
     act(() => vi.advanceTimersByTime(0))
     expect(getByRole('status')).toBe(announcement)
     expect(announcement.textContent).toBe('模型认证失败。请在设置中重新登录，或检查 API Key 后重试。')
@@ -727,7 +731,8 @@ describe('ChatMessage', () => {
     expect(container.querySelector('.caret')).not.toBeInTheDocument()
   })
 
-  it('uses doubled live character delays for Markdown output without reanimating the prefix', () => {
+  it('retains unfinished Markdown fades and original delays across rapid tokens without restarting the prefix', () => {
+    vi.useFakeTimers()
     const item = { kind: 'assistant' as const, id: 90, text: 'abc', thinking: '', streaming: true, live: true }
     const view = render(<ChatMessage item={item} canFork={false} />)
     const characters = view.container.querySelectorAll<HTMLElement>('.markdown .screen-text-reveal-live')
@@ -735,8 +740,59 @@ describe('ChatMessage', () => {
     expect(characters[1].style.getPropertyValue('--screen-text-reveal-delay')).toBe('2.4ms')
     view.rerender(<ChatMessage item={{ ...item, text: 'abcde' }} canFork={false} />)
     const suffix = view.container.querySelectorAll<HTMLElement>('.markdown .screen-text-reveal-live')
-    expect(Array.from(suffix, (node) => node.textContent).join('')).toBe('de')
+    expect(Array.from(suffix, (node) => node.textContent).join('')).toBe('abcde')
+    expect(suffix[0]).toBe(characters[0])
+    expect(suffix[1]).toBe(characters[1])
     expect(suffix[1].style.getPropertyValue('--screen-text-reveal-delay')).toBe('2.4ms')
+    expect(suffix[3].style.getPropertyValue('--screen-text-reveal-delay')).toBe('0ms')
+    expect(suffix[4].style.getPropertyValue('--screen-text-reveal-delay')).toBe('2.4ms')
+    act(() => vi.advanceTimersByTime(SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS + 10))
+    expect(view.container.querySelector('.markdown .screen-text-reveal-live')).toBeNull()
+    view.rerender(<ChatMessage item={{ ...item, text: 'abcdef' }} canFork={false} />)
+    expect(view.container.querySelector('.markdown .screen-text-reveal-live')).toHaveTextContent('f')
+  })
+
+  it('preserves completed-line fades through a new line and streaming settlement, then cleans up without losing text', () => {
+    vi.useFakeTimers()
+    const view = render(<Markdown text="abc" revealMode="live" />)
+    const original = view.container.querySelector('.screen-text-reveal-live')
+    act(() => vi.advanceTimersByTime(10))
+    view.rerender(<Markdown text={'abc\ndef'} revealMode="live" />)
+    expect(view.container.querySelector('.screen-text-reveal-live')).toBe(original)
+    expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(6)
+    view.rerender(<Markdown text={'abc\ndef'} />)
+    expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(6)
+    expect(view.container).toHaveTextContent('abcdef')
+    act(() => vi.advanceTimersByTime(SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS + 10))
+    expect(view.container.querySelector('.screen-text-reveal-live')).toBeNull()
+    expect(view.container).toHaveTextContent(/abc\s*def/)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('bounds pending Markdown fades and uses one cleanup timer with unmount cleanup', () => {
+    vi.useFakeTimers()
+    const view = render(<Markdown text={'x'.repeat(5000)} revealMode="live" />)
+    expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(4096)
+    expect(vi.getTimerCount()).toBe(1)
+    act(() => vi.advanceTimersByTime(SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS + 10))
+    expect(view.container.querySelector('.screen-text-reveal-live')).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+    view.rerender(<Markdown text={'x'.repeat(5000) + 'y'} revealMode="live" />)
+    expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(1)
+    view.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('resets fade windows on replacement and never starts new read-only or reduced-motion fades', () => {
+    vi.useFakeTimers()
+    const view = render(<Markdown text="old" revealMode="live" />)
+    view.rerender(<Markdown text="new" revealMode="live" />)
+    expect(Array.from(view.container.querySelectorAll('.screen-text-reveal-live'), (node) => node.textContent).join('')).toBe('new')
+    view.rerender(<Markdown text="new suffix" revealMode="live" readOnly />)
+    expect(Array.from(view.container.querySelectorAll('.screen-text-reveal-live'), (node) => node.textContent).join('')).toBe('new')
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
+    view.rerender(<Markdown text="new suffix more" revealMode="live" />)
+    expect(Array.from(view.container.querySelectorAll('.screen-text-reveal-live'), (node) => node.textContent).join('')).toBe('new')
   })
 
   it('keeps the restored running bubble fade while animating only new thinking and staying silent', () => {
@@ -749,7 +805,9 @@ describe('ChatMessage', () => {
     rerender(<ChatMessage item={{ ...item, text: '恢复的输出新增', thinking: '原思考新增' }} canFork={false} />)
     expect(container.querySelector('.bubble-assistant')).toBe(bubble)
     expect(container.querySelector('.thinking pre')).toHaveTextContent('原思考新增')
-    expect(container.querySelectorAll('.thinking .screen-text-reveal-live')).toHaveLength(2)
+    // The original three characters are still fading; the two new ones join
+    // without prematurely cancelling/restarting that original window.
+    expect(container.querySelectorAll('.thinking .screen-text-reveal-live')).toHaveLength(5)
     expect(container.querySelector('.bubble-error [aria-live]')).not.toBeInTheDocument()
   })
 
