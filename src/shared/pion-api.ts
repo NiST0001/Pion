@@ -6,6 +6,7 @@
 import type { BranchDeleteRequest, BranchDeleteResult } from './branches'
 import type { SubagentSessionList, SubagentSessionSnapshot } from './subagent-sessions'
 import type { SubagentSettings } from './subagents'
+import type { QuestionSettings } from './question-settings'
 import type { ThemeId } from './theme'
 import type { McpStatusSnapshot, McpStatusTarget } from './mcp'
 import type {
@@ -229,6 +230,8 @@ export interface PionApi {
   listSubagentSessions(): Promise<SubagentSessionList>
   getSubagentSession(id: string, backendId: string): Promise<SubagentSessionSnapshot | null>
   onSubagentSessions(listener: (list: SubagentSessionList) => void): () => void
+  getQuestionSettings(): Promise<QuestionSettings>
+  setQuestionSettings(settings: QuestionSettings): Promise<QuestionSettings>
   getSubagentSettings(): Promise<SubagentSettings>
   setSubagentSettings(settings: SubagentSettings): Promise<SubagentSettings>
   setModel(provider: string, modelId: string): Promise<void>

@@ -86,6 +86,7 @@ export function ExtensionUiModal({
           <div>
             <span>{providerAuth ? 'Pi 提供商认证' : 'Agent 需要你的选择'}{queueLength > 1 ? ` · 还有 ${queueLength - 1} 项` : ''}</span>
             <h2 id="extension-ui-title">{request.title}</h2>
+            {request.question && request.timeoutAt === null && <span>等待回答，不自动超时；仍可取消。</span>}
           </div>
           <button
             type="button"

@@ -196,7 +196,7 @@ export interface AgentState {
   /** Counts retained for status/telemetry compatibility. */
   queued: { steering: number; followUp: number }
   /** Text snapshots used by the composer-side queue card. */
-  queuedMessages: { steering: string[]; followUp: string[]; nativeFollowUpCount: number }
+  queuedMessages: { steering: string[]; followUp: string[]; nativeFollowUpCount: number; queuePause?: import('../../../shared/types').QueuePause }
 }
 
 export const initialState: AgentState = {

@@ -30,7 +30,7 @@ export function TitleBar({
   onToggleSidebar,
   onToggleReview
 }: TitleBarProps): ReactElement {
-  const title = [shorten(cwd ?? ''), sessionName].filter(Boolean).join(' · ')
+  const title = [cwd, sessionName].filter(Boolean).join(' · ')
   return (
     <header className="titlebar">
       <div className="titlebar-brand" style={{ width: sidebarWidth }}>
@@ -82,11 +82,4 @@ export function TitleBar({
       </div>
     </header>
   )
-}
-
-function shorten(path: string): string {
-  if (!path) return ''
-  const parts = path.replace(/^\/home\/[^/]+/, '~').split('/')
-  if (parts.length <= 3) return parts.join('/')
-  return `…/${parts.slice(-2).join('/')}`
 }

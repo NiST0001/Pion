@@ -36,6 +36,50 @@ describe('ChatMessage', () => {
     vi.useRealTimers()
   })
 
+  it('adds send motion only to a new live user bubble and never replays it on entry backfill', () => {
+    const item = { kind: 'user' as const, id: 42, text: '发送消息', live: true }
+    const view = render(<ChatMessage item={item} canFork={false} />)
+    const bubble = view.container.querySelector('.bubble-user')!
+    expect(bubble).toHaveClass('user-send-entering')
+    expect(bubble).toHaveAttribute('data-line-reveal-ready', 'true')
+    const delay = (bubble as HTMLElement).style.getPropertyValue('--screen-text-reveal-delay')
+    view.rerender(<ChatMessage item={{ ...item, entryId: 'persisted' }} canFork={false} />)
+    expect(view.container.querySelector('.bubble-user')).toBe(bubble)
+    expect((bubble as HTMLElement).style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+    const finish = (target: Element, name: string) => {
+      const event = new Event('webkitAnimationEnd', { bubbles: true })
+      Object.defineProperty(event, 'animationName', { value: name })
+      fireEvent(target, event)
+    }
+    finish(bubble.querySelector('.bubble-content')!, 'user-message-arrive')
+    expect(bubble).toHaveClass('user-send-entering')
+    finish(bubble, 'screen-text-reveal')
+    expect(bubble).toHaveClass('user-send-entering')
+    finish(bubble, 'user-message-arrive')
+    expect(bubble).not.toHaveClass('user-send-entering')
+    view.rerender(<ChatMessage item={{ ...item, entryId: 'persisted', text: '发送消息' }} canFork={false} />)
+    expect(view.container.querySelector('.bubble-user')).toBe(bubble)
+    expect(bubble).not.toHaveClass('user-send-entering')
+  })
+
+  it.each([
+    { historical: true, live: true }, { noReveal: true, live: true }, { live: false }
+  ])('does not play send motion on history, paging or nonlive mounts: %j', (flags) => {
+    const view = render(<ChatMessage item={{ kind: 'user', id: 43, text: '旧消息', ...flags }} canFork={false} />)
+    expect(view.container.querySelector('.bubble-user')).not.toHaveClass('user-send-entering')
+  })
+
+  it('keeps readonly user messages static and composes motion with reduced-motion-safe opacity', () => {
+    const view = render(<ChatMessage item={{ kind: 'user', id: 44, text: '只读', live: true }} canFork={false} readOnly />)
+    expect(view.container.querySelector('.bubble-user')).not.toHaveClass('user-send-entering')
+    const css = readFileSync('src/renderer/src/styles/refinements.css', 'utf8')
+    expect(css).toContain('animation-name: screen-text-reveal, user-message-arrive;')
+    expect(css).toContain('animation-duration: 560ms, 420ms;')
+    expect(css).toContain('from { transform: translateY(8px); }')
+    expect(css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)')))
+      .toContain('.bubble-user.user-send-entering[data-line-reveal-ready="true"]')
+  })
+
   it('does not leave blank completed assistant bubbles between child tools', () => {
     const item = { kind: 'assistant' as const, id: 88, text: '', thinking: '', streaming: false }
     const props = { item, canFork: false, onFork: vi.fn() }

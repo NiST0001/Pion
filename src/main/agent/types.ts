@@ -20,18 +20,28 @@ export interface PushedTree {
 
 export type BackendPhase = 'starting' | 'running' | 'error'
 
+export interface PendingBackendScope {
+  backend: BackendRecord
+  client: RpcClient
+  runId?: string
+  token?: symbol
+  generation: number
+}
+
 export interface PendingToolPermission {
   request: ToolPermissionRequest
   backendKey: string
   extensionRequestId: string
   timeout: ReturnType<typeof setTimeout>
+  scope?: PendingBackendScope
 }
 
 export interface PendingExtensionUi {
   request: ExtensionUiRequest
   backendKey: string
   extensionRequestId: string
-  timeout: ReturnType<typeof setTimeout>
+  timeout?: ReturnType<typeof setTimeout>
+  scope?: PendingBackendScope
 }
 
 export interface PendingProviderAuthUi {
@@ -71,6 +81,7 @@ export interface BackendRecord {
   liveState?: LiveSessionProjection
   /** Private display routing nonce; not authentication against same-process extensions. */
   subagentViewNonce?: string
+  questionUiNonce?: string
   /** Private observations only; never part of the chat/live projection or billing. */
   mcpStatus?: BackendMcpStatusCache
   key: string
@@ -89,7 +100,12 @@ export interface BackendRecord {
   modePrimed?: AgentMode
   subagentsEnabled?: boolean
   subagentsModePending?: boolean
-  completionState?: 'completed' | 'aborted' | 'failed'
+  completionState?: 'completed' | 'aborted' | 'failed' | 'interrupted'
+  /** Sticky within a real turn: later model success cannot erase failed tools/interactions. */
+  turnInterrupted?: boolean
+  queuePause?: import('../../shared/types').QueuePause
+  /** Only a proven normal SDK settle permits automatic local dispatch. */
+  queueAutoReady?: boolean
   /** A low-level agent_end asked Pi to continue via retry/compaction. */
   awaitingRetry?: boolean
   checkpoint?: GitRunCheckpoint

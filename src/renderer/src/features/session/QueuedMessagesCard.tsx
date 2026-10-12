@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import { Clock3, MessageSquare, Pencil, Send, Trash2, Zap } from 'lucide-react'
+import type { QueuePause } from '../../../../shared/types'
 import { loadPanelExpanded, savePanelExpanded } from '../../utils/sessionPanelPreferences'
 
 type QueueKind = 'steering' | 'followUp'
@@ -23,6 +24,9 @@ export function QueuedMessagesCard({
   followUp = [],
   nativeFollowUpCount = 0,
   agentBusy = false,
+  queuePause,
+  continueBusy = false,
+  onContinueCurrent,
   onSendItem,
   onEditItem,
   onRemoveItem
@@ -33,6 +37,9 @@ export function QueuedMessagesCard({
   /** Leading followUp entries owned by Pi's native queue (not Pion-editable). */
   nativeFollowUpCount?: number
   agentBusy?: boolean
+  queuePause?: QueuePause
+  continueBusy?: boolean
+  onContinueCurrent?: (runId: string) => void | Promise<void>
   onSendItem?: (kind: QueueKind, index: number) => void | Promise<void>
   onEditItem?: (item: QueueItem) => void | Promise<void>
   onRemoveItem?: (kind: QueueKind, index: number) => void | Promise<void>
@@ -43,13 +50,14 @@ export function QueuedMessagesCard({
   ]
   const [expanded, setExpanded] = useState(() => loadPanelExpanded('queue', sessionKey))
   const [sendingKey, setSendingKey] = useState<string | null>(null)
-  const expandedHeight = Math.min(265, Math.max(102, 52 + items.length * 34))
+  const expandedHeight = Math.min(360, Math.max(queuePause?.paused ? 172 : 102,
+    52 + items.length * 34 + (queuePause?.paused ? 100 : 0)))
   const panelStyle = {
     '--task-panel-expanded-height': `${expandedHeight}px`
   } as CSSProperties
   const steeringCount = steering.length
   const followUpCount = followUp.length
-  const caption = steeringCount > 0 && followUpCount > 0
+  const caption = queuePause?.paused ? '已暂停，等待处理当前任务' : steeringCount > 0 && followUpCount > 0
     ? `${steeringCount} 条插入 · ${followUpCount} 条稍后`
     : steeringCount > 0
       ? '等待插入当前运行'
@@ -71,7 +79,7 @@ export function QueuedMessagesCard({
     }
   }
 
-  if (items.length === 0) return null
+  if (items.length === 0 && !queuePause?.paused) return null
 
   return (
     <section
@@ -97,6 +105,12 @@ export function QueuedMessagesCard({
           <span className="task-panel-caption">{caption}</span>
         </button>
 
+        {queuePause?.paused && <div className="queue-pause-note" role="status">
+          <span>{queuePause.reason || '本轮未确认正常完成，排队消息不会自动发送。'}</span>
+          {queuePause.pausedRunId && onContinueCurrent && <button type="button" disabled={agentBusy || continueBusy}
+            onClick={() => void onContinueCurrent(queuePause.pausedRunId!)}>继续当前任务</button>}
+          <span>手动发送只处理所选消息，不解除其余队列的暂停。</span>
+        </div>}
         <div className="task-panel-list-shell queue-panel-list-shell">
           <div
             id="queue-message-list"

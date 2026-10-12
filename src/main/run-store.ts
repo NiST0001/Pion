@@ -8,6 +8,7 @@ import type {
   TokenUsage
 } from '../shared/operations'
 
+import type { QueuePause } from '../shared/types'
 import { addTokenUsage, normalizeTokenUsage } from './agent/utils'
 import { compareMetricsRuns, isRunMetricsCandidate } from '../shared/operations'
 
@@ -16,6 +17,7 @@ interface RunStoreFile {
   runs: RunOperation[]
   usageReceipts?: { key: string; at: number }[]
   usageReplayFloor?: number
+  queuePauses?: Array<{ cwd: string; sessionPath?: string; pause: QueuePause }>
 }
 
 export const MAX_USAGE_RECEIPTS = 2048
@@ -91,6 +93,7 @@ export class RunStore {
   readonly filePath: string
   private readonly usageReceipts = new Map<string, number>()
   private usageReplayFloor = 0
+  private readonly queuePauses = new Map<string, { cwd: string; sessionPath?: string; pause: QueuePause }>()
   private loaded = false
   private writeTimer: ReturnType<typeof setTimeout> | null = null
   private writeQueue: Promise<void> = Promise.resolve()
@@ -109,6 +112,16 @@ export class RunStore {
         ? (parsed as RunStoreFile).runs
         : []
       const ledger = parsed && typeof parsed === 'object' ? parsed as Partial<RunStoreFile> : {}
+      for (const item of Array.isArray(ledger.queuePauses) ? ledger.queuePauses.slice(-250) : []) {
+        if (!item || typeof item.cwd !== 'string' || !item.pause
+          || typeof item.pause.paused !== 'boolean' || !Number.isSafeInteger(item.pause.revision)
+          || item.pause.revision < 0) continue
+        const scope = { cwd: resolve(item.cwd), sessionPath: typeof item.sessionPath === 'string' ? resolve(item.sessionPath) : undefined }
+        const pause: QueuePause = { paused: item.pause.paused, revision: item.pause.revision,
+          reason: typeof item.pause.reason === 'string' ? item.pause.reason.slice(0, 1000) : undefined,
+          pausedRunId: typeof item.pause.pausedRunId === 'string' ? item.pause.pausedRunId : undefined }
+        this.queuePauses.set(this.queuePauseKey(scope), { ...scope, pause })
+      }
       const floor = ledger.usageReplayFloor
       this.usageReplayFloor = typeof floor === 'number' && Number.isFinite(floor) && floor >= 0 ? floor : 0
       for (const receipt of Array.isArray(ledger.usageReceipts) ? ledger.usageReceipts : []) {
@@ -139,6 +152,31 @@ export class RunStore {
       // Missing or malformed ledgers start empty.
     }
     if (recovered) await this.flush()
+  }
+
+  private queuePauseKey(scope: { cwd: string; sessionPath?: string }): string {
+    return JSON.stringify([resolve(scope.cwd), scope.sessionPath ? resolve(scope.sessionPath) : null])
+  }
+
+  getQueuePause(scope: { cwd: string; sessionPath?: string }): QueuePause | undefined {
+    const pause = this.queuePauses.get(this.queuePauseKey(scope))?.pause
+    return pause ? { ...pause } : undefined
+  }
+
+  moveQueuePause(from: { cwd: string; sessionPath?: string }, to: { cwd: string; sessionPath?: string }, pause: QueuePause): void {
+    const oldKey = this.queuePauseKey(from)
+    if (oldKey !== this.queuePauseKey(to) && this.queuePauses.get(oldKey)?.pause.revision === pause.revision) {
+      this.queuePauses.delete(oldKey)
+    }
+    this.setQueuePause(to, pause)
+  }
+
+  setQueuePause(scope: { cwd: string; sessionPath?: string }, pause: QueuePause): void {
+    const key = this.queuePauseKey(scope)
+    this.queuePauses.delete(key)
+    this.queuePauses.set(key, { cwd: resolve(scope.cwd), sessionPath: scope.sessionPath ? resolve(scope.sessionPath) : undefined, pause: { ...pause } })
+    while (this.queuePauses.size > 250) this.queuePauses.delete(this.queuePauses.keys().next().value!)
+    this.scheduleWrite()
   }
 
   onChanged(listener: (run: RunOperation) => void): () => void {
@@ -296,6 +334,7 @@ export class RunStore {
       version: 1,
       usageReceipts: [...this.usageReceipts].map(([key, at]) => ({ key, at })),
       usageReplayFloor: this.usageReplayFloor,
+      queuePauses: [...this.queuePauses.values()],
       runs: [...this.runs.values()].sort((left, right) => left.createdAt - right.createdAt)
     }
     const serialized = `${JSON.stringify(payload, null, 2)}\n`

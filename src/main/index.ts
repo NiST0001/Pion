@@ -16,6 +16,7 @@ import { TerminalService } from './terminal-service'
 import { bindBrowserSecurity } from './browser-security'
 import { WindowEffectsService } from './window-effects'
 import { assertSubagentSettingsOwner, SubagentSettingsStore } from './subagent-settings'
+import { QuestionSettingsStore } from './question-settings'
 import { assertThemeSettingsOwner, ThemeSettingsStore } from './theme-settings'
 import { ProviderVisibilityStore } from './provider-visibility'
 import { registerAgentIpc } from './ipc/agent'
@@ -36,6 +37,7 @@ const runStore = new RunStore(join(app.getPath('userData'), 'pion-runs.json'))
 const terminals = new TerminalService()
 const appSettings = new AppSettings()
 const subagentSettings = new SubagentSettingsStore()
+const questionSettings = new QuestionSettingsStore()
 const themeSettings = new ThemeSettingsStore()
 let mainWindowId: number | undefined
 const windowEffects = new WindowEffectsService(appSettings, {
@@ -217,6 +219,8 @@ function registerIpc(): void {
     windowFromWebContents: (sender) => BrowserWindow.fromWebContents(sender),
     windowEffects,
     terminals,
+    questionSettings,
+    getMainWindowId: () => mainWindowId,
     reserveMutation: (operation) => bridge.withSessionOperation(operation)
   })
   registerAgentIpc({ ipcMain, bridge, projects, pushProjects,

@@ -677,6 +677,51 @@ describe('SettingsModal provider setup', () => {
     expect(screen.queryByText('添加自定义提供商')).not.toBeInTheDocument()
   })
 
+  it('selects a Pion API type and retains it through busy and saving gates', async () => {
+    const pending = deferred<undefined>()
+    const addModelProvider = vi.fn(() => pending.promise)
+    const { rerender, props } = renderSettings(settingsActions(addModelProvider))
+
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+    fireEvent.click(screen.getByRole('tab', { name: /自定义 API/ }))
+    const apiType = screen.getByRole('combobox', { name: 'API 类型' })
+    expect(apiType.tagName).not.toBe('SELECT')
+    expect(apiType).toHaveTextContent('OpenAI Chat Completions')
+    fireEvent.click(apiType)
+    fireEvent.click(screen.getByRole('option', { name: 'OpenAI Responses' }))
+    expect(apiType).toHaveTextContent('OpenAI Responses')
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('textbox', { name: /提供商 ID/ }), {
+      target: { value: 'custom-responses' }
+    })
+    fireEvent.change(screen.getByRole('textbox', { name: /模型 ID/ }), {
+      target: { value: 'custom-model' }
+    })
+    rerender(<SettingsModal {...props} agentBusy />)
+    expect(apiType).toBeDisabled()
+    fireEvent.click(apiType)
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    rerender(<SettingsModal {...props} />)
+    expect(apiType).toBeEnabled()
+    expect(apiType).toHaveTextContent('OpenAI Responses')
+
+    fireEvent.click(screen.getByRole('button', { name: '保存并加载' }))
+    expect(apiType).toBeDisabled()
+    expect(addModelProvider).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      providerId: 'custom-responses',
+      api: 'openai-responses',
+      modelIds: ['custom-model']
+    }))
+    await act(async () => {
+      pending.reject(new Error('自定义提供商保存失败'))
+      await pending.promise.catch(() => undefined)
+    })
+    expect(apiType).toBeEnabled()
+    expect(apiType).toHaveTextContent('OpenAI Responses')
+    expect(within(apiType.closest('form')!).getByRole('alert')).toHaveTextContent('自定义提供商保存失败')
+  })
+
   it('uses Pi provider auth methods instead of a hard-coded provider subset', async () => {
     const providers: ModelProviderInfo[] = [{
       id: 'openai-codex',

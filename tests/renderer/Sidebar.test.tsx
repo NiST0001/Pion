@@ -140,6 +140,31 @@ function openBranchDelete() {
   fireEvent.click(screen.getByRole('menuitem', { name: '删除分支' }))
 }
 
+describe('ProjectList session view controls', () => {
+  it('combines scoped running filters and token sorting without changing stored order, selection or deletion gates', () => {
+    const sessions = [
+      { path: '/a.jsonl', id: 'a', projectCwd: worktreeBranch.cwd, timestamp: '2026-01-01', mtime: 10, name: 'A', preview: '', messageCount: 1, totalTokens: 10 },
+      { path: '/b.jsonl', id: 'b', projectCwd: worktreeBranch.cwd, timestamp: '2026-01-01', mtime: 30, name: 'B', preview: '', messageCount: 1, totalTokens: 100 },
+      { path: '/c.jsonl', id: 'c', projectCwd: worktreeBranch.cwd, timestamp: '2026-01-01', mtime: 20, name: 'C', preview: '', messageCount: 1 }
+    ]
+    const onReorder = vi.fn(), onSelectSession = vi.fn()
+    const view = renderBranches({ sessionsByProject: { [worktreeBranch.cwd]: sessions }, runningSessionPaths: new Set(['/a.jsonl']), onReorder, onSelectSession })
+    const paths = () => Array.from(view.container.querySelectorAll('.side-session'), row => row.getAttribute('data-session-path'))
+    fireEvent.click(screen.getByRole('button', { name: '排序会话' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '累计 Token 多到少' }))
+    expect(paths()).toEqual(['/b.jsonl', '/a.jsonl', '/c.jsonl'])
+    expect(view.container.querySelector('.side-session')).toHaveAttribute('draggable', 'false')
+    fireEvent.click(screen.getByRole('button', { name: '筛选会话' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '未运行' }))
+    expect(paths()).toEqual(['/b.jsonl', '/c.jsonl'])
+    fireEvent.click(screen.getByRole('button', { name: `分支操作 ${branch.name}` }))
+    expect(screen.getByRole('menuitem', { name: '删除分支' })).toBeDisabled() // Hidden running parent still guards deletion.
+    expect(sessions.map(session => session.path)).toEqual(['/a.jsonl', '/b.jsonl', '/c.jsonl'])
+    expect(onReorder).not.toHaveBeenCalled()
+    expect(onSelectSession).not.toHaveBeenCalled()
+  })
+})
+
 describe('ProjectList branch actions', () => {
   it('blocks deletion of the main worktree, missing Git branches and unavailable callbacks', () => {
     for (const overrides of [

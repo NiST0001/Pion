@@ -8,7 +8,7 @@ import type {
   WireEventInput,
   WireMessage
 } from '../../../shared/types'
-import { messageImages, messageText, messageThinking, messageToolCalls } from '../../../shared/types'
+import { messageImages, messageText, messageThinking, messageToolCalls, projectQueuePause } from '../../../shared/types'
 import { subagentBatchesEqual, type SubagentBatch } from '../../../shared/subagent-batches'
 import { taskSnapshotFromEntry, taskSnapshotFromResult } from '../../../shared/task-history'
 import { orderSessions, reorderSessionsByPaths } from './sessionOrder'
@@ -100,9 +100,15 @@ export function reducer(state: AgentState, action: Action): AgentState {
       const compacting = preserveLifecycle ? state.compacting : compactionEventState ?? incoming?.isCompacting ?? false
       const busy = preserveLifecycle ? state.busy : Boolean(incoming?.isStreaming || compacting)
       const projected = projectable ? applyLiveSnapshot(state, live, busy) : state
+      const incomingPause = projectQueuePause(incoming?.queuePause)
+      const previousPause = projected.queuedMessages.queuePause
+      const queuePause = !sameSession || !sameBackend ? incomingPause
+        : !older && incomingPause && incomingPause.revision >= (previousPause?.revision ?? -1)
+          ? incomingPause : previousPause
       return {
         ...projected,
         session: incoming,
+        queuedMessages: { ...projected.queuedMessages, queuePause },
         busy,
         compacting,
         liveSessionLifecycleRevision: projectable ? live.revision : state.liveSessionLifecycleRevision,
@@ -1142,10 +1148,14 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
       const nativeFollowUpCount = typeof event.nativeFollowUpCount === 'number'
         ? event.nativeFollowUpCount
         : 0
+      const incomingPause = projectQueuePause(event.queuePause)
+      const previousPause = state.queuedMessages.queuePause
+      const queuePause = incomingPause && incomingPause.revision >= (previousPause?.revision ?? -1)
+        ? incomingPause : previousPause
       return {
         ...state,
         queued: { steering: steering.length, followUp: followUp.length },
-        queuedMessages: { steering, followUp, nativeFollowUpCount }
+        queuedMessages: { steering, followUp, nativeFollowUpCount, queuePause }
       }
     }
 

@@ -280,6 +280,17 @@ html.pion-keyboard-focus .task-panel-head:focus-visible {
 
 /* 排队消息条目 */
 
+.queue-pause-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+}
+.queue-pause-note button { align-self: flex-start; border-radius: 999px; }
+
 .queue-panel .task-panel-summary > svg {
   color: var(--warn);
 }

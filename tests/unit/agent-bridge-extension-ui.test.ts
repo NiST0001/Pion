@@ -6,11 +6,13 @@ import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import { RunStore } from '../../src/main/run-store'
 import { DEFAULT_TOOL_PERMISSION_RULES, RUN_CHECKPOINT_MARKER, TOOL_PERMISSION_MARKER, ToolPermissionStore } from '../../src/main/tool-permissions'
 import { IMAGE_GENERATION_TOOL_NAME } from '../../src/shared/image-generation'
-import type { ExtensionUiRequest } from '../../src/shared/types'
+import { QUESTION_WAIT_WIDGET_KEY } from '../../src/shared/question-settings'
+import type { ExtensionUiRequest, RunOperation } from '../../src/shared/types'
 
 const roots: string[] = []
 
 afterEach(async () => {
+  vi.useRealTimers()
   await Promise.all(roots.splice(0).map((root) => rm(root, {
     recursive: true,
     force: true,
@@ -24,15 +26,19 @@ async function fixture(): Promise<{
   backend: Record<string, unknown>
   writes: string[]
   handle(event: unknown): boolean
+  emit(event: unknown): void
+  prepareQuestion(): void
 }> {
   const root = await mkdtemp(join(tmpdir(), 'pion-extension-ui-'))
   roots.push(root)
   const bridge = new AgentBridge(new RunStore(join(root, 'runs.json')))
   const writes: string[] = []
+  let listener: ((event: unknown) => void) | undefined
   const backend = {
     key: 'backend-1',
     cwd: root,
     client: {
+      onEvent: (callback: (event: unknown) => void) => { listener = callback },
       process: {
         stdin: {
           destroyed: false,
@@ -49,17 +55,112 @@ async function fixture(): Promise<{
   const internals = bridge as unknown as {
     backendPool: { add(backendValue: unknown): void }
     handleExtensionUiRequest(backendValue: unknown, event: unknown): boolean
+    attachBackendEvents(backendValue: unknown): void
+    createRun(backendValue: unknown, state: null, message: string, images: [], kind: 'prompt', status: 'dispatching'): RunOperation
   }
   internals.backendPool.add(backend)
+  internals.attachBackendEvents(backend)
   return {
     bridge,
     backend,
     writes,
-    handle: (event) => internals.handleExtensionUiRequest(backend, event)
+    handle: (event) => internals.handleExtensionUiRequest(backend, event),
+    emit: (event) => listener?.(event),
+    prepareQuestion: () => {
+      const run = internals.createRun(backend, null, 'question fixture', [], 'prompt', 'dispatching')
+      Object.assign(backend, { questionUiNonce: 'nonce', nativeToolReceipts: new Map([['native-question', {
+        name: 'pion_ask_user', runId: run.id, backendId: run.usageBackendId, rootId: 'native-question',
+        state: 'running', usageConsumed: false
+      }]]) })
+    }
   }
 }
 
 describe('AgentBridge extension UI requests', () => {
+  it.each(['valid', 'wrong-nonce', 'unknown-tool', 'nested', 'ended'])('consumes private question widgets and admits only the captured running source (%s)', async (mode) => {
+    const h = await fixture()
+    h.prepareQuestion()
+    if (mode === 'ended') (h.backend.nativeToolReceipts as Map<string, { state: string }>).get('native-question')!.state = 'ended'
+    h.emit({ type: 'extension_ui_request', method: 'setWidget', widgetKey: QUESTION_WAIT_WIDGET_KEY,
+      ...(mode === 'nested' ? { parentToolCallId: 'parent' } : {}), widgetLines: [JSON.stringify({
+        version: 1, nonce: mode === 'wrong-nonce' ? 'other' : 'nonce',
+        toolCallId: mode === 'unknown-tool' ? 'unknown' : 'native-question', phase: 'begin', timeoutMs: null
+      })] })
+    expect(h.bridge.getPendingExtensionUiRequests()).toHaveLength(0)
+    h.handle({ type: 'extension_ui_request', id: 'question', method: 'input', title: '问题' })
+    const request = h.bridge.getPendingExtensionUiRequests()[0]
+    expect(request.question).toBe(mode === 'valid' ? true : undefined)
+    expect(request.timeoutAt === null).toBe(mode === 'valid')
+    await h.bridge.resolveExtensionUiRequest(request.id, { cancelled: true })
+  })
+  it.each([null, 20 * 60_000])('honors an already-admitted native question deadline (%s), without extending ordinary UI policy', async (timeoutMs) => {
+    vi.useFakeTimers()
+    const h = await fixture()
+    const internal = h.bridge as unknown as {
+      capturePendingScope(backend: unknown): unknown
+      questionWaitStages: WeakMap<object, unknown>
+    }
+    internal.questionWaitStages = new WeakMap()
+    internal.questionWaitStages.set(h.backend, { version: 1, nonce: 'test', toolCallId: 'native-question',
+      phase: 'begin', timeoutMs, scope: internal.capturePendingScope(h.backend) })
+    h.handle({ type: 'extension_ui_request', id: 'ask-native', method: 'input', title: '问题' })
+    const request = h.bridge.getPendingExtensionUiRequests()[0]
+    expect(request.question).toBe(true)
+    expect(request.timeoutAt).toBe(timeoutMs === null ? null : request.createdAt + timeoutMs)
+    await vi.advanceTimersByTimeAsync(11 * 60_000)
+    expect(h.bridge.getPendingExtensionUiRequests()).toHaveLength(1)
+    await h.bridge.resolveExtensionUiRequest(request.id, { value: '回答' })
+    h.handle({ type: 'extension_ui_request', id: 'ordinary', method: 'input', title: '插件' })
+    const ordinary = h.bridge.getPendingExtensionUiRequests()[0]
+    expect(ordinary.question).toBeUndefined()
+    expect(ordinary.timeoutAt).toBe(ordinary.createdAt + 10 * 60_000)
+    await h.bridge.resolveExtensionUiRequest(ordinary.id, { cancelled: true })
+  })
+  it.each([{ cancelled: true as const }, { value: '   ' }])('pauses even an empty queue on an unanswered question (%j)', async (response) => {
+    const h = await fixture()
+    h.backend.activeRunId = 'current-run'
+    h.handle({ type: 'extension_ui_request', id: 'ask', method: 'input', title: '请选择' })
+    await h.bridge.resolveExtensionUiRequest(h.bridge.getPendingExtensionUiRequests()[0].id, response)
+    expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: 'current-run' })
+    expect(h.backend.localQueueBlocked).toBe(true)
+  })
+
+  it('times out only the captured run and client', async () => {
+    vi.useFakeTimers()
+    const h = await fixture()
+    h.backend.activeRunId = 'old-run'
+    h.handle({ type: 'extension_ui_request', id: 'ask-old', method: 'input', title: '问题', timeout: 1000 })
+    const writes: string[] = []
+    h.backend.client = { process: { stdin: { destroyed: false, writable: true, write: (text: string) => writes.push(text) } } }
+    h.backend.activeRunId = 'new-run'
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.bridge.getPendingExtensionUiRequests()).toEqual([])
+    expect(h.backend.queuePause).toBeUndefined()
+    expect(writes).toEqual([])
+    expect(h.writes).toEqual([])
+  })
+
+  it('rejects a late answer after current-run ownership changes without pausing or replying', async () => {
+    const h = await fixture()
+    h.backend.activeRunId = 'old-run'
+    h.handle({ type: 'extension_ui_request', id: 'ask-old', method: 'input', title: '问题' })
+    const id = h.bridge.getPendingExtensionUiRequests()[0].id
+    h.backend.activeRunId = 'new-run'
+    await expect(h.bridge.resolveExtensionUiRequest(id, { cancelled: true })).rejects.toThrow('已关闭')
+    expect(h.backend.queuePause).toBeUndefined()
+    expect(h.writes).toEqual([])
+  })
+
+  it('pauses the captured turn on question timeout and sends cancellation only to its client', async () => {
+    vi.useFakeTimers()
+    const h = await fixture()
+    h.backend.activeRunId = 'current-run'
+    h.handle({ type: 'extension_ui_request', id: 'ask-timeout', method: 'input', title: '问题', timeout: 1000 })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: 'current-run' })
+    expect(JSON.parse(h.writes[0])).toMatchObject({ id: 'ask-timeout', cancelled: true })
+  })
+
   it('queues and resolves plan questionnaire selections through RPC stdin', async () => {
     const value = await fixture()
     const option = '1. 保持兼容 — 改动较小'

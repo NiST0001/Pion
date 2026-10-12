@@ -4,12 +4,12 @@
 .side-subagent-toggle:hover { background: var(--bg-hover); color: var(--fg); }
 .side-subagent-sessions[open] > .side-subagent-toggle svg { transform: rotate(90deg); }
 .side-subagent-count { margin-left: auto; font-variant-numeric: tabular-nums; }
-.side-subagent-session-items { display: grid; gap: 2px; }
-.side-subagent-session { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-dim); text-align: left; cursor: pointer; font: inherit; font-size: 12px; }
+.side-subagent-session-items { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
+.side-subagent-session { display: grid; grid-template-columns: minmax(0, 1fr) max-content; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 6px 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-dim); text-align: left; cursor: pointer; font: inherit; font-size: 12px; }
 .side-subagent-session:hover { background: var(--bg-hover); color: var(--fg); }
 .side-subagent-session.active { background: var(--selected-bg); color: var(--fg); }
-.side-subagent-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.side-subagent-status { flex: none; font-size: 11px; }
+.side-subagent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-subagent-status { min-width: max-content; white-space: nowrap; font-size: 11px; }
 /* Only adjacent child tools are denser: retain ordinary message/thinking
    spacing and the full 28px tool header click target. With the shared 24px
    timeline gap and -8px tool margins, -12px leaves a 4px inter-tool gap. */

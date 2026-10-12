@@ -2,6 +2,7 @@
 
 import '@testing-library/jest-dom/vitest'
 import { useState } from 'react'
+import { readFileSync } from 'node:fs'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { SessionItems } from '../../src/renderer/src/features/session/SessionList'
@@ -21,6 +22,17 @@ const optimistic: SessionMeta = {
 }
 
 describe('SessionItems temporary children', () => {
+  it('reserves intrinsic status width and makes only the title column shrink on sidebar resize', () => {
+    // CSS contract only: jsdom does not prove real Electron geometry.
+    const css = readFileSync('src/renderer/src/styles/subagent-sessions.css', 'utf8')
+    const rule = (name: string) => css.match(new RegExp(`\\.${name} \\{([^}]+)\\}`))?.[1] ?? ''
+    expect(rule('side-subagent-session-items')).toContain('grid-template-columns: minmax(0, 1fr)')
+    expect(rule('side-subagent-session')).toContain('grid-template-columns: minmax(0, 1fr) max-content')
+    expect(rule('side-subagent-name')).toContain('min-width: 0')
+    expect(rule('side-subagent-name')).toContain('text-overflow: ellipsis')
+    expect(rule('side-subagent-status')).toContain('min-width: max-content')
+    expect(rule('side-subagent-status')).toContain('white-space: nowrap')
+  })
   it('passes child props through project, folder and worktree without adding to normal counts', () => {
     const session = { ...optimistic, path: '/parent.jsonl', optimistic: false }
     const child: SubagentSessionSummary = { id: 'child', backendId: 'backend', runtimeId: 'runtime', parentToolCallId: 'tool', parentSessionId: 'parent', parentSessionPath: session.path, cwd: session.projectCwd!, name: '项目子任务', status: 'running', revision: 1, truncated: false }

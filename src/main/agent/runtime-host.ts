@@ -4,7 +4,7 @@ import {
   getAgentDir, resolveModelScopeWithDiagnostics, SessionManager, SettingsManager,
   type CreateAgentSessionRuntimeFactory, type AgentSession, type ModelRuntime
 } from '@earendil-works/pi-coding-agent'
-import { askUserTool } from './ask-user'
+import { createAskUserTool } from './ask-user'
 import { applyPionNativeToolDefaults, createPionNativeExtensions, createPionNativeLoadoutBoundary } from './native-extensions'
 import { createImageGenerationTool } from './image-generation'
 import { createMcpStatusObserver, type McpStatusReadSlot } from './mcp-status-observer'
@@ -81,7 +81,7 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
       model: selected?.model,
       thinkingLevel: selected?.thinkingLevel,
       scopedModels: scope.scopedModels,
-      customTools: [askUserTool, subagents.tool, createImageGenerationTool({
+      customTools: [createAskUserTool(), subagents.tool, createImageGenerationTool({
         cwd,
         // Capture this runtime's services, not a mutable active-session/global
         // credential store. Refresh only after SDK tool permission gates.

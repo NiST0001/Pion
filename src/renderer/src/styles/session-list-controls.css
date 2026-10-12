@@ -1,0 +1,65 @@
+.project-list-actions { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.session-list-controls { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.session-list-controls .session-list-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 28px;
+  width: 28px;
+  min-width: 28px;
+  height: 26px;
+  padding: 0;
+  border-radius: 999px;
+}
+.session-list-control svg { flex: 0 0 auto; }
+.session-list-control[data-active='true'] { color: var(--accent); }
+.session-list-control[aria-expanded='true'] { background: var(--bg-hover, var(--bg)); }
+html.pion-keyboard-focus .session-list-control:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.session-list-menu {
+  z-index: 10000;
+  box-sizing: border-box;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  color: var(--fg);
+  box-shadow: var(--shadow-pop);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+}
+.session-list-menu-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  outline: none;
+}
+.session-list-menu-option:hover, .session-list-menu-option[data-active='true'] { background: var(--bg-hover, var(--bg)); }
+html.pion-keyboard-focus .session-list-menu-option:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.session-list-menu-check { display: inline-flex; justify-content: center; flex: 0 0 16px; color: var(--accent); }
+.session-list-menu-note { margin: 4px 8px; color: var(--fg-dim); font-size: 11px; overflow-wrap: anywhere; }
+:root[data-theme='division-dark'] .session-list-menu { border-color: transparent; box-shadow: none; }
+:root[data-theme='division-dark'] .session-list-menu-option[data-active='true'] { background: var(--selected-bg); }
+@media (forced-colors: active) {
+  .session-list-control[data-active='true'] { color: ButtonText; }
+  .session-list-menu, :root[data-theme='division-dark'] .session-list-menu { border-color: ButtonText; background: Canvas; color: CanvasText; box-shadow: none; }
+  .session-list-menu-option:hover, .session-list-menu-option[data-active='true'],
+  :root[data-theme='division-dark'] .session-list-menu-option[data-active='true'] { background: Highlight; color: HighlightText; forced-color-adjust: none; }
+  html.pion-keyboard-focus .session-list-control:focus-visible,
+  html.pion-keyboard-focus .session-list-menu-option:focus-visible { outline-color: Highlight; }
+  .session-list-menu-check { color: inherit; }
+  .session-list-menu-note { color: CanvasText; }
+}

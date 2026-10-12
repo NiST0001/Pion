@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ModelOption } from '../../../../shared/types'
+import { PionSelect, type PionSelectOption } from '../common/PionSelect'
 import { DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, validateSubagentSettings, type SubagentSettings as Settings } from '../../../../shared/subagents'
 
 const FIELDS: { key: keyof typeof SUBAGENT_LIMITS; label: string; description: string }[] = [
   { key: 'maxParallel', label: '每批最大子代理数', description: '同批并行执行的数量，1–100 个；数量越多，额外模型用量可能越高。' },
   { key: 'timeoutMinutes', label: '每批超时（分钟）', description: '1–300 分钟；超时会中止该批子任务，不代表任务已完成。' },
-  { key: 'maxTurns', label: '每个子代理最多轮数', description: '1–64 轮；到达上限后停止并报告未完成事项。' },
+  { key: 'maxTurns', label: '每个子代理最多轮数', description: '1–1000 轮；到达上限后停止并报告未完成事项。' },
   { key: 'maxResultChars', label: '每个结果最多字符', description: '1000–32000 字符；超出时明确标记截断，不影响用量统计。' }
 ]
 
@@ -113,16 +114,22 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
     groups.set(model.provider, group)
   }
   const missingSelection = selection && !candidates.some((model) => model.provider === selection.provider && model.id === selection.id)
+  const modelOptions: PionSelectOption[] = [
+    { value: 'inherit', label: '继承主会话模型' },
+    ...(selection && missingSelection ? [{ value: modelValue, label: `${selection.provider}/${selection.id}（当前列表未显示）` }] : []),
+    ...[...groups].flatMap(([provider, group]) => group.map((model) => ({
+      value: JSON.stringify([model.provider, model.id]), label: model.name || model.id, group: provider
+    })))
+  ]
 
   return <form className="settings-section subagent-settings" onSubmit={(event) => { event.preventDefault(); void save() }}>
     <div className="settings-section-title">子代理</div>
     <p className="setting-desc">全局参数，保存后从下一批任务开始使用，不中断当前批次。子代理默认开启，可在输入框按会话关闭；重建后端会恢复默认开启。权限与检查点规则不变。</p>
     <label className="setting-row">
       <span><span className="setting-label">默认子代理模型</span><span className="setting-desc subagent-setting-description">用户在会话中指定的子代理模型优先；未指定时使用此默认模型，未设置才继承主会话模型。不同模型可能产生不同费用。</span></span>
-      <select className="setting-input" aria-label="默认子代理模型" value={modelValue}
+      <PionSelect ariaLabel="默认子代理模型" value={modelValue} options={modelOptions}
         disabled={loading || saving || modelsLoading || !available}
-        onChange={(event) => {
-          const value = event.target.value
+        onValueChange={(value) => {
           let defaultModel: Settings['defaultModel'] = null
           if (value !== 'inherit') {
             const [provider, id] = JSON.parse(value) as [string, string]
@@ -130,13 +137,7 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
           }
           setSettings((current) => ({ ...current, defaultModel }))
           setMessage('')
-        }}>
-        <option value="inherit">继承主会话模型</option>
-        {selection && missingSelection && <option value={modelValue}>{selection.provider}/{selection.id}（当前列表未显示）</option>}
-        {[...groups].map(([provider, group]) => <optgroup key={provider} label={provider}>
-          {group.map((model) => <option key={model.id} value={JSON.stringify([model.provider, model.id])}>{model.name || model.id}</option>)}
-        </optgroup>)}
-      </select>
+        }} />
     </label>
     {modelsLoading && <p className="setting-desc" role="status">正在读取已配置的可用模型…</p>}
     {modelsError && <p className="settings-inline-error" role="alert">{modelsError}</p>}

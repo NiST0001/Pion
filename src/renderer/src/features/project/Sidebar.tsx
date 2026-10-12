@@ -25,6 +25,8 @@ import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { TextInputDialog } from '../common/TextInputDialog'
 import { ConfirmDialog } from '../common/ConfirmDialog'
 import { SortableSidebarGroup } from './SortableSidebarGroup'
+import { SessionListControls } from './SessionListControls'
+import { getSessionListView, type SessionListFilter, type SessionListSort } from '../../agent/sessionListView'
 
 // ---------------------------------------------------------------------------
 // Section shell
@@ -204,6 +206,7 @@ export function FavoriteSessions({
 // ---------------------------------------------------------------------------
 
 interface ProjectBranchView {
+  manualOrder?: boolean
   branch: BranchInfo
   sessions: SessionMeta[]
   allSessions: SessionMeta[]
@@ -270,7 +273,10 @@ export function ProjectList({
   favoritePaths: ReadonlySet<string>
   onToggleFavorite: (path: string) => void
 }): ReactElement {
+  const [filter, setFilter] = useState<SessionListFilter>('all')
+  const [sort, setSort] = useState<SessionListSort>('manual')
   const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
+  const viewActive = Boolean(normalizedQuery) || filter !== 'all'
   const visibleProjects = projects
     .map((project) => {
       const branches = branchesByProject[project.cwd] ?? [{
@@ -280,27 +286,31 @@ export function ProjectList({
       }]
       const branchViews: ProjectBranchView[] = branches.map((branch) => {
         const allSessions = sessionsByProject[branch.cwd] ?? []
-        const sessions = normalizedQuery
+        const matches = normalizedQuery
           ? allSessions.filter((session) => sessionMatchesQuery(session, normalizedQuery))
           : allSessions
-        return { branch, sessions, allSessions }
+        const sessions = getSessionListView(matches, runningSessionPaths, filter, sort)
+        return { branch, sessions, allSessions, manualOrder: sort === 'manual' }
       })
       return { project, branches: branchViews }
     })
-    .filter(({ branches }) => !normalizedQuery || branches.some(({ sessions }) => sessions.length > 0))
+    .filter(({ branches }) => !viewActive || branches.some(({ sessions }) => sessions.length > 0))
 
   return (
     <Section
       title="项目"
       count={projects.length}
       action={
-        <button className="icon-button" title="添加项目目录" onClick={onAdd}>
-          <FolderPlus size={14} />
-        </button>
+        <div className="project-list-actions">
+          <SessionListControls filter={filter} sort={sort} onFilterChange={setFilter} onSortChange={setSort} />
+          <button type="button" className="icon-button" title="添加项目目录" onClick={onAdd}>
+            <FolderPlus size={14} />
+          </button>
+        </div>
       }
     >
       {visibleProjects.length === 0 && (
-        <div className="side-empty">{normalizedQuery ? '没有匹配的会话' : '暂无项目'}</div>
+        <div className="side-empty">{viewActive ? '没有匹配的会话' : '暂无项目'}</div>
       )}
       <SortableSidebarGroup scope="projects" kind="project" items={visibleProjects}
         allKeys={projects.map((project) => project.cwd)} getKey={({ project }) => project.cwd}>
@@ -317,7 +327,7 @@ export function ProjectList({
           runningSessionPaths={runningSessionPaths}
           unreadSessionPaths={unreadSessionPaths}
           previewDensity={previewDensity}
-          searchActive={Boolean(normalizedQuery)}
+          searchActive={viewActive}
           canRemove={projects.length > 1}
           onSelect={onSelect}
           onRemove={onRemove}
@@ -349,6 +359,7 @@ function ProjectBranch({
   branch,
   sessions,
   allSessions,
+  manualOrder = true,
   activePath,
   runningSessionPaths,
   unreadSessionPaths,
@@ -373,6 +384,7 @@ function ProjectBranch({
   branch: BranchInfo
   sessions: SessionMeta[]
   allSessions: SessionMeta[]
+  manualOrder?: boolean
   activePath?: string
   runningSessionPaths: ReadonlySet<string>
   unreadSessionPaths?: ReadonlySet<string>
@@ -579,7 +591,7 @@ function ProjectBranch({
               favoritePaths={favoritePaths}
               onToggleFavorite={onToggleFavorite}
               onSelect={(path) => onSelectSession(branch.cwd, path)}
-              onReorder={sessions.some((session) => session.optimistic) ? undefined : handleReorder}
+              onReorder={!manualOrder || sessions.some((session) => session.optimistic) ? undefined : handleReorder}
               onDelete={(path) => onDelete(branch.cwd, path)}
               onCopy={(path) => onCopy(branch.cwd, path)}
               onRename={(path, name) => onRename(branch.cwd, path, name)}
@@ -711,7 +723,7 @@ function ProjectFolder({
         <div className="project-folder-branches">
           <SortableSidebarGroup scope={`branches:${project.cwd}`} kind="branch" items={branches}
             allKeys={branches.map(({ branch }) => branch.cwd)} getKey={({ branch }) => branch.cwd}>
-          {({ branch, sessions, allSessions }) => (
+          {({ branch, sessions, allSessions, manualOrder }) => (
             <ProjectBranch
               selectedSubagent={selectedSubagent}
               subagentSessions={subagentSessions}
@@ -720,6 +732,7 @@ function ProjectFolder({
               branch={branch}
               sessions={sessions}
               allSessions={allSessions}
+              manualOrder={manualOrder}
               activePath={activePath}
               runningSessionPaths={runningSessionPaths}
               unreadSessionPaths={unreadSessionPaths}

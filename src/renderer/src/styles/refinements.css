@@ -925,6 +925,21 @@ button.tool-head.screen-text-reveal-line {
   animation-duration: 440ms;
 }
 
+/* Only a freshly sent user bubble adds positional feedback. Compose with
+   the shared opacity fade: no layout shift, scaling, glow or scroll mutation. */
+@keyframes user-message-arrive {
+  from { transform: translateY(8px); }
+  to { transform: none; }
+}
+
+.bubble-user.user-send-entering[data-line-reveal-ready="true"] {
+  animation-name: screen-text-reveal, user-message-arrive;
+  animation-duration: 560ms, 420ms;
+  animation-timing-function: linear, cubic-bezier(0.22, 1, 0.36, 1);
+  animation-delay: var(--screen-text-reveal-delay, 0ms), var(--screen-text-reveal-delay, 0ms);
+  animation-fill-mode: both, both;
+}
+
 /* History rows stay layout-stable; only their visible reveal elements
    animate. This prevents a complete paragraph/row from flashing on updates. */
 .history-reveal,
@@ -937,6 +952,7 @@ button.tool-head.screen-text-reveal-line {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .bubble-user.user-send-entering[data-line-reveal-ready="true"],
   .screen-text-reveal-history,
   .screen-text-reveal-history.screen-text-reveal-armed,
   .screen-text-reveal-live,

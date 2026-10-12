@@ -54,6 +54,10 @@ export const ChatMessage = memo(function ChatMessage({
   revertDisabledReason
 }: ChatMessageProps): ReactElement | null {
   const rowRef = useRef<HTMLDivElement>(null)
+  // Capture eligibility once: persisting/backfilling the same user row must
+  // not restart send motion, and historical/readonly mounts never opt in.
+  const [sendEntering, setSendEntering] = useState(() => item.kind === 'user'
+    && item.live === true && !item.historical && !item.noReveal && !readOnly)
   // Paged history carries noReveal on the item itself; it never waterfalls.
   const revealSuppressed = item.noReveal === true
   const previousThinkingRef = useRef('')
@@ -113,8 +117,11 @@ export const ChatMessage = memo(function ChatMessage({
         data-user-message-time={messageTimestamp}
       >
         <div
-          className={`bubble bubble-user${revealSuppressed ? '' : ` ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${item.historical ? SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS : SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS}`}`}
+          className={`bubble bubble-user${sendEntering && !revealSuppressed && !readOnly ? ' user-send-entering' : ''}${revealSuppressed ? '' : ` ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${item.historical ? SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS : SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS}`}`}
           ref={revealSuppressed ? undefined : assignLineRevealDelay}
+          onAnimationEnd={(event) => {
+            if (event.target === event.currentTarget && event.animationName === 'user-message-arrive') setSendEntering(false)
+          }}
         >
           {item.text !== '' && (
             <div className="bubble-content">

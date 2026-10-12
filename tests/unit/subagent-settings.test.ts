@@ -20,6 +20,14 @@ it('accepts 1–100 children and 1–300 minutes without changing defaults', () 
   expect(() => validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, timeoutMinutes: 301 })).toThrow()
 })
 
+it('accepts 1000 turns while retaining the 24-turn default and rejecting 1001', () => {
+  expect(DEFAULT_SUBAGENT_SETTINGS.maxTurns).toBe(24)
+  for (const maxTurns of [1, 64, 65, 1000]) {
+    expect(validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, maxTurns }).maxTurns).toBe(maxTurns)
+  }
+  expect(() => validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, maxTurns: 1001 })).toThrow('1–1000')
+})
+
 it('rejects child frames and windows other than the owning main window', () => {
   const frame = {}
   const event = { sender: { id: 10, mainFrame: frame }, senderFrame: frame } as unknown as Electron.IpcMainInvokeEvent

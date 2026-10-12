@@ -13,20 +13,26 @@ interface UseAgentModelActionsOptions {
   api: PionApi | undefined
   dispatch: Dispatch<Action>
   refreshModels: () => Promise<void>
+  /** Capture the shared logical selection plus API/SDK backend identity. */
+  captureSelection?: () => () => boolean
 }
+
+const captureUnscopedSelection = () => () => true
 
 export function useAgentModelActions({
   api,
   dispatch,
-  refreshModels
+  refreshModels,
+  captureSelection = captureUnscopedSelection
 }: UseAgentModelActionsOptions) {
   const setModel = useCallback(
     async (provider: string, modelId: string): Promise<void> => {
       if (!api) return
+      const isSelected = captureSelection()
       await api.setModel(provider, modelId)
-      await refreshModels()
+      if (isSelected()) await refreshModels()
     },
-    [api, refreshModels]
+    [api, refreshModels, captureSelection]
   )
 
   const listModelProviders = useCallback(async (): Promise<ModelProviderInfo[]> => {
@@ -36,29 +42,32 @@ export function useAgentModelActions({
 
   const setModelProviderEnabled = useCallback(async (providerId: string, enabled: boolean): Promise<ModelProviderInfo[]> => {
     if (!api) throw new Error('preload 桥未加载')
+    const isSelected = captureSelection()
     const providers = await api.setModelProviderEnabled(providerId, enabled)
-    await refreshModels()
+    if (isSelected()) await refreshModels()
     return providers
-  }, [api, refreshModels])
+  }, [api, refreshModels, captureSelection])
 
   const loginModelProvider = useCallback(async (
     providerId: string,
     authType: ModelProviderAuthType
   ): Promise<ModelProviderInfo[]> => {
     if (!api) throw new Error('preload 桥未加载')
+    const isSelected = captureSelection()
     const providers = await api.loginModelProvider(providerId, authType)
-    await refreshModels()
+    if (isSelected()) await refreshModels()
     return providers
-  }, [api, refreshModels])
+  }, [api, refreshModels, captureSelection])
 
   const logoutModelProvider = useCallback(async (
     providerId: string
   ): Promise<ModelProviderInfo[]> => {
     if (!api) throw new Error('preload 桥未加载')
+    const isSelected = captureSelection()
     const providers = await api.logoutModelProvider(providerId)
-    await refreshModels()
+    if (isSelected()) await refreshModels()
     return providers
-  }, [api, refreshModels])
+  }, [api, refreshModels, captureSelection])
 
   const cancelModelProviderAuth = useCallback(async (): Promise<void> => {
     await api?.cancelModelProviderAuth()
@@ -72,10 +81,11 @@ export function useAgentModelActions({
   const addModelProvider = useCallback(
     async (input: AddModelProviderInput): Promise<void> => {
       if (!api) throw new Error('preload 桥未加载')
+      const isSelected = captureSelection()
       const models = await api.addModelProvider(input)
-      dispatch({ type: 'models', models })
+      if (isSelected()) dispatch({ type: 'models', models })
     },
-    [api, dispatch]
+    [api, dispatch, captureSelection]
   )
 
   const setThinkingLevel = useCallback(
@@ -89,10 +99,11 @@ export function useAgentModelActions({
   const setMode = useCallback(
     async (mode: AgentMode): Promise<void> => {
       if (!api) return
+      const isSelected = captureSelection()
       await api.setMode(mode)
-      dispatch({ type: 'mode', mode })
+      if (isSelected()) dispatch({ type: 'mode', mode })
     },
-    [api, dispatch]
+    [api, dispatch, captureSelection]
   )
 
   const setYoloMode = useCallback(

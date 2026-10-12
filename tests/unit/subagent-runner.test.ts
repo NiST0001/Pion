@@ -110,6 +110,26 @@ it('honors the snapshotted turn and result-length limits', async () => {
   expect(abort).toHaveBeenCalled()
 })
 
+it.each([1000, 1001])('enforces the snapshotted 1000-turn limit at turn %s without a real model', async (count) => {
+  const h = setup()
+  let notify!: (event: { type: 'turn_start' }) => void
+  const abort = vi.fn(async () => {})
+  mocks.create.mockImplementationOnce(async () => ({ session: {
+    agent: {}, messages: [{ role: 'assistant', stopReason: 'stop' }], abort, dispose: h.dispose,
+    subscribe: (listener: typeof notify) => { notify = listener; return () => {} },
+    getLastAssistantText: () => 'result',
+    prompt: async () => {
+      for (let n = 0; n < 1000; n++) notify({ type: 'turn_start' })
+      expect(abort).not.toHaveBeenCalled()
+      if (count === 1001) notify({ type: 'turn_start' })
+    }
+  } }))
+  const result = await h.run({ name: 'worker', task: 'inspect' }, new AbortController().signal, () => {},
+    { ...DEFAULT_SUBAGENT_SETTINGS, maxTurns: 1000 })
+  expect(result.status).toBe(count === 1000 ? 'completed' : 'aborted')
+  expect(result.text.includes('轮数上限')).toBe(count === 1001)
+})
+
 const unitUsage = () => ({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4, totalTokens: 10,
   cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 } })
 const usageEntry = (id: string, kind = 'cache_warm'): SessionEntry => ({

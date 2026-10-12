@@ -23,7 +23,6 @@ export function applyBackendEvent(
     backend.compacting = false
     backend.completionState = undefined
     backend.awaitingRetry = false
-    backend.runCompletionPromise = undefined
     runningStateChanged = true
   }
   if (type === 'compaction_start') {
@@ -39,14 +38,18 @@ export function applyBackendEvent(
     backend.awaitingRetry = Boolean(endEvent.willRetry)
     if (endEvent.willRetry) backend.completionState = undefined
     else {
-      const assistant = [...(endEvent.messages ?? [])]
-        .reverse()
-        .find((message) => message.role === 'assistant')
+      // A newly consumed user/steering message must not borrow the stop
+      // evidence of an earlier assistant response in this SDK run.
+      const tail = [...(endEvent.messages ?? [])].reverse()
+        .find((message) => message.role === 'assistant' || message.role === 'user')
+      const assistant = tail?.role === 'assistant' ? tail : undefined
       backend.completionState = assistant?.stopReason === 'aborted'
         ? 'aborted'
         : assistant?.stopReason === 'error'
           ? 'failed'
-          : 'completed'
+          : assistant?.stopReason === 'stop' && !backend.turnInterrupted
+            ? 'completed'
+            : 'interrupted'
     }
   }
   if (type === 'compaction_end') {
@@ -80,7 +83,8 @@ export function applyBackendEvent(
     }
   }
   if (type === 'agent_settled') {
-    if (!backend.completionState && backend.awaitingRetry) backend.completionState = 'failed'
+    if (!backend.completionState) backend.completionState = backend.awaitingRetry ? 'failed' : 'interrupted'
+    if (backend.turnInterrupted && backend.completionState === 'completed') backend.completionState = 'interrupted'
     sessionCompleted = backend.completionState === 'completed'
     if (backend.busy) runningStateChanged = true
     backend.busy = false

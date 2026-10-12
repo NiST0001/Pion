@@ -106,10 +106,14 @@ export function App(): ReactElement {
     historyJump: null, loadOlder: noChildPaging, loadNewer: noChildPaging
   })
   useWindowEffects(true)
-  const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string } | null>(null)
+  const [selectedSession, setSelectedSession] = useState<{ cwd: string; path: string | null } | null>(null)
   const [operationsPanel, setOperationsPanel] = useState<OperationsPanelKind | null>(null)
   const resourceCwd = selectedSession?.cwd ?? state.status.cwd
-  const resourceSessionPath = selectedSession?.path ?? state.session?.sessionFile
+  // A migrated fresh session has no persisted path yet. Only the target
+  // backend may fill it; never borrow the previous project's session file.
+  const resourceSessionPath = selectedSession
+    ? selectedSession.path ?? (state.status.cwd === selectedSession.cwd ? state.session?.sessionFile : undefined)
+    : state.session?.sessionFile
   const mcpBackendId = resourceCwd && state.status.cwd === resourceCwd
     && state.liveSessionOwnerPath === resourceSessionPath ? state.liveSessionBackendId : undefined
   const mcpScope = JSON.stringify([resourceCwd, resourceSessionPath, selectionRef.current.generation, mcpBackendId])
@@ -326,13 +330,15 @@ export function App(): ReactElement {
     historyJump: state.historyJump,
     historyResetRevision: state.historyResetRevision,
     panelsVisible: state.queuedMessages.steering.length > 0
-      || state.queuedMessages.followUp.length > 0
+      || state.queuedMessages.followUp.length > 0 || state.queuedMessages.queuePause?.paused === true
       || (state.mode !== 'plan' && hasIncompleteTasks(agentTodos)),
     loadOlder: actions.loadOlder,
     loadNewer: actions.loadNewer,
     hasNewerHistory: actions.hasNewerHistory
   })
   const sessionSelectionId = useRef(0)
+  const migrationSelection = useRef<{ id: number; generation: number; target: string } | null>(null)
+  const migrationInFlight = useRef(false)
 
   // bootstrap: pick the most recent project (or home) and start the agent
   useEffect(() => {
@@ -380,6 +386,7 @@ export function App(): ReactElement {
 
   const handleFork = useCallback(
     async (entryId: string) => {
+      sessionSelectionId.current += 1
       setSelectedSession(null)
       const text = await actions.forkAt(entryId)
       if (text) setPrefill(`${text}`)
@@ -391,6 +398,8 @@ export function App(): ReactElement {
     if (!hasBridge) return
     const cwd = await window.pion.pickWorkspace()
     if (!cwd) return
+    sessionSelectionId.current += 1
+    setSelectedSession(null)
     await actions.addProject(cwd)
     await actions.start(cwd)
   }, [hasBridge, actions])
@@ -414,25 +423,51 @@ export function App(): ReactElement {
   )
 
   const requestProjectMigration = useCallback((cwd: string): void => {
-    if (!cwd || cwd === state.status.cwd) return
+    if (!cwd || cwd === state.status.cwd || migrationInFlight.current) return
+    migrationSelection.current = { id: sessionSelectionId.current, generation: selectionRef.current.generation, target: cwd }
     setMigrationError('')
     setMigrationTarget(cwd)
-  }, [state.status.cwd])
+  }, [selectionRef, state.status.cwd])
 
   const confirmProjectMigration = useCallback(async (): Promise<void> => {
-    if (!migrationTarget) return
+    if (!migrationTarget || migrationInFlight.current) return
+    const intent = migrationSelection.current
+    if (!intent || intent.target !== migrationTarget || intent.id !== sessionSelectionId.current
+      || intent.generation !== selectionRef.current.generation) {
+      setMigrationTarget(null)
+      return
+    }
+    const targetCwd = migrationTarget
+    const requestId = ++sessionSelectionId.current
+    migrationInFlight.current = true
+    childSessions.close()
     setMigrationBusy(true)
     setMigrationError('')
     try {
-      const movedPath = await actions.migrateSessionToProject(migrationTarget)
+      const movedPath = await actions.migrateSessionToProject(targetCwd)
+      // Migration itself changes the backend selection generation. Explicit
+      // App selection intent fences the response without mistaking that expected
+      // lifecycle change (or a missing SDK id) for another user selection.
+      if (requestId !== sessionSelectionId.current) return
       setMigrationTarget(null)
-      if (movedPath) await actions.switchSession(movedPath, migrationTarget)
+      setSelectedSession({ cwd: targetCwd, path: movedPath })
+      // Main already activated the target. The ordinary history switch remains
+      // responsible for selected timeline/index ownership; the retained backend
+      // makes this idempotent rather than a second SDK activation.
+      if (movedPath) await actions.switchSession(movedPath, targetCwd)
+      // start also clears the old history owner before reading a fresh session.
+      // Main's already-selected target makes startAgent a no-op selection, not
+      // another SDK launch. reloadTimeline alone would reuse the source owner.
+      else await actions.start(targetCwd, { fresh: true })
     } catch (error) {
-      setMigrationError(error instanceof Error ? error.message : String(error))
+      if (requestId === sessionSelectionId.current) {
+        setMigrationError(error instanceof Error ? error.message : String(error))
+      }
     } finally {
+      migrationInFlight.current = false
       setMigrationBusy(false)
     }
-  }, [actions, migrationTarget])
+  }, [actions, childSessions.close, migrationTarget, selectionRef])
 
   const handleNewSession = useCallback(
     async (cwd?: string) => {
@@ -508,6 +543,7 @@ export function App(): ReactElement {
   const handleSelectSession = useCallback(
     async (cwd: string, path: string) => {
       // Selecting the already active parent is a view change, not an SDK switch.
+      const requestId = ++sessionSelectionId.current
       const wasViewingChild = viewingChild
       childSessions.close()
       if (wasViewingChild && cwd === state.status.cwd && path === state.session?.sessionFile) {
@@ -524,7 +560,6 @@ export function App(): ReactElement {
         setSelectedSession(null)
         return
       }
-      const requestId = ++sessionSelectionId.current
       const previousSelection = selectedSession
       const previousReviewPath = reviewPath
       const previousCapturedReviewChange = capturedReviewChange
@@ -557,18 +592,22 @@ export function App(): ReactElement {
 
   const handleDeleteSession = useCallback(
     async (cwd: string, path: string) => {
-      if (selectedSession?.path === path) setSelectedSession(null)
+      if (selectedSession?.path === path || selectionRef.current.ownerPath === path) {
+        sessionSelectionId.current += 1
+        setSelectedSession(null)
+      }
       setFavoriteSessionPaths((current) => current.includes(path)
         ? current.filter((favoritePath) => favoritePath !== path)
         : current)
       await actions.deleteSession(path)
       await actions.refreshProjectSessions(cwd)
     },
-    [actions, selectedSession?.path]
+    [actions, selectedSession?.path, selectionRef]
   )
 
   const handleCopySession = useCallback(
     async (_cwd: string, path: string) => {
+      sessionSelectionId.current += 1
       setSelectedSession(null)
       await actions.copySession(path)
     },
@@ -590,6 +629,7 @@ export function App(): ReactElement {
 
   const handleForkSession = useCallback(
     async (_cwd: string, path: string, entryId: string) => {
+      sessionSelectionId.current += 1
       setSelectedSession(null)
       const text = await actions.forkSession(path, entryId)
       if (text) setPrefill(text)
@@ -693,7 +733,7 @@ export function App(): ReactElement {
   const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
   const hasTaskPanel = state.mode !== 'plan' && hasIncompleteTasks(agentTodos)
   const queuedMessages = state.queuedMessages
-  const hasQueuedMessages = queuedMessages.steering.length > 0 || queuedMessages.followUp.length > 0
+  const hasQueuedMessages = queuedMessages.steering.length > 0 || queuedMessages.followUp.length > 0 || queuedMessages.queuePause?.paused === true
   const agentActivity = state.busy || state.compacting
   const [workingCycle, setWorkingCycle] = useState(0)
   useEffect(() => {
@@ -803,7 +843,7 @@ export function App(): ReactElement {
   }, [actions, gitWorkspace, state.busy, state.runCheckpoint])
 
   const activeCwd = selectedSession?.cwd ?? state.status.cwd
-  const activePath = viewingChild ? undefined : selectedSession?.path ?? state.session?.sessionFile
+  const activePath = viewingChild ? undefined : resourceSessionPath
   const historyNavigatorVisible = (state.historyIndex?.landmarks.length ?? 0) >= 2
 
   if (!hasBridge) {
@@ -1008,7 +1048,7 @@ export function App(): ReactElement {
                 timeline={state.timeline}
                 timelineLoading={state.timelineLoading}
                 timelineReady={state.timelineReady}
-                historySelected={Boolean(selectedSession)}
+                historySelected={Boolean(selectedSession?.path)}
                 timelineError={state.timelineError}
                 onReloadHistory={() => { void actions.reloadTimeline() }}
                 busy={state.busy}
@@ -1065,6 +1105,9 @@ export function App(): ReactElement {
                   steering={queuedMessages.steering}
                   followUp={queuedMessages.followUp}
                   nativeFollowUpCount={queuedMessages.nativeFollowUpCount}
+                  queuePause={queuedMessages.queuePause}
+                  continueBusy={runRecovery.busyId !== null}
+                  onContinueCurrent={(runId) => runRecovery.resume(runId)}
                   agentBusy={state.busy}
                   onSendItem={(kind, index) => actions.sendQueuedMessage(kind, index).catch((error: unknown) => {
                     console.error('[pion] 直接发送排队消息失败', error)

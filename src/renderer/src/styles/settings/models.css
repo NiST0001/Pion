@@ -491,7 +491,7 @@
 }
 
 .provider-add-field input,
-.provider-add-field select,
+.provider-add-field .pion-select-trigger,
 .provider-add-field textarea {
   width: 100%;
   min-width: 0;
@@ -508,7 +508,7 @@
 }
 
 .provider-add-field input,
-.provider-add-field select {
+.provider-add-field .pion-select-trigger {
   height: 32px;
   padding: 0 9px;
 }
@@ -526,7 +526,7 @@
 }
 
 .provider-add-field input:focus,
-.provider-add-field select:focus,
+.provider-add-field .pion-select-trigger:focus,
 .provider-add-field textarea:focus {
   border-color: rgba(var(--accent-rgb), 0.7);
   box-shadow: 0 0 0 2px var(--accent-soft);

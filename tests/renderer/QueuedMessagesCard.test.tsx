@@ -8,6 +8,24 @@ import { QueuedMessagesCard } from '../../src/renderer/src/features/session/Queu
 beforeEach(() => window.localStorage.clear())
 
 describe('QueuedMessagesCard', () => {
+  it('retains a paused-task notice even with no queued messages and continues only the actual run', () => {
+    const resume = vi.fn()
+    render(<QueuedMessagesCard sessionKey="paused-empty" queuePause={{ paused: true, revision: 2,
+      reason: '提问等待超时', pausedRunId: 'real-run' }} onContinueCurrent={resume} />)
+    expect(screen.getByText('提问等待超时')).toBeInTheDocument()
+    expect(screen.getByText('已暂停，等待处理当前任务')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '继续当前任务' }))
+    expect(resume).toHaveBeenCalledExactlyOnceWith('real-run')
+  })
+
+  it('does not offer a fabricated resume identity or auto-send a paused queue', () => {
+    const send = vi.fn()
+    render(<QueuedMessagesCard sessionKey="paused" followUp={['下一任务']} queuePause={{ paused: true, revision: 1 }} onSendItem={send} />)
+    expect(screen.queryByRole('button', { name: '继续当前任务' })).not.toBeInTheDocument()
+    expect(send).not.toHaveBeenCalled()
+    expect(screen.getByText('本轮未确认正常完成，排队消息不会自动发送。')).toBeInTheDocument()
+  })
+
   it('shows steering and follow-up messages with their queue kind', () => {
     const { container } = render(
       <QueuedMessagesCard

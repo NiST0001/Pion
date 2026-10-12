@@ -48,7 +48,8 @@ async function harness() {
   const steer = vi.fn(async (): Promise<'queued' | 'handled'> => 'queued')
   const backend = {
     key: 'backend-1', cwd: root, phase: 'running', busy: false, compacting: false,
-    modePrimed: 'build', pendingRunIds: [], localFollowUps: [],
+    // Most dispatcher fixtures model an already proven normal settle.
+    modePrimed: 'build', pendingRunIds: [], localFollowUps: [], queueAutoReady: true,
     client: { getState, prompt, steer, onEvent: vi.fn((callback: (event: unknown) => void) => { listener = callback }) },
     startPromise: Promise.resolve()
   } as unknown as BackendRecord
@@ -467,6 +468,108 @@ describe('AgentBridge live session state', () => {
 })
 
 describe('AgentBridge send and local queue', () => {
+  it.each([undefined, 'length', 'toolUse', 'unknown', 'aborted', 'error'])(
+    'keeps queues paused without normal stop evidence (%s)', async (stopReason) => {
+      const h = await harness()
+      await h.bridge.send('first')
+      const firstId = h.backend.activeRunId!
+      h.emit('agent_start')
+      const queued = h.addQueued('later')
+      if (stopReason !== undefined) h.emit('agent_end', { messages: [{ role: 'assistant', stopReason }] })
+      h.emit('agent_settled')
+      await dispatchGap()
+      h.bridge.dispatchNextLocalFollowUp(h.backend)
+      await dispatchGap()
+      expect(h.prompt).toHaveBeenCalledTimes(1)
+      expect(h.runStore.get(firstId)?.state).not.toBe('completed')
+      expect(h.runStore.get(queued.id)?.state).toBe('queued')
+      expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: firstId })
+      await h.runStore.flush()
+    }
+  )
+
+  it('requires actual normal settle and completion listeners before auto dispatch', async () => {
+    const h = await harness()
+    const gate = deferred<void>()
+    Object.assign(h.bridge, { runCompletedListeners: new Set([() => gate.promise]) })
+    await h.bridge.send('first')
+    h.emit('agent_start')
+    h.addQueued('later')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
+    await dispatchGap()
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    h.emit('agent_settled')
+    await dispatchGap()
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    expect(h.backend.runCompletionPromise).toBeDefined()
+    gate.resolve()
+    await dispatchGap()
+    expect(h.prompt).toHaveBeenLastCalledWith('later', [])
+    expect(h.prompt).toHaveBeenCalledTimes(2)
+    await h.runStore.flush()
+  })
+
+  it('persists an empty-queue pause and does not clear it on unrelated successful input', async () => {
+    const h = await harness()
+    await h.bridge.send('interrupted task')
+    const original = h.backend.activeRunId!
+    h.emit('agent_start')
+    h.emit('agent_settled')
+    expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: original })
+    await h.bridge.send('unrelated input')
+    h.emit('agent_start')
+    const queued = h.addQueued('keep waiting')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    expect(h.prompt).toHaveBeenCalledTimes(2)
+    expect(h.runStore.get(queued.id)?.state).toBe('queued')
+    expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: original })
+    await h.runStore.flush()
+    const restored = new RunStore(h.runStore.filePath)
+    await restored.load()
+    expect(restored.getQueuePause(h.backend)).toMatchObject({ paused: true, pausedRunId: original })
+  })
+
+  it('manual promotion authorizes one item without releasing other restored queue items', async () => {
+    const h = await harness()
+    h.backend.queuePause = { paused: true, revision: 3, reason: 'restored' }
+    h.backend.localQueueBlocked = true
+    const selected = h.addQueued('selected')
+    const remaining = h.addQueued('remaining')
+    await h.bridge.sendQueuedMessage('followUp', 0)
+    expect(h.prompt).toHaveBeenCalledWith('selected', [])
+    h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    expect(h.runStore.get(selected.id)?.state).toBe('completed')
+    expect(h.runStore.get(remaining.id)?.state).toBe('queued')
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    expect(h.backend.queuePause).toMatchObject({ paused: true, revision: 3 })
+    await h.runStore.flush()
+  })
+
+  it('explicit resume retains its actual continuation pause until positive normal settle', async () => {
+    const h = await harness()
+    await h.bridge.send('interrupted task')
+    const sourceId = h.backend.activeRunId!
+    h.emit('agent_start')
+    h.emit('agent_settled')
+    const queued = h.addQueued('after resume')
+    const resumed = await h.bridge.resumeRun(sourceId)
+    expect(resumed.recoveredFromRunId).toBe(sourceId)
+    expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: resumed.id })
+    expect(h.backend.queueAutoReady).toBe(false)
+    expect(h.runStore.get(queued.id)?.state).toBe('queued')
+    h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    expect(h.prompt).toHaveBeenLastCalledWith('after resume', [])
+    await h.runStore.flush()
+  })
+
   it('sends Enter directly while preserving existing follow-ups', async () => {
     const h = await harness()
     const queued = h.addQueued('稍后处理')
@@ -497,6 +600,7 @@ describe('AgentBridge send and local queue', () => {
     await h.bridge.send('work')
     expect(h.backend.busy).toBe(true)
     h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
     h.emit('agent_settled')
     expect(h.backend.busy).toBe(false)
     expect(h.runs()[0].state).toBe('completed')
@@ -507,6 +611,7 @@ describe('AgentBridge send and local queue', () => {
     const h = await harness()
     h.prompt.mockImplementation(async () => {
       h.emit('agent_start')
+      h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
       h.emit('agent_settled')
       return disposition
     })
@@ -546,7 +651,7 @@ describe('AgentBridge send and local queue', () => {
     await h.runStore.flush()
   })
 
-  it('drains multiple handled auto-dispatched items and reserves only the actual queued item', async () => {
+  it('pauses after a handled auto-dispatched item without treating acceptance as normal completion', async () => {
     const h = await harness()
     const first = h.addQueued('first')
     const second = h.addQueued('second')
@@ -555,10 +660,11 @@ describe('AgentBridge send and local queue', () => {
     await dispatchGap()
     while (h.backend.localQueueDispatchPromise) await h.backend.localQueueDispatchPromise
     expect(h.prompt).toHaveBeenNthCalledWith(1, 'first', [])
-    expect(h.prompt).toHaveBeenNthCalledWith(2, 'second', [])
+    expect(h.prompt).toHaveBeenCalledTimes(1)
     expect(h.runStore.get(first.id)?.state).toBe('discarded')
-    expect(h.runStore.get(second.id)?.state).toBe('discarded')
-    expect(h.backend.pendingRunIds).toEqual([])
+    expect(h.runStore.get(second.id)?.state).toBe('queued')
+    expect(h.backend.pendingRunIds).toEqual([second.id])
+    expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: first.id })
     expect(h.backend.busy).toBe(false)
     expect(h.backend.localQueueDispatching).toBe(false)
     await h.runStore.flush()
@@ -637,6 +743,7 @@ describe('AgentBridge send and local queue', () => {
     const first = h.bridge.send('first')
     await dispatchGap()
     h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
     h.emit('agent_settled')
     await dispatchGap()
     await h.bridge.send('new run')
@@ -741,6 +848,7 @@ describe('AgentBridge send and local queue', () => {
         h.pool.set(h.backend.key, replacement)
       } else {
         h.emit('agent_start')
+        h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
         h.emit('agent_settled')
         await dispatchGap()
         if (phase === 'new-run') await h.bridge.send('new run')

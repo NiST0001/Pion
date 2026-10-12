@@ -133,9 +133,9 @@
 }
 
 .subagent-settings .setting-input { width: 100px; flex-shrink: 0; }
-.subagent-settings select.setting-input { width: 240px; max-width: 50%; min-width: 0; }
+.subagent-settings .pion-select { width: 240px; max-width: 50%; min-width: 0; flex-shrink: 0; }
 @media (max-width: 700px) {
-  .subagent-settings select.setting-input { max-width: 100%; }
+  .subagent-settings .pion-select { max-width: 100%; }
 }
 .subagent-setting-description { display: block; }
 .subagent-settings-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }

@@ -2,6 +2,7 @@ import type { BrowserWindow, IpcMain, IpcMainInvokeEvent, WebContents } from 'el
 import type { TerminalService } from '../terminal-service'
 import type { WindowEffectsService } from '../window-effects'
 import { IPC } from '../../shared/ipc'
+import { assertQuestionSettingsOwner, type QuestionSettingsStore } from '../question-settings'
 
 interface WindowIpcDependencies {
   ipcMain: Pick<IpcMain, 'handle' | 'on'>
@@ -9,9 +10,36 @@ interface WindowIpcDependencies {
   windowEffects: WindowEffectsService
   terminals: TerminalService
   reserveMutation?: <T>(operation: () => Promise<T>) => Promise<T>
+  questionSettings?: QuestionSettingsStore
+  getMainWindowId?: () => number | undefined
 }
 
-export function registerWindowIpc({ ipcMain, windowFromWebContents, windowEffects, terminals, reserveMutation }: WindowIpcDependencies): void {
+export function registerWindowIpc({ ipcMain, windowFromWebContents, windowEffects, terminals, reserveMutation, questionSettings, getMainWindowId }: WindowIpcDependencies): void {
+  if (questionSettings && getMainWindowId) {
+    const captureOwner = (event: IpcMainInvokeEvent) => {
+      const id = getMainWindowId()
+      const sender = event.sender
+      const frame = event.senderFrame
+      const assertCurrent = () => {
+        if (getMainWindowId() !== id || event.sender !== sender || event.senderFrame !== frame) throw new Error('AI 提问设置窗口已变更')
+        assertQuestionSettingsOwner(event, id)
+      }
+      assertCurrent()
+      return assertCurrent
+    }
+    ipcMain.handle(IPC.GetQuestionSettings, async (event) => {
+      const assertCurrent = captureOwner(event)
+      const value = await questionSettings.get()
+      assertCurrent()
+      return value
+    })
+    ipcMain.handle(IPC.SetQuestionSettings, async (event, value: unknown) => {
+      const assertCurrent = captureOwner(event)
+      const saved = await questionSettings.set(value, assertCurrent)
+      assertCurrent()
+      return saved
+    })
+  }
   const appearanceOwner = (event: IpcMainInvokeEvent): number => {
     if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口操作外观')
     return event.sender.id

@@ -6,6 +6,34 @@ import { applyBackendEvent } from '../../src/main/agent/backend-events'
 import type { BackendRecord } from '../../src/main/agent/types'
 
 describe('agent compaction state', () => {
+  it('cannot borrow an earlier assistant stop after a newly consumed steering/user message', () => {
+    const backend = { key: 'scope', busy: true } as BackendRecord
+    applyBackendEvent(backend, { type: 'agent_end', messages: [
+      { role: 'assistant', stopReason: 'stop' }, { role: 'user', content: 'new input' }
+    ] }, new Map())
+    expect(applyBackendEvent(backend, { type: 'agent_settled' }, new Map()).sessionCompleted).toBe(false)
+    expect(backend.completionState).toBe('interrupted')
+  })
+  it.each([undefined, 'length', 'toolUse', 'other'])('fails closed on unproven root completion (%s)', (stopReason) => {
+    const backend = { key: 'scope', busy: true, compacting: false } as BackendRecord
+    applyBackendEvent(backend, { type: 'agent_end', messages: stopReason === undefined ? [] : [
+      { role: 'assistant', stopReason }
+    ] }, new Map())
+    expect(applyBackendEvent(backend, { type: 'agent_settled' }, new Map()).sessionCompleted).toBe(false)
+    expect(backend.completionState).toBe('interrupted')
+  })
+
+  it('does not erase an unanswered interaction or real pending completion slot on retry start', () => {
+    const completion = new Promise<void>(() => undefined)
+    const backend = { key: 'scope', busy: true, turnInterrupted: true,
+      runCompletionPromise: completion } as BackendRecord
+    applyBackendEvent(backend, { type: 'agent_start' }, new Map())
+    applyBackendEvent(backend, { type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop' }] }, new Map())
+    expect(applyBackendEvent(backend, { type: 'agent_settled' }, new Map()).sessionCompleted).toBe(false)
+    expect(backend.runCompletionPromise).toBe(completion)
+    expect(backend.completionState).toBe('interrupted')
+  })
+
   it('keeps compaction events authoritative over late snapshots in either direction', () => {
     const session = { sessionId: 'a', sessionFile: '/a.jsonl', isStreaming: true, isCompacting: false, messageCount: 1 }
     const selected = reducer(initialState, { type: 'session', session })

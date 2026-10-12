@@ -3,6 +3,7 @@ import { Download, Loader2, RefreshCw } from 'lucide-react'
 import type { ModelOption, SessionInfo } from '../../../../shared/types'
 import { PageHeading } from './SettingsPageHeading'
 import { SubagentSettings } from './SubagentSettings'
+import { QuestionSettings } from './QuestionSettings'
 import { SESSION_PREVIEW_OPTIONS } from '../../utils/sessionPreview'
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 
@@ -231,6 +232,7 @@ export function SessionPage({
         </div>
       </div>
 
+      <QuestionSettings />
       <SubagentSettings models={models} />
 
       <div className="settings-section">

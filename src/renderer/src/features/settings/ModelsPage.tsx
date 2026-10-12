@@ -27,6 +27,7 @@ import type {
   ModelProviderInfo,
   SessionInfo
 } from '../../../../shared/types'
+import { PionSelect } from '../common/PionSelect'
 import { PageHeading } from './SettingsPageHeading'
 
 const PROVIDER_API_OPTIONS: Array<{ value: ModelProviderApi; label: string }> = [
@@ -658,11 +659,13 @@ function AddProviderForm({
           </label>
           <label className="provider-add-field">
             <span>API 类型</span>
-            <select value={api} onChange={(event) => setApi(event.target.value as ModelProviderApi)}>
-              {PROVIDER_API_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
+            <PionSelect
+              value={api}
+              options={PROVIDER_API_OPTIONS}
+              onValueChange={(value) => setApi(value as ModelProviderApi)}
+              disabled={saving || disabled}
+              ariaLabel="API 类型"
+            />
           </label>
           <label className="provider-add-field provider-add-field-wide">
             <span>API 地址</span>
