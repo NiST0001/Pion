@@ -27,6 +27,15 @@ npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 
 平台升级的进程边界、安全规则与状态机见
 [`docs/coding-agent-platform.md`](docs/coding-agent-platform.md)。
 
+## 测试发现与覆盖率隔离
+
+- `vitest.config.ts` 与 `vitest.coverage.config.ts` 共用 `tests/test-files.ts` 的发现模式：`tests/unit/**/*.test.ts`、`tests/renderer/**/*.test.{ts,tsx}`。新增或移动符合模式的测试自动纳入普通测试和覆盖率，不维护手工 import 清单；E2E 继续使用独立 Playwright 配置，helper 与旧聚合入口不在发现范围内。
+- 覆盖率配置通过 `globSync` 为每个测试文件创建唯一命名、只包含该文件的 inline project；不继承包含 project 列表的配置自身，也不把 suites 导入同一共享模块作用域，以免跨文件 mocks/root hooks 污染收集与执行。依赖 mock 仍须局部注册并清理，不能用运行隔离替代测试自身的清理责任。
+- 每个单文件 project 保持独立的原始 V8 合并组，由 Vitest 转换为 Istanbul 后再合并最终报告，避免跨测试文件直接合并 V8 range tree；这不是对所有 V8 覆盖率问题的通用修复保证。使用 threads 池、最多 2 个 worker，测试与 hook 超时均为 30 秒。
+- 源码覆盖范围仍为 `src/shared/**/*.ts`、`src/main/**/*.ts`、`src/renderer/src/**/*.{ts,tsx}`；继续排除主进程入口、preload、renderer 入口及声明文件。覆盖率门槛保留 statements 15%、branches 12%、functions 10%、lines 17%，不以降低门槛规避 quality 失败。
+- `tests/coverage/all.test.tsx` 作为 legacy 文件保留，但新配置不执行、不维护它；文件仍存在不表示恢复了共享 suite 聚合。`tests/unit/test-files.test.ts` 回归保护自动发现、单文件唯一 project、E2E/旧入口/helper 排除与阈值不降低。
+- 覆盖率或模拟测试结果仅证明对应检查范围，不替代类型检查、构建、GUI、跨平台或真实模型/收费服务验证；执行这些检查仍须遵守各自授权要求。
+
 ## 环境要求与坑位说明
 
 - Node ≥ 22.19（内置 pi 的最低要求；本项目在 v24 上开发）

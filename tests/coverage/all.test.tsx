@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
-// A single coverage isolate avoids a Node 24 / @bcoe/v8-coverage range-tree
-// recursion bug when the same transformed module is merged across test files.
-// The normal test command still runs each source test independently.
+// Legacy reference only: retained, but no longer executed by test:coverage.
+// vitest.coverage.config.ts discovers each test file into a separate project,
+// preserving mock/hook isolation and avoiding cross-file raw V8 range merging.
+// Do not add new imports here; tests/test-files.ts is the active discovery path.
 // Register the policy suite's Electron mock before dependent backend modules load.
 import '../unit/tool-permission-policy.test'
 import '../unit/browser-security.test'

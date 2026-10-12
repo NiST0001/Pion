@@ -1,26 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { runInNewContext } from 'node:vm'
 
-const mocks = vi.hoisted(() => ({
+const mocks = {
   userData: '',
   git: vi.fn<(cwd: string, args: string[]) => Promise<string>>()
-}))
-vi.mock('electron', () => ({ app: { getPath: () => mocks.userData } }))
-vi.mock('node:child_process', async () => {
-  const { promisify } = await import('node:util')
-  // execFile's real promisify contract returns an object, not just stdout.
-  const execFile = Object.assign(vi.fn(), {
-    [promisify.custom]: async (_file: string, args: string[]) => ({
-      stdout: await mocks.git(args[1], args.slice(2)), stderr: ''
-    })
-  })
-  return { execFile }
-})
-import { ProjectStore } from '../../src/main/projects'
-import { canonicalProjectCwd } from '../../src/main/git'
+}
+let ProjectStore: typeof import('../../src/main/projects').ProjectStore
+let canonicalProjectCwd: typeof import('../../src/main/git').canonicalProjectCwd
+let previousElectron: typeof import('electron')
 import type { ProjectMeta } from '../../src/shared/types'
 
 let temporary: string
@@ -31,6 +21,39 @@ let registered: Set<string>
 const meta = (cwd: string, name = basename(cwd), addedAt = 1, lastUsedAt = 2): ProjectMeta => ({ cwd, name, addedAt, lastUsedAt })
 const disk = () => readFileSync(join(mocks.userData, 'projects.json'), 'utf8')
 const seed = (projects: ProjectMeta[]) => writeFileSync(join(mocks.userData, 'projects.json'), JSON.stringify({ projects }))
+
+describe('project store scoped dependencies', () => {
+// Load private module instances only while these non-hoisted mocks are active.
+// Other suites in the coverage isolate retain their own Electron/Git imports.
+beforeAll(async () => {
+  // Preserve the coverage entry's policy mock (or the real standalone module).
+  previousElectron = { ...await import('electron') }
+  vi.resetModules()
+  vi.doMock('electron', () => ({ app: { getPath: () => mocks.userData } }))
+  vi.doMock('node:child_process', async () => {
+    const { promisify } = await import('node:util')
+    // execFile's real promisify contract returns an object, not just stdout.
+    const execFile = Object.assign(vi.fn(), {
+      [promisify.custom]: async (_file: string, args: string[]) => ({
+        stdout: await mocks.git(args[1], args.slice(2)), stderr: ''
+      })
+    })
+    return { execFile }
+  })
+  try {
+    ;({ ProjectStore } = await import('../../src/main/projects'))
+    ;({ canonicalProjectCwd } = await import('../../src/main/git'))
+  } finally {
+    // Restore the original Electron identity, not this suite's userData closure.
+    vi.doMock('electron', () => previousElectron)
+    vi.doUnmock('node:child_process')
+    vi.resetModules()
+  }
+})
+afterAll(() => {
+  vi.doUnmock('node:child_process')
+  vi.resetModules()
+})
 
 beforeEach(() => {
   temporary = mkdtempSync(join(tmpdir(), 'pion-projects-'))
@@ -59,6 +82,8 @@ describe('canonical project registration', () => {
     expect(store.list()).toHaveLength(1)
     expect(store.list()[0]).toMatchObject({ cwd: root, name: basename(root) })
     expect(await canonicalProjectCwd(branch)).toBe(root)
+    expect(mocks.git).toHaveBeenCalledWith(branch, ['rev-parse', '--show-toplevel'])
+    expect(mocks.git).toHaveBeenCalledWith(branch, ['worktree', 'list', '--porcelain'])
     expect(await store.listGrouped()).toEqual(store.list())
   })
 
@@ -229,5 +254,20 @@ describe('project push ordering', () => {
     h.pending[1]([meta(root)])
     await closed
     expect(h.context.projectsPush).not.toHaveBeenCalled()
+  })
+})
+})
+
+describe('project dependency cleanup', () => {
+  it('leaves later process imports real, including their default export', async () => {
+    const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process')
+    const later = await import('node:child_process')
+    expect(later.execFile).toBe(actual.execFile)
+    expect(later.default.execFile).toBe(actual.execFile)
+    expect(later.spawn).toBe(actual.spawn)
+    const electron = await import('electron')
+    expect({ ...electron }).toEqual(previousElectron)
+    const git = await import('../../src/main/git')
+    expect(git.canonicalProjectCwd).not.toBe(canonicalProjectCwd)
   })
 })

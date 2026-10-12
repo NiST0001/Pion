@@ -243,14 +243,17 @@
 - `tests/unit/git-service.test.ts`：NUL 分隔的普通/重命名/复制路径、XY 标志和对象形状、畸形记录不吞下一条；隔离临时仓库验证两种 diff scope、未跟踪分流、重命名元数据及暂存/撤销选择等操作。
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
 - `tests/unit/review-file-tree.test.ts`：审查树目录优先排序、嵌套计数、原文件元数据与统计保留，以及既有父目录路径处理。
-- `tests/unit/projects.test.ts`：模拟主项目/worktree 登记、历史只读分组、名称与排序保留、缺失目录/非 Git 回退、显式移除元数据及异步变更/窗口推送竞态。
+- `tests/unit/projects.test.ts`：模拟主项目/worktree 登记、历史只读分组、名称与排序保留、缺失目录/非 Git 回退、显式移除元数据及异步变更/窗口推送竞态；依赖使用局部 `vi.doMock` 并清理，回归保护默认 `node:child_process` 导入不泄露测试 mock。
 - `tests/unit/worktree-session-isolation.test.ts`：按 SDK 会话真实 header cwd 隔离工作树，拒绝目录编码碰撞及未知归属，不迁移会话文件。
 - `tests/unit/session-sidebar-sync.test.ts`：新会话首次落盘后的项目列表推送；`optimistic-session.test.ts` 覆盖占位替换和跨项目列表隔离。
   - `historyReveal.test.tsx`、`screenTextReveal.test.tsx`：渐入行为。
 - `tests/e2e/app.spec.ts`：Electron 启动、侧栏设置/插件商店悬浮栏及列表底部避让、统计计费开关、统计按压不缩放、统计条/输入框覆盖完整消息视口、多行输入与详情展开不改变视口尺寸、详情同宽、插件卸载及 Git 审查提交场景。
 - `tests/e2e/session-scroll.spec.ts`：独立临时项目和会话，在真实 Electron DOM 中反复长/短会话切换、注入加载期间的延迟 scroll，检查后端就绪前后不存在残留空白滚动范围；不使用现有用户会话。
-- `vitest.config.ts`、`playwright.config.ts`：测试配置；E2E 在 CI 中同时输出 GitHub 断言注释，便于定位失败。
-- `tests/coverage/all.test.tsx`：覆盖率单 isolate 聚合入口，新增或移动测试时同步导入清单；不替代普通测试发现。
+- `tests/test-files.ts`：普通测试与覆盖率共用的 `TEST_FILE_PATTERNS` 和 `globSync` 自动发现；纳入嵌套 unit `.test.ts` 与 renderer `.test.ts/.test.tsx`，排除 E2E、旧覆盖率聚合入口及 helper，无需维护手工导入清单。
+- `tests/unit/test-files.test.ts`：测试发现范围、每个普通测试文件对应唯一单文件 coverage project、无自继承配置及覆盖率阈值不降低的回归。
+- `vitest.config.ts`、`vitest.coverage.config.ts`：普通测试与独立覆盖率配置；覆盖率为每个发现的文件创建唯一命名 inline project，不将 suites 导入共享作用域，保持 mocks/root hooks 隔离；单文件 V8 数据按 project 转换为 Istanbul 后合并报告。
+- `playwright.config.ts`：独立 E2E 配置；E2E 在 CI 中同时输出 GitHub 断言注释，便于定位失败。
+- `tests/coverage/all.test.tsx`：保留的 legacy 聚合文件，非活跃测试入口；普通测试与覆盖率配置均不执行它，也不再维护其手工导入清单。
 
 ## 开发、安装与发布
 

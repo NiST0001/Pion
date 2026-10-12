@@ -1,10 +1,11 @@
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vitest/config'
+import { TEST_FILE_PATTERNS } from './tests/test-files'
 
 export default defineConfig({
   plugins: [react()],
   test: {
-    include: ['tests/unit/**/*.test.ts', 'tests/renderer/**/*.test.tsx'],
+    include: TEST_FILE_PATTERNS,
     setupFiles: ['tests/setup.ts'],
     restoreMocks: true,
     clearMocks: true,
