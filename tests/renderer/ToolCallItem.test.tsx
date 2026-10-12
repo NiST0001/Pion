@@ -238,6 +238,52 @@ describe('ToolCallItem', () => {
     } finally { cleanup(); vi.useRealTimers() }
   })
 
+  it('keeps task and summary surfaces transparent while preserving status, hover and focus colors', () => {
+    expect(chatCss).toMatch(/\.tool-subagent-row\s*\{[^}]*background: transparent;/)
+    expect(chatCss).toMatch(/\.tool-subagent-summary\s*\{[^}]*background: transparent;/)
+    expect(chatCss).toMatch(/\.tool-subagent-summary pre\s*\{[^}]*background: transparent;/)
+    expect(chatCss).toMatch(/\.tool-subagent-status\s*\{[^}]*background: var\(--bg-elev\);/)
+    expect(chatCss).toContain('.tool-subagent-status-failed { color: var(--danger); }')
+    expect(chatCss).toContain('.tool-subagent-summary-toggle:hover { background: var(--bg-elev); color: var(--fg); }')
+    expect(chatCss).toContain('html.pion-keyboard-focus .tool-subagent-summary-toggle:focus-visible')
+  })
+
+  it('preserves unfinished summary fades through fast append and terminal status updates', () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    try {
+      const task = { index: 0, name: '增量摘要', status: 'running' as const, summary: 'old' }
+      const tool: ToolItem = { ...batchTool, status: 'running', live: true, subagentBatch: { version: 1, tasks: [task] } }
+      const { container, rerender } = render(<ToolCallItem tool={tool} />)
+      fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：增量摘要' }))
+      const body = container.querySelector('.tool-subagent-summary pre')!
+      const first = body.querySelector<HTMLElement>('.screen-text-reveal-live')!
+      const delay = first.style.getPropertyValue('--screen-text-reveal-delay')
+      act(() => vi.advanceTimersByTime(30))
+      const updated: ToolItem = { ...tool, status: 'done', subagentBatch: { version: 1, tasks: [
+        { ...task, status: 'completed', summary: 'old new' }
+      ] } }
+      rerender(<ToolCallItem tool={updated} />)
+      expect(container.querySelector('.tool-subagent-summary pre')).toBe(body)
+      expect(body.querySelector('.screen-text-reveal-live')).toBe(first)
+      expect(first.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+      expect(Array.from(body.querySelectorAll('.screen-text-reveal-live'), (node) => node.textContent).join('')).toBe('old new')
+      act(() => vi.advanceTimersByTime(868))
+      expect(body.querySelector('[data-screen-reveal-character]')).toBeNull()
+      expect(body.textContent).toBe('old new')
+    } finally { cleanup(); vi.useRealTimers() }
+  })
+
+  it.each([false, true])('does not animate readonly live summary or reduced-motion summary: reduced=%s', (reduced) => {
+    vi.stubGlobal('IntersectionObserver', undefined)
+    if (reduced) vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
+    const { container } = render(<ToolCallItem tool={{ ...batchTool, live: true }} readOnly={!reduced} />)
+    fireEvent.click(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
+    expect(container.querySelector('.tool-subagent-summary pre')?.textContent).toBe('入口结果')
+    expect(container.querySelector('.tool-subagent-summary [data-screen-reveal-character]')).toBeNull()
+    cleanup()
+  })
+
   it('animates only live summary suffixes and keeps completed content stable on status changes', () => {
     vi.useFakeTimers()
     vi.stubGlobal('IntersectionObserver', undefined)

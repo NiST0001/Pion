@@ -99,7 +99,8 @@
 | src/renderer/src/hooks/useMessageRevert.ts | 撤销确认、空草稿/附件读取门控、一次性文字/图片恢复及拒绝后的恢复重试；按逻辑选择隔离迟到结果，不持有后端或文件回滚 |
 | src/renderer/src/hooks/agent/useAgentSubscriptions.ts | IPC 订阅与列表状态同步；分支/会话列表有界并发逐 cwd 发布，慢/失败项不阻挡已完成项，实时推送优先于迟到初次查询 |
 | src/renderer/src/hooks/agent/useAgentRunActions.ts | 发送、队列、中止与新会话 |
-| src/renderer/src/hooks/useConversationNavigation.ts | 用户滚动优先、加载空白占位、按保留行位移补偿向前分页（含只迁移未新增行）、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别；真实会话末尾选最后已挂载用户轮次，包含无持久 ID 的实时行；仅以所属索引与挂载行均唯一的实际 SDK 消息时钟作显示桥接，歧义清除旧标记、不补造撤销 ID；加载占位/分页末尾除外；历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
+| src/renderer/src/utils/endFollowAnimator.ts | 可续接目标的单 RAF 末尾跟随控制器，输出换行/正文增高平滑上移，静止后有界收口；取消 generation 拒迟到写，减少动态效果即时；endFollowAnimator.test.tsx 数值/调度回归 |
+| src/renderer/src/hooks/useConversationNavigation.ts | 输出增长仅在既有末尾跟随意图下平滑追尾；用户手势/项目会话切换/跳转/隐藏即取消，分页补偿、首次恢复及浮层clearance保持即时；用户滚动优先、加载空白占位、按保留行位移补偿向前分页（含只迁移未新增行）、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别；真实会话末尾选最后已挂载用户轮次，包含无持久 ID 的实时行；仅以所属索引与挂载行均唯一的实际 SDK 消息时钟作显示桥接，歧义清除旧标记、不补造撤销 ID；加载占位/分页末尾除外；历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
 | src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让，权限请求及会话提问面板复用底部余量定位在输入框上方；全局认证仍居中，不测量展开详情、不重挂载消息或草稿 |
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
@@ -121,7 +122,7 @@
 - `session/`：HistoryNavigator 跳转条、SessionList 会话行、QueuedMessagesCard、TaskPanel、TaskHistoryPanel；`TaskPanel` 全部完成后隐藏但混合计划保留完成行；`ComposerSupportPanels.tsx` 共用状态判定，保持任务/排队面板的网格槽位及相邻草稿身份稳定。
 - `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；分支操作菜单与删除路径确认、禁用/错误/在途门，保留重命名；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
 - `operations/`：RunMetricsStrip、权限确认、验证、运行恢复和工作流面板。RunMetricsStrip 保留在会话顶部，详情在统计条下方同宽悬浮展开，不占消息区高度；任务/排队面板仍在输入框上方。
-- `review/`：Git 改动列表、差异与审查界面。`ReviewPanel.tsx` 保留审查编排、提交草稿与冲突编辑；`ReviewFileTree.tsx` 管理各分组独立折叠、选中父目录展开与文件行渲染，`reviewFileTreeModel.ts` 提供纯树构建、排序、目录计数与父路径计算。文件树在状态码旁显示绿色新增/红色删减行数，直接使用快照的工作区合计（已暂存 + 未暂存，包含未跟踪文件），不额外加载 diff；缺失统计不伪造零值。ModifiedFilesCard 使用同一工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 与工具正文共用可见性观察器，按小段延迟创建动画字符，保留渐入并在结束后回收节点，实时文字仅动画新增后缀；DiffView 对长差异分页，工具内使用有界滚动区，保留全部差异的翻页访问。
+- `review/`：Git 改动列表、差异与审查界面。`ReviewPanel.tsx` 保留审查编排、提交草稿与冲突编辑；`ReviewFileTree.tsx` 管理各分组独立折叠、选中父目录展开与文件行渲染，`reviewFileTreeModel.ts` 提供纯树构建、排序、目录计数与父路径计算。文件树在状态码旁显示绿色新增/红色删减行数，直接使用快照的工作区合计（已暂存 + 未暂存，包含未跟踪文件），不额外加载 diff；缺失统计不伪造零值。ModifiedFilesCard 使用同一工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 与工具正文、用户正文和子代理摘要共用可见性观察器，按小段延迟创建动画字符，保留渐入并在结束后回收节点，实时文字仅动画新增后缀；DiffView 对长差异分页，工具内使用有界滚动区，保留全部差异的翻页访问。
 - `settings/`：设置、模型选择器与按职责拆分的页面。
   - `SettingsModal.tsx`：设置外壳、导航与操作编排，继续持有原有会话名称草稿、压缩/导出状态、诊断日志及主题保存 revision，切页不因拆分而重置宿主状态。
   - `ModelsPage.tsx`、`SessionPage.tsx`、`SecurityPage.tsx`：模型与提供商、会话行为与工具、安全信任与权限页面；新增页面通过受控 props 回调操作，不反向依赖弹窗。

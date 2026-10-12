@@ -188,7 +188,7 @@ body {
 }
 
 .bubble-user {
-  background: var(--user-bubble);
+  background: transparent;
   border-top-right-radius: 5px;
 }
 

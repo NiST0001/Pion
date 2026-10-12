@@ -15,6 +15,7 @@ import {
   SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS,
   syncContainerRevealDelay
 } from '../../utils/screenTextReveal'
+import { ReviewRevealText } from '../review/ReviewRevealText'
 import { Markdown } from './Markdown'
 
 interface ChatMessageProps {
@@ -125,7 +126,9 @@ export const ChatMessage = memo(function ChatMessage({
         >
           {item.text !== '' && (
             <div className="bubble-content">
-              {item.text}
+              {revealSuppressed || (!item.historical && (!item.live || readOnly)) ? item.text : (
+                <ReviewRevealText text={item.text} mode={item.historical ? 'history' : 'live'} />
+              )}
             </div>
           )}
           {!readOnly && item.images && item.images.length > 0 && (

@@ -104,7 +104,7 @@ const SubagentBatchRow = memo(function SubagentBatchRow({ task, mode, frameMode 
   const [open, setOpen] = useState(false)
   const hasSummary = Boolean(task.summary)
   const displayName = task.name.trim() ? task.name : `子代理 ${task.index + 1}`
-  // Reveal the complete frame (including its background and controls) on the
+  // Reveal the complete transparent row (including its controls) on the
   // same clock as the tool header. Summary text keeps its own chunk/suffix
   // lifecycle; status updates and disclosure toggles never reattach this ref.
   return <li
@@ -203,7 +203,7 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
       </button>
 
       {batch && <ul className="tool-subagent-batch" aria-label={`子代理任务（${batch.tasks.length} 项）`}>
-        {batch.tasks.map((task) => <SubagentBatchRow key={`${tool.id}:${task.index}`} task={task} mode={detailMode} frameMode={frameMode} />)}
+        {batch.tasks.map((task) => <SubagentBatchRow key={`${tool.id}:${task.index}`} task={task} mode={readOnly && !historical ? undefined : frameMode} frameMode={frameMode} />)}
       </ul>}
 
       <AnimatedDisclosure open={open}>

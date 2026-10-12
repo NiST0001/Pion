@@ -62,6 +62,72 @@ describe('ChatMessage', () => {
     expect(bubble).not.toHaveClass('user-send-entering')
   })
 
+  it('fades live user text with shared bounded chunks without requeueing the bubble or replaying backfills', () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    resetLineRevealClock()
+    const item = { kind: 'user' as const, id: 45, text: '原始 **文字**\n下一行🙂', live: true }
+    const view = render(<ChatMessage item={item} canFork={false} />)
+    const bubble = view.container.querySelector<HTMLElement>('.bubble-user')!
+    const content = bubble.querySelector('.bubble-content')!
+    const first = content.querySelector('.screen-text-reveal-live')!
+    const delay = bubble.style.getPropertyValue('--screen-text-reveal-delay')
+    expect(content.textContent).toBe(item.text)
+    expect(content.querySelector('strong, .markdown')).toBeNull()
+    expect(content.querySelectorAll('.screen-text-reveal-line')).toHaveLength(0)
+    expect(first).toBeInTheDocument()
+    view.rerender(<ChatMessage item={{ ...item, entryId: 'saved' }} canFork={false} />)
+    expect(content.querySelector('.screen-text-reveal-live')).toBe(first)
+    expect(bubble.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+    act(() => vi.advanceTimersByTime(SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS + SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS))
+    expect(content.querySelector('[data-screen-reveal-character]')).toBeNull()
+    view.rerender(<ChatMessage item={{ ...item, entryId: 'saved', text: item.text + '新增' }} canFork={false} />)
+    expect(view.container.querySelector('.bubble-content')).toBe(content)
+    expect(Array.from(content.querySelectorAll('.screen-text-reveal-live'), (node) => node.textContent).join('')).toBe('新增')
+  })
+
+  it.each([
+    { historical: true, live: true, noReveal: true, readOnly: false },
+    { historical: false, live: true, noReveal: false, readOnly: true },
+    { historical: false, live: false, noReveal: false, readOnly: false }
+  ])('keeps suppressed, readonly live and nonlive user content as plain text: %j', ({ readOnly, ...flags }) => {
+    const item = { kind: 'user' as const, id: 46, text: '原样\n**文字**', ...flags }
+    const view = render(<ChatMessage item={item} canFork={false} readOnly={readOnly} />)
+    expect(view.container.querySelector('.bubble-content')?.textContent).toBe(item.text)
+    expect(view.container.querySelector('.bubble-content span')).toBeNull()
+  })
+
+  it('uses visible history chunks for user text, with cleanup and no live or send replay', () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('IntersectionObserver', undefined)
+    const item = { kind: 'user' as const, id: 47, text: '历史🙂\n文字', historical: true, live: true }
+    const view = render(<ChatMessage item={item} canFork={false} readOnly />)
+    const content = view.container.querySelector('.bubble-content')!
+    expect(content.querySelector('.screen-text-reveal-history')).toBeInTheDocument()
+    expect(content.querySelector('.screen-text-reveal-live')).toBeNull()
+    expect(view.container.querySelector('.user-send-entering')).toBeNull()
+    act(() => vi.advanceTimersByTime(468))
+    expect(content.querySelector('[data-screen-reveal-character]')).toBeNull()
+    view.rerender(<ChatMessage item={{ ...item, entryId: 'persisted' }} canFork={false} readOnly />)
+    expect(view.container.querySelector('.bubble-content')).toBe(content)
+    expect(content.querySelector('[data-screen-reveal-character]')).toBeNull()
+  })
+
+  it('disables user character animation under reduced motion', () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
+    const view = render(<ChatMessage item={{ kind: 'user', id: 48, text: '减少动态🙂', live: true }} canFork={false} />)
+    expect(view.container.querySelector('.bubble-content')?.textContent).toBe('减少动态🙂')
+    expect(view.container.querySelector('[data-screen-reveal-character]')).toBeNull()
+  })
+
+  it('keeps user backgrounds transparent in both stylesheet layers without changing padding', () => {
+    for (const path of ['chat.css', 'refinements.css']) {
+      const css = readFileSync(`src/renderer/src/styles/${path}`, 'utf8')
+      expect(css).toMatch(/\.bubble-user\s*\{\s*background: transparent;/)
+      expect(css).not.toMatch(/\.bubble-user\s*\{[^}]*background: var\(--user-bubble\)/)
+    }
+  })
+
   it.each([
     { historical: true, live: true }, { noReveal: true, live: true }, { live: false }
   ])('does not play send motion on history, paging or nonlive mounts: %j', (flags) => {

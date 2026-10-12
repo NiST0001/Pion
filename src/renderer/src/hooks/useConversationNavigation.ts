@@ -4,6 +4,7 @@ import type { AgentState, TimelineItem } from '../agent/types'
 import type { SessionHistoryIndex } from '../../../shared/types'
 import { armPendingHistoryRevealRows } from '../utils/historyReveal'
 import { consumedInside, useHistoryPaging } from './useHistoryPaging'
+import { createEndFollowAnimator } from '../utils/endFollowAnimator'
 
 const noNewerHistory = () => false
 // Only tolerate pixel rounding here; the 96px pagination prefetch zone is NOT
@@ -85,6 +86,13 @@ export function useConversationNavigation({
   const lastScrollTop = useRef(0)
   const loadingRef = useRef(timelineLoading)
   const hasContentRef = useRef(timeline.length > 0)
+  const followScope = useRef({ viewportActive, sessionPath, projectCwd, historyResetRevision, hasNewerHistory })
+  followScope.current = { viewportActive, sessionPath, projectCwd, historyResetRevision, hasNewerHistory }
+  const endFollow = useRef<{
+    element: HTMLElement; sessionPath?: string; projectCwd?: string; reset: number
+    controller: ReturnType<typeof createEndFollowAnimator>
+  } | null>(null)
+  const cancelEndFollow = useCallback(() => { endFollow.current?.controller.cancel() }, [])
   // This is provisional blank space, not an estimate of the entire history.
   // Keep its extent while the user is scrolling; actual content can fill it
   // naturally; an explicit jump or return to the end releases unused space.
@@ -99,6 +107,7 @@ export function useConversationNavigation({
   }, [])
 
   const followEnd = useCallback((element: HTMLElement) => {
+    cancelEndFollow()
     readingHistory.current = false
     manualScroll.current = false
     explicitHistoryEntry.current = undefined
@@ -108,7 +117,7 @@ export function useConversationNavigation({
     element.scrollTop = element.scrollHeight
     lastScrollTop.current = element.scrollTop
     nearBottomRef.current = true
-  }, [])
+  }, [cancelEndFollow])
 
   // Active-marker tracking is read-only and independently frame-coalesced;
   // neither layout delivery nor an index refresh represents a scroll gesture.
@@ -171,6 +180,42 @@ export function useConversationNavigation({
     })
   }, [updateVisibleHistoryEntry, viewportActive])
 
+  const requestEndFollow = useCallback((element: HTMLElement) => {
+    const scope = followScope.current
+    let owned = endFollow.current
+    if (!owned || owned.element !== element || owned.sessionPath !== scope.sessionPath
+      || owned.projectCwd !== scope.projectCwd || owned.reset !== scope.historyResetRevision) {
+      cancelEndFollow()
+      const session = scope.sessionPath, project = scope.projectCwd, reset = scope.historyResetRevision
+      const motion = window.matchMedia?.('(prefers-reduced-motion: reduce)')
+      const controller = createEndFollowAnimator({
+        position: () => element.scrollTop,
+        target: () => element.scrollHeight - element.clientHeight,
+        valid: () => {
+          const current = followScope.current
+          return current.viewportActive && scrollRef.current === element
+            && current.sessionPath === session && current.projectCwd === project && current.historyResetRevision === reset
+            && nearBottomRef.current && !manualScroll.current && !readingHistory.current
+            && pendingJumpNonce.current === null && !current.hasNewerHistory()
+            && !(loadingRef.current && !hasContentRef.current)
+        },
+        reducedMotion: () => motion?.matches ?? false,
+        now: () => performance.now(),
+        requestFrame: (callback) => window.requestAnimationFrame(callback),
+        cancelFrame: (id) => window.cancelAnimationFrame(id),
+        write: (top) => {
+          element.scrollTop = top
+          // A smooth frame is programmatic, never a paging/reading gesture.
+          lastScrollTop.current = element.scrollTop
+          scheduleVisibleHistoryUpdate()
+        }
+      })
+      owned = { element, sessionPath: session, projectCwd: project, reset, controller }
+      endFollow.current = owned
+    }
+    owned.controller.request()
+  }, [scrollRef, cancelEndFollow, scheduleVisibleHistoryUpdate])
+
   const timelineLength = timeline.length
   const { onScroll: pageOnScroll } = useHistoryPaging({
     scrollRef, timelineLength, loadOlder, loadNewer,
@@ -193,6 +238,7 @@ export function useConversationNavigation({
     hasContentRef.current = timelineLength > 0
     scrollSurfaceRef.current?.style.setProperty('--chat-viewport-height', `${element.clientHeight}px`)
     if (observedHistoryResetRevision.current !== historyResetRevision) {
+      cancelEndFollow()
       observedHistoryResetRevision.current = historyResetRevision
       // Undo selects a different branch without changing the session path.
       // Its old reading window, jump and gestures no longer describe this
@@ -215,6 +261,7 @@ export function useConversationNavigation({
       followEnd(element)
     }
     if (navigationSession.current !== sessionPath || navigationProject.current !== projectCwd) {
+      cancelEndFollow()
       const assigningFirstPath = navigationProject.current === projectCwd && navigationSession.current === undefined && sessionPath !== undefined && manualScroll.current
       navigationSession.current = sessionPath
       navigationProject.current = projectCwd
@@ -233,6 +280,7 @@ export function useConversationNavigation({
       }
     }
     if (historyJump?.nonce !== observedJumpNonce.current) {
+      cancelEndFollow()
       observedJumpNonce.current = historyJump?.nonce
       pendingJumpNonce.current = historyJump?.nonce ?? null
       explicitHistoryEntry.current = historyJump?.entryId
@@ -263,10 +311,12 @@ export function useConversationNavigation({
     observedContentHeight.current = content?.offsetHeight ?? 0
     const addedTimelineItems = timelineLength > previousTimelineLength.current
     if (hasNewerHistory() || (timelineMutation === 'history-append' && addedTimelineItems)) {
+      cancelEndFollow()
       nearBottomRef.current = false
       readingHistory.current = true
     }
     if (timelineMutation === 'prepend' && previousHeight > 0 && pendingJumpNonce.current === null) {
+      cancelEndFollow()
       // Older pages can also relocate mounted live rows without adding any.
       // Prepending moves existing rows, even during manual scrolling. Keeping
       // the same numeric scrollTop would jump to the newly inserted page.
@@ -285,12 +335,21 @@ export function useConversationNavigation({
       element.scrollTop += displacement
     } else if (timelineMutation === 'replace') {
       // Cache refreshes and new array references are not a request to go live.
-      if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)) element.scrollTop = element.scrollHeight
+      if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)
+        && (!endFollow.current?.controller.isAnimating() || previousHeight !== element.scrollHeight)) {
+        cancelEndFollow()
+        element.scrollTop = element.scrollHeight
+      }
     } else if (timelineMutation === 'append') {
       // Follow the newest message only while the user is already near the
       // bottom; never yank someone away who is reading older history.
       if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)) {
-        element.scrollTop = element.scrollHeight
+        if (previousHeight > 0 && previousTimelineLength.current > 0 && !timelineLoading && lastItem?.kind !== 'user') {
+          requestEndFollow(element)
+        } else {
+          cancelEndFollow()
+          element.scrollTop = element.scrollHeight
+        }
       }
     }
     previousTimelineHeight.current = element.scrollHeight
@@ -301,7 +360,7 @@ export function useConversationNavigation({
       ? { element: firstRow, top: firstRow.offsetTop, parent: firstRow.offsetParent }
       : null
     lastScrollTop.current = element.scrollTop
-  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, historyResetRevision, sessionPath, projectCwd, reserveSpace, hasNewerHistory, followEnd, viewportActive])
+  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, historyResetRevision, sessionPath, projectCwd, reserveSpace, hasNewerHistory, followEnd, viewportActive, requestEndFollow, cancelEndFollow])
 
   // Banners resize the viewport; floating summary/composer rows change its
   // padding. Preserve follow intent for both instead of deriving it again
@@ -312,6 +371,7 @@ export function useConversationNavigation({
     if (!viewportActive || !element || typeof ResizeObserver !== 'function') return
     let previousClientHeight = element.clientHeight
     let previousPaddingTop = parseFloat(getComputedStyle(element).paddingTop) || 0
+    let previousPaddingBottom = parseFloat(getComputedStyle(element).paddingBottom) || 0
     const content = element.querySelector<HTMLElement>('.timeline')
     const observer = new ResizeObserver(() => {
       scheduleVisibleHistoryUpdate()
@@ -332,7 +392,12 @@ export function useConversationNavigation({
         lastScrollTop.current = element.scrollTop
       }
       const nextClientHeight = element.clientHeight
-      const nextPaddingTop = parseFloat(getComputedStyle(element).paddingTop) || 0
+      const style = getComputedStyle(element)
+      const nextPaddingTop = parseFloat(style.paddingTop) || 0
+      const nextPaddingBottom = parseFloat(style.paddingBottom) || 0
+      const viewportChanged = nextClientHeight !== previousClientHeight || nextPaddingTop !== previousPaddingTop || nextPaddingBottom !== previousPaddingBottom
+      previousPaddingBottom = nextPaddingBottom
+      if (viewportChanged || shrink > 0) cancelEndFollow()
       const topDisplacement = nextPaddingTop - previousPaddingTop
       previousPaddingTop = nextPaddingTop
       if (topDisplacement !== 0 && element.scrollTop > 0 && pendingJumpNonce.current === null) {
@@ -347,8 +412,10 @@ export function useConversationNavigation({
       }
       if (loadingRef.current && !hasContentRef.current) return
       if (pendingJumpNonce.current === null && nearBottomRef.current && !readingHistory.current && !hasNewerHistory()) {
-        element.scrollTop = element.scrollHeight
-        lastScrollTop.current = element.scrollTop
+        if (viewportChanged || shrink > 0 || loadingRef.current) {
+          element.scrollTop = element.scrollHeight
+          lastScrollTop.current = element.scrollTop
+        } else requestEndFollow(element)
         nearBottomRef.current = true
       }
     })
@@ -357,16 +424,17 @@ export function useConversationNavigation({
     // The outer min-height can hide a collapse from the surface observer.
     if (content) observer.observe(content)
     return () => observer.disconnect()
-  }, [scrollRef, hasNewerHistory, timelineLoading, timelineLength, scheduleVisibleHistoryUpdate, viewportActive])
+  }, [scrollRef, hasNewerHistory, timelineLoading, timelineLength, scheduleVisibleHistoryUpdate, viewportActive, requestEndFollow, cancelEndFollow])
 
   // Panel visibility also changes bottom clearance in the current commit;
   // synchronize an existing follow intent without waiting for a resize delivery.
   useLayoutEffect(() => {
     const element = scrollRef.current
     if (!viewportActive || !element || pendingJumpNonce.current !== null || !nearBottomRef.current || hasNewerHistory() || (loadingRef.current && !hasContentRef.current)) return
+    cancelEndFollow()
     element.scrollTop = element.scrollHeight
     lastScrollTop.current = element.scrollTop
-  }, [scrollRef, panelsVisible, hasNewerHistory, viewportActive])
+  }, [scrollRef, panelsVisible, hasNewerHistory, viewportActive, cancelEndFollow])
 
   useEffect(() => {
     scheduleVisibleHistoryUpdate()
@@ -375,6 +443,7 @@ export function useConversationNavigation({
   useLayoutEffect(() => {
     const jump = historyJump
     if (!viewportActive || !jump || pendingJumpNonce.current !== jump.nonce) return
+    cancelEndFollow()
     const frame = window.requestAnimationFrame(() => {
       if (pendingJumpNonce.current !== jump.nonce) return
       const container = scrollRef.current
@@ -412,7 +481,7 @@ export function useConversationNavigation({
       }, 1_600)
     })
     return () => window.cancelAnimationFrame(frame)
-  }, [historyJump?.nonce, historyResetRevision, scrollRef, scheduleVisibleHistoryUpdate, viewportActive])
+  }, [historyJump?.nonce, historyResetRevision, scrollRef, scheduleVisibleHistoryUpdate, viewportActive, cancelEndFollow])
 
   // Arm eager historical rows after scroll restoration. Lazy chat rows also
   // arm themselves when their chunk finishes mounting; otherwise Suspense can
@@ -436,6 +505,7 @@ export function useConversationNavigation({
   useEffect(() => {
     if (!viewportActive) return
     return () => {
+      cancelEndFollow()
       if (historyScrollFrame.current !== null) window.cancelAnimationFrame(historyScrollFrame.current)
       historyScrollFrame.current = null
       if (historyHighlightTimer.current !== null) window.clearTimeout(historyHighlightTimer.current)
@@ -443,7 +513,7 @@ export function useConversationNavigation({
       highlightedHistoryRow.current?.classList.remove('history-jump-target')
       highlightedHistoryRow.current = null
     }
-  }, [viewportActive])
+  }, [viewportActive, cancelEndFollow])
 
   // Programmatic scroll events (including scrollIntoView and resize clamping)
   // must not cancel an explicit history jump. Resume only after user input.
@@ -451,6 +521,7 @@ export function useConversationNavigation({
     const element = scrollRef.current
     if (!viewportActive || !element) return
     const resume = () => {
+      cancelEndFollow()
       if (pendingJumpNonce.current !== null) {
         pendingJumpNonce.current = null
         explicitHistoryEntry.current = undefined
@@ -520,7 +591,7 @@ export function useConversationNavigation({
       element.removeEventListener('pointerdown', resume)
       element.removeEventListener('keydown', key)
     }
-  }, [scrollRef, reserveSpace, hasNewerHistory, followEnd, historyResetRevision, scheduleVisibleHistoryUpdate, viewportActive])
+  }, [scrollRef, reserveSpace, hasNewerHistory, followEnd, historyResetRevision, scheduleVisibleHistoryUpdate, viewportActive, cancelEndFollow])
 
   const handleTimelineScroll = useCallback((): void => {
     const element = scrollRef.current
