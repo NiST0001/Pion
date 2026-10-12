@@ -559,8 +559,16 @@ export function useConversationNavigation({
       // still an explicit return to the end (e.g. after a history jump).
       if (event.deltaY > 0) resumeAtEnd()
     }
+    // A disclosure tap is an operation, not a reading gesture. Real wheel,
+    // touch movement or dragging outside controls still pauses immediately.
+    const insideControl = (event: Event) => {
+      const control = event.target instanceof Element
+        ? event.target.closest('input, textarea, select, button, summary, [role="button"], [contenteditable]')
+        : null
+      return control !== null && control !== element && element.contains(control)
+    }
     let touchY: number | undefined
-    const touchStart = (event: TouchEvent) => { touchY = event.touches?.[0]?.clientY; resume() }
+    const touchStart = (event: TouchEvent) => { touchY = event.touches?.[0]?.clientY; if (!insideControl(event)) resume() }
     const touchMove = (event: TouchEvent) => {
       const y = event.touches?.[0]?.clientY
       const previousY = touchY
@@ -571,9 +579,12 @@ export function useConversationNavigation({
       resume()
       if (forward) resumeAtEnd()
     }
-    const pointerMove = (event: PointerEvent) => { if (event.buttons) resume() }
+    // Keep the existing intent (including history reading); an operation
+    // cannot grant follow intent. Subsequent growth uses the resize observer.
+    const pointerDown = (event: PointerEvent) => { if (!insideControl(event)) resume() }
+    const pointerMove = (event: PointerEvent) => { if (event.buttons && !insideControl(event)) resume() }
     const key = (event: KeyboardEvent) => {
-      if (event.target instanceof Element && event.target.closest('input, textarea, select, button, [contenteditable]')) return
+      if (event.target instanceof Element && event.target.closest('input, textarea, select, button, summary, [role="button"], [contenteditable]')) return
       const forward = ['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey)
       if (consumedInside(event, element, forward ? 'newer' : 'older')) return
       if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) resume()
@@ -595,14 +606,14 @@ export function useConversationNavigation({
     element.addEventListener('touchstart', touchStart, { passive: true })
     element.addEventListener('touchmove', touchMove, { passive: true })
     element.addEventListener('pointermove', pointerMove)
-    element.addEventListener('pointerdown', resume)
+    element.addEventListener('pointerdown', pointerDown)
     element.addEventListener('keydown', key)
     return () => {
       element.removeEventListener('wheel', wheel)
       element.removeEventListener('touchstart', touchStart)
       element.removeEventListener('touchmove', touchMove)
       element.removeEventListener('pointermove', pointerMove)
-      element.removeEventListener('pointerdown', resume)
+      element.removeEventListener('pointerdown', pointerDown)
       element.removeEventListener('keydown', key)
     }
   }, [scrollRef, reserveSpace, hasNewerHistory, followEnd, historyResetRevision, scheduleVisibleHistoryUpdate, viewportActive, cancelEndFollow])

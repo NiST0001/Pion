@@ -104,6 +104,14 @@ const SubagentBatchRow = memo(function SubagentBatchRow({ task, mode, frameMode 
   const [open, setOpen] = useState(false)
   const hasSummary = Boolean(task.summary)
   const displayName = task.name.trim() ? task.name : `子代理 ${task.index + 1}`
+  const heading = <>
+    {hasSummary && <ChevronRight className="tool-subagent-chevron" size={12} aria-hidden="true" />}
+    <span className="tool-subagent-name">{displayName}</span>
+    <span className={`tool-subagent-status tool-subagent-status-${task.status}`}>
+      {SUBAGENT_STATUS_LABELS[task.status]}
+    </span>
+    {!hasSummary && task.summaryTruncated && <span className="tool-subagent-summary-notice">摘要已截断</span>}
+  </>
   // Reveal the complete transparent row (including its controls) on the
   // same clock as the tool header. Summary text keeps its own chunk/suffix
   // lifecycle; status updates and disclosure toggles never reattach this ref.
@@ -112,19 +120,12 @@ const SubagentBatchRow = memo(function SubagentBatchRow({ task, mode, frameMode 
     ref={frameMode ? assignLineRevealDelay : undefined}
     data-subagent-index={task.index}
   >
-    <div className="tool-subagent-row-head">
-      <span className="tool-subagent-name">{displayName}</span>
-      <span className={`tool-subagent-status tool-subagent-status-${task.status}`}>
-        {SUBAGENT_STATUS_LABELS[task.status]}
-      </span>
-      {hasSummary && <button type="button" className="tool-subagent-summary-toggle"
-        aria-expanded={open}
-        aria-label={`${open ? '收起' : '展开'}第 ${task.index + 1} 项子代理结果摘要：${displayName}`}
-        onClick={() => setOpen((value) => !value)}>
-        <ChevronRight size={12} aria-hidden="true" />摘要
-      </button>}
-      {!hasSummary && task.summaryTruncated && <span className="tool-subagent-summary-notice">摘要已截断</span>}
-    </div>
+    {hasSummary ? <button type="button" className="tool-subagent-row-head tool-subagent-row-toggle"
+      aria-expanded={open}
+      aria-label={`${open ? '收起' : '展开'}第 ${task.index + 1} 项子代理结果摘要：${displayName}`}
+      onClick={() => setOpen((value) => !value)}>
+      {heading}
+    </button> : <div className="tool-subagent-row-head">{heading}</div>}
     {hasSummary && <AnimatedDisclosure open={open}>
       <div className="tool-subagent-summary">
         <pre>{mode ? <ReviewRevealText text={task.summary ?? ''} mode={mode} /> : task.summary}</pre>

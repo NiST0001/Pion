@@ -88,7 +88,7 @@ export function useHistoryPaging({ scrollRef, owner, timelineLength, loadOlder, 
       touchY = y
     }
     const key = (event: KeyboardEvent) => {
-      if (event.target instanceof Element && event.target.closest('input, textarea, select, button, [contenteditable]')) return
+      if (event.target instanceof Element && event.target.closest('input, textarea, select, button, summary, [role="button"], [contenteditable]')) return
       if (['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey)) input(event, 'newer')
       if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) input(event, 'older')
     }

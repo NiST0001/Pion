@@ -116,13 +116,15 @@ describe('AgentBridge extension UI requests', () => {
     expect(ordinary.timeoutAt).toBe(ordinary.createdAt + 10 * 60_000)
     await h.bridge.resolveExtensionUiRequest(ordinary.id, { cancelled: true })
   })
-  it.each([{ cancelled: true as const }, { value: '   ' }])('pauses even an empty queue on an unanswered question (%j)', async (response) => {
+  it.each([{ cancelled: true as const }, { value: '   ' }])('does not pause an empty queue on an ordinary unanswered question (%j)', async (response) => {
     const h = await fixture()
     h.backend.activeRunId = 'current-run'
     h.handle({ type: 'extension_ui_request', id: 'ask', method: 'input', title: '请选择' })
     await h.bridge.resolveExtensionUiRequest(h.bridge.getPendingExtensionUiRequests()[0].id, response)
-    expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: 'current-run' })
-    expect(h.backend.localQueueBlocked).toBe(true)
+    expect(h.backend.queuePause).toBeUndefined()
+    expect(h.backend.localQueueBlocked).not.toBe(true)
+    expect(h.backend.turnInterrupted).not.toBe(true)
+    expect(JSON.parse(h.writes[0])).toMatchObject({ id: 'ask', ...response })
   })
 
   it('times out only the captured run and client', async () => {

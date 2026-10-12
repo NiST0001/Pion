@@ -9,6 +9,8 @@ import type { RunOperation } from '../../src/shared/operations'
 import type { SessionEntriesPage, SessionHistoryIndex, SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
 import { RunStore } from '../../src/main/run-store'
 import { SessionListCache } from '../../src/main/agent/session-list-cache'
+import { PendingRequestStore } from '../../src/main/agent/pending-requests'
+import { TOOL_PERMISSION_MARKER } from '../../src/main/tool-permissions'
 
 function messageOf(event: WireEventInput): WireMessage {
   if (event.type !== 'message_start' && event.type !== 'message_end') throw new Error('Expected a message lifecycle event')
@@ -468,6 +470,140 @@ describe('AgentBridge live session state', () => {
 })
 
 describe('AgentBridge send and local queue', () => {
+  async function interactionHarness() {
+    const h = await harness()
+    const writes = vi.fn()
+    Object.assign(h.backend.client, { process: { stdin: { writable: true, write: writes } } })
+    Object.assign(h.bridge, {
+      pendingRequests: new PendingRequestStore({
+        pushToolPermissionRequests: () => undefined, pushExtensionUiRequests: () => undefined
+      }),
+      pushToolPermissionRequests: vi.fn(), pushExtensionUiRequests: vi.fn(),
+      notifyToolPermissionRequested: vi.fn()
+    })
+    const bridge = h.bridge as unknown as AgentBridge
+    const handle = (event: unknown) => (bridge as unknown as {
+      handleExtensionUiRequest(backend: BackendRecord, event: unknown): boolean
+    }).handleExtensionUiRequest(h.backend, event)
+    const ask = (timeout = 60_000, method: 'input' | 'confirm' = 'input') => {
+      handle({ type: 'extension_ui_request', id: 'ask', method, title: 'Question',
+        ...(method === 'confirm' ? { message: 'Proceed?' } : {}), timeout })
+      return bridge.getPendingExtensionUiRequests()[0].id
+    }
+    const permission = (timeout = 60_000) => {
+      handle({ type: 'extension_ui_request', id: 'permission', method: 'select', timeout,
+        title: `${TOOL_PERMISSION_MARKER}${JSON.stringify({ cwd: h.backend.cwd, toolName: 'write',
+          category: 'write', policyCategories: ['write'], summary: 'write file', detail: 'file',
+          risks: [], canRemember: false })}` })
+      return bridge.getPendingToolPermissionRequests()[0].id
+    }
+    return { ...h, interactionBridge: bridge, writes, ask, permission }
+  }
+
+  it.each(['cancel', 'blank', 'negative', 'deny'] as const)(
+    'does not latch on %s and auto-dispatches only after normal settle and checkpoint cleanup', async (response) => {
+      const h = await interactionHarness()
+      const completion = deferred<void>()
+      Object.assign(h.bridge, { refreshRunCheckpoint: vi.fn(() => completion.promise) })
+      await h.bridge.send('first')
+      const firstId = h.backend.activeRunId!
+      h.emit('agent_start')
+      const queued = h.addQueued('later')
+      if (response === 'deny') {
+        await h.interactionBridge.resolveToolPermission(h.permission(), 'deny')
+        expect(JSON.parse(h.writes.mock.calls[0][0])).toMatchObject({ id: 'permission', value: 'deny' })
+      } else {
+        await h.interactionBridge.resolveExtensionUiRequest(h.ask(60_000, response === 'negative' ? 'confirm' : 'input'),
+          response === 'cancel' ? { cancelled: true } : response === 'blank' ? { value: '   ' } : { confirmed: false })
+      }
+      expect(h.backend.queuePause?.paused).not.toBe(true)
+      expect(h.backend.turnInterrupted).not.toBe(true)
+      expect(h.backend.queueAutoReady).toBe(false)
+      expect(h.prompt).toHaveBeenCalledTimes(1)
+      h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
+      await dispatchGap()
+      expect(h.prompt).toHaveBeenCalledTimes(1)
+      h.emit('agent_settled')
+      await dispatchGap()
+      expect(h.runStore.get(firstId)?.state).toBe('completed')
+      expect(h.prompt).toHaveBeenCalledTimes(1)
+      completion.resolve()
+      await dispatchGap()
+      expect(h.prompt).toHaveBeenNthCalledWith(2, 'later', [])
+      expect(h.backend.activeRunId).toBe(queued.id)
+      await h.runStore.flush()
+    }
+  )
+
+  it.each(['tool-error', 'deny-tool-error', 'question-timeout', 'permission-timeout'] as const)(
+    'retains the %s pause even after a normal assistant stop and settle', async (failure) => {
+      const h = await interactionHarness()
+      vi.useFakeTimers()
+      await h.bridge.send('first')
+      const firstId = h.backend.activeRunId!
+      h.emit('agent_start')
+      if (failure === 'tool-error' || failure === 'deny-tool-error') {
+        h.emit('tool_execution_start', { toolCallId: 'write-call', toolName: 'write' })
+        if (failure === 'deny-tool-error') {
+          await h.interactionBridge.resolveToolPermission(h.permission(), 'deny')
+          expect(h.backend.queuePause?.paused).not.toBe(true)
+        }
+        h.emit('tool_execution_end', { toolCallId: 'write-call', toolName: 'write', isError: true })
+      } else {
+        if (failure === 'question-timeout') h.ask(1_000)
+        else h.permission(1_000)
+        await vi.advanceTimersByTimeAsync(1_250)
+        expect(failure === 'question-timeout' ? h.interactionBridge.getPendingExtensionUiRequests()
+          : h.interactionBridge.getPendingToolPermissionRequests()).toEqual([])
+      }
+      // Error/timeout latches even with no queued messages yet.
+      expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: firstId })
+      expect(h.backend.turnInterrupted).toBe(true)
+      const queued = h.addQueued('later')
+      h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
+      h.emit('agent_settled')
+      await dispatchGap()
+      expect(h.prompt).toHaveBeenCalledTimes(1)
+      expect(h.runStore.get(firstId)?.state).toBe('interrupted')
+      expect(h.runStore.get(queued.id)?.state).toBe('queued')
+      expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: firstId })
+      await h.runStore.flush()
+    }
+  )
+
+  it.each([
+    ['cancel', 'unknown'], ['deny', 'unknown'], ['cancel', 'tool-error'], ['deny', 'tool-error'],
+    ['cancel', 'timeout'], ['deny', 'timeout']
+  ] as const)('ordinary %s does not clear an existing %s queue pause', async (response, failure) => {
+    const h = await interactionHarness()
+    vi.useFakeTimers()
+    await h.bridge.send('first')
+    h.emit('agent_start')
+    if (failure === 'tool-error') {
+      h.emit('tool_execution_start', { toolCallId: 'old-call', toolName: 'read' })
+      h.emit('tool_execution_end', { toolCallId: 'old-call', toolName: 'read', isError: true })
+    } else if (failure === 'timeout') {
+      h.ask(1_000)
+      await vi.advanceTimersByTimeAsync(1_000)
+    }
+    h.emit('agent_settled')
+    const pause = { ...h.backend.queuePause! }
+    await dispatchGap()
+    await h.bridge.send('unrelated')
+    h.emit('agent_start')
+    const queued = h.addQueued('later')
+    if (response === 'cancel') await h.interactionBridge.resolveExtensionUiRequest(h.ask(), { cancelled: true })
+    else await h.interactionBridge.resolveToolPermission(h.permission(), 'deny')
+    expect(h.backend.queuePause).toEqual(pause)
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    expect(h.backend.queuePause).toEqual(pause)
+    expect(h.prompt).toHaveBeenCalledTimes(2)
+    expect(h.runStore.get(queued.id)?.state).toBe('queued')
+    await h.runStore.flush()
+  })
+
   it.each([undefined, 'length', 'toolUse', 'unknown', 'aborted', 'error'])(
     'keeps queues paused without normal stop evidence (%s)', async (stopReason) => {
       const h = await harness()
@@ -506,6 +642,78 @@ describe('AgentBridge send and local queue', () => {
     await dispatchGap()
     expect(h.prompt).toHaveBeenLastCalledWith('later', [])
     expect(h.prompt).toHaveBeenCalledTimes(2)
+    await h.runStore.flush()
+  })
+
+  it.each(['rpc-first', 'completion-first'] as const)(
+    'pumps one follow-up after normal settle only when both pending leases close (%s)', async (order) => {
+      const h = await harness()
+      const rpc = deferred<Disposition>()
+      const completion = deferred<void>()
+      h.prompt.mockImplementationOnce(() => rpc.promise)
+      Object.assign(h.bridge, { refreshRunCheckpoint: vi.fn(() => completion.promise) })
+      const first = h.addQueued('first')
+      const second = h.addQueued('second')
+      const third = h.addQueued('third')
+      h.bridge.dispatchNextLocalFollowUp(h.backend)
+      const dispatch = h.backend.localQueueDispatchPromise!
+      await dispatchGap()
+      h.emit('agent_start')
+      // Task snapshots are display state, not queue completion evidence or gates.
+      h.emit('entry_appended', { entry: { type: 'custom', customType: 'pion-task-state', data: {
+        native: 'pion', tasks: [{ id: 1, subject: 'unfinished task', status: 'pending' }], nextId: 2
+      } } })
+      h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
+      h.emit('agent_settled')
+      await dispatchGap()
+      expect(h.runStore.get(first.id)?.state).toBe('completed')
+      expect(h.backend.localQueueDispatchPromise).toBe(dispatch)
+      expect(h.prompt).toHaveBeenCalledTimes(1)
+      if (order === 'rpc-first') {
+        rpc.resolve('started')
+        await dispatch
+        await dispatchGap()
+        expect(h.backend.runCompletionPromise).toBeDefined()
+        expect(h.prompt).toHaveBeenCalledTimes(1)
+        completion.resolve()
+      } else {
+        completion.resolve()
+        await dispatchGap()
+        expect(h.backend.localQueueDispatchPromise).toBe(dispatch)
+        expect(h.prompt).toHaveBeenCalledTimes(1)
+        rpc.resolve('started')
+        await dispatch
+      }
+      await dispatchGap()
+      expect(h.prompt).toHaveBeenNthCalledWith(2, 'second', [])
+      expect(h.prompt).toHaveBeenCalledTimes(2)
+      expect(h.backend.activeRunId).toBe(second.id)
+      expect(h.runStore.get(third.id)?.state).toBe('queued')
+      await h.runStore.flush()
+    }
+  )
+
+  it('does not pump a new generation when an older settled auto-dispatch RPC closes', async () => {
+    const h = await harness()
+    const rpc = deferred<Disposition>()
+    h.prompt.mockImplementationOnce(() => rpc.promise)
+    h.addQueued('first')
+    const remaining = h.addQueued('remaining')
+    h.bridge.dispatchNextLocalFollowUp(h.backend)
+    const dispatch = h.backend.localQueueDispatchPromise!
+    await dispatchGap()
+    h.emit('agent_start')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    h.emit('agent_start')
+    rpc.resolve('handled')
+    await dispatch
+    await dispatchGap()
+    expect(h.backend.busy).toBe(true)
+    expect(h.backend.activeRunId).toBeUndefined()
+    expect(h.prompt).toHaveBeenCalledTimes(1)
+    expect(h.runStore.get(remaining.id)?.state).toBe('queued')
     await h.runStore.flush()
   })
 

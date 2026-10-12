@@ -50,8 +50,10 @@ export function QueuedMessagesCard({
   ]
   const [expanded, setExpanded] = useState(() => loadPanelExpanded('queue', sessionKey))
   const [sendingKey, setSendingKey] = useState<string | null>(null)
-  const expandedHeight = Math.min(360, Math.max(queuePause?.paused ? 172 : 102,
-    52 + items.length * 34 + (queuePause?.paused ? 100 : 0)))
+  const pausedRunId = queuePause?.paused ? queuePause.pausedRunId : undefined
+  const canContinue = Boolean(pausedRunId && onContinueCurrent)
+  const expandedHeight = Math.min(360, Math.max(102,
+    52 + items.length * 34 + (canContinue ? 34 : 0)))
   const panelStyle = {
     '--task-panel-expanded-height': `${expandedHeight}px`
   } as CSSProperties
@@ -105,11 +107,9 @@ export function QueuedMessagesCard({
           <span className="task-panel-caption">{caption}</span>
         </button>
 
-        {queuePause?.paused && <div className="queue-pause-note" role="status">
-          <span>{queuePause.reason || '本轮未确认正常完成，排队消息不会自动发送。'}</span>
-          {queuePause.pausedRunId && onContinueCurrent && <button type="button" disabled={agentBusy || continueBusy}
-            onClick={() => void onContinueCurrent(queuePause.pausedRunId!)}>继续当前任务</button>}
-          <span>手动发送只处理所选消息，不解除其余队列的暂停。</span>
+        {canContinue && <div className="queue-pause-note">
+          <button type="button" disabled={agentBusy || continueBusy}
+            onClick={() => { if (pausedRunId) void onContinueCurrent?.(pausedRunId) }}>继续当前任务</button>
         </div>}
         <div className="task-panel-list-shell queue-panel-list-shell">
           <div

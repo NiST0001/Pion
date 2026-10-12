@@ -2,6 +2,7 @@
 
 import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -58,6 +59,35 @@ describe('ToolCallItem', () => {
     }
   }
 
+  it('expands from the whole task heading without a separate summary button or affecting other tasks', () => {
+    const { container } = render(<ToolCallItem tool={batchTool} noReveal />)
+    const toggle = screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' })
+    expect(toggle).toHaveClass('tool-subagent-row-head', 'tool-subagent-row-toggle')
+    expect(toggle).toContainElement(screen.getByText('检查入口'))
+    expect(toggle).toContainElement(screen.getByText('已完成'))
+    expect(screen.queryByText('摘要', { exact: true })).not.toBeInTheDocument()
+    expect(container.querySelector('.tool-subagent-summary-toggle')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('检查入口'))
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: '展开第 3 项子代理结果摘要：检查样式' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('button', { name: '展开子代理工具详情' })).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(screen.getByText('已完成'))
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByText('执行中').closest('button')).toBeNull()
+  })
+
+  it('supports native Enter and Space toggling of the focused task heading', async () => {
+    const user = userEvent.setup()
+    render(<ToolCallItem tool={batchTool} noReveal />)
+    const toggle = screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' })
+    toggle.focus()
+    await user.keyboard('{Enter}')
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await user.keyboard(' ')
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(toggle).toHaveFocus()
+  })
+
   it('shows all four real batch tasks and mixed states without expanding aggregate details', () => {
     const { container } = render(<ToolCallItem tool={batchTool} noReveal />)
     const head = screen.getByRole('button', { name: '展开子代理工具详情' })
@@ -87,7 +117,7 @@ describe('ToolCallItem', () => {
       expect(line).not.toHaveAttribute('data-line-reveal-ready')
       expect(line.style.getPropertyValue('--screen-text-reveal-delay')).toBe('')
     }
-    // Name, state, summary button and background all belong to the same line,
+    // Name, state and whole-row toggle belong to the same transparent line,
     // not independently animated name characters or synthetic SDK calls.
     expect(rows[0].querySelectorAll('.screen-text-reveal-line')).toHaveLength(0)
     expect(rows[0]).toContainElement(screen.getByRole('button', { name: '展开第 1 项子代理结果摘要：检查入口' }))
@@ -244,8 +274,8 @@ describe('ToolCallItem', () => {
     expect(chatCss).toMatch(/\.tool-subagent-summary pre\s*\{[^}]*background: transparent;/)
     expect(chatCss).toMatch(/\.tool-subagent-status\s*\{[^}]*background: var\(--bg-elev\);/)
     expect(chatCss).toContain('.tool-subagent-status-failed { color: var(--danger); }')
-    expect(chatCss).toContain('.tool-subagent-summary-toggle:hover { background: var(--bg-elev); color: var(--fg); }')
-    expect(chatCss).toContain('html.pion-keyboard-focus .tool-subagent-summary-toggle:focus-visible')
+    expect(chatCss).toContain('.tool-subagent-row-toggle:hover { background: var(--bg-elev); color: var(--fg); }')
+    expect(chatCss).toContain('html.pion-keyboard-focus .tool-subagent-row-toggle:focus-visible')
   })
 
   it('preserves unfinished summary fades through fast append and terminal status updates', () => {
@@ -379,7 +409,7 @@ describe('ToolCallItem', () => {
     expect(screen.getAllByRole('listitem')).toHaveLength(8)
     expect(screen.getByText('任务 8')).toBeVisible()
     expect(screen.getByText('摘要已截断')).toBeVisible()
-    expect(container.querySelector('.tool-subagent-summary-toggle')).not.toBeInTheDocument()
+    expect(container.querySelector('.tool-subagent-row-toggle')).not.toBeInTheDocument()
   })
 
   it('retains generic legacy subagent details without guessing a task count', () => {

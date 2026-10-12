@@ -162,6 +162,178 @@ it('uses immediate positioning for reduced motion without scheduling growth anim
   expect(h.element.scrollTop).toBe(1648)
 })
 
+// Match the real tool/subagent button, thinking <summary>, and accessible
+// disclosure paths without depending on labels or changing their event owners.
+function disclosure(element: HTMLElement, tag: 'button' | 'summary' | 'div') {
+  const control = document.createElement(tag)
+  if (tag === 'div') { control.setAttribute('role', 'button'); control.tabIndex = 0 }
+  const child = document.createElement('span')
+  control.append(child)
+  if (tag === 'summary') {
+    const details = document.createElement('details')
+    details.append(control)
+    element.append(details)
+  } else element.append(control)
+  return { control, child }
+}
+
+it.each(['button', 'summary', 'div'] as const)('keeps smooth end follow through a %s disclosure click and later layout growth', (tag) => {
+  const h = setup()
+  const { control, child } = disclosure(h.element, tag)
+  const click = vi.fn()
+  control.addEventListener('click', click)
+  child.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+  child.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  expect(click).toHaveBeenCalledOnce()
+  h.layout(300)
+  expect(h.element.scrollTop).toBe(1600)
+  h.frame()
+  expect(h.element.scrollTop).toBeGreaterThan(1600)
+  expect(h.element.scrollTop).toBeLessThan(1900)
+  h.layout(100) // disclosure animation/late Markdown continues growing
+  h.settle()
+  expect(h.element.scrollTop).toBe(2000)
+  expect(h.props.loadOlder).not.toHaveBeenCalled()
+  expect(h.props.loadNewer).not.toHaveBeenCalled()
+})
+
+it('keeps an in-flight follow curve when a disclosure is clicked before it catches up', () => {
+  const h = setup()
+  h.append(300)
+  h.frame()
+  const before = h.element.scrollTop
+  const { child } = disclosure(h.element, 'button')
+  child.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+  h.layout(100)
+  expect(h.element.scrollTop).toBe(before)
+  h.settle()
+  expect(h.element.scrollTop).toBe(2000)
+})
+
+it('does not let a control outside the viewport suppress a scrollbar gesture', () => {
+  const h = setup()
+  const wrapper = document.createElement('div')
+  wrapper.setAttribute('role', 'button')
+  wrapper.append(h.element)
+  h.element.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+  h.layout(300)
+  h.settle()
+  expect(h.element.scrollTop).toBe(1600)
+})
+
+it.each(['button', 'summary', 'div'] as const)('does not resume history reading when a %s disclosure is clicked', (tag) => {
+  const h = setup()
+  h.scroll(600)
+  const { child } = disclosure(h.element, tag)
+  child.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+  child.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  h.layout(300)
+  h.append(100)
+  h.settle()
+  expect(h.element.scrollTop).toBe(600)
+})
+
+it.each(['button', 'summary', 'div'] as const)('preserves existing follow intent on keyboard disclosure activation for %s', (tag) => {
+  const h = setup()
+  const { control } = disclosure(h.element, tag)
+  control.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }))
+  control.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  expect(h.props.loadOlder).not.toHaveBeenCalled()
+  expect(h.props.loadNewer).not.toHaveBeenCalled()
+  h.layout(300)
+  h.settle()
+  expect(h.element.scrollTop).toBe(1900)
+  h.scroll(600)
+  control.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }))
+  h.layout(300)
+  h.settle()
+  expect(h.element.scrollTop).toBe(600)
+})
+
+it.each(['background', 'scrollbar', 'text', 'image'] as const)('immediately cancels follow on %s pointerdown, not only after scrolling', (target) => {
+  const h = setup()
+  h.append(100)
+  const late = h.pendingFrame()
+  const node = target === 'scrollbar' ? h.element : document.createElement(target === 'image' ? 'img' : 'div')
+  if (node !== h.element) h.element.append(node)
+  node.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+  act(() => late.forEach(callback => callback(100)))
+  h.layout(300)
+  h.settle()
+  expect(h.element.scrollTop).toBe(1600)
+})
+
+it('cancels for wheel over a control and held-pointer dragging outside controls', () => {
+  for (const event of [new WheelEvent('wheel', { deltaY: -100, bubbles: true }),
+    new MouseEvent('pointermove', { buttons: 1, bubbles: true })]) {
+    const h = setup()
+    const { child } = disclosure(h.element, 'button')
+    const target = event.type === 'pointermove' ? h.element : child
+    target.dispatchEvent(event)
+    h.layout(300)
+    h.settle()
+    expect(h.element.scrollTop).toBe(1600)
+    h.unmount()
+  }
+})
+
+it('keeps disclosure taps and small pointer movement following, but pauses for a real touch scroll', () => {
+  const h = setup()
+  const { child } = disclosure(h.element, 'button')
+  const touch = (type: string, y: number) => {
+    const event = new Event(type, { bubbles: true })
+    Object.defineProperty(event, 'touches', { value: [{ clientY: y }] })
+    child.dispatchEvent(event)
+  }
+  touch('touchstart', 200)
+  child.dispatchEvent(new MouseEvent('pointermove', { buttons: 1, bubbles: true }))
+  h.layout(300)
+  h.settle()
+  expect(h.element.scrollTop).toBe(1900)
+  touch('touchmove', 220)
+  h.layout(300)
+  h.settle()
+  expect(h.element.scrollTop).toBe(1900)
+})
+
+it('leaves nested output scrolling local and footer editing out of reading gestures', () => {
+  const h = setup()
+  const output = document.createElement('pre')
+  output.style.overflowY = 'auto'
+  Object.defineProperties(output, { clientHeight: { value: 100 }, scrollHeight: { value: 500 } })
+  output.scrollTop = 100
+  const input = document.createElement('textarea')
+  h.element.append(output, input)
+  output.dispatchEvent(new WheelEvent('wheel', { deltaY: -50, bubbles: true }))
+  input.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))
+  h.layout(300)
+  h.settle()
+  expect(h.element.scrollTop).toBe(1900)
+  expect(h.props.loadOlder).not.toHaveBeenCalled()
+})
+
+it('does not release an explicit history jump or its selected owner on a control click', () => {
+  const h = setup()
+  const row = document.createElement('div')
+  row.className = 'row-user'
+  row.dataset.entryId = 'target'
+  row.getBoundingClientRect = () => ({ top: 752 - h.element.scrollTop } as DOMRect)
+  h.element.append(row)
+  const { child } = disclosure(row, 'button')
+  h.rerender({ ...h.props, historyJump: { entryId: 'target', nonce: 1 } })
+  // Clicking while the jump frame is still pending must not cancel its owner.
+  child.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+  h.settle()
+  expect(h.element.scrollTop).toBe(600)
+  expect(h.result.current.visibleHistoryEntryId).toBe('target')
+  child.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  h.layout(300)
+  h.settle()
+  expect(h.element.scrollTop).toBe(600)
+  expect(h.result.current.visibleHistoryEntryId).toBe('target')
+})
+
 it('invalidates smooth follow on a real scope change or hidden viewport', () => {
   const h = setup()
   h.append(48)

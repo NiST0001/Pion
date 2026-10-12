@@ -772,7 +772,8 @@ export class AgentBridge {
         throw new Error('发起请求的 Agent 会话已关闭')
       }
     }
-    if (effectiveResolution === 'deny') this.pauseQueue(backend, '工具权限被拒绝，本轮需显式继续。', pending.scope?.runId)
+    // A denial still blocks execution; only a resulting tool error (or timeout)
+    // latches the queue. It is not, by itself, an interrupted assistant turn.
     this.respondToExtensionUi(pending.scope!.client, pending.extensionRequestId, { value: effectiveResolution })
     this.clearToolPermissionRequest(requestId)
     return policy
@@ -807,10 +808,8 @@ export class AgentBridge {
       this.clearExtensionUiRequest(requestId)
       throw new Error('发起请求的 Agent 会话已关闭')
     }
-    if (cancelled || ('value' in response && !response.value.trim())
-      || ('confirmed' in response && !response.confirmed)) {
-      this.pauseQueue(backend, '提问已取消或未获得有效回答，本轮需显式继续。', pending.scope?.runId)
-    }
+    // Ordinary cancellation/negative answers do not establish or clear a pause.
+    // Timeout callbacks latch independently, before sending their cancellation.
     this.respondToExtensionUi(pending.scope!.client, pending.extensionRequestId, response)
     this.clearExtensionUiRequest(requestId)
   }

@@ -1103,19 +1103,24 @@ html.pion-keyboard-focus .thinking summary:focus-visible {
 .tool-subagent-status-completed { color: var(--ok); }
 .tool-subagent-status-failed { color: var(--danger); }
 
-.tool-subagent-summary-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px 5px;
+.tool-subagent-row-toggle {
+  width: 100%;
+  min-height: 28px;
+  padding: 3px 0;
+  border: 0;
   border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--fg-dim);
-  font-size: 11px;
+  font: inherit;
+  text-align: left;
+  flex-wrap: nowrap;
+  cursor: pointer;
 }
-
-.tool-subagent-summary-toggle:hover { background: var(--bg-elev); color: var(--fg); }
-.tool-subagent-summary-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
-html.pion-keyboard-focus .tool-subagent-summary-toggle:focus-visible {
+.tool-subagent-row-toggle .tool-subagent-name { flex: 1 1 0; }
+.tool-subagent-chevron { flex: 0 0 auto; }
+.tool-subagent-row-toggle:hover { background: var(--bg-elev); color: var(--fg); }
+.tool-subagent-row-toggle[aria-expanded="true"] .tool-subagent-chevron { transform: rotate(90deg); }
+html.pion-keyboard-focus .tool-subagent-row-toggle:focus-visible {
   outline: 2px solid var(--accent-strong);
   outline-offset: 2px;
 }
@@ -1136,7 +1141,7 @@ html.pion-keyboard-focus .tool-subagent-summary-toggle:focus-visible {
 @media (forced-colors: active) {
   .tool-subagent-row { background: transparent; color: CanvasText; }
   .tool-subagent-status { background: Canvas; color: CanvasText; }
-  .tool-subagent-summary-toggle:hover { background: Highlight; color: HighlightText; }
-  html.pion-keyboard-focus .tool-subagent-summary-toggle:focus-visible { outline-color: Highlight; }
+  .tool-subagent-row-toggle:hover { background: Highlight; color: HighlightText; }
+  html.pion-keyboard-focus .tool-subagent-row-toggle:focus-visible { outline-color: Highlight; }
 }
 
