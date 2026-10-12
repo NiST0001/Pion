@@ -70,6 +70,7 @@ export interface RunOperation {
   kind: 'prompt' | 'follow-up' | 'recovery' | 'verification-repair'
   state: RunOperationState
   createdAt: number
+  /** Main-process RPC dispatch-attempt time, not a receipt proving SDK acceptance. */
   dispatchedAt?: number
   agentStartedAt?: number
   agentEndedAt?: number

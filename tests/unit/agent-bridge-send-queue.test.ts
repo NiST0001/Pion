@@ -25,6 +25,7 @@ interface BridgeHarness {
   startVerificationRepair(sessionPath: string, cwd: string, message: string): Promise<RunOperation | null>
   sendQueuedMessage(kind: 'followUp', index: number): Promise<void>
   dispatchNextLocalFollowUp(backend: BackendRecord): void
+  restoreQueuedRuns(backend: BackendRecord): void
   createRun(backend: BackendRecord, state: null, message: string, images: [], kind: 'follow-up', phase: 'queued'): RunOperation
   activeKey: string
   sessionSelectionGeneration: number
@@ -878,19 +879,34 @@ describe('AgentBridge send and local queue', () => {
     await h.runStore.flush()
   })
 
-  it('restores a rejected auto-dispatch without reserving its queued ledger for future events', async () => {
+  it.each(['auto', 'promoted'] as const)('isolates a rejected %s RPC without requeuing or releasing busy', async (path) => {
     const h = await harness()
-    const queued = h.addQueued('retry')
-    h.prompt.mockRejectedValue(new Error('preflight failed'))
-    h.bridge.dispatchNextLocalFollowUp(h.backend)
-    await dispatchGap()
-    if (h.backend.localQueueDispatchPromise) await h.backend.localQueueDispatchPromise
-    expect(h.backend.activeRunId).toBeUndefined()
-    expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual([queued.id])
-    expect(h.runStore.get(queued.id)?.state).toBe('queued')
+    const queued = h.addQueued('same')
+    const remaining = h.addQueued('same')
+    h.prompt.mockRejectedValueOnce(new Error('network disconnected'))
+    if (path === 'auto') {
+      h.bridge.dispatchNextLocalFollowUp(h.backend)
+      await h.backend.localQueueDispatchPromise
+    } else await expect(h.bridge.sendQueuedMessage('followUp', 0)).rejects.toThrow('network disconnected')
+    expect(h.backend.activeRunId).toBe(queued.id)
+    expect(h.backend.busy).toBe(true)
+    expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual([remaining.id])
+    expect(h.backend.pendingRunIds).not.toContain(queued.id)
+    expect(h.runStore.get(queued.id)).toMatchObject({ state: 'interrupted', dispatchedAt: expect.any(Number),
+      interruptedAt: expect.any(Number) })
+    expect(h.runStore.get(queued.id)?.settledAt).toBeUndefined()
+    expect(h.backend.queuePause?.paused).toBe(true)
+    await h.bridge.send('new')
+    expect(h.prompt).toHaveBeenCalledTimes(1)
     h.emit('agent_start')
-    expect(h.backend.activeRunId).toBeUndefined()
-    expect(h.runStore.get(queued.id)?.agentStartedAt).toBeUndefined()
+    expect(h.backend.activeRunId).toBe(queued.id)
+    expect(h.runStore.get(queued.id)?.state).toBe('running')
+    h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
+    h.emit('agent_settled')
+    await dispatchGap()
+    expect(h.backend.busy).toBe(false)
+    expect(h.backend.queuePause?.paused).toBe(true)
+    expect(h.prompt).toHaveBeenCalledTimes(1)
     await h.runStore.flush()
   })
 
@@ -1169,9 +1185,29 @@ describe('AgentBridge send and local queue', () => {
     await h.bridge.queue('local second')
     result.reject(new Error('event-free failure'))
     await first
-    expect(h.backend.busy).toBe(false)
-    expect(h.runStore.get(activeId)?.state).toBe('failed')
+    expect(h.backend.busy).toBe(true)
+    expect(h.runStore.get(activeId)?.state).toBe('interrupted')
+    expect(h.runStore.get(activeId)?.dispatchedAt).toEqual(expect.any(Number))
     expect(h.backend.localFollowUps?.map((item) => item.text)).toEqual(['local second'])
+    await h.runStore.flush()
+  })
+
+  it('does not expose an uncertain direct insertion as an unsent queue item', async () => {
+    const h = await harness()
+    await h.bridge.send('active')
+    h.emit('agent_start')
+    h.state.isStreaming = true
+    const result = deferred<'queued' | 'handled'>()
+    h.steer.mockImplementationOnce(() => result.promise)
+    const sending = h.bridge.send('inserted').catch((error: unknown) => error)
+    await dispatchGap()
+    h.emit('queue_update', { steering: ['inserted'], followUp: [] })
+    result.reject(new Error('network disconnected'))
+    await sending
+    expect(h.backend.directSteering).toEqual(['inserted'])
+    expect(h.backend.queuePause?.paused).toBe(true)
+    expect(h.backend.busy).toBe(true)
+    expect(h.backend.localFollowUps ?? []).toEqual([])
     await h.runStore.flush()
   })
 
@@ -1213,6 +1249,120 @@ describe('AgentBridge send and local queue', () => {
     expect(h.backend.companionRunIds).toContain(queued.id)
     expect(h.runStore.get(queued.id)?.state).toBe('running')
     await h.runStore.flush()
+  })
+
+  it.each(['completed', 'failed'] as const)('preserves an already %s queued-card ledger on manual steering', async (terminal) => {
+    const h = await harness()
+    await h.bridge.send('active')
+    h.emit('agent_start')
+    h.state.isStreaming = true
+    const queued = h.addQueued('already ran')
+    h.runStore.update(queued.id, (run) => {
+      run.state = terminal
+      run.dispatchedAt = 1
+      run.usage.total = 12
+      run.tools.push({ toolCallId: 'tool', name: 'read', state: 'completed', startedAt: 1 })
+    })
+    const before = h.runStore.get(queued.id)
+    await expect(h.bridge.sendQueuedMessage('followUp', 0)).rejects.toThrow('不能作为未发送消息重发')
+    expect(h.runStore.get(queued.id)).toEqual(before)
+    expect(h.steer).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
+  it('retains a rejected promoted steering input as unknown, not unsent', async () => {
+    const h = await harness()
+    await h.bridge.send('active')
+    h.emit('agent_start')
+    h.state.isStreaming = true
+    const first = h.addQueued('same')
+    const second = h.addQueued('same')
+    h.steer.mockRejectedValueOnce(new Error('network disconnected'))
+    await expect(h.bridge.sendQueuedMessage('followUp', 0)).rejects.toThrow('network disconnected')
+    expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual([second.id])
+    expect(h.backend.pendingRunIds).not.toContain(first.id)
+    expect(h.backend.companionRunIds).toContain(first.id)
+    expect(h.runStore.get(first.id)).toMatchObject({ state: 'interrupted', dispatchedAt: expect.any(Number) })
+    expect(h.backend.busy).toBe(true)
+    expect(h.backend.queuePause?.paused).toBe(true)
+    expect(h.backend.directSteering).toEqual([])
+    await h.runStore.flush()
+  })
+
+  it.each(['auto', 'promoted'] as const)('does not misclassify an internal %s lease rejection as an invoked RPC', async (path) => {
+    const h = await harness()
+    const queued = h.addQueued('unsent')
+    const internals = h.bridge as unknown as { dispatchPrompt(...args: unknown[]): Promise<void> }
+    const original = internals.dispatchPrompt.bind(internals)
+    vi.spyOn(internals, 'dispatchPrompt').mockImplementationOnce(async (...args) => {
+      h.emit('compaction_start')
+      await original(...args)
+    })
+    if (path === 'auto') {
+      h.bridge.dispatchNextLocalFollowUp(h.backend)
+      await h.backend.localQueueDispatchPromise
+    } else await expect(h.bridge.sendQueuedMessage('followUp', 0)).rejects.toThrow()
+    expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.runStore.get(queued.id)?.state).toBe('queued')
+    expect(h.runStore.get(queued.id)?.dispatchedAt).toBeUndefined()
+    expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual([queued.id])
+    expect(h.backend.busy).toBe(true)
+    await h.runStore.flush()
+  })
+
+  it.each(['auto', 'promoted'] as const)('does not let late rejected %s RPCs rewrite a replacement owner', async (path) => {
+    const h = await harness()
+    const first = h.addQueued('same')
+    const second = h.addQueued('same')
+    const result = deferred<Disposition>()
+    h.prompt.mockImplementationOnce(() => result.promise)
+    let sending: Promise<void>
+    if (path === 'auto') {
+      h.bridge.dispatchNextLocalFollowUp(h.backend)
+      sending = h.backend.localQueueDispatchPromise!
+    } else sending = h.bridge.sendQueuedMessage('followUp', 0)
+    const observed = sending.catch((error: unknown) => error)
+    await dispatchGap()
+    const replacement = { ...h.backend, activeRunId: 'new-owner', busy: true }
+    h.pool.set(h.backend.key, replacement)
+    const before = h.runStore.get(first.id)
+    result.reject(new Error('old RPC rejection'))
+    await observed
+    expect(h.runStore.get(first.id)).toEqual(before)
+    expect(replacement.activeRunId).toBe('new-owner')
+    expect(replacement.busy).toBe(true)
+    expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual([second.id])
+    await h.runStore.flush()
+  })
+
+  it.each(['dispatchedAt', 'agentStartedAt', 'tools'] as const)('restores only truly unsent IDs, excluding queued records with %s evidence', async (evidence) => {
+    const h = await harness()
+    const old = h.addQueued('same')
+    const unsent = h.addQueued('same')
+    const duplicate = h.addQueued('same')
+    const images = [{ type: 'image' as const, data: 'AA==', mimeType: 'image/png' }]
+    h.runStore.update(unsent.id, (run) => { run.prompt.images = images })
+    h.runStore.update(old.id, (run) => {
+      if (evidence === 'tools') run.tools.push({ toolCallId: 'real-tool', name: 'read', state: 'completed', startedAt: 1 })
+      else run[evidence] = 1
+      run.usage.total = 12
+    })
+    await h.runStore.flush()
+    const restored = new RunStore(h.runStore.filePath)
+    await restored.load()
+    Object.assign(h.bridge, { runStore: restored })
+    h.backend.localFollowUps = []
+    h.backend.pendingRunIds = []
+    h.bridge.restoreQueuedRuns(h.backend)
+    h.bridge.restoreQueuedRuns(h.backend)
+    expect(h.backend.localFollowUps).toHaveLength(2)
+    expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual(expect.arrayContaining([unsent.id, duplicate.id]))
+    expect(h.backend.localFollowUps?.find((item) => item.runId === unsent.id)?.images).toEqual(images)
+    expect(restored.get(old.id)).toMatchObject({ state: 'interrupted', usage: { total: 12 } })
+    if (evidence === 'tools') expect(restored.get(old.id)?.tools).toHaveLength(1)
+    else expect(restored.get(old.id)?.[evidence]).toBe(1)
+    expect(h.prompt).not.toHaveBeenCalled()
+    await restored.flush()
   })
 
   it('ignores late handled responses from a replaced backend', async () => {

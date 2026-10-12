@@ -56,6 +56,7 @@ describe('ChatTimeline empty history state', () => {
     expect(view.queryByRole('button', { name: '分叉' })).not.toBeInTheDocument()
     expect(view.queryByRole('button', { name: '撤销' })).not.toBeInTheDocument()
     expect(view.queryByRole('button', { name: '撤销本轮' })).not.toBeInTheDocument()
+    fireEvent.click(view.getByRole('button', { name: '展开工具调用（1次）' }))
     const toolHeader = view.getByRole('button', { name: '展开读取工具详情' })
     fireEvent.click(toolHeader)
     expect(view.container.querySelector('.tool-body .tool-output')).toHaveTextContent('工具输出')

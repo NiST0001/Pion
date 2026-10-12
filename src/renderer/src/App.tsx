@@ -1030,6 +1030,7 @@ export function App(): ReactElement {
             </div>
             <div className="chat-stage">
               {viewingChild && <ChatTimeline
+                scopeKey={JSON.stringify([childSessions.selectedTarget?.backendId, childSessions.selectedTarget?.id])}
                 readOnly className="child-chat-scroll"
                 scrollRef={childScrollRef} scrollSurfaceRef={childSurfaceRef} onScroll={handleChildScroll}
                 timeline={childTimeline} timelineLoading={childSessions.loading} timelineReady={!childSessions.loading}
@@ -1041,6 +1042,7 @@ export function App(): ReactElement {
                 onUndo={() => {}} onReview={() => {}} onSelectChange={() => {}}
               />}
               <ChatTimeline
+                scopeKey={JSON.stringify([resourceKey, state.historyResetRevision])}
                 hidden={viewingChild}
                 scrollRef={scrollRef}
                 scrollSurfaceRef={scrollSurfaceRef}
@@ -1106,8 +1108,6 @@ export function App(): ReactElement {
                   followUp={queuedMessages.followUp}
                   nativeFollowUpCount={queuedMessages.nativeFollowUpCount}
                   queuePause={queuedMessages.queuePause}
-                  continueBusy={runRecovery.busyId !== null}
-                  onContinueCurrent={(runId) => runRecovery.resume(runId)}
                   agentBusy={state.busy}
                   onSendItem={(kind, index) => actions.sendQueuedMessage(kind, index).catch((error: unknown) => {
                     console.error('[pion] 直接发送排队消息失败', error)

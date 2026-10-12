@@ -25,8 +25,6 @@ export function QueuedMessagesCard({
   nativeFollowUpCount = 0,
   agentBusy = false,
   queuePause,
-  continueBusy = false,
-  onContinueCurrent,
   onSendItem,
   onEditItem,
   onRemoveItem
@@ -38,8 +36,6 @@ export function QueuedMessagesCard({
   nativeFollowUpCount?: number
   agentBusy?: boolean
   queuePause?: QueuePause
-  continueBusy?: boolean
-  onContinueCurrent?: (runId: string) => void | Promise<void>
   onSendItem?: (kind: QueueKind, index: number) => void | Promise<void>
   onEditItem?: (item: QueueItem) => void | Promise<void>
   onRemoveItem?: (kind: QueueKind, index: number) => void | Promise<void>
@@ -50,10 +46,8 @@ export function QueuedMessagesCard({
   ]
   const [expanded, setExpanded] = useState(() => loadPanelExpanded('queue', sessionKey))
   const [sendingKey, setSendingKey] = useState<string | null>(null)
-  const pausedRunId = queuePause?.paused ? queuePause.pausedRunId : undefined
-  const canContinue = Boolean(pausedRunId && onContinueCurrent)
-  const expandedHeight = Math.min(360, Math.max(102,
-    52 + items.length * 34 + (canContinue ? 34 : 0)))
+  const expandedHeight = items.length === 0 ? 52 : Math.min(360, Math.max(102,
+    52 + items.length * 34))
   const panelStyle = {
     '--task-panel-expanded-height': `${expandedHeight}px`
   } as CSSProperties
@@ -107,10 +101,6 @@ export function QueuedMessagesCard({
           <span className="task-panel-caption">{caption}</span>
         </button>
 
-        {canContinue && <div className="queue-pause-note">
-          <button type="button" disabled={agentBusy || continueBusy}
-            onClick={() => { if (pausedRunId) void onContinueCurrent?.(pausedRunId) }}>继续当前任务</button>
-        </div>}
         <div className="task-panel-list-shell queue-panel-list-shell">
           <div
             id="queue-message-list"

@@ -357,12 +357,18 @@ export class AgentBridge {
     if (!lease.owns() || (run && (backend.activeRunId !== run.id
       || this.runStore.get(run.id)?.state !== 'dispatching'))) return
     this.pauseQueue(backend, '消息派发失败，排队已暂停。', run?.id)
-    backend.activeRunId = undefined
-    backend.busy = false
+    const attempted = run && this.runStore.get(run.id)?.dispatchedAt !== undefined
+    // An RPC rejection is not proof that the child stopped or never accepted
+    // the input. Keep its reservation until the real lifecycle closes it.
+    if (!attempted) {
+      backend.activeRunId = undefined
+      backend.busy = false
+    }
     if (run) this.runStore.update(run.id, (current) => {
       if (current.state !== 'dispatching') return
-      current.state = 'failed'
-      current.settledAt = Date.now()
+      current.state = attempted ? 'interrupted' : 'failed'
+      if (attempted) current.interruptedAt = Date.now()
+      else current.settledAt = Date.now()
       current.error = error instanceof Error ? error.message : String(error)
     })
   }
@@ -374,7 +380,7 @@ export class AgentBridge {
   /** Acceptance is not completion. Only an event-free handled dispatch owns the busy reservation. */
   private async dispatchPrompt(
     backend: BackendRecord, runId: string, message: string, images?: ImageContent[],
-    lease = this.reserveDispatch(backend)
+    lease = this.reserveDispatch(backend), onInvoke?: () => void
   ): Promise<void> {
     this.assertDispatchLease(lease)
     const lifecycle = this.dispatchLifecycle(backend)
@@ -388,6 +394,10 @@ export class AgentBridge {
     backend.queueAutoReady = false
     // Rejections are recovered only by the caller's original lease; an event
     // or replacement may already own the backend by the time this rejects.
+    // This is a main-process dispatch-attempt clock, not an SDK receipt.
+    // Record it only after the local lease check and immediately before RPC.
+    this.runStore.update(runId, (run) => { run.dispatchedAt ??= Date.now() })
+    onInvoke?.()
     const disposition = await client.prompt(message, images)
     if (!this.backendStillOwned(backend) || backend.client !== client) return
     this.runStore.update(runId, (run) => {
@@ -1273,6 +1283,10 @@ export class AgentBridge {
   /** Reset stale checkpoint state when a queued run is dispatched; the real
       checkpoint is created lazily at the first write-capable tool call. */
   private async prepareQueuedRunForDispatch(backend: BackendRecord, runId: string): Promise<void> {
+    const queued = this.runStore.get(runId)
+    if (!queued || queued.state !== 'queued' || this.hasRunDispatchEvidence(queued)) {
+      throw new Error('该消息已开始派发，不能作为未发送消息重发')
+    }
     this.resetRunCheckpoint(backend)
     this.runStore.update(runId, (run) => {
       run.state = 'dispatching'
@@ -2121,6 +2135,7 @@ export class AgentBridge {
       const state = await backend.client.getState().catch(() => null)
       if (!lease.owns() || backend.compacting || backend.queuePause?.paused || backend.localQueueBlocked
         || backend.queueAutoReady !== true || !state || state.isStreaming || state.isCompacting) {
+        if (!lease.ownsReservation()) return
         if (!localFollowUps.some((queued) => queued.runId === item.runId)) localFollowUps.unshift(item)
         if (lease.owns() && state && !state.isStreaming && !state.isCompacting && !backend.compacting) {
           backend.busy = false
@@ -2143,34 +2158,36 @@ export class AgentBridge {
         if (backend.queuePause?.paused || backend.localQueueBlocked || backend.queueAutoReady !== true) {
           throw new Error('排队已暂停，消息未发送')
         }
-        invoked = true
-        await this.dispatchPrompt(backend, item.runId, item.text, item.images, lease)
+        await this.dispatchPrompt(backend, item.runId, item.text, item.images, lease, () => { invoked = true })
       } catch (error) {
-        if (invoked && (!lease.owns() || backend.activeRunId !== item.runId)) return
-        if (!invoked && !lease.owns()) {
+        if (invoked) {
+          this.recoverPromptFailure(backend, lease, this.runStore.get(item.runId), error)
+          return
+        }
+        if (!lease.ownsReservation()) return
+        const current = this.runStore.get(item.runId)
+        if (!current || (current.state !== 'queued' && current.state !== 'dispatching')
+          || this.hasRunDispatchEvidence(current)) return
+        if (!lease.owns()) {
           if (!localFollowUps.some((queued) => queued.runId === item.runId)) localFollowUps.unshift(item)
           this.runStore.update(item.runId, (run) => {
             // Preparation can yield before prompt is invoked. No event was
             // allowed to adopt this still-local item, so undo only its ledger.
-            if (run.state === 'dispatching') run.state = 'queued'
+            if (run.state === 'dispatching' && !this.hasRunDispatchEvidence(run)) run.state = 'queued'
           })
           this.pushQueueSnapshot(backend)
           return
         }
         backend.activeRunId = undefined
         backend.busy = false
-        // prompt() rejected before agent_start, so this item was not
-        // delivered and can be retried safely. Keep it visible instead of
-        // losing a queued message on a transient RPC failure.
+        // Only a local preparation failure, before the RPC call, is unsent.
         backend.pendingRunIds = [item.runId, ...backend.pendingRunIds.filter((id) => id !== item.runId)]
         localFollowUps.unshift(item)
         backend.localQueueDispatching = false
         this.pauseQueue(backend, '排队消息派发失败，请手动重试该消息。', item.runId)
         this.runStore.update(item.runId, (run) => {
+          if (run.state !== 'dispatching' || this.hasRunDispatchEvidence(run)) return
           run.state = 'queued'
-          run.dispatchedAt = undefined
-          run.agentStartedAt = undefined
-          run.settledAt = undefined
           run.error = error instanceof Error ? error.message : String(error)
         })
         this.pushQueueSnapshot(backend)
@@ -2201,6 +2218,10 @@ export class AgentBridge {
     const localFollowUps = backend.localFollowUps ?? []
     const item = localFollowUps[index]
     if (!item) throw new Error('排队消息已被发送或移除')
+    const queued = this.runStore.get(item.runId)
+    if (!queued || queued.state !== 'queued' || this.hasRunDispatchEvidence(queued)) {
+      throw new Error('该消息已开始派发，不能作为未发送消息重发')
+    }
     const lease = this.reserveDispatch(backend)
     localFollowUps.splice(index, 1)
     this.pushQueueSnapshot(backend)
@@ -2215,13 +2236,16 @@ export class AgentBridge {
       || backend.localQueueDispatchPromise
       || (backend.busy && !state.isStreaming)
     ) {
-      localFollowUps.splice(index, 0, item)
-      this.pushQueueSnapshot(backend)
+      if (lease.ownsReservation()) {
+        localFollowUps.splice(index, 0, item)
+        this.pushQueueSnapshot(backend)
+      }
       throw new Error('当前 Agent 正在切换运行状态，请稍后再次发送该消息')
     }
     // This action authorizes only the selected item, not the remaining queue.
     if (!backend.queuePause?.paused) this.pauseQueue(backend, '已手动发送一条消息，其余排队消息仍暂停。', null, false)
     if (state.isStreaming) {
+      backend.busy = true
       backend.pendingRunIds = backend.pendingRunIds.filter((id) => id !== item.runId)
       backend.companionRunIds ??= []
       backend.companionRunIds.push(item.runId)
@@ -2231,29 +2255,23 @@ export class AgentBridge {
         run.agentStartedAt ??= Date.now()
       })
       const marker = this.markDirectSteering(backend, item.text)
+      const activeRunId = backend.activeRunId
       try {
         await this.dispatchSteering(backend, item.text, item.images, marker, item.runId)
       } catch (error) {
-        if (!lease.owns() || !backend.companionRunIds?.includes(item.runId)
+        if (!lease.ownsReservation() || backend.activeRunId !== activeRunId || !backend.companionRunIds?.includes(item.runId)
           || !this.steeringMarkers?.get(backend)?.some((entry) => entry.token === marker)) throw error
-        backend.companionRunIds = backend.companionRunIds.filter((id) => id !== item.runId)
-        localFollowUps.splice(index, 0, item)
-        const nextQueuedRunId = localFollowUps[index + 1]?.runId
-        const insertionIndex = nextQueuedRunId
-          ? backend.pendingRunIds.indexOf(nextQueuedRunId)
-          : backend.pendingRunIds.length
-        backend.pendingRunIds.splice(
-          insertionIndex < 0 ? backend.pendingRunIds.length : insertionIndex,
-          0,
-          item.runId
-        )
-        this.unmarkDirectSteering(backend, item.text, marker)
+        // steer was invoked; a transport error cannot make this input local
+        // again. Retain the companion ledger for actual lifecycle settlement.
+        // Keep this direct-insertion marker: an uncertain RPC response does
+        // not turn its native steering entry into a visible unsent message.
         this.runStore.update(item.runId, (run) => {
-          run.state = 'queued'
+          if (run.state !== 'running' && run.state !== 'dispatching') return
+          run.state = 'interrupted'
+          run.interruptedAt = Date.now()
           run.error = error instanceof Error ? error.message : String(error)
         })
-        this.pushQueueSnapshot(backend)
-        if (!backend.busy && !backend.localQueueBlocked) this.dispatchNextLocalFollowUp(backend)
+        this.pauseQueue(backend, '插入消息执行状态未知，排队已暂停。')
         throw error
       }
       return
@@ -2271,11 +2289,17 @@ export class AgentBridge {
       this.assertDispatchLease(lease)
       await this.prepareQueuedRunForDispatch(backend, item.runId)
       this.assertDispatchLease(lease)
-      invoked = true
-      await this.dispatchPrompt(backend, item.runId, item.text, item.images, lease)
+      await this.dispatchPrompt(backend, item.runId, item.text, item.images, lease, () => { invoked = true })
     } catch (error) {
-      if (invoked && (!lease.owns() || backend.activeRunId !== item.runId)) throw error
-      if (!invoked && lease.ownsReservation()) backend.localQueueDispatching = false
+      if (invoked) {
+        this.recoverPromptFailure(backend, lease, this.runStore.get(item.runId), error)
+        throw error
+      }
+      if (!lease.ownsReservation()) throw error
+      const current = this.runStore.get(item.runId)
+      if (!current || (current.state !== 'queued' && current.state !== 'dispatching')
+        || this.hasRunDispatchEvidence(current)) throw error
+      backend.localQueueDispatching = false
       if (lease.owns()) {
         backend.activeRunId = undefined
         backend.busy = false
@@ -2286,8 +2310,8 @@ export class AgentBridge {
       backend.pendingRunIds = [item.runId, ...backend.pendingRunIds.filter((id) => id !== item.runId)]
       this.runStore.update(item.runId, (run) => {
         if (run.state !== 'dispatching' && run.state !== 'queued') return
+        if (this.hasRunDispatchEvidence(run)) return
         run.state = 'queued'
-        run.dispatchedAt = undefined
         run.error = error instanceof Error ? error.message : String(error)
       })
       this.pushQueueSnapshot(backend)
@@ -2772,9 +2796,12 @@ export class AgentBridge {
     }
   }
 
-  /** Queued runs are persisted in the run store; put them back into the live
-      queue when their session activates so an app restart never drops them.
-      They wait for the user's next action instead of auto-dispatching. */
+  private hasRunDispatchEvidence(run: RunOperation): boolean {
+    return run.dispatchedAt !== undefined || run.agentStartedAt !== undefined || run.tools.length > 0
+  }
+
+  /** Only genuinely unsent queued runs return to the live queue on activation.
+      Dispatch attempts remain recovery records, never automatic replays. */
   private restoreQueuedRuns(backend: BackendRecord): void {
     if (backend.queueRestored) return
     backend.queueRestored = true
@@ -2793,6 +2820,16 @@ export class AgentBridge {
     backend.localFollowUps ??= []
     const existing = new Set(backend.localFollowUps.map((item) => item.runId))
     for (const run of queued) {
+      if (this.hasRunDispatchEvidence(run)) {
+        this.runStore.update(run.id, (current) => {
+          if (current.state !== 'queued') return
+          current.state = 'interrupted'
+          current.interruptedAt ??= Date.now()
+        })
+        backend.localFollowUps = backend.localFollowUps.filter((item) => item.runId !== run.id)
+        backend.pendingRunIds = backend.pendingRunIds.filter((id) => id !== run.id)
+        continue
+      }
       if (existing.has(run.id)) continue
       backend.localFollowUps.push({ runId: run.id, text: run.prompt.message, images: run.prompt.images })
     }
@@ -2846,10 +2883,15 @@ export class AgentBridge {
       // than a user follow-up. Keep it out of the visible queue card.
       const marker = this.markDirectSteering(backend, message)
       const client = backend.client
+      const activeRunId = backend.activeRunId
       try {
         await this.dispatchSteering(backend, message, images, marker)
       } catch (error) {
-        if (backend.client === client) this.unmarkDirectSteering(backend, message, marker)
+        // A missing steering receipt does not prove it was never inserted.
+        // Keep it hidden as a direct input; do not expose it as a queued retry.
+        if (lease.ownsReservation() && backend.client === client && backend.activeRunId === activeRunId) {
+          this.pauseQueue(backend, '插入消息执行状态未知，排队已暂停。', activeRunId)
+        }
         throw error
       }
     } else if (

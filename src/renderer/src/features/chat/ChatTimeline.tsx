@@ -1,4 +1,4 @@
-import { useLayoutEffect } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, RefObject, ReactElement } from 'react'
 import type { RunCheckpointStatus } from '../../../../shared/types'
 import type { FileChange, TimelineItem } from '../../agent/types'
@@ -7,6 +7,8 @@ import { EmptyState } from '../common/EmptyState'
 import { ModifiedFilesCard } from '../review/ModifiedFilesCard'
 import { ChatMessage } from './ChatMessage'
 import { ToolCallItem } from './ToolCallItem'
+import { ToolActivityHeader } from './ToolActivityHeader'
+import { groupToolActivity, summarizeToolActivity, type ToolTimelineItem } from '../../agent/toolActivityGroups'
 import {
   assignPendingLineDelays,
   resetLineRevealClock,
@@ -14,6 +16,8 @@ import {
 } from '../../utils/screenTextReveal'
 
 export interface ChatTimelineProps {
+  /** Real selected transcript identity; not a backend-readiness or content revision. */
+  scopeKey?: string
   /** Display-only transcripts retain the normal chat UI without mutation or media. */
   readOnly?: boolean
   /** Keep the scroll surface mounted and measurable while another transcript is shown. */
@@ -53,7 +57,18 @@ export interface ChatTimelineProps {
   onSelectChange: (change: FileChange) => void
 }
 
+// Keep already opened tool cards mounted when the outer group collapses.
+// Flat sibling keys prevent prepend/merged groups from reparenting their DOM.
+function ToolActivityItem({ item, visible, readOnly }: { item: ToolTimelineItem; visible: boolean; readOnly: boolean }) {
+  const mounted = useRef(false)
+  useLayoutEffect(() => { if (visible) mounted.current = true }, [visible])
+  return <div className="tool-activity-item" hidden={!visible} inert={!visible} aria-hidden={!visible || undefined}>
+    {(visible || mounted.current) && <ToolCallItem tool={item.tool} historical={item.historical} noReveal={item.noReveal} readOnly={readOnly} />}
+  </div>
+}
+
 export function ChatTimeline({
+  scopeKey,
   readOnly = false,
   hidden = false,
   className,
@@ -88,6 +103,39 @@ export function ChatTimeline({
   onReview,
   onSelectChange
 }: ChatTimelineProps): ReactElement {
+  const scope = scopeKey ?? cwd ?? ''
+  const previousGroups = useRef<{ scope: string; groups: { key: string; ids: Set<string> }[] }>({ scope, groups: [] })
+  const [expandedGroups, setExpandedGroups] = useState<{ scope: string; keys: Set<string> }>({ scope, keys: new Set() })
+  const groups = useMemo(() => {
+    const previous = previousGroups.current.scope === scope ? previousGroups.current.groups : []
+    const used = new Set<string>()
+    return groupToolActivity(timeline).map(group => {
+      const ids = new Set(group.items.map(item => item.tool.id))
+      const retained = previous.find(old => !used.has(old.key) && [...old.ids].some(id => ids.has(id)))
+      const key = retained?.key ?? `group:${scope}:${group.items[0].tool.id}:${group.items[0].id}`
+      used.add(key)
+      return { ...group, key, ids }
+    })
+  }, [timeline, scope])
+  useLayoutEffect(() => { previousGroups.current = { scope, groups } }, [groups, scope])
+  useEffect(() => {
+    // Open-state storage is limited to the current mounted window, not history.
+    const visible = new Set(groups.map(group => group.key))
+    setExpandedGroups(previous => {
+      const keys = previous.scope === scope ? new Set([...previous.keys].filter(key => visible.has(key))) : new Set<string>()
+      return previous.scope === scope && keys.size === previous.keys.size ? previous : { scope, keys }
+    })
+  }, [groups, scope])
+  const groupsByStart = new Map(groups.map(group => [group.firstIndex, group]))
+  const groupByIndex = new Map<number, typeof groups[number]>()
+  for (const group of groups) for (let index = group.firstIndex; index <= group.lastIndex; index++) groupByIndex.set(index, group)
+  const toggleGroup = (key: string) => setExpandedGroups(previous => {
+    const keys = previous.scope === scope ? new Set(previous.keys) : new Set<string>()
+    if (keys.has(key)) keys.delete(key)
+    else keys.add(key)
+    return { scope, keys }
+  })
+
   // A cleared timeline means a session switch; start a fresh waterfall clock.
   useLayoutEffect(() => {
     if (timeline.length === 0) resetLineRevealClock()
@@ -101,7 +149,7 @@ export function ChatTimeline({
     if (!container || hidden) return
     const timer = window.setTimeout(() => assignPendingLineDelays(container), 120)
     return () => window.clearTimeout(timer)
-  }, [timeline, scrollRef, hidden])
+  }, [timeline, scrollRef, hidden, expandedGroups])
 
   return (
     <main className={`chat-scroll${className ? ` ${className}` : ''}`} ref={scrollRef} onScroll={onScroll}
@@ -121,10 +169,17 @@ export function ChatTimeline({
         />
       ) : (
         <div className="timeline">
-          {timeline.map((item) =>
-            item.kind === 'tool' ? (
-              <ToolCallItem key={item.id} tool={item.tool} historical={item.historical} noReveal={item.noReveal} readOnly={readOnly} />
-            ) : item.kind === 'compaction' ? (
+          {timeline.flatMap((item, index) => {
+            if (item.kind === 'tool') {
+              const group = groupByIndex.get(index)!
+              const open = expandedGroups.scope === scope && expandedGroups.keys.has(group.key)
+              const nodes = [<ToolActivityItem key={`tool:${scope}:${item.id}`} item={item} visible={open} readOnly={readOnly} />]
+              if (groupsByStart.has(index)) nodes.unshift(<ToolActivityHeader key={group.key}
+                summary={summarizeToolActivity(group.items)} open={open} onToggle={() => toggleGroup(group.key)}
+                historical={group.items[0].historical} noReveal={group.items[0].noReveal} />)
+              return nodes
+            }
+            return item.kind === 'compaction' ? (
               <div key={item.id} className={`compaction-marker${item.historical ? ' history-reveal' : ''}`}>
                 {item.historical ? <RevealText text={item.summary} mode="history" /> : item.summary}
               </div>
@@ -140,7 +195,7 @@ export function ChatTimeline({
                 revertDisabledReason={revertDisabledReason}
               />
             )
-          )}
+          })}
           {agentActivity && (
             <div className="row row-agent-working">
               <span className="agent-working-text" role="status" aria-live="polite" aria-atomic="true">
