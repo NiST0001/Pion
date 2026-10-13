@@ -8,7 +8,7 @@ import type {
   WireEventInput,
   WireMessage
 } from '../../../shared/types'
-import { messageImages, messageText, messageThinking, messageToolCalls, projectQueuePause } from '../../../shared/types'
+import { messageImages, messageText, messageThinking, messageToolCalls } from '../../../shared/types'
 import { subagentBatchesEqual, type SubagentBatch } from '../../../shared/subagent-batches'
 import { taskSnapshotFromEntry, taskSnapshotFromResult } from '../../../shared/task-history'
 import { orderSessions, reorderSessionsByPaths } from './sessionOrder'
@@ -100,17 +100,18 @@ export function reducer(state: AgentState, action: Action): AgentState {
       const compacting = preserveLifecycle ? state.compacting : compactionEventState ?? incoming?.isCompacting ?? false
       const busy = preserveLifecycle ? state.busy : Boolean(incoming?.isStreaming || compacting)
       const projected = projectable ? applyLiveSnapshot(state, live, busy) : state
-      const incomingPause = projectQueuePause(incoming?.queuePause)
-      const previousPause = projected.queuedMessages.queuePause
-      const queuePause = !sameSession || !sameBackend ? incomingPause
-        : !older && incomingPause && incomingPause.revision >= (previousPause?.revision ?? -1)
-          ? incomingPause : previousPause
+      const queue = !older && incoming?.queuedMessages
+        ? incoming.queuedMessages : sameSession ? projected.queuedMessages
+          : { steering: [], followUp: [], nativeFollowUpCount: 0 }
       return {
         ...projected,
         session: incoming,
-        queuedMessages: { ...(!older && incoming?.queuedMessages
-          ? incoming.queuedMessages : sameSession ? projected.queuedMessages
-            : { steering: [], followUp: [], nativeFollowUpCount: 0 }), queuePause },
+        queuedMessages: {
+          steering: queue.steering,
+          followUp: queue.followUp,
+          nativeFollowUpCount: queue.nativeFollowUpCount,
+          ...(queue.followUpRunIds ? { followUpRunIds: queue.followUpRunIds } : {})
+        },
         queued: !older && incoming?.queuedMessages
           ? { steering: incoming.queuedMessages.steering.length, followUp: incoming.queuedMessages.followUp.length }
           : sameSession ? projected.queued : { steering: 0, followUp: 0 },
@@ -1153,14 +1154,10 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
       const nativeFollowUpCount = typeof event.nativeFollowUpCount === 'number'
         ? event.nativeFollowUpCount
         : 0
-      const incomingPause = projectQueuePause(event.queuePause)
-      const previousPause = state.queuedMessages.queuePause
-      const queuePause = incomingPause && incomingPause.revision >= (previousPause?.revision ?? -1)
-        ? incomingPause : previousPause
       return {
         ...state,
         queued: { steering: steering.length, followUp: followUp.length },
-        queuedMessages: { steering, followUp, nativeFollowUpCount, queuePause,
+        queuedMessages: { steering, followUp, nativeFollowUpCount,
           followUpRunIds: followUp.map((_, index) => {
             const id = event.followUpRunIds?.[index]
             return index >= nativeFollowUpCount && followUp.length === event.followUp.length

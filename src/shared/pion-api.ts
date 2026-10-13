@@ -74,7 +74,21 @@ import type {
   WorkflowUpdate
 } from './workflows'
 
+export interface ComputerUseLocalApi {
+  /** Cached metadata only; never probes the OS or starts a helper. */
+  getState(): Promise<import('./computer-use').ComputerUseStatus>
+  /** Explicit manual capture consent; upload/control must both be false.
+   * retention is intent only: this local workflow never writes SDK history. */
+  start(consent: import('./computer-use').ComputerUseConsent): Promise<import('./computer-use').ComputerUseStatus>
+  /** Exact current scopeRevision from getState/onState. At most one independent
+   * static PNG thumbnail (512px/96KiB); never returns the original/model PNG. */
+  capture(request: { scopeRevision: number }): Promise<{ state: import('./computer-use').ComputerUseStatus; preview?: string; previewUnavailable?: 'thumbnail-not-supported' }>
+  stop(): Promise<import('./computer-use').ComputerUseStatus>
+  onState(listener: (state: import('./computer-use').ComputerUseStatus) => void): () => void
+}
+
 export interface PionApi {
+  computerUse: ComputerUseLocalApi
   openTerminal(cwd: string, cols: number, rows: number): Promise<import('./terminal').TerminalSnapshot>
   writeTerminal(id: string, data: string): Promise<void>
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>

@@ -103,8 +103,7 @@ export interface BackendRecord {
   completionState?: 'completed' | 'aborted' | 'failed' | 'interrupted'
   /** Sticky within a real turn: later model success cannot erase failed tools/interactions. */
   turnInterrupted?: boolean
-  queuePause?: import('../../shared/types').QueuePause
-  /** Only a proven normal SDK settle permits automatic local dispatch. */
+  /** Only an owned SDK settle permits automatic local dispatch, after actual receipts close. */
   queueAutoReady?: boolean
   /** A low-level agent_end asked Pi to continue via retry/compaction. */
   awaitingRetry?: boolean
@@ -143,13 +142,16 @@ export interface BackendRecord {
   localQueueDispatchPromise?: Promise<void>
   /** Actual prompt RPC receipt slot, shared by direct/queued/recovery paths. */
   promptDispatch?: { promise: Promise<unknown>; runId: string; settledGeneration?: number }
-  normalQueueSettledRunId?: string
-  /** Explicit direct-input recovery intent, never granted by automatic queues. */
-  queueRecovery?: { runId: string; pauseRevision: number; sourceRunId?: string }
+  /** Actual steering RPC receipts must also close before automatic follow-ups. */
+  steeringDispatchPromises?: Set<Promise<unknown>>
+  /** Actual control RPC receipts (including abort), retained until fulfillment/rejection. */
+  controlDispatchPromises?: Set<Promise<unknown>>
+  /** Last settled run identity, including failed and aborted runs, for late RPC ownership. */
+  queueSettledRunId?: string
+  /** Reject an old settled receipt after independent lifecycle work begins. */
+  queueSettledGeneration?: number
   /** A local follow-up has been removed from the queue and is awaiting settle. */
   localQueueDispatching?: boolean
-  /** A failed/aborted turn blocks automatic replay until the user explicitly promotes one item. */
-  localQueueBlocked?: boolean
   startPromise: Promise<void>
 }
 

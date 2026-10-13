@@ -347,6 +347,7 @@ export function SettingsModal({
 
             {page === 'security' && (
               <SecurityPage
+                active={open}
                 projectTrust={projectTrust}
                 projectTrustBusy={projectTrustBusy}
                 projectTrustError={projectTrustError}

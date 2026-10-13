@@ -7,6 +7,11 @@
 
 /** renderer -> main 的 invoke/send 频道。 */
 export const IPC = {
+  // user-local capture, not Agent tools
+  ComputerUseGetState: 'pion:computer-use-get-state',
+  ComputerUseStart: 'pion:computer-use-start',
+  ComputerUseCapture: 'pion:computer-use-capture',
+  ComputerUseStop: 'pion:computer-use-stop',
   // agent lifecycle
   AgentStart: 'pion:agent-start',
   AgentStop: 'pion:agent-stop',
@@ -164,6 +169,7 @@ export const IPC = {
 
 /** main -> renderer 的事件推送频道。 */
 export const IPC_EVENTS = {
+  ComputerUseState: 'pion:computer-use-state',
   SubagentSessions: 'pion:subagent-sessions',
   AgentEvent: 'pion:agent-event',
   AgentStatus: 'pion:agent-status',

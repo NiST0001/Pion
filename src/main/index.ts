@@ -22,6 +22,12 @@ import { ProviderVisibilityStore } from './provider-visibility'
 import { registerAgentIpc } from './ipc/agent'
 import { registerGitIpc } from './ipc/git'
 import { registerWindowIpc } from './ipc/window'
+import { registerComputerUseIpc, projectComputerUseState } from './ipc/computer-use'
+import { ComputerUseService } from './computer-use/service'
+import { WaylandComputerUseDriver } from './computer-use/wayland-driver'
+import { sameComputerUseOwner, type ComputerUseOwner } from '../shared/computer-use'
+import { randomUUID } from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import type {
   ProjectMeta,
   StartVerificationOptions,
@@ -40,6 +46,100 @@ const subagentSettings = new SubagentSettingsStore()
 const questionSettings = new QuestionSettingsStore()
 const themeSettings = new ThemeSettingsStore()
 let mainWindowId: number | undefined
+// Host-only manual workflow ledger. These tokens never claim SDK/run/tool identity.
+let localCaptureOwner: ComputerUseOwner | undefined
+let localCaptureGeneration = 0
+let localCaptureApproved = false
+// Host-owned document incarnation; a WebContents id survives renderer reloads.
+let captureDocument: { windowId: number; generation: number; ready: boolean; frame?: Electron.WebFrameMain } | undefined
+let captureDocumentGeneration = 0
+let localCaptureDocumentGeneration: number | undefined
+let localCaptureFrame: Electron.WebFrameMain | undefined
+let computerUseQuitting = false
+
+function requireCaptureDocument(windowId: number, statusOnly = false): Electron.WebFrameMain {
+  const win = BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed() && candidate.webContents.id === windowId)
+  const document = captureDocument
+  if ((computerUseQuitting && !statusOnly) || windowId !== mainWindowId || !document || document.windowId !== windowId || !document.ready || !win || win.webContents.isDestroyed()) throw new Error('ComputerUse document unavailable')
+  const frame = win.webContents.mainFrame
+  if (!frame || frame.detached || frame !== document.frame) throw new Error('ComputerUse document unavailable')
+  return frame
+}
+
+function requireLocalCaptureOwner(windowId: number): ComputerUseOwner {
+  const frame = requireCaptureDocument(windowId)
+  if (!localCaptureApproved || !localCaptureOwner || localCaptureOwner.ownerWindowId !== windowId || localCaptureDocumentGeneration !== captureDocument?.generation || localCaptureFrame !== frame) throw new Error('ComputerUse local owner unavailable')
+  return { ...localCaptureOwner }
+}
+
+function createLocalCaptureOwner(windowId: number): ComputerUseOwner {
+  const frame = requireCaptureDocument(windowId)
+  const state = computerUse.getState()
+  if (state.actualPending || state.owner) throw new Error('ComputerUse desktop lease occupied')
+  localCaptureOwner = { ownerWindowId: windowId, backendId: 'local-preview', runtimeId: `local-preview-${windowId}-${captureDocument!.generation}`, runId: `local-preview-${randomUUID()}`, generation: ++localCaptureGeneration }
+  localCaptureDocumentGeneration = captureDocument!.generation
+  localCaptureFrame = frame
+  localCaptureApproved = true
+  return { ...localCaptureOwner }
+}
+
+function bindCaptureDocument(contents: Electron.WebContents): void {
+  const windowId = contents.id
+  // The initial host load has not committed yet and cannot carry approval.
+  captureDocument = { windowId, generation: ++captureDocumentGeneration, ready: false }
+  const invalidate = (): void => {
+    if (captureDocument?.windowId !== windowId || mainWindowId !== windowId) return
+    captureDocument = { windowId, generation: ++captureDocumentGeneration, ready: false }
+    void stopLocalCapture(windowId).catch(error => console.error('[pion] ComputerUse document cleanup unverified:', error))
+  }
+  // Electron 44 details are authoritative; positional arguments are deprecated.
+  // will-navigate excludes in-page changes and does not cover host loadURL/reload.
+  contents.on('will-navigate', () => invalidate())
+  contents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame && !details.isSameDocument && (!details.frame || details.frame === contents.mainFrame)) invalidate()
+  })
+  contents.on('did-finish-load', () => {
+    if (captureDocument?.windowId !== windowId || mainWindowId !== windowId || contents.isDestroyed() || contents.mainFrame.detached) return
+    captureDocument.frame = contents.mainFrame
+    captureDocument.ready = true
+  })
+  contents.on('render-process-gone', invalidate)
+  contents.once('destroyed', invalidate)
+}
+const computerUse = new ComputerUseService({
+  clock: () => performance.now(),
+  randomId: () => randomUUID(),
+  driverFactory: () => {
+    // Native packaging is not configured: no asar binary, download or fallback.
+    if (app.isPackaged || process.platform !== 'linux' || process.env.XDG_SESSION_TYPE !== 'wayland') throw new Error('ComputerUse helper unavailable')
+    return new WaylandComputerUseDriver(join(app.getAppPath(), 'native/computer-use/target/debug/pion-computer-use-helper'))
+  },
+  assertOwned: (owner) => {
+    const win = BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed() && candidate.webContents.id === mainWindowId)
+    const approvedOwner = requireLocalCaptureOwner(owner.ownerWindowId)
+    if (!sameComputerUseOwner(owner, approvedOwner) || !win || win.webContents.isDestroyed()) throw new Error('ComputerUse local approval revoked')
+    // This is manual local UI, not an Agent tool: no YOLO or SDK plan-mode grant.
+  },
+  publish: (state) => {
+    const win = BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed() && candidate.webContents.id === mainWindowId)
+    if (!win || win.webContents.isDestroyed() || mainWindowId === undefined) return
+    // Reading redacted status needs a live document, not a still-valid grant.
+    // Otherwise host revocation would hide the very stopping/quarantine update.
+    try { requireCaptureDocument(mainWindowId, true) } catch { return }
+    win.webContents.send(IPC_EVENTS.ComputerUseState, projectComputerUseState(state))
+  }
+})
+function stopLocalCapture(windowId?: number): Promise<import('../shared/computer-use').ComputerUseStatus> {
+  if (windowId !== undefined && windowId !== mainWindowId) return Promise.resolve(computerUse.getState())
+  const owner = localCaptureOwner
+  localCaptureApproved = false
+  localCaptureOwner = undefined
+  localCaptureDocumentGeneration = undefined
+  localCaptureFrame = undefined
+  if (owner) computerUse.revoke(owner)
+  // No new owner can be installed until this physical lease actually settles.
+  return computerUse.stop(undefined, 'host-lifecycle')
+}
 const windowEffects = new WindowEffectsService(appSettings, {
   platform: process.platform, release: release(), ozonePlatform: app.commandLine.getSwitchValue('ozone-platform'),
   sessionType: process.env.XDG_SESSION_TYPE, desktop: process.env.XDG_CURRENT_DESKTOP,
@@ -149,6 +249,7 @@ function createWindow(): void {
   bindBrowserSecurity(win)
   const ownerId = win.webContents.id
   mainWindowId = ownerId
+  bindCaptureDocument(win.webContents)
   const push = (list: ProjectMeta[]): void => {
     if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.Projects, list)
   }
@@ -163,6 +264,22 @@ function createWindow(): void {
   win.once('ready-to-show', () => {
     win.show()
     pushMaximized()
+  })
+  let captureCloseSettled = false
+  let captureClosePending = false
+  win.on('close', (event) => {
+    if (captureCloseSettled) return
+    event.preventDefault()
+    if (captureClosePending) return
+    captureClosePending = true
+    void stopLocalCapture(ownerId).then(state => {
+      if (state.actualPending) return // Unknown physical exit stays quarantined.
+      captureCloseSettled = true
+      if (!win.isDestroyed()) win.close()
+    }).catch(error => console.error('[pion] ComputerUse close unverified:', error))
+  })
+  win.webContents.once('destroyed', () => {
+    void stopLocalCapture(ownerId).catch(error => console.error('[pion] ComputerUse destroyed cleanup unverified:', error))
   })
   win.on('closed', () => {
     if (mainWindowId === ownerId) mainWindowId = undefined
@@ -182,6 +299,7 @@ function createWindow(): void {
     console.error(`[pion] page load FAILED: ${code} ${desc} ${url}`)
   })
   win.webContents.on('render-process-gone', (_e, details) => {
+    void stopLocalCapture(ownerId).catch(error => console.error('[pion] ComputerUse renderer cleanup unverified:', error))
     console.error(`[pion] renderer GONE: ${details.reason} ${details.exitCode ?? ''}`)
   })
   win.webContents.on('console-message', (event) => {
@@ -198,6 +316,11 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  registerComputerUseIpc({
+    ipcMain, service: computerUse, getMainWindowId: () => mainWindowId,
+    createLocalOwner: createLocalCaptureOwner,
+    getLocalOwner: requireLocalCaptureOwner
+  })
   ipcMain.handle(IPC.GetTheme, (event) => {
     assertThemeSettingsOwner(event, mainWindowId)
     return themeSettings.get()
@@ -336,7 +459,22 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
+let captureQuitSettled = false
+let captureQuitPending = false
+app.on('before-quit', (event) => {
+  if (!captureQuitSettled) {
+    event.preventDefault()
+    computerUseQuitting = true
+    if (!captureQuitPending) {
+      captureQuitPending = true
+      void stopLocalCapture().then(state => {
+        if (state.actualPending) return // Never force-exit an unknown helper lease.
+        captureQuitSettled = true
+        app.quit()
+      }).catch(error => console.error('[pion] ComputerUse shutdown unverified:', error))
+    }
+    return
+  }
   bridge.disposeSubagentSessions()
   terminals.dispose()
   void Promise.all([bridge.stop(), verification.flush(), workflows.shutdown()])

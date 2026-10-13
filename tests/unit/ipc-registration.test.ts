@@ -7,6 +7,8 @@ import type { WindowEffectsService } from '../../src/main/window-effects'
 import { registerAgentIpc } from '../../src/main/ipc/agent'
 import { registerGitIpc } from '../../src/main/ipc/git'
 import { registerWindowIpc } from '../../src/main/ipc/window'
+import { registerComputerUseIpc } from '../../src/main/ipc/computer-use'
+import type { ComputerUseService } from '../../src/main/computer-use/service'
 import { IPC } from '../../src/shared/ipc'
 import type { BranchDeleteRequest, BranchDeleteResult } from '../../src/shared/branches'
 import type { McpStatusTarget } from '../../src/shared/mcp'
@@ -773,7 +775,7 @@ describe('window IPC registration', () => {
   })
 })
 
-it('composes the three registrars without duplicate channels', () => {
+it('composes the domain registrars without duplicate channels', () => {
   const h = collectIpc()
   registerAgentIpc({ ipcMain: h.ipcMain, bridge: {} as AgentBridge, projects: { touchCanonical: vi.fn() }, pushProjects: vi.fn() })
   registerGitIpc({ ipcMain: h.ipcMain, git: {} as GitService })
@@ -781,7 +783,13 @@ it('composes the three registrars without duplicate channels', () => {
     ipcMain: h.ipcMain, windowFromWebContents: vi.fn(),
     windowEffects: {} as WindowEffectsService, terminals: {} as TerminalService
   })
+  registerComputerUseIpc({
+    ipcMain: h.ipcMain, service: {} as ComputerUseService, getMainWindowId: () => undefined,
+    createLocalOwner: () => { throw new Error('not invoked') },
+    getLocalOwner: () => { throw new Error('not invoked') }
+  })
   const expected = new Set([
+    IPC.ComputerUseGetState, IPC.ComputerUseStart, IPC.ComputerUseCapture, IPC.ComputerUseStop,
     ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
     IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete, IPC.AgentEditQueued,
     IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels,

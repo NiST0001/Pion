@@ -61,6 +61,13 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const api: PionApi = {
+  computerUse: {
+    getState: () => ipcRenderer.invoke(IPC.ComputerUseGetState),
+    start: (consent) => ipcRenderer.invoke(IPC.ComputerUseStart, consent),
+    capture: (request) => ipcRenderer.invoke(IPC.ComputerUseCapture, request),
+    stop: () => ipcRenderer.invoke(IPC.ComputerUseStop),
+    onState: (listener) => subscribe<import('../shared/computer-use').ComputerUseStatus>(IPC_EVENTS.ComputerUseState, listener)
+  },
   openTerminal: (cwd, cols, rows) => ipcRenderer.invoke(IPC.TerminalOpen, cwd, cols, rows),
   writeTerminal: (id, data) => ipcRenderer.invoke(IPC.TerminalWrite, id, data),
   resizeTerminal: (id, cols, rows) => ipcRenderer.invoke(IPC.TerminalResize, id, cols, rows),

@@ -331,18 +331,18 @@ describe('agent compaction state', () => {
       steering: ['检查入口'],
       followUp: ['完成后运行测试'],
       followUpRunIds: [null],
-      nativeFollowUpCount: 0,
-      queuePause: undefined
+      nativeFollowUpCount: 0
     })
+    expect(queued.busy).toBe(false)
 
     const settled = reducer(queued, { type: 'event', event: { type: 'agent_settled' } })
     expect(settled.queuedMessages).toEqual({
       steering: ['检查入口'],
       followUp: ['完成后运行测试'],
       followUpRunIds: [null],
-      nativeFollowUpCount: 0,
-      queuePause: undefined
+      nativeFollowUpCount: 0
     })
+    expect(settled.busy).toBe(false)
   })
 
   it('returns to idle when manual compaction ends', () => {

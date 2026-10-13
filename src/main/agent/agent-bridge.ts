@@ -317,49 +317,12 @@ export class AgentBridge {
       && lifecycle.token === scope.token && lifecycle.generation === scope.generation
   }
 
-  private pauseQueue(backend: BackendRecord, reason: string, runId: string | null | undefined = backend.activeRunId,
-    interruptTurn = true): void {
-    if (!this.backendStillOwned(backend) || (runId && backend.activeRunId && backend.activeRunId !== runId)) return
-    if (interruptTurn) backend.turnInterrupted = true
+  /** Preserve failed-turn classification without imposing a lasting queue policy. */
+  private interruptOwnedTurn(backend: BackendRecord, runId: string | null | undefined = backend.activeRunId): void {
+    if (!this.backendStillOwned(backend) || !backend.activeRunId
+      || (runId && backend.activeRunId !== runId)) return
+    backend.turnInterrupted = true
     backend.queueAutoReady = false
-    backend.localQueueBlocked = true
-    const previous = backend.queuePause ?? this.runStore.getQueuePause?.(backend)
-    backend.queuePause = { paused: true, revision: (previous?.revision ?? 0) + 1,
-      reason: previous?.paused && previous.pausedRunId ? previous.reason : reason,
-      pausedRunId: previous?.pausedRunId ?? runId ?? undefined }
-    this.runStore.setQueuePause?.(backend, backend.queuePause)
-    this.pushQueueSnapshot(backend)
-  }
-
-  private bindQueueRecovery(backend: BackendRecord, runId: string, sourceRunId?: string): void {
-    const pause = backend.queuePause
-    if (!pause?.paused || (pause.pausedRunId && pause.pausedRunId !== sourceRunId)) return
-    if (sourceRunId) this.runStore.update(runId, run => { run.recoveredFromRunId = sourceRunId })
-    backend.queuePause = { ...pause, revision: pause.revision + 1, pausedRunId: runId }
-    backend.queueRecovery = { runId, sourceRunId, pauseRevision: backend.queuePause.revision }
-    this.runStore.setQueuePause?.(backend, backend.queuePause)
-    this.pushQueueSnapshot(backend)
-  }
-
-  private finishQueueRecovery(backend: BackendRecord): void {
-    const intent = backend.queueRecovery
-    if (!intent || backend.busy || backend.compacting || backend.promptDispatch
-      || backend.runCompletionPromise || backend.localQueueDispatchPromise) return
-    const pause = backend.queuePause
-    const run = this.runStore.get(intent.runId)
-    if (backend.normalQueueSettledRunId !== intent.runId || run?.state !== 'completed'
-      || run.recoveredFromRunId !== intent.sourceRunId || !pause?.paused
-      || pause.pausedRunId !== intent.runId || pause.revision !== intent.pauseRevision) return
-    backend.queueRecovery = undefined
-    this.clearQueuePause(backend)
-    backend.queueAutoReady = true
-  }
-
-  private clearQueuePause(backend: BackendRecord): void {
-    backend.queuePause = { paused: false, revision: (backend.queuePause?.revision ?? 0) + 1 }
-    backend.localQueueBlocked = false
-    this.runStore.setQueuePause?.(backend, backend.queuePause)
-    this.pushQueueSnapshot(backend)
   }
 
   private reserveDispatch(backend: BackendRecord): { owns: () => boolean; ownsReservation: () => boolean } {
@@ -380,7 +343,8 @@ export class AgentBridge {
   ): void {
     if (!lease.owns() || (run && (backend.activeRunId !== run.id
       || this.runStore.get(run.id)?.state !== 'dispatching'))) return
-    this.pauseQueue(backend, '消息派发失败，排队已暂停。', run?.id)
+    this.interruptOwnedTurn(backend, run?.id)
+    backend.queueAutoReady = false
     const attempted = run && this.runStore.get(run.id)?.dispatchedAt !== undefined
     // An RPC rejection is not proof that the child stopped or never accepted
     // the input. Keep its reservation until the real lifecycle closes it.
@@ -407,7 +371,7 @@ export class AgentBridge {
     lease = this.reserveDispatch(backend), onInvoke?: () => void
   ): Promise<void> {
     this.assertDispatchLease(lease)
-    if (backend.promptDispatch) throw new Error('上一条输入的派发仍在收尾，请稍后再试')
+    if (backend.promptDispatch || backend.controlDispatchPromises?.size) throw new Error('上一条输入的派发仍在收尾，请稍后再试')
     const lifecycle = this.dispatchLifecycle(backend)
     const generation = lifecycle.generation
     const token = lifecycle.token
@@ -442,24 +406,25 @@ export class AgentBridge {
       })
       if (disposition !== 'handled') return
       // Independent extension work cannot prove this handled input completed.
-      if (backend.normalQueueSettledRunId === runId) {
-        backend.normalQueueSettledRunId = undefined
-        this.pauseQueue(backend, '输入被扩展接管，尚无本轮正常完成证据。', runId)
+      if (backend.queueSettledRunId === runId) {
+        // Keep the real settle identity for receipt cleanup, without authorizing FIFO dispatch.
+        backend.queueAutoReady = false
       }
       if (backend.activeRunId !== runId) return
       backend.activeRunId = undefined
       if (lifecycle.token !== token || lifecycle.generation !== generation) return
-      this.pauseQueue(backend, '输入被扩展接管，尚无本轮正常完成证据。', runId)
+      backend.queueAutoReady = false
       lifecycle.token = undefined
-      backend.busy = false
+      backend.busy = Boolean(backend.controlDispatchPromises?.size || backend.steeringDispatchPromises?.size
+        || backend.runCompletionPromise || backend.checkpointCreatePromise || backend.checkpointRefreshPromise)
       backend.localQueueDispatching = false
       this.pushQueueSnapshot(backend)
       this.pushRunningSessionPaths()
       this.dispatchNextLocalFollowUp(backend)
     } catch (error) {
       if (this.backendStillOwned(backend) && backend.client === client && backend.promptDispatch === slot
-        && (backend.activeRunId === runId || backend.normalQueueSettledRunId === runId)) {
-        this.pauseQueue(backend, '输入派发未确认正常收口，排队已暂停。', runId)
+        && (backend.activeRunId === runId || backend.queueSettledRunId === runId)) {
+        this.interruptOwnedTurn(backend, runId)
       }
       throw error
     } finally {
@@ -468,7 +433,10 @@ export class AgentBridge {
         const settledHere = slot.settledGeneration !== undefined
           && slot.settledGeneration === this.dispatchLifecycle(backend).generation
           && this.dispatchLifecycle(backend).token === token
-        if (settledHere && !backend.activeRunId && !backend.compacting) backend.busy = false
+        if (settledHere && !backend.activeRunId && !backend.compacting
+          && !backend.controlDispatchPromises?.size && !backend.steeringDispatchPromises?.size
+          && !backend.runCompletionPromise && !backend.checkpointCreatePromise
+          && !backend.checkpointRefreshPromise) backend.busy = false
         if (settledHere) this.dispatchNextLocalFollowUp(backend)
         this.pushRunningSessionPaths()
       }
@@ -479,18 +447,30 @@ export class AgentBridge {
     backend: BackendRecord, message: string, images: ImageContent[], marker: symbol, runId?: string
   ): Promise<void> {
     const client = backend.client
-    const disposition = await client.steer(message, images)
-    if (disposition !== 'handled' || !this.backendStillOwned(backend) || backend.client !== client) return
-    if (runId) {
-      backend.companionRunIds = backend.companionRunIds?.filter((id) => id !== runId)
-      this.runStore.update(runId, (run) => {
-        if (run.state !== 'running' && run.state !== 'dispatching') return
-        run.state = 'discarded'
-        run.settledAt = Date.now()
-        run.stopReason = 'input-handled'
-      })
+    type Disposition = Awaited<ReturnType<BackendRecord['client']['steer']>>
+    let accept!: (value: Disposition) => void
+    let reject!: (error: unknown) => void
+    const receipt = new Promise<Disposition>((resolve, fail) => { accept = resolve; reject = fail })
+    backend.steeringDispatchPromises ??= new Set()
+    backend.steeringDispatchPromises.add(receipt)
+    try {
+      // Register before invoking RPC, including synchronously emitted settlement.
+      try { void client.steer(message, images).then(accept, reject) } catch (error) { reject(error) }
+      const disposition = await receipt
+      if (disposition !== 'handled' || !this.backendStillOwned(backend) || backend.client !== client) return
+      if (runId) {
+        backend.companionRunIds = backend.companionRunIds?.filter((id) => id !== runId)
+        this.runStore.update(runId, (run) => {
+          if (run.state !== 'running' && run.state !== 'dispatching') return
+          run.state = 'discarded'
+          run.settledAt = Date.now()
+          run.stopReason = 'input-handled'
+        })
+      }
+      this.unmarkDirectSteering(backend, message, marker)
+    } finally {
+      backend.steeringDispatchPromises.delete(receipt)
     }
-    this.unmarkDirectSteering(backend, message, marker)
   }
   private branchDeletionInFlight = false
   private unconfirmedStoppedWorktreeCwds = new Set<string>()
@@ -639,7 +619,7 @@ export class AgentBridge {
   getRunningSessionPaths(): string[] {
     return [...new Set(
       [...this.backendPool.values()]
-        .filter((backend) => (backend.busy || backend.runCompletionPromise) && backend.sessionPath)
+        .filter((backend) => (backend.busy || backend.runCompletionPromise || backend.controlDispatchPromises?.size) && backend.sessionPath)
         .map((backend) => resolve(backend.sessionPath as string))
     )]
   }
@@ -944,7 +924,7 @@ export class AgentBridge {
       }
       const timeout = setTimeout(() => {
         if (this.pendingRequests.getToolPermission(id)?.scope === scope && this.pendingScopeOwned(scope, backend)) {
-          this.pauseQueue(backend, '工具权限等待超时，本轮需显式继续。', scope.runId)
+          this.interruptOwnedTurn(backend, scope.runId)
         }
         this.clearToolPermissionRequest(id)
       }, timeoutMs + 250)
@@ -959,7 +939,7 @@ export class AgentBridge {
       this.pushToolPermissionRequests()
     } catch (error) {
       console.error('[pion] invalid tool permission request:', error)
-      this.pauseQueue(backend, '工具权限请求无效，本轮需显式继续。', scope.runId)
+      this.interruptOwnedTurn(backend, scope.runId)
       this.respondToExtensionUi(backend.client, request.id, { value: 'deny' })
     }
     return true
@@ -985,7 +965,7 @@ export class AgentBridge {
 
     const scope = this.capturePendingScope(backend)
     const cancelInvalidRequest = (message: string): true => {
-      this.pauseQueue(backend, '提问无法显示，本轮需显式继续。', scope.runId)
+      this.interruptOwnedTurn(backend, scope.runId)
       console.error(`[pion] invalid extension UI request: ${message}`)
       try {
         this.respondToExtensionUi(backend.client, source.id as string, { cancelled: true })
@@ -1041,7 +1021,7 @@ export class AgentBridge {
         this.clearExtensionUiRequest(id)
         return
       }
-      this.pauseQueue(backend, '提问等待超时，本轮需显式继续。', pending.scope?.runId)
+      this.interruptOwnedTurn(backend, pending.scope?.runId)
       try {
         this.respondToExtensionUi(pending.scope!.client, pending.extensionRequestId, { cancelled: true })
       } catch (error) {
@@ -1398,7 +1378,7 @@ export class AgentBridge {
     if (!backend.usageBackendId || receipt.backendId !== backend.usageBackendId
       || source?.usageBackendId !== backend.usageBackendId) return
     if (backend.activeRunId === receipt.runId && (tool.isError === true || tool.result?.isError === true)) {
-      this.pauseQueue(backend, '嵌套工具执行未成功，本轮需显式继续。', receipt.runId)
+      this.interruptOwnedTurn(backend, receipt.runId)
     }
     // SDK 1.0.4 codemode only aggregates models.* usage, not executeTool's
     // child sessions. Only known independent child/codemode usage is charged.
@@ -1534,7 +1514,7 @@ export class AgentBridge {
       finalReceipt.usageConsumed = true
       if (backend.activeRunId === runId && this.runStore.get(runId)?.usageBackendId === finalReceipt.backendId
         && (tool.isError === true || (tool.result as { isError?: unknown } | undefined)?.isError === true)) {
-        this.pauseQueue(backend, '工具执行未成功，本轮需显式继续。', runId)
+        this.interruptOwnedTurn(backend, runId)
       }
       if (!backend.usageBackendId
         || this.runStore.get(runId)?.usageBackendId !== finalReceipt.backendId) return
@@ -1631,7 +1611,6 @@ export class AgentBridge {
           () => undefined,
           (error) => {
             console.error('[pion] run checkpoint refresh failed:', error)
-            this.pauseQueue(backend, '运行检查点收尾失败，排队已暂停。', completed.id)
           }
         ).then(async () => {
           for (const listener of this.runCompletedListeners) {
@@ -1639,7 +1618,6 @@ export class AgentBridge {
               await listener(completed)
             } catch (error) {
               console.error('[pion] run completion listener failed:', error)
-              this.pauseQueue(backend, '运行完成处理失败，排队已暂停。', completed.id)
             }
           }
         })
@@ -1680,9 +1658,7 @@ export class AgentBridge {
       }
       // Queued runs restore into the live queue on session activation; they
       // are not recovery candidates.
-      const paused = this.runStore.getQueuePause?.(run)
-      if (run.state !== 'interrupted' && !(paused?.paused && paused.pausedRunId === run.id
-        && (run.state === 'failed' || run.state === 'aborted'))) continue
+      if (run.state !== 'interrupted' && run.state !== 'failed' && run.state !== 'aborted') continue
       candidates.push({
         run,
         reason: 'interrupted-run',
@@ -1717,10 +1693,8 @@ export class AgentBridge {
 
   async resumeRun(runId: string): Promise<RunOperation> {
     let source = this.runStore.get(runId)
-    const pausedSource = source ? this.runStore.getQueuePause?.(source) : undefined
     if (!source || (source.state !== 'interrupted' && !(source.state === 'queued' && source.interruptedAt !== undefined)
-      && !(pausedSource?.paused && pausedSource.pausedRunId === source.id
-        && (source.state === 'failed' || source.state === 'aborted')))) {
+      && source.state !== 'failed' && source.state !== 'aborted')) {
       throw new Error('这条运行记录已不再等待恢复')
     }
     if (source.state === 'queued' && this.queuedPromptWasPersisted(source)) {
@@ -1776,22 +1750,11 @@ export class AgentBridge {
         current.recoveredFromRunId = source.id
       })
       const client = backend.client
-      if (backend.queuePause?.paused && (!backend.queuePause.pausedRunId || backend.queuePause.pausedRunId === source.id)) {
-        // Transfer the actual continuation identity, never unlock on RPC acceptance.
-        this.bindQueueRecovery(backend, run.id, source.id)
-      }
       await this.dispatchPrompt(backend, run.id, message, source.prompt.images, lease)
-      let accepted = this.runStore.get(run.id)
-      if (accepted?.state === 'completed' && accepted.stopReason === 'input-handled'
-        && backend.queuePause?.paused && backend.queuePause.pausedRunId === accepted.id) {
-        accepted = this.runStore.update(accepted.id, (current) => {
-          current.state = 'interrupted'
-          current.interruptedAt = Date.now()
-        })
-      }
+      const accepted = this.runStore.get(run.id)
       if (!this.backendStillOwned(backend) || backend.client !== client || !accepted
         || accepted.state === 'discarded' || accepted.state === 'failed' || accepted.state === 'aborted'
-        || accepted.state === 'interrupted') throw new Error('续接未被当前 Agent 接受，排队仍暂停')
+        || accepted.state === 'interrupted') throw new Error('续接未被当前 Agent 接受')
       this.runStore.update(source.id, (current) => {
         current.state = 'discarded'
         current.settledAt ??= Date.now()
@@ -1908,6 +1871,7 @@ export class AgentBridge {
       if (backend && (state?.isStreaming || state?.isCompacting || state?.pendingMessageCount
         || backend.busy || backend.compacting || backend.localQueueDispatching
         || (backend.localFollowUps?.length ?? 0) > 0 || backend.runCompletionPromise
+        || backend.controlDispatchPromises?.size
         || this.dispatchLifecycle(backend).token || backend.historyMutation)) {
         throw new Error('当前会话正在运行，请等待完成或中止后再迁移项目')
       }
@@ -2103,7 +2067,6 @@ export class AgentBridge {
     return {
       ...projection.queue,
       nativeFollowUpCount: projection.queue.nativeFollowUpCount ?? 0,
-      queuePause: backend.queuePause ? { ...backend.queuePause } : undefined
     }
   }
 
@@ -2159,7 +2122,6 @@ export class AgentBridge {
   }
 
   private dispatchNextLocalFollowUp(backend: BackendRecord): void {
-    if (this.backendStillOwned(backend)) this.finishQueueRecovery(backend)
     if (
       !this.backendStillOwned(backend)
       || this.messageRevertInFlight
@@ -2167,11 +2129,15 @@ export class AgentBridge {
       || backend.busy
       || backend.localQueueDispatchPromise
       || backend.promptDispatch
+      || backend.steeringDispatchPromises?.size
+      || backend.controlDispatchPromises?.size
       || backend.localQueueDispatching
-      || backend.localQueueBlocked
-      || backend.queuePause?.paused
       || backend.queueAutoReady !== true
+      || (backend.queueSettledGeneration !== undefined
+        && backend.queueSettledGeneration !== this.dispatchLifecycle(backend).generation)
       || backend.runCompletionPromise
+      || backend.checkpointCreatePromise
+      || backend.checkpointRefreshPromise
       || (backend.localFollowUps?.length ?? 0) === 0
     ) return
     const lease = this.reserveDispatch(backend)
@@ -2188,17 +2154,18 @@ export class AgentBridge {
       }
       this.pushQueueSnapshot(backend)
       const state = await backend.client.getState().catch(() => null)
-      if (!lease.owns() || backend.compacting || backend.queuePause?.paused || backend.localQueueBlocked
+      if (!lease.owns() || backend.compacting || backend.controlDispatchPromises?.size
         || backend.queueAutoReady !== true || !state || state.isStreaming || state.isCompacting) {
         if (!lease.ownsReservation()) return
         if (!localFollowUps.some((queued) => queued.runId === item.runId)) localFollowUps.unshift(item)
-        if (lease.owns() && state && !state.isStreaming && !state.isCompacting && !backend.compacting) {
+        if (lease.owns() && state && !state.isStreaming && !state.isCompacting && !backend.compacting
+          && !backend.controlDispatchPromises?.size) {
           backend.busy = false
         }
         if (!state && lease.owns()) {
-          backend.busy = false
+          backend.busy = Boolean(backend.controlDispatchPromises?.size)
           // A failed state read must not spin the dispatcher indefinitely.
-          this.pauseQueue(backend, '无法确认 Agent 状态，排队已暂停。', item.runId)
+          backend.queueAutoReady = false
         }
         backend.localQueueDispatching = false
         this.pushQueueSnapshot(backend)
@@ -2210,9 +2177,7 @@ export class AgentBridge {
         this.assertDispatchLease(lease)
         await this.prepareQueuedRunForDispatch(backend, item.runId)
         this.assertDispatchLease(lease)
-        if (backend.queuePause?.paused || backend.localQueueBlocked || backend.queueAutoReady !== true) {
-          throw new Error('排队已暂停，消息未发送')
-        }
+        if (backend.queueAutoReady !== true) throw new Error('运行状态已改变，消息未发送')
         await this.dispatchPrompt(backend, item.runId, item.text, item.images, lease, () => { invoked = true })
       } catch (error) {
         if (invoked) {
@@ -2234,21 +2199,18 @@ export class AgentBridge {
           return
         }
         backend.activeRunId = undefined
-        backend.busy = false
+        backend.busy = Boolean(backend.controlDispatchPromises?.size)
         // Only a local preparation failure, before the RPC call, is unsent.
         backend.pendingRunIds = [item.runId, ...backend.pendingRunIds.filter((id) => id !== item.runId)]
         localFollowUps.unshift(item)
         backend.localQueueDispatching = false
-        this.pauseQueue(backend, '排队消息派发失败，请手动重试该消息。', item.runId)
+        backend.queueAutoReady = false
         this.runStore.update(item.runId, (run) => {
           if (run.state !== 'dispatching' || this.hasRunDispatchEvidence(run)) return
           run.state = 'queued'
           run.error = error instanceof Error ? error.message : String(error)
         })
         this.pushQueueSnapshot(backend)
-        if (!backend.busy && !backend.localQueueBlocked && (backend.localFollowUps?.length ?? 0) > 0) {
-          this.dispatchNextLocalFollowUp(backend)
-        }
       }
     })().finally(() => {
       if (backend.localQueueDispatchPromise !== promise || !this.backendStillOwned(backend)) return
@@ -2257,7 +2219,7 @@ export class AgentBridge {
       if (
         this.backendStillOwned(backend)
         && !backend.localQueueDispatching
-        && !backend.localQueueBlocked
+        && backend.queueAutoReady === true
         && !backend.runCompletionPromise
         && !backend.busy
         && !backend.compacting
@@ -2298,8 +2260,6 @@ export class AgentBridge {
       }
       throw new Error('当前 Agent 正在切换运行状态，请稍后再次发送该消息')
     }
-    // This action authorizes only the selected item, not the remaining queue.
-    if (!backend.queuePause?.paused) this.pauseQueue(backend, '已手动发送一条消息，其余排队消息仍暂停。', null, false)
     if (state.isStreaming) {
       backend.busy = true
       backend.pendingRunIds = backend.pendingRunIds.filter((id) => id !== item.runId)
@@ -2327,7 +2287,7 @@ export class AgentBridge {
           run.interruptedAt = Date.now()
           run.error = error instanceof Error ? error.message : String(error)
         })
-        this.pauseQueue(backend, '插入消息执行状态未知，排队已暂停。')
+        this.interruptOwnedTurn(backend)
         throw error
       }
       return
@@ -2360,7 +2320,7 @@ export class AgentBridge {
         backend.activeRunId = undefined
         backend.busy = false
         backend.localQueueDispatching = false
-        this.pauseQueue(backend, '排队消息派发失败，请手动重试该消息。', item.runId)
+        backend.queueAutoReady = false
       }
       if (!localFollowUps.some((queued) => queued.runId === item.runId)) localFollowUps.splice(index, 0, item)
       backend.pendingRunIds = [item.runId, ...backend.pendingRunIds.filter((id) => id !== item.runId)]
@@ -2584,7 +2544,8 @@ export class AgentBridge {
         this.dispatchLifecycle(backend).generation += 1
       }
       if (type === 'agent_start') {
-        backend.normalQueueSettledRunId = undefined
+        backend.queueSettledRunId = undefined
+        backend.queueSettledGeneration = undefined
         backend.queueAutoReady = false
       }
       if (type === 'extension_ui_request' && this.handleExtensionUiRequest(backend, event)) return
@@ -2626,9 +2587,6 @@ export class AgentBridge {
         }
       }
       const settledRunId = type === 'agent_settled' ? backend.activeRunId : undefined
-      if (type === 'agent_settled' && backend.completionState !== 'completed') {
-        this.pauseQueue(backend, '本轮未正常完成，排队已暂停。', settledRunId)
-      }
       this.trackBackendEvent(backend, event, type)
       if (type === 'agent_settled') {
         const terminal = backend.completionState ?? 'interrupted'
@@ -2637,7 +2595,8 @@ export class AgentBridge {
           // Even a settled SDK run cannot release a still-pending RPC receipt.
           backend.busy = true
         }
-        backend.normalQueueSettledRunId = terminal === 'completed' ? settledRunId : undefined
+        backend.queueSettledRunId = settledRunId
+        backend.queueSettledGeneration = this.dispatchLifecycle(backend).generation
         const settledSessionPath = backend.sessionPath ? resolve(backend.sessionPath) : undefined
         // Mark sessions finished elsewhere as unread until the user opens them.
         if (
@@ -2653,40 +2612,28 @@ export class AgentBridge {
         this.completeCompanionRuns(backend, terminal, Date.now())
         backend.completionState = undefined
         backend.localQueueDispatching = false
-        if (terminal === 'completed') {
-          backend.queueAutoReady = !!settledRunId && !backend.queuePause?.paused && !backend.localQueueBlocked
-          const completionGeneration = this.dispatchLifecycle(backend).generation
-          const completionPromise = backend.runCompletionPromise
-          if (completionPromise) {
-            void completionPromise.then(() => {
-              if (!this.backendStillOwned(backend) || backend.client !== client
-                || backend.runCompletionPromise !== completionPromise) return
-              backend.runCompletionPromise = undefined
-              this.pushRunningSessionPaths()
-              if (
-                this.dispatchLifecycle(backend).generation === completionGeneration
-                && !backend.busy
-                && !backend.compacting
-                && !backend.localQueueDispatching
-              ) {
-                this.dispatchNextLocalFollowUp(backend)
-              }
-            })
-          } else {
-            this.dispatchNextLocalFollowUp(backend)
-          }
-        } else {
-          backend.localQueueBlocked = true
-          this.pushQueueSnapshot(backend)
-          // Failure pauses dispatch, but does not retain an already finished
-          // checkpoint/listener Promise forever. Release only its real receipt.
-          const completionPromise = backend.runCompletionPromise
-          if (completionPromise) void completionPromise.then(() => {
+        // Every truly settled owned turn releases one FIFO item, regardless of outcome.
+        backend.queueAutoReady = !!settledRunId
+        const completionGeneration = this.dispatchLifecycle(backend).generation
+        // Failed/aborted runs may still own checkpoint work. Wait for its actual
+        // receipt as well; rejecting a completed receipt does not reopen the turn.
+        const pendingCompletion = [backend.runCompletionPromise,
+          backend.checkpointCreatePromise, backend.checkpointRefreshPromise,
+          ...(backend.steeringDispatchPromises ?? []), ...(backend.controlDispatchPromises ?? [])].filter(Boolean)
+        if (backend.controlDispatchPromises?.size) backend.busy = true
+        const completionPromise = pendingCompletion.length > 0
+          ? Promise.allSettled(pendingCompletion).then(() => undefined) : undefined
+        if (completionPromise) {
+          backend.runCompletionPromise = completionPromise
+          void completionPromise.then(() => {
             if (!this.backendStillOwned(backend) || backend.client !== client
               || backend.runCompletionPromise !== completionPromise) return
             backend.runCompletionPromise = undefined
             this.pushRunningSessionPaths()
+            this.releaseSettledBackend(backend, client, completionGeneration, settledRunId)
           })
+        } else {
+          this.dispatchNextLocalFollowUp(backend)
         }
       }
       if (runningStateChanged) this.pushRunningSessionPaths()
@@ -2889,9 +2836,7 @@ export class AgentBridge {
     const sessionPath = state?.sessionFile
     if (!sessionPath) return
     const normalizedPath = resolve(sessionPath)
-    const previousScope = { cwd: backend.cwd, sessionPath: backend.sessionPath }
     backend.sessionPath = normalizedPath
-    if (backend.queuePause) this.runStore.moveQueuePause?.(previousScope, backend, backend.queuePause)
     if (backend.liveState) this.subagentSessionStore?.bindParent(backend.liveState.backendId, normalizedPath)
     this.updateRunSession(backend, normalizedPath, state.sessionId)
     // Parsed history is refreshed by its file signature or explicit history mutations,
@@ -2922,8 +2867,6 @@ export class AgentBridge {
   private restoreQueuedRuns(backend: BackendRecord): void {
     if (backend.queueRestored) return
     backend.queueRestored = true
-    backend.queuePause = this.runStore.getQueuePause?.(backend)
-    if (backend.queuePause?.paused) backend.localQueueBlocked = true
     const sessionPath = backend.sessionPath ? resolve(backend.sessionPath) : undefined
     const queued = this.runStore
       .list({ sessionPath, cwd: sessionPath ? undefined : backend.cwd, limit: 50 })
@@ -2933,7 +2876,8 @@ export class AgentBridge {
       this.pushQueueSnapshot(backend)
       return
     }
-    this.pauseQueue(backend, '恢复的排队消息需手动发送或继续原任务。', null, false)
+    // Restoring a snapshot supplies no evidence that its previous writer settled.
+    backend.queueAutoReady = false
     backend.localFollowUps ??= []
     const existing = new Set(backend.localFollowUps.map((item) => item.runId))
     for (const run of queued) {
@@ -3007,7 +2951,7 @@ export class AgentBridge {
         // A missing steering receipt does not prove it was never inserted.
         // Keep it hidden as a direct input; do not expose it as a queued retry.
         if (lease.ownsReservation() && backend.client === client && backend.activeRunId === activeRunId) {
-          this.pauseQueue(backend, '插入消息执行状态未知，排队已暂停。', activeRunId)
+          this.interruptOwnedTurn(backend, activeRunId)
         }
         throw error
       }
@@ -3018,6 +2962,7 @@ export class AgentBridge {
       || backend.localQueueDispatching
       || backend.localQueueDispatchPromise
       || backend.promptDispatch
+      || backend.controlDispatchPromises?.size
       || backend.runCompletionPromise
     ) {
       // Protect the dispatch/compaction transition instead of racing a prompt
@@ -3028,20 +2973,12 @@ export class AgentBridge {
       // Reserve the backend before checkpoint/mode preparation. Both calls are
       // asynchronous, and RpcClient.prompt itself returns before agent_start.
       backend.busy = true
-      const recoveryPause = backend.queuePause?.paused ? { ...backend.queuePause } : undefined
       let run: RunOperation | undefined
       try {
         this.resetRunCheckpoint(backend)
         await this.applyDesiredMode(backend, lease)
         this.assertDispatchLease(lease)
         run = this.createRun(backend, state, message, images, 'prompt', 'dispatching')
-        // Explicit idle direct input is a new recovery attempt, not replay of
-        // the failed original prompt. Queued/steering inputs do not grant this.
-        if (recoveryPause && backend.queuePause?.paused
-          && backend.queuePause.revision === recoveryPause.revision
-          && backend.queuePause.pausedRunId === recoveryPause.pausedRunId) {
-          this.bindQueueRecovery(backend, run.id, recoveryPause.pausedRunId)
-        }
         await this.dispatchPrompt(backend, run.id, message, images, lease)
       } catch (error) {
         this.recoverPromptFailure(backend, lease, run, error)
@@ -3067,7 +3004,7 @@ export class AgentBridge {
   private hasFollowUpWork(backend: BackendRecord): boolean {
     return Boolean(backend.busy || backend.compacting || backend.localQueueDispatching
       || backend.localQueueDispatchPromise || backend.promptDispatch || backend.runCompletionPromise
-      || backend.queuePause?.paused || backend.localQueueBlocked || backend.localFollowUps?.length)
+      || backend.steeringDispatchPromises?.size || backend.controlDispatchPromises?.size || backend.localFollowUps?.length)
   }
 
   /** Tab appends immediately during a reply; idle Tab starts one new reply. */
@@ -3163,8 +3100,46 @@ export class AgentBridge {
     backend.modePrimed = desired
   }
 
+  /** Release only an owned positive SDK settle, never an idle state/control response alone. */
+  private releaseSettledBackend(backend: BackendRecord, client: BackendRecord['client'],
+    generation: number, runId: string | undefined): void {
+    if (!runId || !this.backendStillOwned(backend) || backend.client !== client
+      || backend.queueSettledRunId !== runId || backend.queueSettledGeneration !== generation
+      || this.dispatchLifecycle(backend).generation !== generation || backend.activeRunId
+      || backend.compacting || backend.promptDispatch || backend.controlDispatchPromises?.size
+      || backend.steeringDispatchPromises?.size || backend.runCompletionPromise
+      || backend.checkpointCreatePromise || backend.checkpointRefreshPromise) return
+    backend.busy = false
+    this.pushRunningSessionPaths()
+    this.dispatchNextLocalFollowUp(backend)
+  }
+
   async abort(): Promise<void> {
-    await this.client?.abort()
+    const client = this.client
+    const backend = this.getActiveBackend()
+    if (!client || !backend) return
+    const lifecycle = this.dispatchLifecycle(backend)
+    const generation = lifecycle.generation
+    const token = lifecycle.token
+    const runId = backend.activeRunId ?? backend.queueSettledRunId
+    let accept!: () => void
+    let reject!: (error: unknown) => void
+    const receipt = new Promise<void>((resolve, fail) => { accept = resolve; reject = fail })
+    const pending = backend.controlDispatchPromises ??= new Set()
+    // Register before invoking: abort may synchronously emit agent_settled.
+    pending.add(receipt)
+    backend.busy = true
+    try {
+      try { void client.abort().then(accept, reject) } catch (error) { reject(error) }
+      await receipt
+    } finally {
+      pending.delete(receipt)
+      const settledGeneration = backend.queueSettledGeneration
+      if (lifecycle.token === token && settledGeneration !== undefined
+        && (settledGeneration === generation || settledGeneration === generation + 1)) {
+        this.releaseSettledBackend(backend, client, settledGeneration, runId)
+      }
+    }
   }
 
   getStderr(): string {
@@ -3374,6 +3349,7 @@ export class AgentBridge {
           || (backend.companionRunIds?.length ?? 0) > 0 || (backend.directSteering?.length ?? 0) > 0
           || (backend.rawQueue?.steering.length ?? 0) > 0 || (backend.rawQueue?.followUp.length ?? 0) > 0
           || backend.localQueueDispatching || backend.localQueueDispatchPromise || backend.runCompletionPromise
+          || backend.controlDispatchPromises?.size
           || backend.checkpointCreatePromise || backend.checkpointRefreshPromise || backend.subagentsModePending
           || (backend.sessionPath && this.runStore.hasUnsettledSessionRuns(backend.sessionPath))) {
           throw new Error('请等待所有运行、压缩及收尾完成，并清空排队消息后再删除分支')
@@ -3503,6 +3479,7 @@ export class AgentBridge {
       || (backend.companionRunIds?.length ?? 0) > 0 || (backend.directSteering?.length ?? 0) > 0
       || (backend.rawQueue?.steering.length ?? 0) > 0 || (backend.rawQueue?.followUp.length ?? 0) > 0
       || backend.localQueueDispatching || backend.localQueueDispatchPromise || backend.runCompletionPromise
+      || backend.controlDispatchPromises?.size
       || backend.checkpointCreatePromise || backend.checkpointRefreshPromise || backend.subagentsModePending
       || this.runStore.hasUnsettledSessionRuns(target)
       || this.getPendingToolPermissionRequests().some((item) => item.sessionPath === target)
@@ -4069,7 +4046,7 @@ export class AgentBridge {
       if (lease.owns()) {
         backend.busy = false
       }
-      if (this.backendStillOwned(backend) && !backend.busy && !backend.compacting && !backend.localQueueDispatching && !backend.localQueueBlocked && !backend.runCompletionPromise && (backend.localFollowUps?.length ?? 0) > 0) {
+      if (this.backendStillOwned(backend) && !backend.busy && !backend.compacting && !backend.localQueueDispatching && backend.queueAutoReady === true && !backend.runCompletionPromise && (backend.localFollowUps?.length ?? 0) > 0) {
         this.dispatchNextLocalFollowUp(backend)
       }
     }
@@ -4385,7 +4362,7 @@ export class AgentBridge {
       backend
       && !backend.busy
       && !backend.compacting
-      && !backend.localQueueBlocked
+      && backend.queueAutoReady === true
       && !backend.runCompletionPromise
       && (backend.localFollowUps?.length ?? 0) > 0
     ) {
@@ -4568,7 +4545,6 @@ export class AgentBridge {
   private overlayBackendSessionInfo(backend: BackendRecord, info: SessionInfo): SessionInfo {
     return {
       ...info,
-      queuePause: backend.queuePause ? { ...backend.queuePause } : undefined,
       queuedMessages: this.projectedQueueSnapshot(backend),
       isStreaming: backend.busy,
       isCompacting: backend.compacting,
@@ -4638,7 +4614,6 @@ export class AgentBridge {
       followUpMode: state.followUpMode,
       messageCount: state.messageCount,
       pendingMessageCount: state.pendingMessageCount,
-      queuePause: backend.queuePause ? { ...backend.queuePause } : undefined,
       queuedMessages: this.projectedQueueSnapshot(backend),
       liveState: backend.liveState?.snapshot(backend.cwd, backend.sessionPath)
     }

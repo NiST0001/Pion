@@ -8,28 +8,17 @@ import { QueuedMessagesCard } from '../../src/renderer/src/features/session/Queu
 beforeEach(() => window.localStorage.clear())
 
 describe('QueuedMessagesCard', () => {
-  it('keeps an empty paused queue compact without a continue action or explanatory messages', () => {
-    const { container } = render(<QueuedMessagesCard sessionKey="paused-empty" queuePause={{ paused: true, revision: 2,
-      reason: '提问等待超时', pausedRunId: 'real-run' }} />)
-    expect(screen.queryByText('提问等待超时')).not.toBeInTheDocument()
-    expect(screen.queryByText('手动发送只处理所选消息，不解除其余队列的暂停。')).not.toBeInTheDocument()
-    expect(container.querySelector<HTMLElement>('.queue-panel')?.style.getPropertyValue('--task-panel-expanded-height')).toBe('52px')
-    expect(screen.getByText('已暂停，等待处理当前任务')).toBeInTheDocument()
-    expect(screen.getByText('0 条')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '继续当前任务' })).not.toBeInTheDocument()
-    expect(screen.queryAllByRole('listitem')).toHaveLength(0)
-  })
-
-  it('does not offer a continue action or auto-send actual items even with a paused run identity', () => {
+  it('shows waiting messages without auto-sending from the renderer', () => {
     const send = vi.fn()
-    const { container } = render(<QueuedMessagesCard sessionKey="paused" followUp={['下一任务']} queuePause={{ paused: true, revision: 1,
-      pausedRunId: 'real-run' }} onSendItem={send} />)
+    const { container } = render(<QueuedMessagesCard sessionKey="waiting" followUp={['下一任务']} onSendItem={send} />)
     expect(container.querySelector<HTMLElement>('.queue-panel')?.style.getPropertyValue('--task-panel-expanded-height')).toBe('102px')
     expect(screen.queryByRole('button', { name: '继续当前任务' })).not.toBeInTheDocument()
     expect(send).not.toHaveBeenCalled()
     expect(screen.queryByText('本轮未确认正常完成，排队消息不会自动发送。')).not.toBeInTheDocument()
     expect(screen.getByText('下一任务')).toBeInTheDocument()
-    expect(screen.getByText('已暂停，等待处理当前任务')).toBeInTheDocument()
+    expect(screen.getByText('1 条')).toBeInTheDocument()
+    expect(screen.queryByText('已暂停，等待处理当前任务')).not.toBeInTheDocument()
+    expect(container.querySelector('.task-panel-caption')).toHaveTextContent('等待本轮完成')
   })
 
   it('shows steering and follow-up messages with their queue kind', () => {
@@ -44,6 +33,7 @@ describe('QueuedMessagesCard', () => {
     expect(screen.getByText('排队消息')).toBeInTheDocument()
     expect(screen.getByText('先检查这个文件')).toBeInTheDocument()
     expect(screen.getByText('完成当前任务后运行测试')).toBeInTheDocument()
+    expect(screen.getByText('1 条插入 · 1 条稍后')).toBeInTheDocument()
     expect(container.querySelector('[data-queue-kind="steering"]')).toBeInTheDocument()
     expect(container.querySelector('[data-queue-kind="followUp"]')).toBeInTheDocument()
   })
@@ -53,7 +43,6 @@ describe('QueuedMessagesCard', () => {
     render(
       <QueuedMessagesCard
         sessionKey="session-direct"
-        queuePause={{ paused: true, revision: 1, pausedRunId: 'real-run' }}
         steering={['插入当前运行']}
         followUp={['稍后继续']}
         onSendItem={onSendItem}
@@ -70,13 +59,12 @@ describe('QueuedMessagesCard', () => {
     let finishSend!: () => void
     const send = vi.fn(() => new Promise<void>((resolve) => { finishSend = resolve }))
     const props = {
-      sessionKey: 'paused-send',
+      sessionKey: 'direct-send',
       steering: ['原生插入'],
       followUp: ['原生稍后', '本地稍后'],
-      nativeFollowUpCount: 1,
-      queuePause: { paused: true, revision: 1, pausedRunId: 'real-run' }
+      nativeFollowUpCount: 1
     }
-    const { rerender } = render(<QueuedMessagesCard {...props} />)
+    const { container, rerender } = render(<QueuedMessagesCard {...props} />)
     expect(screen.getAllByRole('button', { name: /直接发送第/ }).every((button) => button.hasAttribute('disabled'))).toBe(true)
 
     rerender(<QueuedMessagesCard {...props} onSendItem={send} />)
@@ -88,7 +76,8 @@ describe('QueuedMessagesCard', () => {
 
     await act(async () => { finishSend() })
     expect(screen.getAllByRole('button', { name: /直接发送第/ }).every((button) => !button.hasAttribute('disabled'))).toBe(true)
-    expect(screen.getByText('已暂停，等待处理当前任务')).toBeInTheDocument()
+    expect(screen.queryByText('已暂停，等待处理当前任务')).not.toBeInTheDocument()
+    expect(container.querySelector('.task-panel-caption')).toHaveTextContent('1 条插入 · 2 条稍后')
     expect(screen.queryByRole('button', { name: '继续当前任务' })).not.toBeInTheDocument()
   })
 
@@ -98,7 +87,6 @@ describe('QueuedMessagesCard', () => {
     render(
       <QueuedMessagesCard
         sessionKey="session-edit"
-        queuePause={{ paused: true, revision: 1, pausedRunId: 'real-run' }}
         steering={['原生插入']}
         followUp={['原生稍后', '本地稍后']}
         nativeFollowUpCount={1}
@@ -119,6 +107,32 @@ describe('QueuedMessagesCard', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '删除第 3 条排队消息' }))
     expect(onRemoveItem).toHaveBeenCalledWith('followUp', 1)
+  })
+
+  it('retains the waiting caption, FIFO text, image references, identities and actions', async () => {
+    const onEditItem = vi.fn()
+    const onSendItem = vi.fn()
+    const onRemoveItem = vi.fn()
+    const originalText = '原始正文\n@"图像 1" @"图像 2"'
+    const { container } = render(<QueuedMessagesCard sessionKey="queue-actions"
+      followUp={[originalText, '下一项']} followUpRunIds={['image-run', 'next-run']}
+      onEditItem={onEditItem} onSendItem={onSendItem} onRemoveItem={onRemoveItem} />)
+
+    expect(screen.queryByText('已暂停，等待处理当前任务')).not.toBeInTheDocument()
+    expect(container.querySelector('.task-panel-caption')).toHaveTextContent('等待本轮完成')
+    expect(screen.getByText('排队消息')).toBeInTheDocument()
+    expect(screen.getByText('2 条')).toBeInTheDocument()
+    expect(screen.getAllByRole('listitem').map((item) => item.getAttribute('title'))).toEqual([originalText, '下一项'])
+    expect(screen.getAllByRole('button', { name: /编辑第/ })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: /直接发送第/ })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: /删除第/ })).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: '编辑第 1 条排队消息' }))
+    expect(onEditItem).toHaveBeenCalledExactlyOnceWith({ kind: 'followUp', index: 0, text: originalText, runId: 'image-run' })
+    fireEvent.click(screen.getByRole('button', { name: '删除第 2 条排队消息' }))
+    expect(onRemoveItem).toHaveBeenCalledExactlyOnceWith('followUp', 1)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '直接发送第 1 条排队消息' })) })
+    expect(onSendItem).toHaveBeenCalledExactlyOnceWith('followUp', 0)
+    expect(container.querySelector('.task-panel-caption')).toHaveTextContent('等待本轮完成')
   })
 
   it('does not guess an edit identity from local position or identical text', () => {
@@ -153,6 +167,8 @@ describe('QueuedMessagesCard', () => {
 
   it('does not mount an empty queue', () => {
     const { container } = render(<QueuedMessagesCard sessionKey="session-empty" />)
-    expect(container.querySelector('.queue-panel')).not.toBeInTheDocument()
+    expect(container).toBeEmptyDOMElement()
+    expect(screen.queryByText('0 条')).not.toBeInTheDocument()
+    expect(container.querySelector('.task-panel-caption')).not.toBeInTheDocument()
   })
 })

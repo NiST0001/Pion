@@ -24,26 +24,6 @@ export interface QueuedMessagesSnapshot {
   nativeFollowUpCount: number
   /** Parallel to followUp; native or non-editable entries have null identity. */
   followUpRunIds?: (string | null)[]
-  queuePause?: QueuePause
-}
-
-export interface QueuePause {
-  paused: boolean
-  revision: number
-  reason?: string
-  /** Actual run identity only; absent for an uncorrelated interaction or restored queue. */
-  pausedRunId?: string
-}
-
-export function projectQueuePause(value: unknown): QueuePause | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const pause = value as QueuePause
-  if (typeof pause.paused !== 'boolean' || !Number.isSafeInteger(pause.revision) || pause.revision < 0
-    || (pause.reason !== undefined && (typeof pause.reason !== 'string' || pause.reason.length > 200))
-    || (pause.pausedRunId !== undefined && (typeof pause.pausedRunId !== 'string' || !pause.pausedRunId || pause.pausedRunId.length > 256))) return undefined
-  return { paused: pause.paused, revision: pause.revision,
-    ...(pause.paused && pause.reason ? { reason: pause.reason } : {}),
-    ...(pause.paused && pause.pausedRunId ? { pausedRunId: pause.pausedRunId } : {}) }
 }
 
 export type { PionApi } from './pion-api'
@@ -145,7 +125,6 @@ export interface SessionInfo {
   followUpMode?: 'all' | 'one-at-a-time'
   messageCount: number
   pendingMessageCount?: number
-  queuePause?: QueuePause
   queuedMessages?: QueuedMessagesSnapshot
 }
 
@@ -209,7 +188,7 @@ export type WireEvent =
   | { type: 'tool_execution_start'; toolCallId: string; parentToolCallId?: string; toolName: string; args: unknown }
   | { type: 'tool_execution_update'; toolCallId: string; parentToolCallId?: string; toolName: string; partialResult: unknown }
   | { type: 'tool_execution_end'; toolCallId: string; parentToolCallId?: string; toolName: string; result: unknown; isError: boolean }
-  | { type: 'queue_update'; steering: string[]; followUp: string[]; nativeFollowUpCount?: number; followUpRunIds?: (string | null)[]; queuePause?: QueuePause }
+  | { type: 'queue_update'; steering: string[]; followUp: string[]; nativeFollowUpCount?: number; followUpRunIds?: (string | null)[] }
   | { type: 'compaction_start'; reason: string }
   | { type: 'compaction_end'; reason: string; result: unknown; aborted: boolean; willRetry: boolean; errorMessage?: string }
   | { type: 'session_info_changed'; name?: string }

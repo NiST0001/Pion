@@ -8,8 +8,10 @@ import type {
 } from '../../../../shared/types'
 import { PageHeading } from './SettingsPageHeading'
 import { ToolPermissionSettings } from './ToolPermissionSettings'
+import { ComputerUseSettings } from '../computer-use/ComputerUseSettings'
 
 interface SecurityPageProps {
+  active?: boolean
   projectTrust: ProjectTrustInfo | null
   projectTrustBusy: boolean
   projectTrustError: string
@@ -22,6 +24,7 @@ interface SecurityPageProps {
 }
 
 export function SecurityPage({
+  active = true,
   projectTrust,
   projectTrustBusy,
   projectTrustError,
@@ -106,6 +109,8 @@ export function SecurityPage({
         onChange={onToolPermissionChange}
         onReset={onToolPermissionReset}
       />
+
+      <ComputerUseSettings active={active} />
 
       <div className="settings-note security-note">
         <ShieldAlert size={14} />

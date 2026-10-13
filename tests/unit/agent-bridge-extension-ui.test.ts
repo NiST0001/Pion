@@ -39,6 +39,7 @@ async function fixture(): Promise<{
     cwd: root,
     client: {
       onEvent: (callback: (event: unknown) => void) => { listener = callback },
+      getState: vi.fn(async () => ({})),
       process: {
         stdin: {
           destroyed: false,
@@ -49,6 +50,7 @@ async function fixture(): Promise<{
     },
     phase: 'running',
     busy: true,
+    queueAutoReady: false,
     pendingRunIds: [],
     startPromise: Promise.resolve()
   }
@@ -116,15 +118,19 @@ describe('AgentBridge extension UI requests', () => {
     expect(ordinary.timeoutAt).toBe(ordinary.createdAt + 10 * 60_000)
     await h.bridge.resolveExtensionUiRequest(ordinary.id, { cancelled: true })
   })
-  it.each([{ cancelled: true as const }, { value: '   ' }])('does not pause an empty queue on an ordinary unanswered question (%j)', async (response) => {
+  it.each([{ cancelled: true as const }, { value: '   ' }])('keeps an unanswered question busy until actual settlement (%j)', async (response) => {
     const h = await fixture()
     h.backend.activeRunId = 'current-run'
     h.handle({ type: 'extension_ui_request', id: 'ask', method: 'input', title: '请选择' })
     await h.bridge.resolveExtensionUiRequest(h.bridge.getPendingExtensionUiRequests()[0].id, response)
-    expect(h.backend.queuePause).toBeUndefined()
-    expect(h.backend.localQueueBlocked).not.toBe(true)
+    expect(h.bridge.getPendingExtensionUiRequests()).toEqual([])
+    expect(h.backend).toMatchObject({ busy: true, queueAutoReady: false, activeRunId: 'current-run' })
     expect(h.backend.turnInterrupted).not.toBe(true)
     expect(JSON.parse(h.writes[0])).toMatchObject({ id: 'ask', ...response })
+    h.emit({ type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop', content: [] }] })
+    expect(h.backend).toMatchObject({ busy: true, queueAutoReady: false })
+    h.emit({ type: 'agent_settled' })
+    expect(h.backend).toMatchObject({ busy: false, queueAutoReady: true })
   })
 
   it('times out only the captured run and client', async () => {
@@ -137,7 +143,7 @@ describe('AgentBridge extension UI requests', () => {
     h.backend.activeRunId = 'new-run'
     await vi.advanceTimersByTimeAsync(1000)
     expect(h.bridge.getPendingExtensionUiRequests()).toEqual([])
-    expect(h.backend.queuePause).toBeUndefined()
+    expect(h.backend).toMatchObject({ busy: true, queueAutoReady: false, activeRunId: 'new-run' })
     expect(writes).toEqual([])
     expect(h.writes).toEqual([])
   })
@@ -149,18 +155,46 @@ describe('AgentBridge extension UI requests', () => {
     const id = h.bridge.getPendingExtensionUiRequests()[0].id
     h.backend.activeRunId = 'new-run'
     await expect(h.bridge.resolveExtensionUiRequest(id, { cancelled: true })).rejects.toThrow('已关闭')
-    expect(h.backend.queuePause).toBeUndefined()
+    expect(h.backend).toMatchObject({ busy: true, queueAutoReady: false, activeRunId: 'new-run' })
     expect(h.writes).toEqual([])
   })
 
-  it('pauses the captured turn on question timeout and sends cancellation only to its client', async () => {
+  it('keeps the captured turn busy after question timeout until actual settlement', async () => {
     vi.useFakeTimers()
     const h = await fixture()
     h.backend.activeRunId = 'current-run'
     h.handle({ type: 'extension_ui_request', id: 'ask-timeout', method: 'input', title: '问题', timeout: 1000 })
     await vi.advanceTimersByTimeAsync(1000)
-    expect(h.backend.queuePause).toMatchObject({ paused: true, pausedRunId: 'current-run' })
+    expect(h.bridge.getPendingExtensionUiRequests()).toEqual([])
+    expect(h.backend).toMatchObject({ busy: true, queueAutoReady: false, activeRunId: 'current-run', turnInterrupted: true })
     expect(JSON.parse(h.writes[0])).toMatchObject({ id: 'ask-timeout', cancelled: true })
+    h.emit({ type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'error', content: [] }] })
+    expect(h.backend).toMatchObject({ busy: true, queueAutoReady: false })
+    h.emit({ type: 'agent_settled' })
+    expect(h.backend).toMatchObject({ busy: false, queueAutoReady: true })
+  })
+
+  it('does not treat a tool permission deadline as actual run settlement', async () => {
+    vi.useFakeTimers()
+    const h = await fixture()
+    h.backend.activeRunId = 'permission-run'
+    h.handle({
+      type: 'extension_ui_request', id: 'permission-timeout', method: 'select', timeout: 1000,
+      title: `${TOOL_PERMISSION_MARKER}${JSON.stringify({
+        cwd: h.backend.cwd, toolName: 'write', category: 'write', policyCategories: ['write'],
+        summary: '写文件', detail: '写文件', risks: [], canRemember: true
+      })}`
+    })
+    const request = h.bridge.getPendingToolPermissionRequests()[0]
+    expect(request).toBeDefined()
+    await vi.advanceTimersByTimeAsync(request.timeoutAt - Date.now() + 250)
+    expect(h.bridge.getPendingToolPermissionRequests()).toEqual([])
+    expect(h.backend).toMatchObject({ busy: true, queueAutoReady: false, activeRunId: 'permission-run', turnInterrupted: true })
+    expect((h.backend.client as { getState: unknown }).getState).not.toHaveBeenCalled()
+    h.emit({ type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'error', content: [] }] })
+    expect(h.backend).toMatchObject({ busy: true, queueAutoReady: false })
+    h.emit({ type: 'agent_settled' })
+    expect(h.backend).toMatchObject({ busy: false, queueAutoReady: true })
   })
 
   it('queues and resolves plan questionnaire selections through RPC stdin', async () => {

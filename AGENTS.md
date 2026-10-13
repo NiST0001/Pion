@@ -33,7 +33,7 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 - 子代理仅继承父级可见内置编码工具、实时权限/检查点，无插件或递归委派。独立工作合并并发批次，分配不重叠文件；未指定子模型省略 `task.model`，使用设置默认，仅用户明确选择才覆盖或传 null 继承父模型。不猜 ID、静默回退或重复计费。
 - 生图仅复用所属 Codex OAuth，无 API-key/付费回退；非法参数前置拒绝，失败不自动重试、换型号、降设置或改路径。只写显式新项目 PNG、不覆盖输入；参考原文件含 metadata 上传，严格有界校验与 no-replace 发布，保留恢复路径。请求型号/尺寸/质量不冒称实际值。
 - 实时、缓存、分页按真实身份归并，保 React key/DOM；不按文本/位置猜重复消息，不造 SDK 时间戳/entry ID。未落盘输出不被旧历史覆盖，空 final 权威，裁剪不冒充权威缩短，历史失败不伪装空会话。
-- RPC 接受/handled/idle 不等于完成。自动队列须最新输入之后正常 assistant stop 与所属 settled 的正面证据；工具执行报错、超时、模型失败、中止或未知收口锁存暂停，空队列也保留；普通交互取消/拒绝不单独锁存，仍须正常收口才派发，不解除旧暂停或代替执行授权。显式续接或空闲时手动新输入建立所属暂停revision关联，正常assistant stop/settled及实际RPC、检查点/监听器全部收口才解除；新错误/revision及旧owner结果不得解除，Tab/自动/单项发送不授予恢复，单发某项不连发其余消息。
+- 自动队列按消息所属 agent_settled 正面凭证及全部 prompt/steer/abort 实际 RPC、检查点/完成监听器收口逐项 FIFO，不因正常、工具错误、权限超时、模型失败或中止建立长期暂停；原生任务 pending 不阻塞队列。逻辑 stop/idle/handled/超时不等于实际结束，未知 pending 继续占槽，旧 owner/generation 不得唤醒新队列，不重发已调用项或授予权限，执行前独立检查 deny。单项发送后须等所属本轮真实收口才自动下一项，不整批派发；状态读取/调用前本地准备失败保留未发项并显示错误，不忙循环，可在可靠后续收口或手动新输入后重试。旧 queuePauses 不恢复；保留真实运行恢复与历史撤销，SDK RPC 收口不冒称 provider 底层请求或收费已停止。
 - 撤销仅回到消息前并保留旧分支/草稿/图片，不回滚文件；写历史前确认旧进程实际退出。worktree 删除须真实目录/Git登记/合并/clean（含 ignored）和生命周期复查，仅非 force remove/branch -d，保历史，报告部分成功，不自动强删。
 - 区分累计费用与上下文占用、Git 工作区改动与本轮工具记录、有限统计窗口与整个会话。压缩后未知占用显示待更新，不造 0%；终态消息/压缩事件优先，不重复错误或用量。
 
@@ -44,6 +44,7 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 - 下拉使用 PionSelect 自绘控件，保分组、精确值、disabled/fieldset、键盘/IME、可访问性与菜单独立滚动。Enter 发送、Shift+Enter 换行，@ 菜单不劫持 Enter，IME 不发送。
 - 子会话仅只读内存投影，保父 DOM/草稿，父控制隐藏且 inert；不导航、解码图片或制造会话/工具/用量。列表折叠不取消任务，TTL/容量/身份门不得放宽。
 - 主题与独立设置持久化失败不得用默认值覆盖，迟到读取不覆盖新选择；安装不清用户配置。保留既有主题与 division-dark ID、毛玻璃默认关闭及必要平台回退，不自动重建窗口。
+- ComputerUse 当前仅开发版 Wayland 手动本地观察：默认不捕获，状态读取不探测 OS；Portal 窗口类型不认证应用或授予输入/外发。许可绑定活主帧与 document incarnation，撤权后真实帧先记账再拒交付，原图不经 UI IPC，独立预览有界。真实 pending/Portal/PipeWire/进程/解码未收口保持隔离；跨进程/未知重启恢复、模型工具/SDK 留存、输入及打包尚未完成，不能因编译/mock 或重启冒称可用/停止。细节见功能约束与 ComputerUse 实施说明。
 - PTY 由主进程管理、绑定打开时的真实 cwd，隐藏不停止，关闭清理；使用系统用户权限，不受 Agent 审批沙箱化。保 Electron ABI 重建与解包配置。
 - 浏览器固定非持久 `pion-browser` guest，显式导航，保 attach/request 门、Node关闭、隔离/沙箱/webSecurity及危险行为拒绝；不暴露 Pion IPC。插件商店持久 guest 独立，不宣称内存 session 零痕迹或浏览器门是网络沙箱。
 

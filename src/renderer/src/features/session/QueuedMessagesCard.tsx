@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import { Clock3, MessageSquare, Pencil, Send, Trash2, Zap } from 'lucide-react'
-import type { QueuePause } from '../../../../shared/types'
 import { loadPanelExpanded, savePanelExpanded } from '../../utils/sessionPanelPreferences'
 
 type QueueKind = 'steering' | 'followUp'
@@ -27,7 +26,6 @@ export function QueuedMessagesCard({
   controlsDisabled = false,
   followUpRunIds = [],
   agentBusy = false,
-  queuePause,
   onSendItem,
   onEditItem,
   onRemoveItem
@@ -40,7 +38,6 @@ export function QueuedMessagesCard({
   controlsDisabled?: boolean
   followUpRunIds?: (string | null)[]
   agentBusy?: boolean
-  queuePause?: QueuePause
   onSendItem?: (kind: QueueKind, index: number) => void | Promise<void>
   onEditItem?: (item: QueueItem) => void | Promise<void>
   onRemoveItem?: (kind: QueueKind, index: number) => void | Promise<void>
@@ -52,14 +49,13 @@ export function QueuedMessagesCard({
   ]
   const [expanded, setExpanded] = useState(() => loadPanelExpanded('queue', sessionKey))
   const [sendingKey, setSendingKey] = useState<string | null>(null)
-  const expandedHeight = items.length === 0 ? 52 : Math.min(360, Math.max(102,
-    52 + items.length * 34))
+  const expandedHeight = Math.min(360, Math.max(102, 52 + items.length * 34))
   const panelStyle = {
     '--task-panel-expanded-height': `${expandedHeight}px`
   } as CSSProperties
   const steeringCount = steering.length
   const followUpCount = followUp.length
-  const caption = queuePause?.paused ? '已暂停，等待处理当前任务' : steeringCount > 0 && followUpCount > 0
+  const caption = steeringCount > 0 && followUpCount > 0
     ? `${steeringCount} 条插入 · ${followUpCount} 条稍后`
     : steeringCount > 0
       ? '等待插入当前运行'
@@ -81,7 +77,7 @@ export function QueuedMessagesCard({
     }
   }
 
-  if (items.length === 0 && !queuePause?.paused) return null
+  if (items.length === 0) return null
 
   return (
     <section

@@ -118,6 +118,49 @@ describe('RunStore standalone SDK usage', () => {
 })
 
 describe('RunStore', () => {
+  it.each([
+    [{ cwd: '/tmp/project', sessionPath: '/tmp/session.jsonl', pause: { paused: true, revision: 9, pausedRunId: 'queued' } }],
+    [null, {}, { cwd: '/tmp/project', pause: { paused: 'invalid', revision: -1 } }],
+    { malformed: true }
+  ])('ignores legacy queuePauses while preserving runs and original queue identities (%j)', async (queuePauses) => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-runs-'))
+    roots.push(root)
+    const file = join(root, 'runs.json')
+    const sessionPath = '/tmp/session.jsonl'
+    const images = [{ type: 'image' as const, data: 'first', mimeType: 'image/png' },
+      { type: 'image' as const, data: 'second', mimeType: 'image/jpeg' }]
+    const originalRuns = [
+      operation({ id: 'done', sessionPath, state: 'completed', recoveredFromRunId: 'previous-run',
+        usage: { ...EMPTY_TOKEN_USAGE, total: 42 }, tools: [{ toolCallId: 'tool-1', name: 'read', state: 'completed', startedAt: 1, endedAt: 2 }] }),
+      operation({ id: 'queued', sessionPath, state: 'queued', prompt: { message: 'same', images } }),
+      operation({ id: 'queued-other', sessionPath, state: 'queued', prompt: { message: 'same', images: [] } })
+    ]
+    const originalFile = JSON.stringify({ version: 1, runs: originalRuns, queuePauses })
+    await writeFile(file, originalFile)
+
+    const store = new RunStore(file)
+    await store.load()
+    expect(await readFile(file, 'utf8')).toBe(originalFile)
+    expect(store.get('done')).toMatchObject(originalRuns[0])
+    expect(store.get('queued')).toMatchObject({ id: 'queued', state: 'queued', prompt: { message: 'same', images } })
+    expect(store.get('queued-other')).toMatchObject({ id: 'queued-other', state: 'queued' })
+    store.create(operation({ id: 'new-queue', sessionPath, state: 'queued', createdAt: 200 }))
+    store.update('queued', (run) => { run.state = 'discarded'; run.stopReason = 'queue-edited' })
+    expect(store.get('queued')?.prompt.images).toEqual(images)
+    expect(store.get('queued-other')?.state).toBe('queued')
+    expect(store.get('new-queue')?.state).toBe('queued')
+    await store.flush()
+
+    const disk = JSON.parse(await readFile(file, 'utf8'))
+    expect(disk).not.toHaveProperty('queuePauses')
+    const restored = new RunStore(file)
+    await restored.load()
+    expect(restored.get('done')).toEqual(store.get('done'))
+    expect(restored.get('queued')).toEqual(store.get('queued'))
+    expect(restored.get('new-queue')).toEqual(store.get('new-queue'))
+    expect(restored.get('queued-other')).toEqual(store.get('queued-other'))
+  })
+
   it('worktree deletion checks the full cwd ledger beyond the latest page', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pion-runs-'))
     roots.push(root)

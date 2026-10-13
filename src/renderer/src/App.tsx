@@ -324,7 +324,7 @@ export function App(): ReactElement {
     historyJump: state.historyJump,
     historyResetRevision: state.historyResetRevision,
     panelsVisible: state.queuedMessages.steering.length > 0
-      || state.queuedMessages.followUp.length > 0 || state.queuedMessages.queuePause?.paused === true
+      || state.queuedMessages.followUp.length > 0
       || (state.mode !== 'plan' && hasIncompleteTasks(agentTodos)),
     loadOlder: actions.loadOlder,
     loadNewer: actions.loadNewer,
@@ -749,7 +749,7 @@ export function App(): ReactElement {
   const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
   const hasTaskPanel = state.mode !== 'plan' && hasIncompleteTasks(agentTodos)
   const queuedMessages = state.queuedMessages
-  const hasQueuedMessages = queuedMessages.steering.length > 0 || queuedMessages.followUp.length > 0 || queuedMessages.queuePause?.paused === true
+  const hasQueuedMessages = queuedMessages.steering.length > 0 || queuedMessages.followUp.length > 0
   const agentActivity = state.busy || state.compacting
   const [workingCycle, setWorkingCycle] = useState(0)
   useEffect(() => {
@@ -1115,7 +1115,6 @@ export function App(): ReactElement {
                   nativeFollowUpCount={queuedMessages.nativeFollowUpCount}
                   followUpRunIds={queuedMessages.followUpRunIds}
                   controlsDisabled={queueEditor.frozen}
-                  queuePause={queuedMessages.queuePause}
                   agentBusy={state.busy}
                   onSendItem={(kind, index) => actions.sendQueuedMessage(kind, index).catch((error: unknown) => {
                     console.error('[pion] 直接发送排队消息失败', error)
