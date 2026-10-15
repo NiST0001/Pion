@@ -6,7 +6,7 @@
 
 ## 查阅索引
 
-- 运行时、IPC、MCP/codemode、权限、排队/提问、生图、子代理、原生窗口/终端/浏览器：见「架构边界」各子节。
+- 运行时、IPC、原生斜杠命令、MCP/codemode、权限、排队/提问、生图、子代理、原生窗口/终端/浏览器：见「架构边界」各子节。
 - 下拉/主题/动效、撤销、任务、布局/历史/阅读、Git与身份、提供商/错误/费用、图片预览/统计：见「UI 与会话」各子节。
 - 安装、内置日志与正式交付：见「安装与发布」。
 
@@ -20,6 +20,17 @@
 - 原生 MCP 沿用用户 ~/.pi/agent/mcp.json、项目 .pi/mcp.json 的 canonical mcpServers；项目配置仅在用户信任后生效并受用户全局服务器基线约束，不自动迁移凭据或删除旧插件。启用服务器会在 tool-call 之前后台 spawn stdio/继承完整环境、执行 !command 或触发 HTTP OAuth；工具闸门不是启动门控或 OS 沙箱。禁用曝光不停止连接，服务器 enabled:false 才停止。RPC /mcp 是文字状态/login/logout/reconnect，不宣称支持 GUI custom TUI。
 - MCP 列表仅读取已选后端的私有状态缓存，不新建后端/manager、发 prompt、连接/重连或触发认证、模型调用。SDK 状态适配只接受已核对版本的真正 builtin:mcp 空参数 RPC handler，保留原生启动与命令来源门及真实 command context；旧插件接管时不调用未知同名命令，不把注册/曝光当连接。状态投影有界且只保留服务器名、状态、曝光及连接后登记工具数，不透传原始诊断、地址、命令、配置路径或凭据；私有 widget 在正文/计费/UI 投影前消费，key 不是认证边界。查询超时只停止采集，实际 pending 跨 SDK 替换保持单槽至收口；缓存沿单调时间过期，界面有独立过期门，挂起读取、重复缓存或时钟回拨不能无限保留/复活已过期连接列表。保持 owner/主帧与 cwd/path/backend/选择 generation 隔离，关闭/隐藏时停止页面轮询与订阅，不改变服务器生命周期。
 - 原生 codemode 启用 models:true，可能调用付费模型；外层每次须 allowOnce 并声明费用，检查 read/write/shell/network/external，任一 deny 禁止 execute，不伪造逐模型审批，不作为 pion_generate_image 失败自动回退。每 script 最多 8 次模型调用、5 分钟 host deadline 并传递 parent abort；停止等待不证明请求已停止，失败/取消可能收费。原 SDK usage 只累计计费、不充父上下文、不双计。codemode/MCP/resource 图片结果 fail-closed，最多 4 张静态 PNG/JPEG、512/边、96 KiB/张，超限安全提示、不解码原图；清除 structuredContent 可能影响程序化结构化 MCP，任意文字/base64/script/store/参数未保证不记录，SDK 可保存 OS 临时原图而非项目、metadata 未保证清除。计划模式重新应用白名单并执行时阻止 codemode/tool-search/动态 MCP；显式工具集合持续约束，不以 defaultTools 代替执行边界，子代理仅 SDK 编码工具/noExtensions。嵌套事件保留 parentToolCallId 供过滤，不另建根 transcript 或重复统计。
+### 原生斜杠命令
+
+- Pi 核心斜杠命令是 TUI 分派入口，不能通过 RPC `prompt` 原样执行；未识别的核心字符串可能变成付费模型输入。`src/shared/slash-commands.ts` 统一桌面目录、原生名字、后端准备期间可用子集及明确待接入项，Composer 与 App 同源拦截；精确名称的非法/多行参数及带附件调用也消费为原生命令，不发送模型、不入队、不打开终端。扩展、模板、技能等资源命令继续由 SDK 处理，不拦截未知名字。
+- 当前第一阶段原生入口：`/settings`、`/model`、`/thinking`、`/login`、`/logout`、`/new`、`/resume`、`/name`、`/session`、`/clone`、`/compact`、`/copy`、`/export`、`/trust`、`/hotkeys`、`/changelog`、`/quit`；另有桌面 `/debug`，保留 Pion 的 `/plan`、`/yolo`、`/verify`、`/agents`。`/scoped-models`、`/tree`、`/fork`、`/import`、`/reload`、`/share`、`/bug`、`/llama` 仍标注“待接入”，执行只解释状态，不冒称全部完成。源码接入不等于已发布、测试通过或实机验证。
+- `/settings`、`/trust`、`/debug` 定向打开对应桌面设置页；`/login [provider]` 与 `/logout` 只打开/过滤提供商目录，认证或登出仍须点击现有显式操作。安全整数递增导航请求只消费一次，迟到旧请求不抢页，用户切页不重放认证意图，不永久挂载所有设置页；重命名和提供商动作槽保在设置宿主，普通切页/关闭仍卸载页面，重开须等所属真实操作收口，不重复调用，旧页面不向新页面发布目录。同会话名称回填不覆盖用户编辑，旧保存不覆盖新选择/新 revision，失败显示本地错误而非未处理拒绝。`/hotkeys` 只列 Pion 真正实现的键位；`/quit` 走现有窗口关闭生命周期，不借用 Pi TUI 快捷键或退出协议。
+- `/model [provider/model]` 使用当前会话模型目录和精确 ID；无精确匹配时展示可搜索选择器。`/thinking [level]` 按当前支持级别选择；提交前重查模型目录/级别及忙碌、压缩、流式/排队状态，准备期间不启动变更。`/name` 无参数只显示名称，有参数才重命名；`/resume` 仅列当前项目已保存会话；`/new`、`/clone`、`/compact` 沿现有原生生命周期，不造消息或虚构 SDK entry ID。
+- `/session` 直接投影现有 SDK 的完整会话统计，不以当前历史页、上下文占用或有限运行列表代替。`/copy` 从所属后端读取当前分支最后一条助手文字再写本地剪贴板；`/changelog` 仅读取内置 Pi 包的有界版本/日志，打包时沿真实解包目录避免 ASAR 虚拟路径与 FD 身份误判，不是 Pion 发布日志。新增 typed IPC 均核对所属主窗口/主帧；`SessionCommandTarget` 的 cwd、sessionId、sessionPath、backendId 只作为现有后端身份 fence，不请求加载或启动，异步前后复查 client/选择/事件 generation 与活窗口。
+- `/export [path.html|path.jsonl]` 是用户显式本地导出：HTML 使用 SDK 完整会话树，JSONL 使用 SDK 当前分支序列化；缺少已落盘消息的 HTML 在 RPC 前拒绝，但不能因当前分支为空否定完整树中的已保存消息；仅零计数歧义时有界读取全树并复查身份。路径只移除匹配的外层引号，支持捕获 cwd 的相对路径和 `~/`，不做 shell 解释；`.jsonl` 后缀导出 JSONL，其余路径导出 HTML，不覆盖已有目标。私有暂存完整写入、身份与预算复查后 hard-link no-replace 发布；拒绝符号链接/非普通文件、超限及变化的输入，不支持安全发布时报告恢复路径、不自动覆盖/换路径。检查不是 OS 沙箱或完整 TOCTOU 防护，导出可包含敏感提示词/工具输出，不能自动分享或上传。
+- 导出真实 Promise 在途期间保留全局操作槽及后端池保留标记，阻止相冲突的会话变更/自动派发与驱逐；不能复用 `historyMutation` 屏蔽 SDK 事件，真实 `agent_start` 等事件照常处理并作废旧发布。逻辑关闭、切页或超时不解除真实 pending；SDK 导出返回失败无法区分业务拒绝和未知 writer 时保守保留私有暂存，后续导出隔离至重启，但不冻结普通会话/其他只读能力。日志未知 close 只保留日志读槽；释放已暴露 RPC Promise 不宣称底层 writer、远端请求或收费已物理停止。
+- 命令弹窗是独立 lazy/Suspense 受控槽位，不重挂载父时间线/设置；搜索结果有界展示并可继续翻页，纯文字信息不注入 HTML。cwd/路径/会话/backend/API/selection generation 或请求替换后拒绝迟到结果；观察到身份/API/可见性失效后永久退休该次弹窗，即使不变的 selection generation 下 A→B→A 也不能复活。连续同类命令及相冲突变更保留实际 pending，重复选择不重复调用。焦点仅由最上层 modal 处理，Enter/Tab/Escape 不穿透 Composer，IME/长按不执行；菜单仅滚动自身，原生命令不消费图片附件，后端准备例外不是变更授权。
+
 ### 运行时、排队与提问
 
 - 会话子进程由编译后的 agent-runtime.mjs 通过 SDK 创建，提问工具使用 customTools 内置注册，不生成或安装提问插件。保留 RPC 协议、项目信任、会话替换和用户配置；系统 Node 执行的入口及共享块需解包到 app.asar.unpacked。

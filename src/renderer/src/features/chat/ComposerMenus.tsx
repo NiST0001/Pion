@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react'
 import type { ReactElement } from 'react'
 import { AtSign, FileText } from 'lucide-react'
 import type { SlashCommandInfo } from '../../../../shared/types'
@@ -61,13 +62,27 @@ export function SlashCommandMenu({
   activeIndex: number
   onSelect: (index: number) => void
 }): ReactElement {
+  const menuRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    const menu = menuRef.current
+    const row = menu?.querySelector<HTMLElement>(`[data-command-index="${activeIndex}"]`)
+    if (!menu || !row) return
+    // scrollIntoView can also move the conversation/document ancestors.
+    const menuRect = menu.getBoundingClientRect()
+    const rowRect = row.getBoundingClientRect()
+    if (rowRect.top < menuRect.top) menu.scrollTop -= menuRect.top - rowRect.top
+    else if (rowRect.bottom > menuRect.bottom) menu.scrollTop += rowRect.bottom - menuRect.bottom
+  }, [activeIndex, commands])
+
   return (
-    <div id="slash-command-menu" className="slash-command-menu" role="listbox" aria-label="斜杠命令">
+    <div ref={menuRef} id="slash-command-menu" className="slash-command-menu" role="listbox" aria-label="斜杠命令">
       <div className="slash-command-heading">斜杠命令</div>
       {commands.map((command, index) => (
         <button
           type="button"
           key={`${command.source}:${command.name}`}
+          id={`slash-command-option-${index}`}
+          data-command-index={index}
           className={`slash-command-option${index === activeIndex ? ' active' : ''}`}
           role="option"
           aria-selected={index === activeIndex}

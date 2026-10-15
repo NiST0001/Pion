@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactElement, ReactNode } from 'react'
 import { ArrowUp, AtSign, Hammer, ListTodo, ShieldAlert, Square } from 'lucide-react'
 import type { AgentMode, ImageContent, SlashCommandInfo } from '../../../../shared/types'
+import { parseDesktopSlashCommand } from '../../../../shared/slash-commands'
 
 import { REFERENCE_TRIGGER_RE } from './composerReferences'
 import { ComposerAttachments } from './ComposerAttachments'
@@ -33,7 +34,9 @@ interface ComposerProps {
   contextUsagePending?: boolean
   contextTokens?: number
   contextWindow?: number
-  /** Renderer-owned commands that stay available while the Agent backend prepares. */
+  /** Only these commands bypass message/attachment packaging and the queue. */
+  nativeCommandNames?: string[]
+  /** Only these commands may execute while the Agent backend prepares. */
   localCommandNames?: string[]
   mode: AgentMode
   /** Session auto-approves every tool-permission prompt. */
@@ -62,6 +65,7 @@ export function Composer({
   contextTokens,
   contextWindow,
   localCommandNames = [],
+  nativeCommandNames = [],
   mode,
   yolo = false,
   onYoloDisable,
@@ -73,6 +77,7 @@ export function Composer({
   const [value, setValue] = useState('')
   const [commandIndex, setCommandIndex] = useState(0)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const composingRef = useRef(false)
   const valueRef = useRef('')
   const restoredTextRef = useRef<string | null>(null)
   const consumedRestoresRef = useRef(new Set<string>())
@@ -242,14 +247,16 @@ export function Composer({
       || (reference.kind === 'image' && `图像 ${reference.imageNumber}`.includes(referenceQuery))).slice(0, 8)
 
   const slashMatch = value.match(/^\s*\/([^\s]*)$/)
-  const slashQuery = slashMatch?.[1].toLocaleLowerCase() ?? null
-  const commandOptions = slashQuery === null
+  const slashQuery = slashMatch?.[1].toLowerCase() ?? null
+  const commandOptions = useMemo(() => slashQuery === null
     ? []
-    : commands.filter((command) => command.name.toLocaleLowerCase().startsWith(slashQuery)).slice(0, 12)
+    : commands.filter((command) => command.name.toLowerCase().startsWith(slashQuery)), [commands, slashQuery])
   const showCommandMenu = !disabled && commandOptions.length > 0
   const showReferenceMenu = !disabled && !showCommandMenu && referenceMatch !== null
-  const invokedCommandName = value.trim().match(/^\/([^\s]+)(?:\s+[\s\S]*)?$/)?.[1]?.toLocaleLowerCase()
-  const localCommandReady = Boolean(invokedCommandName && localCommandNames.includes(invokedCommandName))
+  const invokedCommandName = parseDesktopSlashCommand(value)?.name
+    ?? value.trim().match(/^\/([^\s]+)(?:\s+[\s\S]*)?$/)?.[1]?.toLowerCase()
+  const nativeCommandReady = Boolean(invokedCommandName && nativeCommandNames.some((name) => name.toLowerCase() === invokedCommandName))
+  const localCommandReady = Boolean(invokedCommandName && localCommandNames.some((name) => name.toLowerCase() === invokedCommandName))
   const activeCommandIndex = Math.min(commandIndex, Math.max(0, commandOptions.length - 1))
   const contextPercent = contextUsagePending || contextPressure === undefined
     ? null
@@ -269,27 +276,28 @@ export function Composer({
     const text = valueRef.current === restoredTextRef.current ? valueRef.current : valueRef.current.trim()
     if ((text.trim() === '' && references.references.length === 0) || disabled || references.reading || (sendDisabled && !localCommandReady)) return
     onSend(
-      localCommandReady ? text.trim() : buildMessage(text),
-      localCommandReady ? [] : references.images
+      nativeCommandReady ? text.trim() : buildMessage(text),
+      nativeCommandReady ? [] : references.images
     )
     clearValue()
-    if (!localCommandReady) clearReferences()
-  }, [getReferenceDraft, buildMessage, disabled, sendDisabled, localCommandReady, onSend, clearValue, clearReferences])
+    if (!nativeCommandReady) clearReferences()
+  }, [getReferenceDraft, buildMessage, disabled, sendDisabled, localCommandReady, nativeCommandReady, onSend, clearValue, clearReferences])
 
   const queue = useCallback(() => {
     const references = getReferenceDraft()
     const text = valueRef.current === restoredTextRef.current ? valueRef.current : valueRef.current.trim()
     if ((text.trim() === '' && references.references.length === 0) || disabled || references.reading || (sendDisabled && !localCommandReady)) return
-    if (localCommandReady) onSend(text.trim(), [])
+    if (nativeCommandReady) onSend(text.trim(), [])
     else onQueue(buildMessage(text), references.images)
     clearValue()
-    if (!localCommandReady) clearReferences()
+    if (!nativeCommandReady) clearReferences()
   }, [
     getReferenceDraft,
     buildMessage,
     disabled,
     sendDisabled,
     localCommandReady,
+    nativeCommandReady,
     onSend,
     onQueue,
     clearValue,
@@ -301,8 +309,10 @@ export function Composer({
       event.preventDefault()
       return
     }
+    if (event.nativeEvent.isComposing || composingRef.current || event.keyCode === 229) return
     if (showCommandMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
       event.preventDefault()
+      event.stopPropagation()
       setCommandIndex((current) => {
         const last = commandOptions.length - 1
         if (last < 0) return 0
@@ -320,7 +330,7 @@ export function Composer({
       !event.nativeEvent.isComposing
     ) {
       event.preventDefault()
-      if (localCommandReady) submit()
+      if (nativeCommandReady) submit()
       else selectSlashCommand(activeCommandIndex)
       return
     }
@@ -444,6 +454,7 @@ export function Composer({
             disabled={disabled}
             aria-autocomplete="list"
             aria-controls={showCommandMenu ? 'slash-command-menu' : showReferenceMenu ? 'reference-menu' : undefined}
+            aria-activedescendant={showCommandMenu ? `slash-command-option-${activeCommandIndex}` : undefined}
             rows={1}
             onChange={(event) => {
               if (disabled) return
@@ -461,6 +472,8 @@ export function Composer({
             }}
             onDrop={handleDrop}
             onKeyDown={handleKeyDown}
+            onCompositionStart={() => { composingRef.current = true }}
+            onCompositionEnd={() => { composingRef.current = false }}
             aria-keyshortcuts="ArrowUp ArrowDown Control+Tab"
           />
           <input

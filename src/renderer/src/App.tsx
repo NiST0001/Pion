@@ -3,6 +3,9 @@ import type { ReactElement } from 'react'
 import { flushSync } from 'react-dom'
 import { Settings, Store, PanelLeft, PanelRight, TerminalSquare, Globe, RotateCcw, PanelsTopLeft } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
+import { useSlashCommands } from './hooks/useSlashCommands'
+import { DESKTOP_SLASH_COMMAND_NAMES, PREPARATION_SLASH_COMMAND_NAMES } from '../../shared/slash-commands'
+import type { SettingsNavigationRequest } from './features/settings/settingsNavigation'
 import { useSubagentSessions } from './hooks/useSubagentSessions'
 import { createSubagentTimelineProjector } from './agent/subagentTimeline'
 import { useMessageRevert } from './hooks/useMessageRevert'
@@ -76,13 +79,6 @@ import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPat
 const TerminalPanel = lazy(() => import('./features/terminal/TerminalPanel').then((module) => ({ default: module.TerminalPanel })))
 const BrowserPanel = lazy(() => import('./features/browser/BrowserPanel').then((module) => ({ default: module.BrowserPanel })))
 
-const PION_LOCAL_SLASH_COMMANDS: SlashCommandInfo[] = [
-  { name: 'plan', description: '切换 Pion 只读计划模式，不直接执行实现', source: 'pion' },
-  { name: 'yolo', description: '切换 YOLO 模式：自动批准本会话所有工具权限请求', source: 'pion' },
-  { name: 'verify', description: '打开项目自动验证面板', source: 'pion' },
-  { name: 'agents', description: '打开隔离多 Agent 工作流面板', source: 'pion' }
-]
-const LOCAL_SLASH_COMMAND_NAMES = PION_LOCAL_SLASH_COMMANDS.map((command) => command.name)
 const noChildPaging = async (): Promise<void> => {}
 
 export function App(): ReactElement {
@@ -181,6 +177,12 @@ export function App(): ReactElement {
   const [pendingReviewSelection, setPendingReviewSelection] = useState<PendingReviewSelection | null>(null)
   const [reviewScope, setReviewScope] = useState<GitDiffScope>('unstaged')
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsNavigation, setSettingsNavigation] = useState<SettingsNavigationRequest>()
+  const settingsNavigationId = useRef(0)
+  const openCommandSettings = useCallback((request: Omit<SettingsNavigationRequest, 'id'>): void => {
+    setSettingsNavigation({ ...request, id: ++settingsNavigationId.current })
+    setSettingsOpen(true)
+  }, [])
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [pluginStoreOpen, setPluginStoreOpen] = useState(false)
   const [taskHistorySession, setTaskHistorySession] = useState<SessionMeta | null>(null)
@@ -485,8 +487,11 @@ export function App(): ReactElement {
   }, [actions, childSessions.close, migrationTarget, selectionRef])
 
   const handleNewSession = useCallback(
-    async (cwd?: string) => {
-      if (newSessionInFlight.current) return
+    async (cwd?: string, reportFailure = false) => {
+      if (newSessionInFlight.current) {
+        if (reportFailure) throw new Error('正在新建会话，请稍后重试')
+        return
+      }
       newSessionInFlight.current = true
       childSessions.close()
       try {
@@ -504,6 +509,7 @@ export function App(): ReactElement {
         await actions.newSession()
       } catch (error) {
         console.error('[pion] 新建会话失败', error)
+        if (reportFailure) throw error
       } finally {
         newSessionInFlight.current = false
       }
@@ -666,75 +672,39 @@ export function App(): ReactElement {
     setYoloMode: actions.setYoloMode
   })
 
+  const slashCommands = useSlashCommands({
+    api: hasBridge ? window.pion : undefined,
+    state, selectionRef, enabled: !viewingChild, actions,
+    onOpenSettings: openCommandSettings,
+    onNewSession: () => handleNewSession(undefined, true),
+    onCloneSession: async () => {
+      const path = state.session?.sessionFile
+      if (!path) throw new Error('当前会话尚未持久化，无法复制')
+      await handleCopySession(state.status.cwd ?? '', path)
+    },
+    onSelectSession: handleSelectSession,
+    onOpenOperations: setOperationsPanel,
+    onModeChange: handleModeChange,
+    onRequestYolo: requestYoloMode
+  })
+  const commandDialogMounted = useDeferredMount(slashCommands.dialog !== null)
   const handleComposerSend = useCallback(async (
     text: string,
     images: ImageContent[]
   ): Promise<void> => {
-    if (viewingChild) return
-    const localMatch = text.trim().match(/^\/(verify|agents|plan|yolo)(?:\s+([\s\S]*))?$/i)
-    const match = localMatch ?? (images.length === 0
-      ? text.trim().match(/^\/(compact|new|name|clone)(?:\s+([\s\S]*))?$/i)
-      : null)
-    if (!match) {
-      try {
-        await actions.send(text, images)
-      } catch (error) {
-        console.error('[pion] 发送消息失败', error)
-      }
-      return
-    }
-
-    const command = match[1].toLowerCase()
-    const argument = (match[2] ?? '').trim()
+    if (viewingChild || slashCommands.execute(text, images)) return
     try {
-      if (command === 'compact') {
-        await actions.compactNow(argument || undefined)
-      } else if (command === 'new') {
-        await handleNewSession()
-      } else if (command === 'name') {
-        await actions.renameSession(argument)
-      } else if (command === 'clone') {
-        const path = state.session?.sessionFile
-        if (!path) throw new Error('当前会话尚未持久化，无法复制')
-        await handleCopySession(state.status.cwd ?? '', path)
-      } else if (command === 'verify') {
-        setOperationsPanel('verification')
-      } else if (command === 'agents') {
-        setOperationsPanel('agents')
-      } else if (command === 'plan') {
-        const requested = argument.toLocaleLowerCase()
-        if (requested === 'start') handleModeChange('plan')
-        else if (requested === 'exit' || requested === 'off') handleModeChange('build')
-        else if (!requested) handleModeChange(state.mode === 'plan' ? 'build' : 'plan')
-        else throw new Error('用法：/plan start 或 /plan exit')
-      } else if (command === 'yolo') {
-        const requested = argument.toLocaleLowerCase()
-        if (requested === 'on' || requested === 'start') requestYoloMode(true)
-        else if (requested === 'off' || requested === 'exit') requestYoloMode(false)
-        else if (!requested) requestYoloMode(!state.yolo)
-        else throw new Error('用法：/yolo on 或 /yolo off')
-      }
+      await actions.send(text, images)
     } catch (error) {
-      console.error(`[pion] /${command} 执行失败`, error)
+      console.error('[pion] 发送消息失败', error)
     }
-  }, [
-    actions,
-    handleCopySession,
-    handleModeChange,
-    handleNewSession,
-    requestYoloMode,
-    state.mode,
-    state.session?.sessionFile,
-    state.status.cwd,
-    state.yolo,
-    viewingChild
-  ])
+  }, [actions, slashCommands.execute, viewingChild])
 
-  const composerCommands = useMemo(() => {
+  const composerCommands = useMemo<SlashCommandInfo[]>(() => {
     const merged = new Map(state.commands.map((command) => [command.name, command]))
-    for (const command of PION_LOCAL_SLASH_COMMANDS) merged.set(command.name, command)
+    for (const command of slashCommands.commands) merged.set(command.name, command)
     return [...merged.values()]
-  }, [state.commands])
+  }, [state.commands, slashCommands.commands])
   const latestRunChanges = useMemo<FileChange[]>(() => {
     // Use the same workspace snapshot as Review, not a partial tool transcript.
     if (gitWorkspace.snapshot) return gitWorkspace.snapshot.files.map((file) => ({
@@ -981,7 +951,10 @@ export function App(): ReactElement {
             <button type="button" onClick={() => setBranchNotice('')} aria-label="关闭分支操作提示">关闭</button>
           </div>}
           <div className="sidebar-footer">
-            <button className="sidebar-settings" onClick={() => setSettingsOpen(true)}>
+            <button className="sidebar-settings" onClick={() => {
+              setSettingsNavigation(undefined)
+              setSettingsOpen(true)
+            }}>
               <Settings size={14} />
               <span>设置</span>
             </button>
@@ -1152,7 +1125,8 @@ export function App(): ReactElement {
               contextUsagePending={displayedRun?.contextUsagePending}
               contextTokens={displayedRun?.contextTokens}
               contextWindow={displayedRun?.contextWindow}
-              localCommandNames={LOCAL_SLASH_COMMAND_NAMES}
+              localCommandNames={PREPARATION_SLASH_COMMAND_NAMES}
+              nativeCommandNames={DESKTOP_SLASH_COMMAND_NAMES}
               mode={state.mode}
               yolo={state.yolo}
               onYoloDisable={() => requestYoloMode(false)}
@@ -1347,10 +1321,17 @@ export function App(): ReactElement {
             onSubmit: handleCreateBranch
           }
         }}
+        command={{
+          mounted: commandDialogMounted,
+          dialog: slashCommands.dialog ? { ...slashCommands.dialog,
+            open: !settingsOpen && !viewingChild && toolPermissionRequests.length === 0 && extensionUiRequests.length === 0 }
+            : { open: false, requestId: 0, title: '', onClose: () => {} }
+        }}
         settings={{
           mounted: settingsMounted,
           dialog: {
             open: settingsOpen,
+            navigationRequest: settingsNavigation,
             session: state.session,
             models: state.models,
             modelProviderAuthState,

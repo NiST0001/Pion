@@ -3,6 +3,7 @@ import { IPC, IPC_EVENTS } from '../shared/ipc'
 import type { SubagentSessionList, SubagentSessionSnapshot } from '../shared/subagent-sessions'
 import type { BranchDeleteResult } from '../shared/branches'
 import type { McpStatusSnapshot, McpStatusTarget } from '../shared/mcp'
+import type { PiChangelog, SessionCommandInfo } from '../shared/slash-command-protocol'
 import type {
   AgentCapabilities,
   AgentMode,
@@ -131,6 +132,10 @@ const api: PionApi = {
 
   // session management
   getState: () => ipcRenderer.invoke(IPC.AgentState),
+  getSessionCommandInfo: (target) => ipcRenderer.invoke(IPC.AgentSessionCommandInfo, target) as Promise<SessionCommandInfo>,
+  copyLastAssistantText: (target) => ipcRenderer.invoke(IPC.AgentCopyLastAssistantText, target) as Promise<boolean>,
+  getPiChangelog: () => ipcRenderer.invoke(IPC.AgentPiChangelog) as Promise<PiChangelog>,
+  exportSessionForCommand: (target, outputPath) => ipcRenderer.invoke(IPC.AgentExportForCommand, target, outputPath) as Promise<string>,
   newSession: () => ipcRenderer.invoke(IPC.AgentNewSession),
   forkAt: (entryId) => ipcRenderer.invoke(IPC.AgentFork, entryId),
   revertMessage: (request) => ipcRenderer.invoke(IPC.AgentRevertMessage, request),

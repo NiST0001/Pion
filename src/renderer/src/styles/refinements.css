@@ -777,6 +777,7 @@ html.pion-keyboard-focus .composer-project-option:focus-visible {
   flex-direction: column;
   gap: 3px;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
   padding: 7px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -785,6 +786,7 @@ html.pion-keyboard-focus .composer-project-option:focus-visible {
 }
 
 .slash-command-heading {
+  flex-shrink: 0;
   padding: 3px 8px 5px;
   color: var(--fg-faint);
   font-size: 10px;
@@ -794,6 +796,7 @@ html.pion-keyboard-focus .composer-project-option:focus-visible {
 
 .slash-command-option {
   display: grid;
+  flex: 0 0 auto;
   grid-template-columns: minmax(96px, auto) minmax(0, 1fr) auto;
   align-items: center;
   min-height: 32px;

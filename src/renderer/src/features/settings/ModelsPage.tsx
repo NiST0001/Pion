@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { FormEvent, ReactElement } from 'react'
+import type { FormEvent, MutableRefObject, ReactElement } from 'react'
 import {
   Bot,
   Check,
@@ -29,6 +29,7 @@ import type {
 } from '../../../../shared/types'
 import { PionSelect } from '../common/PionSelect'
 import { PageHeading } from './SettingsPageHeading'
+import type { SettingsNavigationRequest } from './settingsNavigation'
 
 const PROVIDER_API_OPTIONS: Array<{ value: ModelProviderApi; label: string }> = [
   { value: 'openai-completions', label: 'OpenAI Chat Completions' },
@@ -51,6 +52,8 @@ export function ModelsPage({
   error,
   agentBusy,
   providerAuthState,
+  providerRequest,
+  providerActionSlot,
   onSelect,
   onListProviders,
   onSetProviderEnabled,
@@ -68,6 +71,8 @@ export function ModelsPage({
   error: string
   agentBusy: boolean
   providerAuthState: ModelProviderAuthState | null
+  providerRequest?: Pick<SettingsNavigationRequest, 'id' | 'providerQuery' | 'authIntent'>
+  providerActionSlot?: MutableRefObject<Promise<void> | null>
   onSelect: (provider: string, modelId: string) => void
   onListProviders: () => Promise<ModelProviderInfo[]>
   onSetProviderEnabled?: (providerId: string, enabled: boolean) => Promise<ModelProviderInfo[]>
@@ -77,18 +82,22 @@ export function ModelsPage({
   onOpenProviderAuthUrl: (url: string) => Promise<void>
   onAddProvider: (input: AddModelProviderInput) => Promise<void>
 }): ReactElement {
+  const localActionSlot = useRef<Promise<void> | null>(null)
+  // Settings owns the slot across ordinary page unmounts; standalone views retain a local one.
+  const actionPending = providerActionSlot ?? localActionSlot
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
   const [addingProvider, setAddingProvider] = useState(false)
   const [setupMode, setSetupMode] = useState<'pi' | 'custom'>('pi')
+  const [authIntent, setAuthIntent] = useState<SettingsNavigationRequest['authIntent']>()
+  const lastProviderRequestId = useRef<number | undefined>(undefined)
   const [providerCatalog, setProviderCatalog] = useState<ModelProviderInfo[]>([])
   const [providerCatalogLoading, setProviderCatalogLoading] = useState(true)
   const [providerCatalogError, setProviderCatalogError] = useState('')
-  const [providerActionKey, setProviderActionKey] = useState('')
+  const [providerActionKey, setProviderActionKey] = useState(actionPending.current ? 'pending' : '')
   const [providerQuery, setProviderQuery] = useState('')
 
   const mounted = useRef(false)
   const catalogRevision = useRef(0)
-  const actionPending = useRef(false)
   const catalogOwner = useRef({ onListProviders, onSetProviderEnabled })
   if (catalogOwner.current.onListProviders !== onListProviders
     || catalogOwner.current.onSetProviderEnabled !== onSetProviderEnabled) {
@@ -98,9 +107,16 @@ export function ModelsPage({
   }
 
   const loadProviderCatalog = async (): Promise<void> => {
-    if (actionPending.current) return
     const owner = catalogOwner.current
     const revision = ++catalogRevision.current
+    const pending = actionPending.current
+    if (pending) {
+      // A remounted page waits for the old instance's actual action, not a UI close.
+      await pending
+      if (!mounted.current || owner !== catalogOwner.current || revision !== catalogRevision.current) return
+      setProviderActionKey('')
+      return loadProviderCatalog()
+    }
     setProviderCatalogLoading(true)
     setProviderCatalogError('')
     try {
@@ -135,6 +151,17 @@ export function ModelsPage({
     return () => { ++catalogRevision.current }
   }, [onListProviders, onSetProviderEnabled])
 
+  useEffect(() => {
+    if (!providerRequest || !Number.isSafeInteger(providerRequest.id)
+      || (lastProviderRequestId.current !== undefined && providerRequest.id <= lastProviderRequestId.current)) return
+    lastProviderRequestId.current = providerRequest.id
+    // Navigation only: real authentication remains behind the existing explicit buttons/gate.
+    setAddingProvider(true)
+    setSetupMode('pi')
+    setProviderQuery(providerRequest.providerQuery ?? '')
+    setAuthIntent(providerRequest.authIntent)
+  }, [providerRequest])
+
   const toggleProvider = (provider: string): void => {
     setExpandedProviders((current) => {
       const next = new Set(current)
@@ -142,12 +169,6 @@ export function ModelsPage({
       else next.add(provider)
       return next
     })
-  }
-
-  const handleProviderAdded = (providerId: string): void => {
-    setAddingProvider(false)
-    setExpandedProviders((current) => new Set(current).add(providerId))
-    void loadProviderCatalog()
   }
 
   const runProviderAction = async (
@@ -159,7 +180,9 @@ export function ModelsPage({
       if (key === 'add') throw new Error('请等待提供商操作完成。')
       return
     }
-    actionPending.current = true
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    actionPending.current = pending
     const owner = catalogOwner.current
     const revision = ++catalogRevision.current
     setProviderCatalogLoading(false)
@@ -180,12 +203,25 @@ export function ModelsPage({
       if (key === 'add') throw actionError
     } finally {
       // Only actual settlement releases the gate; owner changes cannot do so.
-      actionPending.current = false
+      if (actionPending.current === pending) actionPending.current = null
+      release()
       if (mounted.current) {
         setProviderActionKey('')
         if (owner !== catalogOwner.current) void loadProviderCatalog()
       }
     }
+  }
+
+  const handleAddProvider = async (input: AddModelProviderInput): Promise<void> => {
+    const owner = catalogOwner.current
+    const navigationId = lastProviderRequestId.current
+    await runProviderAction('add', () => onAddProvider(input))
+    if (!mounted.current || owner !== catalogOwner.current) return
+    void loadProviderCatalog()
+    // An old custom save must not close a newer login/logout directory request.
+    if (navigationId !== lastProviderRequestId.current) return
+    setAddingProvider(false)
+    setExpandedProviders((current) => new Set(current).add(input.providerId))
   }
 
   const handleProviderLogin = (providerId: string, authType: ModelProviderAuthType): Promise<void> =>
@@ -305,6 +341,9 @@ export function ModelsPage({
               <div className="provider-directory-copy">
                 <strong>Pi 提供商目录</strong>
                 <span>完整读取 ModelRuntime；API 密钥、订阅 OAuth、设备代码和系统凭据均沿用 Pi 原生流程。</span>
+                {authIntent && <span role="status">{authIntent === 'login'
+                  ? '请选择提供商的认证方式登录，不会自动登录。'
+                  : '请选择提供商的“退出”按钮登出，不会自动登出。'}</span>}
               </div>
               <div className="provider-directory-toolbar">
                 <label className="provider-directory-search">
@@ -358,8 +397,7 @@ export function ModelsPage({
             <AddProviderForm
               disabled={providerActionBusy}
               onCancel={() => setAddingProvider(false)}
-              onSubmit={(input) => runProviderAction('add', () => onAddProvider(input))}
-              onAdded={handleProviderAdded}
+              onSubmit={handleAddProvider}
             />
           )}
         </div>
@@ -573,13 +611,11 @@ function providerStatusLabel(provider: ModelProviderInfo): string {
 function AddProviderForm({
   disabled,
   onCancel,
-  onSubmit,
-  onAdded
+  onSubmit
 }: {
   disabled: boolean
   onCancel: () => void
   onSubmit: (input: AddModelProviderInput) => Promise<void>
-  onAdded: (providerId: string) => void
 }): ReactElement {
   const [providerId, setProviderId] = useState('')
   const [baseUrl, setBaseUrl] = useState('http://localhost:11434/v1')
@@ -624,7 +660,6 @@ function AddProviderForm({
         imageInput,
         authHeader
       })
-      onAdded(normalizedProviderId)
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : String(error))
     } finally {

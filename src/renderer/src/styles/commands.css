@@ -1,0 +1,190 @@
+.command-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 320;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--backdrop, rgba(0, 0, 0, 0.34));
+}
+
+.command-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(640px, 100%);
+  max-height: min(720px, calc(100dvh - 48px));
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  color: var(--fg);
+  box-shadow: var(--shadow-pop);
+  animation: command-dialog-enter var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.command-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  flex: none;
+  gap: 12px;
+  padding: 15px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.command-dialog-head > div { flex: 1; min-width: 0; }
+.command-dialog-head h2 { margin: 0; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.command-dialog-head p { margin: 5px 0 0; color: var(--fg-dim); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+
+.command-dialog-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+}
+
+.command-dialog-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 10px;
+  padding: 14px 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.command-dialog-search { display: grid; flex: none; gap: 5px; color: var(--fg-dim); font-size: 11px; }
+.command-dialog-search input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--fg);
+  font: inherit;
+}
+.command-dialog-search input::placeholder { color: var(--fg-faint); }
+
+.command-dialog-entries {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(420px, 50dvh);
+  gap: 6px;
+  margin: 0;
+  padding: 3px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  list-style: none;
+}
+.command-dialog-entries li { flex: none; min-width: 0; }
+.command-dialog-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--fg);
+  text-align: left;
+}
+.command-dialog-entry-copy { display: grid; min-width: 0; gap: 3px; overflow-wrap: anywhere; }
+.command-dialog-entry-copy strong { font-size: 12px; font-weight: 600; line-height: 1.5; }
+.command-dialog-entry-copy > span { color: var(--fg-dim); font-size: 11px; line-height: 1.5; white-space: pre-wrap; }
+.command-dialog-current { display: inline-flex; align-items: center; flex: none; gap: 4px; color: var(--accent-strong); font-size: 10px; }
+.command-dialog-entry[aria-pressed='true'] { border-color: var(--selected-border); background: var(--selected-bg); }
+.command-dialog-entry:hover:not(:disabled),
+.command-dialog-close:hover:not(:disabled),
+.command-dialog-page:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.command-dialog button:disabled { cursor: not-allowed; opacity: 0.55; }
+
+.command-dialog-pagination {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+}
+.command-dialog-page {
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 11px;
+}
+.command-dialog-range { flex: 1; min-width: 0; text-align: center; }
+
+.command-dialog-text {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(480px, 55dvh);
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--fg);
+  font: 11.5px/1.65 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.command-dialog-status,
+.command-dialog-range,
+.command-dialog-error { margin: 0; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+.command-dialog-status, .command-dialog-error { flex: none; }
+.command-dialog-status, .command-dialog-range { color: var(--fg-dim); }
+.command-dialog-error { color: var(--danger); }
+
+html.pion-keyboard-focus .command-dialog:focus-visible,
+html.pion-keyboard-focus .command-dialog :is(button, input, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes command-dialog-enter {
+  from { transform: translateY(6px); }
+  to { transform: translateY(0); }
+}
+
+@media (max-width: 680px) {
+  .command-dialog-backdrop { padding: 12px; }
+  .command-dialog { max-height: calc(100dvh - 24px); }
+  .command-dialog-head, .command-dialog-body { padding: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .command-dialog { animation: none; }
+}
+
+@media (forced-colors: active) {
+  .command-dialog, .command-dialog-close, .command-dialog-entry, .command-dialog-page,
+  .command-dialog-search input, .command-dialog-text { background: Canvas; color: CanvasText; border-color: CanvasText; box-shadow: none; }
+  .command-dialog-head { border-color: CanvasText; }
+  .command-dialog-head p, .command-dialog-search, .command-dialog-entry-copy > span,
+  .command-dialog-status, .command-dialog-range, .command-dialog-current, .command-dialog-error { color: CanvasText; }
+  .command-dialog-entry[aria-pressed='true'] { border-color: Highlight; outline: 1px solid Highlight; outline-offset: -1px; }
+  .command-dialog button:disabled { opacity: 1; color: GrayText; }
+  .command-dialog button:disabled .command-dialog-entry-copy > span,
+  .command-dialog button:disabled .command-dialog-current { color: GrayText; }
+  html.pion-keyboard-focus .command-dialog:focus-visible,
+  html.pion-keyboard-focus .command-dialog :is(button, input, [tabindex]):focus-visible { outline-color: Highlight; }
+}

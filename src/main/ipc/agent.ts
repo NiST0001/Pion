@@ -4,6 +4,7 @@ import type { ProjectStore } from '../projects'
 import { IPC } from '../../shared/ipc'
 import type { BranchDeleteRequest } from '../../shared/branches'
 import type { McpStatusTarget } from '../../shared/mcp'
+import type { SessionCommandTarget } from '../../shared/slash-command-protocol'
 import type {
   AddModelProviderInput,
   ExtensionUiResponse,
@@ -34,7 +35,7 @@ const SESSION_OPERATIONS = new Set<string>([
   IPC.AgentCopySession, IPC.AgentForkSession, IPC.AgentSetMode, IPC.AgentSetYolo,
   IPC.AgentSetSubagents, IPC.AgentLoginModelProvider, IPC.AgentLogoutModelProvider,
   IPC.AgentAddModelProvider, IPC.AgentSetModel, IPC.AgentSetThinking, IPC.AgentSetAutoCompaction,
-  IPC.AgentSetAutoRetry, IPC.AgentCompact, IPC.AgentExportHtml, IPC.AgentRenameSession,
+  IPC.AgentSetAutoRetry, IPC.AgentCompact, IPC.AgentExportHtml, IPC.AgentExportForCommand, IPC.AgentRenameSession,
   IPC.AgentSetSteeringMode, IPC.AgentSetFollowUpMode, IPC.ProjectTrustSet,
   IPC.ToolPermissionResolve, IPC.ExtensionUiResolve, IPC.BranchCreate, IPC.BranchRename
 ])
@@ -94,6 +95,22 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   ipcMain.handle(IPC.AgentStderr, () => bridge.getStderr())
 
   // session management ----------------------------------------------------------
+  ipcMain.handle(IPC.AgentSessionCommandInfo, (event, target: SessionCommandTarget) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取会话命令信息')
+    return bridge.getSessionCommandInfo(target, event.sender.id)
+  })
+  ipcMain.handle(IPC.AgentCopyLastAssistantText, (event, target: SessionCommandTarget) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口复制助手正文')
+    return bridge.copyLastAssistantText(target, event.sender.id)
+  })
+  ipcMain.handle(IPC.AgentPiChangelog, (event) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取 Pi 更新日志')
+    return bridge.getPiChangelog(event.sender.id)
+  })
+  ipcMain.handle(IPC.AgentExportForCommand, (event, target: SessionCommandTarget, outputPath?: string) => {
+    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口导出会话')
+    return bridge.exportSessionForCommand(target, outputPath, event.sender.id)
+  })
   ipcMain.handle(IPC.AgentNewSession, () => bridge.newSession())
   ipcMain.handle(IPC.AgentFork, (_event, entryId: string) => bridge.forkAt(entryId))
   ipcMain.handle(IPC.AgentRevertMessage, (event, request: MessageRevertRequest) => {

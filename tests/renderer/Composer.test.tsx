@@ -5,6 +5,9 @@ import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-li
 import type { ComponentProps } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ImageContent } from '../../src/shared/types'
+import {
+  DESKTOP_SLASH_COMMANDS, DESKTOP_SLASH_COMMAND_NAMES, PREPARATION_SLASH_COMMAND_NAMES
+} from '../../src/shared/slash-commands'
 import { Composer } from '../../src/renderer/src/features/chat/Composer'
 import { useComposerReferences } from '../../src/renderer/src/features/chat/useComposerReferences'
 
@@ -27,6 +30,7 @@ describe('Composer input references and local slash commands', () => {
         contextPressure={0.42}
         contextTokens={42_000}
         contextWindow={100_000}
+        nativeCommandNames={['agents']}
         localCommandNames={['agents']}
         mode="build"
         onModeChange={vi.fn()}
@@ -242,6 +246,7 @@ describe('Composer input references and local slash commands', () => {
         prefill=""
         history={[]}
         commands={[{ name: 'verify', description: 'open verification', source: 'pion' }]}
+        nativeCommandNames={['verify']}
         localCommandNames={['verify']}
         mode="build"
         onModeChange={vi.fn()}
@@ -262,6 +267,307 @@ describe('Composer input references and local slash commands', () => {
     expect(onSend).toHaveBeenCalledWith('/verify', [])
     expect(onQueue).not.toHaveBeenCalled()
     expect(screen.getByAltText('待发送图像 1')).toBeInTheDocument()
+  })
+})
+
+describe('Composer native slash commands', () => {
+  const image: ImageContent = { type: 'image', data: 'aW1hZ2U=', mimeType: 'image/png' }
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function setup(overrides: Partial<ComponentProps<typeof Composer>> = {}) {
+    const onSend = vi.fn()
+    const onQueue = vi.fn()
+    const onModeChange = vi.fn()
+    const onAncestorKeyDown = vi.fn()
+    let props: ComponentProps<typeof Composer> = {
+      busy: false, disabled: false, sendDisabled: false, prefill: '', history: [],
+      commands: DESKTOP_SLASH_COMMANDS, nativeCommandNames: DESKTOP_SLASH_COMMAND_NAMES,
+      localCommandNames: PREPARATION_SLASH_COMMAND_NAMES, mode: 'build',
+      onModeChange, onSend, onQueue, onAbort: vi.fn(), ...overrides
+    }
+    const view = render(<div onKeyDown={onAncestorKeyDown}><Composer {...props} /></div>)
+    return {
+      onSend, onQueue, onModeChange, onAncestorKeyDown,
+      ancestor: view.container.firstElementChild as HTMLDivElement,
+      input: screen.getByRole('textbox') as HTMLTextAreaElement,
+      picker: screen.getByLabelText('选择图像或参考文件') as HTMLInputElement,
+      update(next: Partial<ComponentProps<typeof Composer>>) {
+        props = { ...props, ...next }
+        view.rerender(<div onKeyDown={onAncestorKeyDown}><Composer {...props} /></div>)
+      }
+    }
+  }
+
+  it.each(DESKTOP_SLASH_COMMAND_NAMES)('executes the exact native /%s with a single Enter instead of completing it', (name) => {
+    const h = setup({ busy: true })
+    fireEvent.change(h.input, { target: { value: `/${name}` } })
+    fireEvent.keyDown(h.input, { key: 'Enter', shiftKey: true })
+    expect(h.onSend).not.toHaveBeenCalled()
+    expect(h.onQueue).not.toHaveBeenCalled()
+    expect(h.input).toHaveValue(`/${name}`)
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith(`/${name}`, [])
+    expect(h.onQueue).not.toHaveBeenCalled()
+    expect(h.input).toHaveValue('')
+  })
+
+  it.each(['Enter', 'Tab'])('only completes a partial native name with %s before an explicit Enter executes it', (key) => {
+    const h = setup()
+    fireEvent.change(h.input, { target: { value: '/com' } })
+    fireEvent.keyDown(h.input, { key })
+    expect(h.input).toHaveValue('/compact ')
+    expect(h.onSend).not.toHaveBeenCalled()
+    expect(h.onQueue).not.toHaveBeenCalled()
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('/compact', [])
+  })
+
+  it('uses Tab for exact-name completion and routes a subsequent native Tab directly, never into the queue', () => {
+    const h = setup({ busy: true })
+    fireEvent.change(h.input, { target: { value: '/compact' } })
+    fireEvent.keyDown(h.input, { key: 'Tab' })
+    expect(h.input).toHaveValue('/compact ')
+    expect(h.onSend).not.toHaveBeenCalled()
+    fireEvent.keyDown(h.input, { key: 'Tab' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('/compact', [])
+    expect(h.onQueue).not.toHaveBeenCalled()
+  })
+
+  it.each(['Enter', 'Tab'])('keeps image and text attachments out of native %s packaging and preserves them for the next message', async (key) => {
+    const h = setup({ busy: key === 'Tab', restoreDraft: { id: 'native-attachments', text: '', images: [image] } })
+    fireEvent.change(h.picker, { target: { files: [new File(['private reference'], 'notes.md', { type: 'text/markdown' })] } })
+    expect(await screen.findByText('@notes.md')).toBeInTheDocument()
+    fireEvent.change(h.input, { target: { value: '/CoMpAcT keep details\nincluding API names' } })
+    fireEvent.keyDown(h.input, { key })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('/CoMpAcT keep details\nincluding API names', [])
+    expect(h.onQueue).not.toHaveBeenCalled()
+    expect(h.input).toHaveValue('')
+    expect(screen.getByAltText('待发送图像 1')).toBeInTheDocument()
+    expect(screen.getByText('@notes.md')).toBeInTheDocument()
+
+    fireEvent.change(h.input, { target: { value: 'send references now' } })
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenLastCalledWith(
+      expect.stringContaining('<reference-content>\nprivate reference\n</reference-content>'), [image]
+    )
+    expect(screen.queryByAltText('待发送图像 1')).not.toBeInTheDocument()
+    expect(screen.queryByText('@notes.md')).not.toBeInTheDocument()
+  })
+
+  it.each(DESKTOP_SLASH_COMMAND_NAMES)('keeps multiline /%s native for handler validation without packaging or queueing it', (name) => {
+    const h = setup({ busy: true, restoreDraft: { id: 'multiline-native', text: '', images: [image] } })
+    const text = `/${name.toUpperCase()}\nfirst argument\nsecond argument`
+    for (const [index, key] of ['Enter', 'Tab'].entries()) {
+      fireEvent.change(h.input, { target: { value: text } })
+      fireEvent.keyDown(h.input, { key })
+      expect(h.onSend).toHaveBeenNthCalledWith(index + 1, text, [])
+      expect(h.onQueue).not.toHaveBeenCalled()
+      expect(h.input).toHaveValue('')
+      expect(screen.getByAltText('待发送图像 1')).toBeInTheDocument()
+    }
+  })
+
+  it.each(['compact', 'new', 'name', 'clone', 'model', 'thinking', 'login', 'logout', 'export', 'quit'])(
+    'does not treat native /%s as preparation permission for a backend mutation', (name) => {
+      const h = setup({ sendDisabled: true, restoreDraft: { id: 'preparing', text: '', images: [image] } })
+      const text = `/${name} `
+      fireEvent.change(h.input, { target: { value: text } })
+      expect(screen.getByRole('button', { name: /发送消息/ })).toBeDisabled()
+      fireEvent.keyDown(h.input, { key: 'Enter' })
+      fireEvent.keyDown(h.input, { key: 'Tab' })
+      expect(h.input).toHaveValue(text)
+      expect(h.onSend).not.toHaveBeenCalled()
+      expect(h.onQueue).not.toHaveBeenCalled()
+      expect(screen.getByAltText('待发送图像 1')).toBeInTheDocument()
+    }
+  )
+
+  it.each(PREPARATION_SLASH_COMMAND_NAMES)('keeps the preparation-safe /%s entry available', (name) => {
+    const h = setup({ sendDisabled: true })
+    fireEvent.change(h.input, { target: { value: `/${name}` } })
+    expect(screen.getByRole('button', { name: /发送消息/ })).toBeEnabled()
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith(`/${name}`, [])
+  })
+
+  it.each(['Enter', 'Tab'])('uses explicit local names only for readiness, not native attachment/queue behavior with %s', (key) => {
+    const h = setup({
+      sendDisabled: true, nativeCommandNames: undefined, localCommandNames: ['review'],
+      restoreDraft: { id: 'local-only', text: '', images: [image] }
+    })
+    fireEvent.change(h.input, { target: { value: '/review focus' } })
+    fireEvent.keyDown(h.input, { key })
+    expect(key === 'Enter' ? h.onSend : h.onQueue).toHaveBeenCalledExactlyOnceWith('/review focus', [image])
+    expect(key === 'Enter' ? h.onQueue : h.onSend).not.toHaveBeenCalled()
+    expect(screen.queryByAltText('待发送图像 1')).not.toBeInTheDocument()
+  })
+
+  it('uses the explicit native name set for multiline routing, independently of the desktop catalog and local exceptions', () => {
+    const h = setup({
+      commands: [], nativeCommandNames: ['desktop-extra'], localCommandNames: [],
+      restoreDraft: { id: 'explicit-native', text: '', images: [image] }
+    })
+    fireEvent.change(h.input, { target: { value: '/DESKTOP-EXTRA\nargument' } })
+    fireEvent.keyDown(h.input, { key: 'Tab' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('/DESKTOP-EXTRA\nargument', [])
+    expect(h.onQueue).not.toHaveBeenCalled()
+    expect(screen.getByAltText('待发送图像 1')).toBeInTheDocument()
+  })
+
+  it('does not turn an explicit local-only menu entry into a native one-Enter command', () => {
+    const h = setup({
+      sendDisabled: true, nativeCommandNames: undefined, localCommandNames: ['review'],
+      commands: [{ name: 'review', source: 'prompt' }]
+    })
+    fireEvent.change(h.input, { target: { value: '/review' } })
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.input).toHaveValue('/review ')
+    expect(h.onSend).not.toHaveBeenCalled()
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('/review', [])
+  })
+
+  it.each([
+    { key: 'Enter', text: '/skill:pdf extract' },
+    { key: 'Tab', text: '/review security' },
+    { key: 'Enter', text: '/review security\nthis is ordinary multiline text' },
+    { key: 'Tab', text: '/skill:pdf\nextract all pages' },
+    { key: 'Enter', text: '/settings.md\nthis is an ordinary file path' },
+    { key: 'Tab', text: '/setting\nthis is not a complete native name' },
+    { key: 'Enter', text: 'Explain this example:\n/settings\nordinary body' }
+  ])('preserves normal submission of non-native text $text with $key', ({ key, text }) => {
+    const h = setup({ restoreDraft: { id: 'resource', text: '', images: [image] } })
+    fireEvent.change(h.input, { target: { value: text } })
+    fireEvent.keyDown(h.input, { key })
+    expect(key === 'Enter' ? h.onSend : h.onQueue).toHaveBeenCalledExactlyOnceWith(text, [image])
+    expect(key === 'Enter' ? h.onQueue : h.onSend).not.toHaveBeenCalled()
+  })
+
+  it.each(['/com', '/compact', '/compact keep details', 'ordinary message'])('does not execute, complete or queue %j during IME input, including Tab', (text) => {
+    const h = setup()
+    fireEvent.change(h.input, { target: { value: text } })
+    fireEvent.keyDown(h.input, { key: 'Tab', isComposing: true })
+    fireEvent.keyDown(h.input, { key: 'Enter', isComposing: true })
+    fireEvent.compositionStart(h.input)
+    fireEvent.keyDown(h.input, { key: 'Tab' })
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    fireEvent.keyDown(h.input, { key: 'Tab', ctrlKey: true })
+    fireEvent.compositionEnd(h.input)
+    fireEvent.keyDown(h.input, { key: 'Tab', keyCode: 229 })
+    fireEvent.keyDown(h.input, { key: 'Enter', keyCode: 229 })
+    expect(h.input).toHaveValue(text)
+    expect(h.onSend).not.toHaveBeenCalled()
+    expect(h.onQueue).not.toHaveBeenCalled()
+    expect(h.onModeChange).not.toHaveBeenCalled()
+  })
+
+  it('resumes completion and native execution only after IME composition ends', () => {
+    const h = setup()
+    fireEvent.change(h.input, { target: { value: '/com' } })
+    fireEvent.compositionStart(h.input)
+    fireEvent.keyDown(h.input, { key: 'Tab' })
+    expect(h.input).toHaveValue('/com')
+    fireEvent.compositionEnd(h.input)
+    fireEvent.keyDown(h.input, { key: 'Tab' })
+    expect(h.input).toHaveValue('/compact ')
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('/compact', [])
+    expect(h.onQueue).not.toHaveBeenCalled()
+  })
+
+  it('keeps native execution frozen when disabled, even with a preparation-safe name and attachments', () => {
+    const h = setup({ disabled: true, restoreDraft: { id: 'frozen-native', text: '/settings', images: [image] } })
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    fireEvent.keyDown(h.input, { key: 'Tab' })
+    expect(h.input).toHaveValue('/settings')
+    expect(screen.queryByRole('listbox', { name: '斜杠命令' })).not.toBeInTheDocument()
+    expect(screen.getByAltText('待发送图像 1')).toBeInTheDocument()
+    expect(h.onSend).not.toHaveBeenCalled()
+    expect(h.onQueue).not.toHaveBeenCalled()
+  })
+
+  it('does not execute a native command while a reference read is still pending', async () => {
+    let resolve!: (text: string) => void
+    const pending = new Promise<string>((finish) => { resolve = finish })
+    const h = setup()
+    const file = new File([], 'pending.md', { type: 'text/markdown' })
+    Object.defineProperty(file, 'text', { value: () => pending })
+    fireEvent.change(h.picker, { target: { files: [file] } })
+    fireEvent.change(h.input, { target: { value: '/compact keep details' } })
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    fireEvent.keyDown(h.input, { key: 'Tab' })
+    expect(h.input).toHaveValue('/compact keep details')
+    expect(h.onSend).not.toHaveBeenCalled()
+    expect(h.onQueue).not.toHaveBeenCalled()
+    await act(async () => { resolve('read finished') })
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('/compact keep details', [])
+    expect(screen.getByText('@pending.md')).toBeInTheDocument()
+  })
+
+  it('browses past twelve candidates with menu-only scrolling and keeps the active row accessible', () => {
+    const h = setup()
+    fireEvent.change(h.input, { target: { value: '/' } })
+    const menu = screen.getByRole('listbox', { name: '斜杠命令' })
+    const rows = screen.getAllByRole('option')
+    expect(rows).toHaveLength(DESKTOP_SLASH_COMMANDS.length)
+    h.ancestor.scrollTop = 400
+    vi.spyOn(menu, 'getBoundingClientRect').mockImplementation(() => ({ top: 100, bottom: 300 } as DOMRect))
+    for (const [index, row] of rows.entries()) {
+      vi.spyOn(row, 'getBoundingClientRect').mockImplementation(() => ({
+        top: 100 + index * 32 - menu.scrollTop,
+        bottom: 100 + (index + 1) * 32 - menu.scrollTop
+      } as DOMRect))
+    }
+    for (let index = 1; index < rows.length; index++) fireEvent.keyDown(h.input, { key: 'ArrowDown' })
+    expect(rows[rows.length - 1]).toHaveAttribute('aria-selected', 'true')
+    expect(h.input).toHaveAttribute('aria-activedescendant', rows[rows.length - 1].id)
+    expect(menu.scrollTop).toBeGreaterThan(0)
+    expect(h.ancestor.scrollTop).toBe(400)
+    expect(h.onAncestorKeyDown).not.toHaveBeenCalled()
+    for (let index = 1; index < rows.length; index++) fireEvent.keyDown(h.input, { key: 'ArrowUp' })
+    expect(rows[0]).toHaveAttribute('aria-selected', 'true')
+    expect(menu.scrollTop).toBe(0)
+    expect(h.ancestor.scrollTop).toBe(400)
+    fireEvent.click(rows[rows.length - 1])
+    expect(h.input).toHaveValue('/agents ')
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('/agents', [])
+  })
+
+  it('preserves manual menu scrolling across unrelated context updates', () => {
+    const h = setup()
+    fireEvent.change(h.input, { target: { value: '/' } })
+    const menu = screen.getByRole('listbox', { name: '斜杠命令' })
+    const first = screen.getAllByRole('option')[0]
+    vi.spyOn(menu, 'getBoundingClientRect').mockImplementation(() => ({ top: 100, bottom: 300 } as DOMRect))
+    vi.spyOn(first, 'getBoundingClientRect').mockImplementation(() => ({ top: 100 - menu.scrollTop, bottom: 132 - menu.scrollTop } as DOMRect))
+    menu.scrollTop = 320
+    h.ancestor.scrollTop = 400
+    h.update({ contextPressure: 0.5 })
+    expect(screen.getByRole('listbox', { name: '斜杠命令' })).toBe(menu)
+    expect(menu.scrollTop).toBe(320)
+    expect(h.ancestor.scrollTop).toBe(400)
+  })
+
+  it('keeps the full large resource catalog reachable instead of truncating at 200 candidates', () => {
+    const h = setup({ commands: Array.from({ length: 250 }, (_, index) => ({ name: `resource-${index}`, source: 'extension' as const })) })
+    fireEvent.change(h.input, { target: { value: '/' } })
+    const rows = screen.getAllByRole('option')
+    expect(rows).toHaveLength(250)
+    expect(screen.getByText('/resource-249')).toBeInTheDocument()
+    for (let index = 1; index < rows.length; index++) fireEvent.keyDown(h.input, { key: 'ArrowDown' })
+    expect(rows[249]).toHaveAttribute('aria-selected', 'true')
+    expect(h.input).toHaveAttribute('aria-activedescendant', rows[249].id)
+    fireEvent.keyDown(h.input, { key: 'Tab' })
+    expect(h.input).toHaveValue('/resource-249 ')
+    expect(h.onSend).not.toHaveBeenCalled()
+    expect(h.onQueue).not.toHaveBeenCalled()
+    fireEvent.keyDown(h.input, { key: 'Enter' })
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('/resource-249', [])
   })
 })
 

@@ -72,6 +72,7 @@ export class BackendPool {
           backend
           && !backend.busy
           && !backend.historyMutation
+          && !backend.sessionExportPending
           && !backend.historyStopFailed
           && backend.phase !== 'starting'
           && backend.pendingRunIds.length === 0

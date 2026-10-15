@@ -9,6 +9,7 @@ import type { SubagentSettings } from './subagents'
 import type { QuestionSettings } from './question-settings'
 import type { ThemeId } from './theme'
 import type { McpStatusSnapshot, McpStatusTarget } from './mcp'
+import type { PiChangelog, SessionCommandInfo, SessionCommandTarget } from './slash-command-protocol'
 import type {
   AddModelProviderInput,
   AgentCapabilities,
@@ -175,6 +176,17 @@ export interface PionApi {
   // session management ------------------------------------------------------
   /** Current session info, or null when no session is selected. */
   getState(): Promise<SessionInfo | null>
+  /** Read Pi's full-session statistics from the selected, already-running backend. */
+  getSessionCommandInfo(target: SessionCommandTarget): Promise<SessionCommandInfo>
+  /** Copy the SDK's last assistant text on the current branch; never uses a history page. */
+  copyLastAssistantText(target: SessionCommandTarget): Promise<boolean>
+  /** Read the bundled Pi SDK changelog, without creating a backend or accessing credentials. */
+  getPiChangelog(): Promise<PiChangelog>
+  /** Explicit local export; relative paths use target.cwd, ~/ uses the user's home.
+   * The renderer removes command quoting. Existing files are never overwritten.
+   * Omit the path for a new visible HTML file in cwd; .jsonl exports only the current branch.
+   */
+  exportSessionForCommand(target: SessionCommandTarget, outputPath?: string): Promise<string>
   /** Start a fresh session in the same cwd and initialize its backend. */
   newSession(): Promise<void>
   /** Fork the session at an entry; resolves with the message text at the fork point. */

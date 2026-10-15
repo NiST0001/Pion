@@ -25,6 +25,8 @@ const LazyPluginStoreModal = lazy(() => import('../features/capabilities/PluginS
   .then((module) => ({ default: module.PluginStoreModal })))
 const LazyTaskHistoryPanel = lazy(() => import('../features/session/TaskHistoryPanel')
   .then((module) => ({ default: module.TaskHistoryPanel })))
+const LazyCommandDialog = lazy(() => import('../features/commands/CommandDialog')
+  .then((module) => ({ default: module.CommandDialog })))
 
 interface WorkbenchDialogsProps {
   operations: {
@@ -45,6 +47,7 @@ interface WorkbenchDialogsProps {
   pluginStore: DeferredDialogProps<ComponentProps<typeof LazyPluginStoreModal>>
   branch: DeferredDialogProps<Omit<ComponentProps<typeof LazyBranchCreateModal>, 'projectName'> & { projectName?: string }>
   settings: DeferredDialogProps<ComponentProps<typeof LazySettingsModal>>
+  command?: DeferredDialogProps<ComponentProps<typeof LazyCommandDialog>>
 }
 
 /** Presentation only: App retains the controllers, callbacks and sticky first-mount gates. */
@@ -55,7 +58,8 @@ export function WorkbenchDialogs({
   capabilities,
   pluginStore,
   branch,
-  settings
+  settings,
+  command
 }: WorkbenchDialogsProps): ReactElement {
   return (
     <>
@@ -136,6 +140,11 @@ export function WorkbenchDialogs({
       {branch.mounted && (
         <Suspense fallback={null}>
           <LazyBranchCreateModal {...branch.dialog} projectName={branch.dialog.projectName ?? '当前项目'} />
+        </Suspense>
+      )}
+      {command?.mounted && (
+        <Suspense fallback={null}>
+          <LazyCommandDialog {...command.dialog} />
         </Suspense>
       )}
       {settings.mounted && (

@@ -95,6 +95,8 @@ export interface BackendRecord {
   compacting: boolean
   /** Reserved until the old writer has exited and the conversation branch is persisted. */
   historyMutation?: boolean
+  /** Actual slash-command export only; unlike historyMutation, events stay active. */
+  sessionExportPending?: boolean
   /** Never reuse/evict a writer whose actual process exit could not be confirmed. */
   historyStopFailed?: boolean
   modePrimed?: AgentMode

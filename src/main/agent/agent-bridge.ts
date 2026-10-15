@@ -1,13 +1,23 @@
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { link, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:fs/promises'
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, clipboard } from 'electron'
 import { subagentSettingsFilePath } from '../subagent-settings'
 import { questionSettingsFilePath } from '../question-settings'
 import { QUESTION_WAIT_WIDGET_KEY, parseQuestionWaitMetadata, type QuestionWaitMetadata } from '../../shared/question-settings'
 import { DEFAULT_SUBAGENTS_ENABLED, SUBAGENT_LIMITS } from '../../shared/subagents'
 import { IPC_EVENTS } from '../../shared/ipc'
 import type { McpStatusSnapshot, McpStatusTarget } from '../../shared/mcp'
+import type { PiChangelog, SessionCommandInfo, SessionCommandTarget } from '../../shared/slash-command-protocol'
+import {
+  publishSessionCommandExport,
+  readPiChangelog,
+  SESSION_COMMAND_TEXT_MAX_BYTES,
+  SessionCommandFileStateUnknownError,
+  sessionCommandExportPath,
+  sessionCommandJsonl,
+  writeSessionCommandJsonl
+} from './slash-command-files'
 import {
   ProjectTrustStore,
   RpcClient,
@@ -477,6 +487,11 @@ export class AgentBridge {
   private messageRevertInFlight = false
   private sessionMigrationInFlight = false
   private sessionOperationsInFlight = 0
+  /** Held across every actual export RPC/FS await. Unknown scratch writers
+   * isolate further exports, not unrelated session operations or SDK events. */
+  private sessionCommandExportInFlight = false
+  private sessionCommandFilesUnknown = false
+  private sessionCommandReads?: Set<'info' | 'copy' | 'changelog'>
   private historyRevision = 0
   private activeKey: string | null = null
   private activeCwd: string | undefined
@@ -516,6 +531,7 @@ export class AgentBridge {
   }
 
   private assertHistoryAvailable(): void {
+    if (this.sessionCommandExportInFlight) throw new Error('正在导出会话，请稍后重试')
     if (this.sessionMigrationInFlight) throw new Error('正在迁移会话，请稍后重试')
     if (this.branchDeletionInFlight) throw new Error('正在删除分支，请稍后重试')
     if (this.messageRevertInFlight) throw new Error('正在撤销消息，请稍后重试')
@@ -2125,6 +2141,7 @@ export class AgentBridge {
     if (
       !this.backendStillOwned(backend)
       || this.messageRevertInFlight
+      || backend.sessionExportPending
       || backend.compacting
       || backend.busy
       || backend.localQueueDispatchPromise
@@ -4369,6 +4386,258 @@ export class AgentBridge {
       this.dispatchNextLocalFollowUp(backend)
     }
     await this.refresh()
+  }
+
+  private captureSessionCommand(target: SessionCommandTarget, ownerId: number, exporting = false) {
+    const win = this.win
+    const frame = win?.webContents.mainFrame
+    const assertWindow = () => {
+      if (!win || this.win !== win || win.webContents.id !== ownerId || win.isDestroyed?.()
+        || win.webContents.isDestroyed?.() || win.webContents.mainFrame !== frame || frame?.detached) {
+        throw new Error('只允许所属主窗口执行会话命令')
+      }
+    }
+    assertWindow()
+    this.assertHistoryAvailable()
+    const validString = (value: unknown, max: number): value is string => typeof value === 'string'
+      && value.length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value)
+    if (!target || typeof target !== 'object' || Array.isArray(target)
+      || !validString(target.cwd, 4096) || !isAbsolute(target.cwd) || resolve(target.cwd) !== target.cwd
+      || !validString(target.sessionId, 200)
+      || (target.sessionPath !== undefined && (!validString(target.sessionPath, 16_000)
+        || !isAbsolute(target.sessionPath) || resolve(target.sessionPath) !== target.sessionPath))
+      || (target.backendId !== undefined && !validString(target.backendId, 256))) throw new Error('会话命令目标无效')
+    const { cwd, sessionId, sessionPath: requestedSessionPath, backendId: requestedBackendId } = target
+    const key = this.activeKey
+    const sessionPath = this.activeSessionPath
+    const backend = this.getActiveBackend()
+    if (!backend || backend.phase !== 'running' || backend.historyMutation) throw new Error('所选会话后端尚未就绪，未启动新后端')
+    const client = backend.client
+    const backendId = backend.liveState?.backendId
+    const generation = this.sessionSelectionGeneration
+    const revision = this.historyRevision
+    const lifecycle = this.capturePendingScope(backend)
+    const assertOwned = () => {
+      assertWindow()
+      this.assertSessionNotQuarantined(sessionPath)
+      this.assertSessionNotQuarantined(requestedSessionPath)
+      if (this.stopping || this.providerMutationInFlight || this.providerReloading || this.newSessionInFlight
+        || this.messageRevertInFlight || this.sessionMigrationInFlight || this.branchDeletionInFlight
+        || (!exporting && this.sessionCommandExportInFlight)
+        || backend.phase !== 'running' || backend.historyStopFailed || (!exporting && backend.historyMutation)
+        || key !== this.activeKey || key !== backend.key || this.getActiveBackend() !== backend
+        || this.backendPool.get(backend.key) !== backend || client !== backend.client
+        || backendId !== backend.liveState?.backendId || generation !== this.sessionSelectionGeneration
+        || revision !== this.historyRevision || cwd !== this.activeCwd || cwd !== backend.cwd
+        || sessionPath !== this.activeSessionPath || sessionPath !== backend.sessionPath
+        || (requestedSessionPath !== undefined && sessionPath !== undefined && requestedSessionPath !== sessionPath)
+        || (requestedBackendId !== undefined && requestedBackendId !== backendId)
+        || lifecycle.runId !== backend.activeRunId || lifecycle.token !== this.dispatchLifecycle(backend).token
+        || lifecycle.generation !== this.dispatchLifecycle(backend).generation) {
+        throw new Error('窗口、会话或运行状态已变化，请重试会话命令')
+      }
+    }
+    assertOwned()
+    const expectedPath = requestedSessionPath ?? sessionPath
+    const assertState = (state: Awaited<ReturnType<RpcClient['getState']>>) => {
+      assertOwned()
+      if (!state || state.sessionId !== sessionId
+        || (state.sessionFile !== undefined && (!validString(state.sessionFile, 16_000)
+          || !isAbsolute(state.sessionFile) || resolve(state.sessionFile) !== state.sessionFile))
+        || (expectedPath !== undefined && state.sessionFile !== expectedPath)) throw new Error('SDK 会话身份已变化')
+    }
+    return { backend, client, cwd, sessionId, assertOwned, assertState }
+  }
+
+  private async withSessionCommandRead<T>(kind: 'info' | 'copy' | 'changelog', read: () => Promise<T>): Promise<T> {
+    this.sessionCommandReads ??= new Set()
+    if (this.sessionCommandReads.has(kind)) throw new Error('此会话命令仍在读取或收尾未知，请稍后重试')
+    this.sessionCommandReads.add(kind)
+    let unknown = false
+    try {
+      return await read()
+    } catch (error) {
+      unknown = error instanceof SessionCommandFileStateUnknownError
+      throw error
+    } finally {
+      // An unknown read-only package FD must not disable unrelated sessions.
+      if (!unknown) this.sessionCommandReads.delete(kind)
+    }
+  }
+
+  /** Reads only an existing runtime; no factory, history-page approximation or model call. */
+  async getSessionCommandInfo(target: SessionCommandTarget, ownerId: number): Promise<SessionCommandInfo> {
+    const scope = this.captureSessionCommand(target, ownerId)
+    return this.withSessionCommandRead('info', async () => {
+      const state = await scope.client.getState()
+      scope.assertState(state)
+      const stats = await scope.client.getSessionStats()
+      scope.assertOwned()
+      if (!stats || stats.sessionId !== scope.sessionId || stats.sessionFile !== state.sessionFile) {
+        throw new Error('SDK 会话统计身份已变化')
+      }
+      const counts = [stats.userMessages, stats.assistantMessages, stats.toolCalls, stats.toolResults,
+        stats.totalMessages, stats.tokens?.input, stats.tokens?.output, stats.tokens?.cacheRead,
+        stats.tokens?.cacheWrite, stats.tokens?.total]
+      if (counts.some((value) => !Number.isSafeInteger(value) || value < 0)
+        || typeof stats.cost !== 'number' || !Number.isFinite(stats.cost) || stats.cost < 0) {
+        throw new Error('SDK 会话统计缺失或无效，未以零值替代')
+      }
+      const current = await scope.client.getState()
+      scope.assertState(current)
+      if (current.sessionFile !== state.sessionFile) throw new Error('SDK 会话身份已变化')
+      if (current.sessionName !== undefined && (typeof current.sessionName !== 'string'
+        || current.sessionName.length > 4096)) throw new Error('SDK 会话名称无效或过长')
+      return { cwd: scope.cwd, sessionId: scope.sessionId,
+        ...(current.sessionFile !== undefined ? { sessionPath: current.sessionFile } : {}),
+        ...(current.sessionName !== undefined ? { sessionName: current.sessionName } : {}),
+        stats: { userMessages: stats.userMessages, assistantMessages: stats.assistantMessages,
+          toolCalls: stats.toolCalls, toolResults: stats.toolResults, totalMessages: stats.totalMessages,
+          tokens: { input: stats.tokens.input, output: stats.tokens.output, cacheRead: stats.tokens.cacheRead,
+            cacheWrite: stats.tokens.cacheWrite, total: stats.tokens.total }, cost: stats.cost } }
+    })
+  }
+
+  async copyLastAssistantText(target: SessionCommandTarget, ownerId: number): Promise<boolean> {
+    const scope = this.captureSessionCommand(target, ownerId)
+    return this.withSessionCommandRead('copy', async () => {
+      const state = await scope.client.getState()
+      scope.assertState(state)
+      const text = await scope.client.getLastAssistantText()
+      scope.assertOwned()
+      // SDK 1.0.4 can omit text despite the RPC declaration's null contract.
+      if (text != null && (typeof text !== 'string' || text.length > SESSION_COMMAND_TEXT_MAX_BYTES
+        || Buffer.byteLength(text, 'utf8') > SESSION_COMMAND_TEXT_MAX_BYTES)) throw new Error('助手正文无效或超过复制上限')
+      const current = await scope.client.getState()
+      scope.assertState(current)
+      if (current.sessionFile !== state.sessionFile) throw new Error('SDK 会话身份已变化')
+      if (!text) return false
+      scope.assertOwned()
+      clipboard.writeText(text)
+      return true
+    })
+  }
+
+  async getPiChangelog(ownerId: number): Promise<PiChangelog> {
+    const win = this.win
+    const frame = win?.webContents.mainFrame
+    const assertOwned = () => {
+      if (!win || this.win !== win || win.webContents.id !== ownerId || win.isDestroyed?.()
+        || win.webContents.isDestroyed?.() || win.webContents.mainFrame !== frame || frame?.detached) {
+        throw new Error('只允许所属主窗口读取 Pi 更新日志')
+      }
+    }
+    assertOwned()
+    return this.withSessionCommandRead('changelog', async () => {
+      const result = await readPiChangelog(assertOwned)
+      assertOwned()
+      return result
+    })
+  }
+
+  async exportSessionForCommand(target: SessionCommandTarget, outputPath: string | undefined, ownerId: number): Promise<string> {
+    if (this.sessionCommandFilesUnknown) throw new Error('先前导出的私有文件收尾未知，请重启 Pion 后再导出')
+    const scope = this.captureSessionCommand(target, ownerId, true)
+    const backend = scope.backend
+    const assertIdle = () => {
+      scope.assertOwned()
+      // One reservation is this IPC's own. Other already-admitted host mutations
+      // must finish before export takes its synchronous exclusive gate.
+      if (this.sessionOperationsInFlight > 1 || this.backendPool.pendingStartCount > 0
+        || backend.busy || backend.compacting || backend.awaitingRetry || backend.activeRunId
+        || backend.pendingRunIds.length || backend.localFollowUps?.length || backend.companionRunIds?.length
+        || backend.directSteering?.length || backend.rawQueue?.steering.length || backend.rawQueue?.followUp.length
+        || backend.localQueueDispatching || backend.localQueueDispatchPromise || backend.promptDispatch
+        || backend.steeringDispatchPromises?.size || backend.controlDispatchPromises?.size
+        || backend.runCompletionPromise || backend.checkpointCreatePromise || backend.checkpointRefreshPromise
+        || backend.subagentsModePending || (backend.sessionPath && this.runStore.hasUnsettledSessionRuns(backend.sessionPath))
+        || this.getPendingToolPermissionRequests().some((request) => request.sessionPath === backend.sessionPath)
+        || this.getPendingExtensionUiRequests().some((request) => request.sessionPath === backend.sessionPath)) {
+        throw new Error('请等待运行及收尾完成，并清空排队消息后再导出')
+      }
+    }
+    assertIdle()
+    const destination = sessionCommandExportPath(scope.cwd, outputPath)
+    this.sessionCommandExportInFlight = true
+    // Do not use historyMutation: this writer is alive and every SDK event,
+    // permission, usage and independent run must still be processed.
+    backend.sessionExportPending = true
+    const assertState = (state: Awaited<ReturnType<RpcClient['getState']>>) => {
+      scope.assertState(state)
+      assertIdle()
+      if (state.isStreaming !== false || state.isCompacting !== false || state.pendingMessageCount !== 0) {
+        throw new Error('SDK 会话仍在执行或状态未知，未导出')
+      }
+    }
+    try {
+      const state = await scope.client.getState()
+      assertState(state)
+      let content: string | undefined
+      if (destination.toLowerCase().endsWith('.jsonl')) {
+        const history = await scope.client.getEntries()
+        scope.assertOwned()
+        const current = await scope.client.getState()
+        assertState(current)
+        if (current.sessionFile !== state.sessionFile) throw new Error('SDK 会话身份已变化')
+        content = sessionCommandJsonl(scope.cwd, scope.sessionId, history)
+      } else {
+        if (!state.sessionFile || !Number.isSafeInteger(state.messageCount) || state.messageCount < 0
+          || !(await pathExists(state.sessionFile))) {
+          // SDK allocates a path before the first message is persisted. This is a
+          // known preflight failure, not an unknown export RPC or file writer.
+          throw new Error('当前会话没有已落盘的消息，无法导出 HTML')
+        }
+        assertIdle()
+        if (state.messageCount === 0) {
+          // getState counts the active branch, but HTML exports the entire tree.
+          // Check only this ambiguous case; never load/start a different backend.
+          const history = await scope.client.getEntries()
+          assertIdle()
+          if (!history || !Array.isArray(history.entries) || history.entries.length > 100_000) {
+            throw new Error('会话树数据无效或超过 HTML 导出上限')
+          }
+          const current = await scope.client.getState()
+          assertState(current)
+          if (current.sessionFile !== state.sessionFile) throw new Error('SDK 会话身份已变化')
+          if (!history.entries.some((entry) => entry?.type === 'message')) {
+            throw new Error('当前会话没有已落盘的消息，无法导出 HTML')
+          }
+        }
+      }
+      assertIdle()
+      return await publishSessionCommandExport(destination, async (scratchPath) => {
+        assertIdle()
+        if (content !== undefined) {
+          await writeSessionCommandJsonl(scratchPath, content, assertIdle)
+        } else {
+          let result: Awaited<ReturnType<RpcClient['exportHtml']>>
+          try {
+            result = await scope.client.exportHtml(scratchPath)
+          } catch {
+            // The public SDK does not distinguish a negative response from a
+            // lost/timeout response or process/pipe failure. Never infer that a
+            // possibly late SDK writer stopped, and never delete its scratch.
+            throw new SessionCommandFileStateUnknownError('SDK 未确认 HTML 导出完成；保留私有恢复目录，重启后再导出')
+          }
+          scope.assertOwned()
+          if (!result || result.path !== scratchPath) throw new Error('SDK 未确认指定的私有导出路径')
+          const current = await scope.client.getState()
+          assertState(current)
+          if (current.sessionFile !== state.sessionFile) throw new Error('SDK 会话身份已变化')
+        }
+        assertIdle()
+      }, assertIdle)
+    } catch (error) {
+      if (error instanceof SessionCommandFileStateUnknownError) this.sessionCommandFilesUnknown = true
+      throw error
+    } finally {
+      // Every publicly exposed Promise is now settled. An unknown scratch
+      // writer/FD stays isolated in the export subsystem; it is not a history
+      // writer and must not swallow events or permanently pause message queues.
+      backend.sessionExportPending = false
+      this.sessionCommandExportInFlight = false
+      if (this.backendStillOwned(backend) && backend.queueAutoReady === true) this.dispatchNextLocalFollowUp(backend)
+    }
   }
 
   async exportSessionHtml(): Promise<string> {

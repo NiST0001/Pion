@@ -12,6 +12,7 @@ import type { ComputerUseService } from '../../src/main/computer-use/service'
 import { IPC } from '../../src/shared/ipc'
 import type { BranchDeleteRequest, BranchDeleteResult } from '../../src/shared/branches'
 import type { McpStatusTarget } from '../../src/shared/mcp'
+import type { SessionCommandTarget } from '../../src/shared/slash-command-protocol'
 import type { AddModelProviderInput, GitSelectionRequest, ImageContent, MessageRevertRequest, RunTelemetryQuery } from '../../src/shared/types'
 
 type InvokeHandler = Parameters<IpcMain['handle']>[1]
@@ -152,6 +153,16 @@ const agentRoutes: RouteCase<AgentBridge>[] = [
   [IPC.BranchRename, 'renameBranch', [cwd, 'old-branch', 'new-branch']]
 ]
 
+const commandTarget: SessionCommandTarget = { cwd, sessionId: 'current-session', sessionPath, backendId: 'backend-id' }
+const sessionCommandRoutes: Array<[string, keyof AgentBridge, unknown[], unknown[], string]> = [
+  [IPC.AgentSessionCommandInfo, 'getSessionCommandInfo', [commandTarget], [commandTarget, 73], '只允许主窗口读取会话命令信息'],
+  [IPC.AgentCopyLastAssistantText, 'copyLastAssistantText', [commandTarget], [commandTarget, 73], '只允许主窗口复制助手正文'],
+  [IPC.AgentPiChangelog, 'getPiChangelog', [], [73], '只允许主窗口读取 Pi 更新日志'],
+  [IPC.AgentExportForCommand, 'exportSessionForCommand', [commandTarget, 'exports/session.jsonl'],
+    [commandTarget, 'exports/session.jsonl', 73], '只允许主窗口导出会话'],
+  [IPC.AgentExportForCommand, 'exportSessionForCommand', [commandTarget], [commandTarget, undefined, 73], '只允许主窗口导出会话']
+]
+
 // These routes intentionally turn both synchronous results and throws into promises.
 const reservedAgentChannels = new Set<string>([
   IPC.AgentStart, IPC.AgentStop, IPC.AgentSend, IPC.AgentQueue, IPC.AgentSendQueued,
@@ -161,7 +172,7 @@ const reservedAgentChannels = new Set<string>([
   IPC.AgentCopySession, IPC.AgentForkSession, IPC.AgentSetMode, IPC.AgentSetYolo,
   IPC.AgentSetSubagents, IPC.AgentLoginModelProvider, IPC.AgentLogoutModelProvider,
   IPC.AgentAddModelProvider, IPC.AgentSetModel, IPC.AgentSetThinking, IPC.AgentSetAutoCompaction,
-  IPC.AgentSetAutoRetry, IPC.AgentCompact, IPC.AgentExportHtml, IPC.AgentRenameSession,
+  IPC.AgentSetAutoRetry, IPC.AgentCompact, IPC.AgentExportHtml, IPC.AgentExportForCommand, IPC.AgentRenameSession,
   IPC.AgentSetSteeringMode, IPC.AgentSetFollowUpMode, IPC.ProjectTrustSet,
   IPC.ToolPermissionResolve, IPC.ExtensionUiResolve, IPC.BranchCreate, IPC.BranchRename
 ])
@@ -230,6 +241,55 @@ describe('branch deletion IPC registration', () => {
   })
 })
 
+describe('slash-command IPC registration', () => {
+  it.each(sessionCommandRoutes)('%s forwards identity, owner, path and receiver to %s', async (channel, method, args, forwarded) => {
+    const value = { result: channel }
+    const stub = vi.fn().mockReturnValue(value)
+    const h = agentHarness({ [method]: stub } as Partial<AgentBridge>)
+    const reserved = reservedAgentChannels.has(channel)
+    await expect(Promise.resolve(h.invoke(channel, mainEvent(73), ...args))).resolves.toBe(value)
+    expect(stub).toHaveBeenCalledExactlyOnceWith(...forwarded)
+    expect(stub.mock.contexts[0]).toBe(h.bridge)
+    expect(h.withSessionOperation).toHaveBeenCalledTimes(reserved ? 1 : 0)
+    expect(h.projects.touchCanonical).not.toHaveBeenCalled()
+    expect(h.pushProjects).not.toHaveBeenCalled()
+    const error = new Error('command owner or selection rejected')
+    stub.mockImplementationOnce(() => { throw error })
+    if (reserved) await expect(h.invoke(channel, mainEvent(73), ...args)).rejects.toBe(error)
+    else expect(() => h.invoke(channel, mainEvent(73), ...args)).toThrow(error)
+    stub.mockRejectedValueOnce(error)
+    await expect(h.invoke(channel, mainEvent(73), ...args)).rejects.toBe(error)
+  })
+
+  it.each(sessionCommandRoutes)('%s rejects iframe access before command %s', async (channel, method, args, _forwarded, message) => {
+    const stub = vi.fn()
+    const h = agentHarness({ [method]: stub } as Partial<AgentBridge>)
+    if (reservedAgentChannels.has(channel)) {
+      await expect(h.invoke(channel, mainEvent(73, true), ...args)).rejects.toThrow(message)
+    } else {
+      expect(() => h.invoke(channel, mainEvent(73, true), ...args)).toThrow(message)
+    }
+    expect(stub).not.toHaveBeenCalled()
+  })
+
+  it('keeps export inside its mutation reservation until the bridge promise settles', async () => {
+    let finish!: (path: string) => void
+    const pending = new Promise<string>((resolve) => { finish = resolve })
+    const order: string[] = []
+    const exportSessionForCommand = vi.fn(() => { order.push('export'); return pending })
+    const h = agentHarness({ exportSessionForCommand })
+    h.withSessionOperation.mockImplementationOnce(async (operation) => {
+      order.push('reserve')
+      try { return await operation() } finally { order.push('release') }
+    })
+    const result = h.invoke(IPC.AgentExportForCommand, mainEvent(73), commandTarget)
+    expect(order).toEqual(['reserve', 'export'])
+    finish('/project/worktree/session.html')
+    await expect(result).resolves.toBe('/project/worktree/session.html')
+    expect(order).toEqual(['reserve', 'export', 'release'])
+  })
+})
+
 describe('queued message editing IPC registration', () => {
   const request = { cwd, sessionFile: sessionPath, runId: 'queued-run' }
 
@@ -263,7 +323,8 @@ describe('agent IPC registration', () => {
   it('registers exactly the agent domain without touching services at registration time', () => {
     const h = agentHarness()
     expect([...h.handlers.keys()].sort()).toEqual([...new Set([
-      ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
+      ...agentRoutes.map(([channel]) => channel), ...sessionCommandRoutes.map(([channel]) => channel),
+      IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
       IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete, IPC.AgentEditQueued,
       IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels
     ])].sort())
@@ -790,7 +851,8 @@ it('composes the domain registrars without duplicate channels', () => {
   })
   const expected = new Set([
     IPC.ComputerUseGetState, IPC.ComputerUseStart, IPC.ComputerUseCapture, IPC.ComputerUseStop,
-    ...agentRoutes.map(([channel]) => channel), IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
+    ...agentRoutes.map(([channel]) => channel), ...sessionCommandRoutes.map(([channel]) => channel),
+    IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
     IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete, IPC.AgentEditQueued,
     IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels,
     ...gitRoutes.map(([channel]) => channel), ...effectRoutes.map(([channel]) => channel),

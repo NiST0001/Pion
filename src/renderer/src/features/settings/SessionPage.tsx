@@ -12,6 +12,8 @@ interface SessionPageProps {
   session: Pick<SessionInfo, 'sessionName' | 'autoCompactionEnabled' | 'steeringMode' | 'followUpMode'> | null
   name: string
   nameSaved: boolean
+  nameSaving?: boolean
+  nameError?: string
   onNameChange: (name: string) => void
   onRename: () => void
   autoRetry: boolean
@@ -43,6 +45,8 @@ export function SessionPage({
   session,
   name,
   nameSaved,
+  nameSaving = false,
+  nameError,
   onNameChange,
   onRename,
   autoRetry,
@@ -90,19 +94,24 @@ export function SessionPage({
               placeholder="未命名"
               onChange={(event) => onNameChange(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') onRename()
+                if (event.key === 'Enter' && !event.nativeEvent.isComposing
+                  && event.nativeEvent.keyCode !== 229 && !event.repeat) {
+                  event.preventDefault()
+                  onRename()
+                }
               }}
             />
             <button
               type="button"
               className="ghost-button"
-              disabled={name.trim() === '' || name.trim() === session?.sessionName}
+              disabled={nameSaving || name.trim() === '' || name.trim() === session?.sessionName}
               onClick={onRename}
             >
-              {nameSaved ? '已保存' : '保存'}
+              {nameSaving ? '保存中…' : nameSaved ? '已保存' : '保存'}
             </button>
           </div>
         </div>
+        {nameError && <p className="settings-inline-error" role="alert">{nameError}</p>}
         <div className="setting-row">
           <div>
             <div className="setting-label">自动压缩</div>

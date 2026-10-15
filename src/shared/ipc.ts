@@ -54,6 +54,10 @@ export const IPC = {
 
   // session management
   AgentState: 'pion:agent-state',
+  AgentSessionCommandInfo: 'pion:agent-session-command-info',
+  AgentCopyLastAssistantText: 'pion:agent-copy-last-assistant-text',
+  AgentPiChangelog: 'pion:agent-pi-changelog',
+  AgentExportForCommand: 'pion:agent-export-for-command',
   AgentNewSession: 'pion:agent-new-session',
   AgentFork: 'pion:agent-fork',
   AgentRevertMessage: 'pion:agent-revert-message',

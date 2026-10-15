@@ -18,6 +18,8 @@
 | src/shared/task-history.ts | 原生自定义任务快照/旧版工具结果校验；新原生目标按 planId 跨轮归档，旧记录保持用户轮次投影；共享未完成状态判定，区分有效空快照与错误/缺失结果 |
 | src/shared/image-generation.ts | 生图工具身份、官方请求别名与实验 2.5 Flare/Sunburst 白名单；size/quality 与有界引用路径准入（字面 @）；v2 必需请求操作/尺寸/质量/引用数及实际 PNG 保存元数据，实际版本未知；只读 v1/v2 投影不补造旧设置默认值 |
 | src/shared/mcp.ts | MCP 只读状态类型、SDK 格式/私有单行协议的有界白名单、状态安全复制；连接状态与登记工具数不推断曝光/执行权限，不返回原始配置或诊断 |
+| src/shared/slash-commands.ts | Pi 核心/Pion 原生命令共享目录、明确待接入项、后端准备可用子集及完整名称解析；资源命令仍归 SDK |
+| src/shared/slash-command-protocol.ts | 只读现有会话目标身份、SDK 完整统计及内置 Pi 日志的跨进程契约，不请求创建后端 |
 | src/shared/tool-images.ts | 跨进程工具预览的严格有界 base64、静态 PNG/JPEG 结构/尺寸、PNG 压缩文本/ICC 拒绝、稳定位置及提示；结构辅助函数也为输入/输出原图提供像素准入，允许压缩 PNG metadata 的调用方须另外执行有界 inflate 完整性校验；不等同于真实解码 |
 | src/shared/operations.ts | 运行/恢复数据契约，以及主进程与 renderer 共用的统计候选筛选、执行状态判定和排序 |
 | src/shared/theme.ts | 内置主题 ID（含 division-dark）、默认主题与跨进程校验 |
@@ -31,20 +33,21 @@
 | src/shared/computer-use.ts | ComputerUse 纯身份/许可/能力/frame/预算/状态校验与复制；动作及模型图 schema 不代表已接入输入或模型工具，标识不认证 peer |
 | src/shared/window-effects.ts | 原生外观后端、启用/生效状态、重启需求与 revision 契约 |
 | src/renderer/src/main.tsx | React 启动入口 |
-| src/renderer/src/App.tsx | 工作台装配、布局与交互编排，持有会话/面板控制器及弹窗首次挂载门控 |
+| src/renderer/src/App.tsx | 工作台装配、布局与交互编排，持有会话/面板控制器、原生命令/定向设置导航及弹窗首次挂载门控 |
 | src/renderer/src/app/WorkbenchDialogs.tsx | 受控工作台弹窗装配：操作面板、确认对话框与独立 lazy/Suspense 槽位；只返回 Fragment，不迁移 App 状态或聊天区权限浮层 |
 
 ## 主进程功能
 
 | 路径 | 用途 |
 | --- | --- |
-| src/main/agent/agent-bridge.ts | 会话迁移区分 SDK 已分配与真实落盘，空会话显式准备目标并保原模型；持久迁移须旧 writer 真实退出、同目录暂存及 hard-link no-replace 发布，错误报告残留/部分成功，session-migration.test.ts 使用纯临时目录与模拟客户端； 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；隐式最新页跳过不可显示的元数据尾部但保持物理游标和有界条目，数字分页/定位不变；运行中状态有界等待及后端私有快照/在途缓存，历史 manager 依文件签名更新而非事件无条件重读；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；Tab已知占槽时直接追加含原图/真实runId的本地FIFO、不等待getState/执行generation；真空闲读状态后复核owner/client，当前生命周期进展只重判入队/派发，新租约仅用于真正执行；queueSettledRunId所属agent_settled正面凭证及全部prompt/steer/abort实际RPC、检查点/完成监听器allSettled后逐项FIFO，steeringDispatchPromises/controlDispatchPromises保持steer/abort真实在途占槽，不因错误/超时/中止长期暂停；单项发送本轮实际收口后自动其余项，不整批提前派发，原生任务pending不阻塞；状态/本地准备失败保未发项及可见错误，不busy loop，可靠后续收口或手动新输入可重试准入；未知pending不释放、不重发已调用项，旧owner/generation拒迟到，deny门独立；backend-events拒含工具调用尾部充当正常final，正常stop不再作为队列准入要求，SDK实际RPC收口不证明provider底层请求或收费停止；原文/图片/runId编辑取回不主动派发，旧queuePauses忽略而真实运行恢复保持；agent-bridge-send-queue.test.ts 覆盖RPC/完成收尾顺序与旧generation；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
+| src/main/agent/agent-bridge.ts | 会话迁移区分 SDK 已分配与真实落盘，空会话显式准备目标并保原模型；持久迁移须旧 writer 真实退出、同目录暂存及 hard-link no-replace 发布，错误报告残留/部分成功，session-migration.test.ts 使用纯临时目录与模拟客户端； 会话后端池编排、运行、迁移、所选分支历史读取、未读状态；原生命令现有后端身份/owner fence、SDK 完整统计及助手正文读取、实际导出槽与独立未知文件隔离，导出不屏蔽事件；隐式最新页跳过不可显示的元数据尾部但保持物理游标和有界条目，数字分页/定位不变；运行中状态有界等待及后端私有快照/在途缓存，历史 manager 依文件签名更新而非事件无条件重读；按 backend/run/token/事件 generation 收尾无事件 handled 派发，保护扩展新运行与精确队列账本；Tab已知占槽时直接追加含原图/真实runId的本地FIFO、不等待getState/执行generation；真空闲读状态后复核owner/client，当前生命周期进展只重判入队/派发，新租约仅用于真正执行；queueSettledRunId所属agent_settled正面凭证及全部prompt/steer/abort实际RPC、检查点/完成监听器allSettled后逐项FIFO，steeringDispatchPromises/controlDispatchPromises保持steer/abort真实在途占槽，不因错误/超时/中止长期暂停；单项发送本轮实际收口后自动其余项，不整批提前派发，原生任务pending不阻塞；状态/本地准备失败保未发项及可见错误，不busy loop，可靠后续收口或手动新输入可重试准入；未知pending不释放、不重发已调用项，旧owner/generation拒迟到，deny门独立；backend-events拒含工具调用尾部充当正常final，正常stop不再作为队列准入要求，SDK实际RPC收口不证明provider底层请求或收费停止；原文/图片/runId编辑取回不主动派发，旧queuePauses忽略而真实运行恢复保持；agent-bridge-send-queue.test.ts 覆盖RPC/完成收尾顺序与旧generation；消息撤销的 owner/空闲/在途门控、退出屏障、路径隔离及旧快照失效 |
 | src/main/agent/message-revert.ts | 独占写入者前提下校验完整会话与所选用户消息，用 SDK 回到实际 parent 并追加持久分支标记；保留旧树，恢复文字及图片，不操作项目文件；兼容独立 usage、context_edit 与 retain-none 压缩记录 |
 | src/main/agent/stop-for-history.ts | 捕获 SDK 子进程并等待真实退出；超时/适配不兼容拒绝历史写入，不把 RpcClient.stop 提前返回当作退出证明 |
+| src/main/agent/slash-command-files.ts | 固定内置 Pi 包日志有界读取、SDK 当前分支 JSONL 序列化与私有 HTML/JSONL 暂存/身份复查/no-replace 发布；未知 FD/writer 保留恢复文件，不自动覆盖/重试 |
 | src/main/agent/live-session-state.ts | 后端私有当前轮显示快照：后台 root 输出持续归并、独立实例/revision 和有界行数/字节；实时事件与快照共用稳定消息身份，不伪造 SDK 时间戳/持久 ID；字段级截断、最终空消息权威、静态安全预览及子代理批次名称/状态/有界摘要（明确预算裁剪，任务参数只保留名字）；选回时随 SessionInfo 恢复，不重放请求或计费 |
 | src/main/agent/session-token-total.ts | 有界只读已落盘全文件Token投影（含分支、独立usage与toolResult），SDK header与文件快照绑定，未知不补零；列表缓存扫描内每目录4并发；session-token-total.test.ts 覆盖身份/异常/预算/用量来源 |
 | src/main/agent/session-list-cache.ts | exact cwd 的轻量会话列表缓存、在途扫描合并及并发界限；落盘软失效避免持续输出饿死扫描，显式变更硬失效防止旧行复活；不缓存 SDK 全量消息文本 |
-| src/main/agent/backend-pool.ts | 后端保留和容量管理 |
+| src/main/agent/backend-pool.ts | 后端保留和容量管理，真实命令导出在途不可驱逐 |
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态；所属agent_settled实际收口凭证，不以正常stop或错误长期锁队列 |
 | src/main/agent/queue-projection.ts | 本地/原生队列与原始本地runId同位置投影，native缺身份项不可编辑；tests/renderer/queue-projection.test.tsx 联查STATE/reducer身份回填，不解析文本图片 |
 | src/main/agent/task-planning.ts | 原生任务工具与扩展；未完成目标跨消息延续，全部完成快照持久归档并可读，之后 create 建立新目标身份/编号；同目标先重开旧任务再追加，显式 clear 重置当前计划；分支完整快照提交失败回滚内存，嵌套可恢复，保留单一进行中约束 |
@@ -108,6 +111,7 @@
 | src/renderer/src/features/project/SessionListControls.tsx、styles/session-list-controls.css | 项目标题筛选/排序按钮与有界自绘菜单；纯受控显示偏好、键盘焦点/portal清理；SessionListControls.test.tsx及Sidebar.test.tsx覆盖独立交互与集成 |
 | src/renderer/src/hooks/useAgent.ts | Agent hooks 汇总、启动及模型刷新；目录按 API/selection generation/cwd/path/session/backend 隔离，模型/思考/命令独立有界发布，不无限重试；迁移已准备的空会话只接管选择与目录、不读取未落盘历史，modelRefreshScope.test.tsx 覆盖迟到/挂起/选择回填 |
 | src/renderer/src/hooks/agent/useAgentHistory.ts | 历史缓存、分页、会话切换/撤销、跳转窗口、任务恢复、事件驱动的索引/叶节点更新；首次实时会话建立逻辑归属并封存缓存，切换前同步保存未落盘输出，缓存带后端身份；缓存回访清除分页渐显抑制标记，首次后台快照显示恢复历史渐显，普通刷新/分页不重播；切换成功后并行补读所属显示快照，metadata 不冒充水合完成，runningPaths 延迟不单独否定已知后端缓存；同作用域历史替换保留实时尾部，拒绝复活已失效运行；撤销隔离旧请求与缓存，区分后端暂时无状态和真实选择；游标区分页末与会话末尾；跨项目选择同步登记目标 cwd，短期排队状态桥接 React 提交，取消恢复旧目录/作用域；历史读取等待有界、按 loadId/选择/scope 收口，所有清空入口同步登记作用域，过期后不追加请求，失败空壳不伪装成功缓存，空实时投影不冒充磁盘空历史、空缓存不隐藏加载及失败；显式重新加载仅重读所属历史 |
+| src/renderer/src/hooks/useSlashCommands.ts | 原生命令分派、模型/思考/会话选择与文字信息弹窗，设置定向导航及既有 Pion 模式；未知资源归 SDK、待接入项解释而非发送；逻辑选择/后端/API/request fence 与真实命令/变更 pending |
 | src/renderer/src/hooks/useQueuedMessageEdit.ts | 排队原始文字/图片取回的空草稿门、输入冻结、逻辑owner/generation/origin/真实runId隔离、受限内存保留与显式重试/放弃；queuedMessageEdit.test.tsx 覆盖取回后拒绝及迟到不覆盖，不重发旧项 |
 | src/renderer/src/styles/queue-edit.css | 排队取回/恢复提示与显式确认入口的主题/键盘/forced-colors样式 |
 | src/renderer/src/hooks/useMessageRevert.ts | 撤销确认、空草稿/附件读取门控、一次性文字/图片恢复及拒绝后的恢复重试；按逻辑选择隔离迟到结果，不持有后端或文件回滚 |
@@ -140,9 +144,11 @@
 - `project/`：Sidebar 的项目/worktree/收藏树、ProjectPicker 与信任提示；分支操作菜单与删除路径确认、禁用/错误/在途门，保留重命名；`SortableSidebarGroup.tsx` 处理项目及同项目分支的标题拖动排序，按 scope 保存到 localStorage，与会话拖动隔离。
 - `operations/`：RunMetricsStrip、权限确认、验证、运行恢复和工作流面板。App 不再挂载全局 RunRecoveryBanner 或启用其 useRunRecovery 自动查询，后端中断记录/显式运行恢复API保留，不恢复过期队列pause；`runRecoveryBannerVisibility.test.tsx`覆盖移除全局入口的源码契约。RunMetricsStrip 保留在会话顶部，详情在统计条下方同宽悬浮展开，不占消息区高度；任务/排队面板仍在输入框上方。
 - `review/`：ModifiedFilesCard按现有Git binary证据和已知非文本后缀过滤行内列表/计数/增删，保全量审查和撤销范围；ModifiedFilesCard.test.tsx覆盖媒体/未知binary/文本候选及空卡；Git 改动列表、差异与审查界面。`ReviewPanel.tsx` 保留审查编排、提交草稿与冲突编辑；`ReviewFileTree.tsx` 管理各分组独立折叠、选中父目录展开与文件行渲染，`reviewFileTreeModel.ts` 提供纯树构建、排序、目录计数与父路径计算。文件树在状态码旁显示绿色新增/红色删减行数，直接使用快照的工作区合计（已暂存 + 未暂存，包含未跟踪文件），不额外加载 diff；缺失统计不伪造零值。ModifiedFilesCard 使用同一工作区统计（无 Git 快照时标明工具记录）；ReviewRevealText 与工具正文、用户正文和子代理摘要共用可见性观察器；工具披露门未收口时等待观察/分配首次字符，以普通透明文字保真实几何，累计更新首次完整播放、已播块只播新增后缀，保旧fade期限；非追加权威替换在门内使用最新透明正文准确测量，不保失效旧高度；按小段延迟创建动画字符，保留渐入并在结束后回收节点，实时文字仅动画新增后缀；DiffView 对长差异分页，工具内使用有界滚动区，保留全部差异的翻页访问。
+- `commands/CommandDialog.tsx`：独立受控原生命令弹窗，搜索/有界结果和继续翻页、纯文字信息/错误、真实忙碌禁用及最上层 modal 焦点/IME 门控；`commands/commandArguments.ts` 校验无参命令与可选引号导出路径，不做 shell 展开。
 - `settings/`：设置、模型选择器与按职责拆分的页面。
-  - `SettingsModal.tsx`：设置外壳、导航与操作编排，继续持有原有会话名称草稿、压缩/导出状态、诊断日志及主题保存 revision，切页不因拆分而重置宿主状态。
-  - `ModelsPage.tsx`、`SessionPage.tsx`、`SecurityPage.tsx`：模型与提供商、会话行为与工具、安全信任与权限页面；新增页面通过受控 props 回调操作，不反向依赖弹窗。
+  - `settingsNavigation.ts`：设置页与递增请求 ID、提供商过滤/认证意图的纯类型；导航不自动登录/登出，不永久挂载页面。
+  - `SettingsModal.tsx`：设置外壳、导航与操作编排，继续持有会话名称草稿、真实重命名/提供商动作槽、压缩/导出状态、诊断日志及主题保存 revision；原页面按导航/关闭卸载但不释放实际动作槽，新页面等所属收口再读取目录，保重命名失败/IME/重复提交门。
+  - `ModelsPage.tsx`、`SessionPage.tsx`、`SecurityPage.tsx`：模型与提供商、会话行为与工具、安全信任与权限页面；模型页消费宿主跨卸载操作槽，名称保存显示在途/错误且 IME 不提交；新增页面通过受控 props 回调操作，不反向依赖弹窗。
   - `AppearancePage.tsx`、`AboutPage.tsx`、`DiagnosticsPage.tsx`：外观、版本与更新日志、会话状态与 stderr 页面；`SettingsInfoRow.tsx` 为关于/诊断共用的信息行。
   - `QuestionSettings.tsx` 在会话页设置下一题的等待期限（默认10分钟、1–300或不自动超时），typed IPC/owner/迟到读取保存隔离，不扩展工具授权期限；`tests/renderer/QuestionSettings.test.tsx` 与 `tests/unit/question-settings{,-pending,-ipc}.test.ts` 覆盖校验/单槽/owner保存与设置UI。
   - `ReleaseNotes.tsx` 在关于 Pion 页展示可展开的更新日志；`WindowEffectsSettings.tsx` 提供简洁的“毛玻璃”开关，仅在重启、不可用或透明回退等必要状态下提示；外观页保留原四套主题并提供“信号橙”战术风格主题，即时切换，不额外渲染实时预览；`SubagentSettings.tsx` 在会话页提供子代理全局数量/超时/轮数/结果长度及默认模型配置，独立 typed IPC 读取 SDK 本地可用模型目录，不依赖主会话候选或显示过滤，10 秒等待期限/保留未显示的保存选择，精确 ID 编码及迟到 owner 隔离，保存后下一批生效。
@@ -160,6 +166,7 @@
 - `src/renderer/src/styles.css`：样式导入顺序。
 - `src/renderer/src/styles/`：按功能拆分的 CSS；`refinements/` 为细化样式。
 - `styles/refinements/project.css`：会话运行整周圆角光环与独立柔和光晕同步呼吸（减少动态效果静态可见、强制色关闭光晕并使用系统 Highlight 轮廓，不旋转/扫描文字）、未读标记和项目列表细节。
+- `styles/commands.css`：原生命令弹窗、独立结果滚动与纯文字信息，主题/forced-colors/减少动效；`styles/refinements.css` 的斜杠菜单独立滚动，不截断命令目录。
 - `styles/dock.css`、`styles/terminal.css`：模块化工作区、拖动反馈、分隔条及终端面板。
 - `styles/subagent-sessions.css`：子会话列表使用可收缩名称列与 max-content 单行状态列，面板缩窄仅省略标题；`SessionList.test.tsx` 登记样式约束回归，不把 JSDOM 断言当实机几何验证。
 - `styles/browser.css`：浏览器地址栏/工具条、主题/高对比度回退，拖动与 resize 期间临时隐藏 guest、保留实例。
@@ -175,6 +182,11 @@
 ## 测试定位
 
 以下为测试源码职责，实际验证范围以对应执行记录为准，不把文件清单当成全部通过的证明。
+
+- `tests/unit/slash-commands.test.ts`、`command-arguments.test.ts`：完整 Pi/Pion 目录、明确待接入项、精确命令/非法多行拦截及字面导出路径校验。
+- `tests/unit/slash-command-bridge.test.ts`：模拟既有后端/owner/选择/client/运行 fence、完整统计/最后助手正文/内置日志、无模型副作用、HTML 空/未落盘预检、实际导出保护与未知文件隔离，以及真实事件处理函数在导出期间保留 agent_start 并作废发布；preload 新 API 透传。
+- `tests/unit/slash-command-files.test.ts`、`slash-command-pool.test.ts`：模拟文件预算/身份/close 未知、SDK 当前分支 JSONL、私有暂存/no-replace/恢复残留与导出在途池驱逐保护，不是实际文件系统或 SDK 兼容验收。
+- `tests/renderer/CommandDialog.test.tsx`、`SettingsNavigation.test.tsx`、`slashCommandActions.test.tsx`：命令选择/搜索/焦点/IME/纯文字、定向设置单次导航及名称草稿/迟到保存、原生/资源/待接入分派、目录/级别重新校验、跨选择迟到及真实 pending 去重及 API/可见性 A→B→A 失效锁存；设置名称/提供商槽跨页卸载仍等实际收口；Composer 与 WorkbenchDialogs 回归另覆盖附件保留、准备门控、完整菜单与独立 lazy 槽位。
 
 - `tests/unit/computer-use-contract.test.ts`、`computer-use-service.test.ts`：纯契约、严格字段/身份/预算与复制、actual pending/停止隔离、迟到与不可交付帧计账、独立缩略图及 Portal 撤权回归，不连接 OS。
 - `tests/unit/computer-use-helper.test.ts`：模拟 child pipes、私有协议/来源/撤权、原图与缩略图边界、关闭 ACK/退出/解码竞态和真实槽；`computer-use-ipc.test.ts`：主帧 owner、metadata/thumbnail-only、scope/frame/reload 迟到隔离；`computer-use-document.test.ts`：实际宿主装配片段的无副作用模拟、文档 incarnation 撤权和退出状态投影。

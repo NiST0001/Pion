@@ -85,7 +85,7 @@ function openedProps(props: Props, open: readonly LazyKind[]): Props {
 }
 
 // Probes measure composition identity, not the real panels' own open/reset effects.
-function createProbe<P extends { onClose: () => void }>(name: LazyKind, isOpen: (props: P) => boolean) {
+function createProbe<P extends { onClose: () => void }>(name: LazyKind | 'command', isOpen: (props: P) => boolean) {
   const load = vi.fn()
   const mount = vi.fn()
   const unmount = vi.fn()
@@ -476,5 +476,122 @@ describe('WorkbenchDialogs composition', () => {
         await Promise.all([compacted.promise, exported.promise])
       })
     }
+  })
+})
+
+describe('WorkbenchDialogs independent command slot', () => {
+  type CommandProps = NonNullable<Props['command']>['dialog']
+  let WorkbenchDialogs: typeof WorkbenchDialogsComponent
+  let command: ReturnType<typeof createProbe<CommandProps>>
+  let settings: ReturnType<typeof createProbe<Props['settings']['dialog']>>
+  let commandImportGate: Promise<void> | undefined
+  let releaseCommandImport: (() => void) | undefined
+
+  function CommandHost(props: Props) {
+    const commandMounted = useDeferredMount(props.command?.dialog.open ?? false)
+    const settingsMounted = useDeferredMount(props.settings.dialog.open)
+    return <WorkbenchDialogs {...props}
+      command={props.command ? { ...props.command, mounted: commandMounted } : undefined}
+      settings={{ ...props.settings, mounted: settingsMounted }}
+    />
+  }
+
+  beforeEach(async () => {
+    vi.resetModules()
+    command = createProbe<CommandProps>('command', (props) => props.open)
+    settings = createProbe<Props['settings']['dialog']>('settings', (props) => props.open)
+    commandImportGate = undefined
+    releaseCommandImport = undefined
+    vi.doMock('../../src/renderer/src/features/commands/CommandDialog', async () => {
+      command.load()
+      await commandImportGate
+      return { CommandDialog: command.Component }
+    })
+    vi.doMock('../../src/renderer/src/features/settings/SettingsModal', () => {
+      settings.load()
+      return { SettingsModal: settings.Component }
+    })
+    WorkbenchDialogs = (await import('../../src/renderer/src/app/WorkbenchDialogs')).WorkbenchDialogs
+  })
+
+  afterEach(async () => {
+    await act(async () => {
+      releaseCommandImport?.()
+      await commandImportGate
+    })
+    cleanup()
+    vi.doUnmock('../../src/renderer/src/features/commands/CommandDialog')
+    vi.doUnmock('../../src/renderer/src/features/settings/SettingsModal')
+    vi.resetModules()
+  })
+
+  it('loads a command only on demand, forwards the controlled props and preserves its host through close/reopen and settings updates', async () => {
+    const props = defaultProps()
+    const dialog: CommandProps = {
+      open: false, requestId: 41, title: '选择模型', initialQuery: 'provider/model', busy: false,
+      entries: [{ id: '["provider","model"]', label: 'provider/model', selected: true }],
+      onSelect: vi.fn(), onClose: vi.fn()
+    }
+    const { rerender } = render(<CommandHost {...props} />)
+    expect(command.load).not.toHaveBeenCalled()
+    rerender(<CommandHost {...props} command={{ mounted: false, dialog }} />)
+    expect(command.load).not.toHaveBeenCalled()
+    const opened = { ...dialog, open: true }
+    await act(async () => { rerender(<CommandHost {...props} command={{ mounted: false, dialog: opened }} />) })
+    const input = await screen.findByRole('textbox', { name: 'command draft' })
+    fireEvent.change(input, { target: { value: 'retain command search' } })
+    expect(command.load).toHaveBeenCalledTimes(1)
+    expect(command.mount).toHaveBeenCalledTimes(1)
+    const forwarded = command.record.mock.calls.at(-1)![0]
+    expect(forwarded).toEqual(opened)
+    expect(forwarded.onSelect).toBe(dialog.onSelect)
+    expect(forwarded.onClose).toBe(dialog.onClose)
+    expect(forwarded).not.toHaveProperty('mounted')
+    fireEvent.click(screen.getByRole('button', { name: 'command close' }))
+    expect(dialog.onClose).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('textbox', { name: 'command draft' })).toBe(input) // Controlled close only.
+
+    const withSettings = openedProps(props, ['settings'])
+    await act(async () => { rerender(<CommandHost {...withSettings} command={{ mounted: false, dialog: { ...opened, error: 'late state' } }} />) })
+    await screen.findByRole('textbox', { name: 'settings draft' })
+    expect(screen.getByRole('textbox', { name: 'command draft' })).toBe(input)
+    expect(input).toHaveValue('retain command search')
+    expect(command.record.mock.calls.at(-1)![0].error).toBe('late state')
+    rerender(<CommandHost {...withSettings} command={{ mounted: false, dialog }} />)
+    expect(screen.queryByRole('textbox', { name: 'command draft' })).not.toBeInTheDocument()
+    expect(command.record.mock.calls.at(-1)![0].open).toBe(false)
+    expect(command.unmount).not.toHaveBeenCalled()
+    rerender(<CommandHost {...withSettings} command={{ mounted: false, dialog: opened }} />)
+    expect(screen.getByRole('textbox', { name: 'command draft' })).toHaveValue('retain command search')
+    expect(command.load).toHaveBeenCalledTimes(1)
+    expect(command.mount).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not suspend or reset already mounted settings while the independent command import is pending', async () => {
+    const pending = deferred<void>()
+    commandImportGate = pending.promise
+    releaseCommandImport = () => pending.resolve(undefined)
+    const props = openedProps(defaultProps(), ['settings'])
+    const { rerender } = render(<CommandHost {...props} />)
+    const input = await screen.findByRole('textbox', { name: 'settings draft' })
+    fireEvent.change(input, { target: { value: 'keep settings mounted' } })
+    input.focus()
+    await act(async () => {
+      rerender(<CommandHost {...props} command={{ mounted: false,
+        dialog: { open: true, requestId: 42, title: 'Pi 会话信息', text: 'only command content', onClose: vi.fn() }
+      }} />)
+    })
+    await waitFor(() => expect(command.load).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('textbox', { name: 'command draft' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'settings draft' })).toBe(input)
+    expect(input).toBeVisible()
+    expect(input).toHaveFocus()
+    expect(input).toHaveValue('keep settings mounted')
+    expect(settings.mount).toHaveBeenCalledTimes(1)
+    expect(settings.unmount).not.toHaveBeenCalled()
+    await act(async () => { pending.resolve(undefined); await pending.promise })
+    await screen.findByRole('textbox', { name: 'command draft' })
+    expect(screen.getByRole('textbox', { name: 'settings draft' })).toBe(input)
+    expect(settings.unmount).not.toHaveBeenCalled()
   })
 })

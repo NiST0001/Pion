@@ -30,6 +30,7 @@ import { DiagnosticsPage } from './DiagnosticsPage'
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { currentTheme, saveTheme } from '../../utils/theme'
 import type { ThemeId } from '../../utils/theme'
+import type { SettingsNavigationRequest, SettingsPage } from './settingsNavigation'
 
 export interface SettingsActions {
   setModel(provider: string, modelId: string): Promise<void>
@@ -51,6 +52,7 @@ export interface SettingsActions {
 
 interface SettingsModalProps {
   open: boolean
+  navigationRequest?: SettingsNavigationRequest
   session: SessionInfo | null
   models: ModelOption[]
   modelProviderAuthState: ModelProviderAuthState | null
@@ -83,10 +85,9 @@ interface SettingsModalProps {
   actions: SettingsActions
 }
 
-type SettingsPage = 'models' | 'session' | 'security' | 'appearance' | 'about' | 'diagnostics'
-
 export function SettingsModal({
   open,
+  navigationRequest,
   session,
   models,
   modelProviderAuthState,
@@ -116,9 +117,26 @@ export function SettingsModal({
   actions
 }: SettingsModalProps): ReactElement | null {
   // Page views mount on navigation; keep the existing drafts and in-flight state in this host.
-  const [page, setPage] = useState<SettingsPage>('models')
+  const [selectedPage, setPage] = useState<SettingsPage>('models')
+  const [providerRequest, setProviderRequest] = useState<SettingsNavigationRequest>()
+  const wasOpen = useRef(false)
+  const lastNavigationId = useRef<number | undefined>(undefined)
+  const requestedPage = navigationRequest && Number.isSafeInteger(navigationRequest.id)
+    && (lastNavigationId.current === undefined || navigationRequest.id > lastNavigationId.current)
+    ? navigationRequest.page : undefined
+  // Do not briefly mount the old page (and start its reads) before the open effect runs.
+  const page = open && requestedPage ? requestedPage
+    : open && !wasOpen.current ? 'models' : selectedPage
   const [name, setName] = useState(session?.sessionName ?? '')
   const [nameSaved, setNameSaved] = useState(false)
+  const [nameSaving, setNameSaving] = useState(false)
+  const [nameError, setNameError] = useState('')
+  const nameWritePending = useRef(false)
+  const providerActionSlot = useRef<Promise<void> | null>(null)
+  const nameOwner = useRef({ sessionId: session?.sessionId, revision: 0, edited: false })
+  if (nameOwner.current.sessionId !== session?.sessionId) {
+    nameOwner.current = { sessionId: session?.sessionId, revision: 0, edited: false }
+  }
   const [compacting, setCompacting] = useState(false)
   const [exportPath, setExportPath] = useState('')
   const [exporting, setExporting] = useState(false)
@@ -151,15 +169,51 @@ export function SettingsModal({
   )
 
   useEffect(() => {
-    if (open) {
-      setPage('models')
+    // Name backfills for the same session must not overwrite an edit or select a page.
+    if (nameOwner.current.edited) return
+    ++nameOwner.current.revision
+    setName(session?.sessionName ?? '')
+    setNameSaved(false)
+    setNameError('')
+  }, [session?.sessionId, session?.sessionName])
+
+  useEffect(() => {
+    const justOpened = open && !wasOpen.current
+    wasOpen.current = open
+    if (!open) {
+      setProviderRequest(undefined)
+      return
+    }
+    // Preserve the traditional open reset, not streaming updates or name backfills.
+    if (justOpened) {
+      ++nameOwner.current.revision
+      nameOwner.current.edited = false
       setName(session?.sessionName ?? '')
       setNameSaved(false)
+      setNameError('')
       setExportPath('')
       setSelectedTheme(currentTheme())
       setModelError('')
     }
-  }, [open, session?.sessionName])
+    if (navigationRequest && Number.isSafeInteger(navigationRequest.id)
+      && (lastNavigationId.current === undefined || navigationRequest.id > lastNavigationId.current)) {
+      // A high-water mark is bounded and rejects delayed older requests as well as duplicates.
+      lastNavigationId.current = navigationRequest.id
+      setPage(navigationRequest.page)
+      setProviderRequest(navigationRequest.page === 'models'
+        && (navigationRequest.authIntent || navigationRequest.providerQuery !== undefined)
+        ? navigationRequest : undefined)
+    } else if (justOpened) {
+      setPage('models')
+      setProviderRequest(undefined)
+    }
+  }, [open, navigationRequest])
+
+  const navigateToPage = (nextPage: SettingsPage): void => {
+    setPage(nextPage)
+    // A user-selected page must not replay a previously delivered auth request.
+    setProviderRequest(undefined)
+  }
 
   useEffect(() => {
     const handler = (event: KeyboardEvent): void => {
@@ -207,10 +261,27 @@ export function SettingsModal({
 
   const handleRename = async (): Promise<void> => {
     const trimmed = name.trim()
-    if (!trimmed || trimmed === session?.sessionName) return
-    await actions.renameSession(trimmed)
-    setNameSaved(true)
-    setTimeout(() => setNameSaved(false), 1500)
+    if (nameWritePending.current || !trimmed || trimmed === session?.sessionName) return
+    const owner = nameOwner.current
+    const revision = ++owner.revision
+    nameWritePending.current = true
+    setNameSaving(true)
+    setNameError('')
+    try {
+      await actions.renameSession(trimmed)
+      if (owner !== nameOwner.current || revision !== owner.revision) return
+      setNameSaved(true)
+      setTimeout(() => {
+        if (owner === nameOwner.current && revision === owner.revision) setNameSaved(false)
+      }, 1500)
+    } catch (error) {
+      if (owner === nameOwner.current && revision === owner.revision) {
+        setNameError(error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      nameWritePending.current = false
+      setNameSaving(false)
+    }
   }
 
   const refreshStderr = async (): Promise<void> => {
@@ -247,28 +318,28 @@ export function SettingsModal({
               icon={<Cpu size={15} />}
               label="模型与提供商"
               description="选择模型与路由"
-              onClick={() => setPage('models')}
+              onClick={() => navigateToPage('models')}
             />
             <NavItem
               active={page === 'session'}
               icon={<MessageSquare size={15} />}
               label="会话"
               description="消息行为与子代理"
-              onClick={() => setPage('session')}
+              onClick={() => navigateToPage('session')}
             />
             <NavItem
               active={page === 'security'}
               icon={<ShieldCheck size={15} />}
               label="安全与信任"
               description="项目资源与工具权限"
-              onClick={() => setPage('security')}
+              onClick={() => navigateToPage('security')}
             />
             <NavItem
               active={page === 'appearance'}
               icon={<Palette size={15} />}
               label="外观"
               description="主题与界面风格"
-              onClick={() => setPage('appearance')}
+              onClick={() => navigateToPage('appearance')}
             />
             <div className="settings-nav-label settings-nav-label-spaced">关于</div>
             <NavItem
@@ -276,14 +347,14 @@ export function SettingsModal({
               icon={<Info size={15} />}
               label="关于 Pion"
               description="版本与项目说明"
-              onClick={() => setPage('about')}
+              onClick={() => navigateToPage('about')}
             />
             <NavItem
               active={page === 'diagnostics'}
               icon={<SlidersHorizontal size={15} />}
               label="诊断"
               description="状态与调试日志"
-              onClick={() => setPage('diagnostics')}
+              onClick={() => navigateToPage('diagnostics')}
             />
           </nav>
 
@@ -298,6 +369,8 @@ export function SettingsModal({
                 error={modelError}
                 agentBusy={agentBusy}
                 providerAuthState={modelProviderAuthState}
+                providerRequest={providerRequest}
+                providerActionSlot={providerActionSlot}
                 onSelect={(provider, modelId) => void handleModelSelect(provider, modelId)}
                 onListProviders={actions.listModelProviders}
                 onSetProviderEnabled={actions.setModelProviderEnabled}
@@ -315,7 +388,15 @@ export function SettingsModal({
                 session={session}
                 name={name}
                 nameSaved={nameSaved}
-                onNameChange={setName}
+                nameSaving={nameSaving}
+                nameError={nameError}
+                onNameChange={(value) => {
+                  ++nameOwner.current.revision
+                  nameOwner.current.edited = true
+                  setName(value)
+                  setNameSaved(false)
+                  setNameError('')
+                }}
                 onRename={() => void handleRename()}
                 autoRetry={autoRetry}
                 onAutoCompactionChange={(value) => void actions.setAutoCompaction(value)}

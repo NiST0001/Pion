@@ -27,7 +27,11 @@
 - **Enter**：发送消息，运行中追加引导。
 - **Tab**：排队发送。
 - **Shift+Enter**：换行。
-- 输入 `/` 查看命令；`/plan` 切换计划模式，`/verify` 打开验证，`/agents` 打开多 Agent 工作流。
+- 输入 `/` 查看命令：精确命令按 Enter 执行，部分名称按 Enter 或 Tab 补全；原生命令不排队，也不消耗已附图片。`/plan` 切换计划模式，`/verify` 打开验证，`/agents` 打开多 Agent 工作流。
+
+Pi 命令正在分阶段接入桌面交互：现有入口包括 `/settings`、`/model`、`/thinking`、`/login`、`/logout`、`/new`、`/resume`、`/name`、`/session`、`/clone`、`/compact`、`/copy`、`/export`、`/trust`、`/hotkeys`、`/changelog`、`/quit`。登录/登出只打开提供商管理，仍需显式点击；`/changelog` 展示内置 Pi SDK 日志，Pion 日志在设置 → 关于 Pion。第一阶段源码接入尚待执行验证。
+
+`/scoped-models`、`/tree`、`/fork`、`/import`、`/reload`、`/share`、`/bug`、`/llama` 仍标注“待接入”，不会送给模型或回退到终端。`/export [path.html|path.jsonl]` 仅导出本地新文件，不覆盖、不上传：HTML 包含会话树，JSONL 只含当前分支；含空格路径加引号，分享前自行检查敏感内容。详细边界见[原生斜杠命令约束](docs/feature-contracts.md#原生斜杠命令)。
 
 生图可以直接说：`画一艘红色小船，保存到 images/boat.png`。编辑图片时，告诉它参考哪张图、保存到哪里就行。
 
