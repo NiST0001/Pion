@@ -53,7 +53,7 @@
 | src/main/agent/task-planning.ts | 原生任务工具与扩展；未完成目标跨消息延续，全部完成快照持久归档并可读，之后 create 建立新目标身份/编号；同目标先重开旧任务再追加，显式 clear 重置当前计划；分支完整快照提交失败回滚内存，嵌套可恢复，保留单一进行中约束 |
 | src/main/agent/wire.ts | SDK 条目映射、所选分支祖先链与模式推导、沿当前叶节点恢复最新任务快照；保留压缩边界及 token 数供实时/历史归并 |
 | src/main/agent-runtime.ts、src/main/agent/runtime-host.ts、src/main/agent/runtime-lifecycle.ts | 编译后的 SDK RPC 子进程入口、私有启动参数、项目隔离/信任与会话替换时重建内置工具；启动失败/返回先等待 owner 清理再退出；生图工具捕获所属 backend 的 SDK ModelRuntime，执行获准后才解析 Codex OAuth/刷新 |
-| src/main/agent/native-extensions.ts | CLI 同源 MCP/codemode/tool-search 的 builtin/replaceable factories，运行时与能力扫描共用；原生默认工具仅未显式选择时临时添加，尊重禁用/替换/noExtensions；显式工具集合以初始 SDK 集合和正负匹配规则持续限制直接及嵌套执行，迟到发现不扩大边界；codemode models:true、每脚本模型调用预算与主机期限/父中止、原 SDK usage 保留，有界图片结果 fail-closed 投影并清除 structuredContent，不承诺任意文字/base64 脱敏或请求实际停止 |
+| src/main/agent/native-extensions.ts | CLI 同源 MCP/codemode/tool-search 的 builtin/replaceable factories，运行时与能力扫描共用；不覆写 Pi 默认激活，codemode/tool_search 由用户 defaultTools 或 MCP 曝光激活，尊重禁用/替换/noExtensions；显式工具集合以初始 SDK 集合和正负匹配规则持续限制直接及嵌套执行，迟到发现不扩大边界；codemode models:true、每脚本模型调用预算与主机期限/父中止、原 SDK usage 保留，有界图片结果 fail-closed 投影并清除 structuredContent，不承诺任意文字/base64 脱敏或请求实际停止 |
 | src/main/agent/mcp-status-observer.ts | 已核对 SDK 版本的 builtin:mcp 空参数 RPC handler 采集；真实 command context、成功原生启动/命令来源双门，每次仅一次 info notify、未知/被吞禁止访问 fail-closed；周期通知、generation/关闭失效、实际 pending 跨 SDK 替换单槽，不创建 manager/连接或调用模型 |
 | src/main/agent/mcp-status-bridge.ts | 私有 widget 消费/白名单缓存与目标选择 fence；捕获 client、cwd/path/backend、主进程单调 revision 和有限 retired-runtime 身份，单调收件 TTL/过期锁存；getter 只读现有后端缓存、超时未知，不污染 live/正文/任务/计费 |
 | src/main/agent/image-generation.ts | SDK 单张文字生图/参考图编辑工具：size/quality 请求及 ≤5 个项目相对 PNG/JPEG 输入，前置拒绝非法/未知参数（含 mask/input_fidelity），显式不同于输入的 PNG 新路径；调用原生读取器后请求订阅服务，v2 请求设置与经输出 PNG 校验的保存尺寸分离，不返回输入字节/metadata/路径数组；原有目录/身份检查、私有同目录 wx 暂存和 hard-link no-replace 发布，不删最终目标，失败保留完整恢复文件，清理失败报告残留；预览真实解码跨实例单槽，提交后失败不回滚 |
@@ -81,7 +81,7 @@
 | src/main/workflow-manager.ts、workflow/ | 多 Agent 工作流编排与契约 |
 | src/main/workflow/runners.ts | 隔离 CLI worker 与确定性验证 runner；权限准备/启动前取消闸门及期限、prompt 前监听、输入接受与完成分离、无运行 handled 与扩展运行保护、message_end 权威输出/错误及取消/超时清理，stop 失败保留原诊断并报告收尾未确认 |
 | src/main/provider-visibility.ts | Pion 专属模型列表显示偏好，默认显示/有界单槽加载、串行私有原子保存与失败保护；不改变 SDK 提供商/凭据/会话 |
-| src/main/provider-config.ts、provider-auth.ts | 模型提供商配置与认证，以及默认子代理设置独立读取的 SDK 本地可用模型目录（不依赖父会话/显示过滤）；SDK 按需请求的稳定设备 UUID 使用 global-only 设置并等待 flush/检查错误，不迁移旧生图认证 |
+| src/main/provider-config.ts、provider-auth.ts | 模型提供商配置与原生 ModelRuntime.login 凭证提交（不整写/回滚 auth.json，私有最小临时配置避免无关凭据命令），以及默认子代理设置独立读取的 SDK 本地可用模型目录（不依赖父会话/显示过滤）；SDK 按需请求的稳定设备 UUID 使用 global-only 设置并等待 flush/检查错误，不迁移旧生图认证 |
 | src/main/plugin-manager.ts | 插件安装和管理 |
 | src/main/pi-runtime.ts | Pion SDK 子进程与独立 pi CLI 路径、Windows/asar 解包兼容 |
 | src/main/window-effects.ts | 平台材质选择、DWM/Vibrancy、Linux 透明/KWin X11 请求、主窗口归属校验与回退；偏好由 app-settings.ts 持久化 |
@@ -254,6 +254,7 @@
 - `tests/unit/workflow-runner.test.ts`：模拟 RPC 快速终态、无运行 handled、扩展独立运行、输入接受不等于完成、message_end 文字/错误优先及空终态、权限准备/启动挂起期限与取消闸门、迟到结果/派发失败清理及 stop 失败保留诊断，不调用真实模型。
 - `tests/unit/provider-visibility.test.ts`、`provider-visibility-bridge.test.ts`：模型显示偏好默认/坏文件/有界读写/并发/保存失败、目录保留、运行中纯显示切换、owner/布尔参数/过滤、已有模型及认证/SDK 文件不变；不调用真实认证。
 - `tests/renderer/providerVisibilityActions.test.tsx`：布尔值与目录透传、刷新/失败、SDK 操作不触发及目录 owner 变化隔离；设置开关及草稿/焦点回归见 `SettingsModal.test.tsx`。
+- `tests/unit/provider-config.test.ts`：Pi 原生锁内凭证提交、并发修改保留、空密钥仅配置 fallback、不读取或迁移旧凭据、目标限定同步/无关凭据命令不执行、临时配置清理及部分成功不回滚；`agent-bridge-provider-auth.test.ts` 补充部分失败后认证目录失效，不重载后端。
 - `tests/unit/provider-auth.test.ts`：提供商认证交互、按需 global-only 设备 ID、flush/错误处理及不向 legacy/API-key 流程生成设备 ID；提交后取消及叠加保存失败仍保留脱敏取消/可能已提交的提示，不回滚用户凭据。
 - `tests/unit/message-revert.test.ts`、`stop-for-history.test.ts`、`agent-bridge-message-revert.test.ts`：SDK 持久分支、首条/元数据/压缩/图片、损坏或不支持内容拒绝、真实退出与超时隔离、会话/owner/队列/在途门控、退出后分支校验、重启失败保留结果及沿分支分页/索引/任务；计划扩展关闭时不重复落盘由 `plan-mode.test.ts` 覆盖。
 - `tests/renderer/messageRevertHistory.test.tsx`、`messageRevertInteraction.test.tsx`、`messageRevertNavigation.test.tsx`、`messageRevertSend.test.tsx`：逻辑会话/首次实时归属、元数据叶节点刷新、旧缓存和请求隔离、确认/取消/重复点击、草稿及附件保护、重启错误下恢复、撤销释放旧阅读范围，以及真实 Composer 到发送/排队的原文与图片透传。
@@ -267,7 +268,7 @@
 - `tests/unit/theme-settings.test.ts`：主题跨实例恢复、参数校验、损坏文件保护、窗口归属及安装脚本同步范围契约。
 - `tests/unit/subagent-settings.test.ts`：所属窗口/主帧校验、参数硬边界、全局设置原子持久化、现有运行时读取更新配置和损坏配置拒绝。
 - `tests/unit/runtime-lifecycle.test.ts`：RPC 启动失败及正常返回等待 owner dispose，保留主诊断并区分清理失败；创建失败不清理不存在的 runtime，不连接真实 MCP。
-- `tests/unit/native-extensions.test.ts`：模拟原生 builtin/replaceable 注册、旧插件替换、禁用/noExtensions、信任决策与临时默认工具；能力扫描仅注册、不连接；脚本模型预算、主机期限/父中止、方法 receiver 与原 usage 保留；codemode/MCP/resource 图片 fail-closed 投影及文字/详情边界，不验证真实服务器或 API。
+- `tests/unit/native-extensions.test.ts`：模拟原生 builtin/replaceable 注册、旧插件替换、禁用/noExtensions、信任决策与 Pi 原生默认激活/显式设置不覆写；能力扫描仅注册、不连接；脚本模型预算、主机期限/父中止、方法 receiver 与原 usage 保留；codemode/MCP/resource 图片 fail-closed 投影及文字/详情边界，不验证真实服务器或 API。
 - `tests/unit/ask-user.test.ts`、`runtime-host.test.ts`：内置提问选择/自定义回答、取消/无 UI/中止、回答长度上限，以及 SDK 工具注入、启动参数、跨项目隔离与每个 backend 的 Codex OAuth 延迟解析/独立捕获；`plan-mode.test.ts` 覆盖 SDK 提问工具的计划模式白名单、生图隐藏/执行拦截及显式工具子集/空集/分支恢复。
 - `tests/unit/git-service.test.ts`：NUL 分隔的普通/重命名/复制路径、XY 标志和对象形状、畸形记录不吞下一条；隔离临时仓库验证两种 diff scope、未跟踪分流、重命名元数据及暂存/撤销选择等操作。
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。

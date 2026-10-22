@@ -73,6 +73,21 @@ describe('AgentBridge provider authentication', () => {
     expect(service.listAvailableModels).toHaveBeenCalledTimes(2)
   })
 
+  it('invalidates the native credential directory after a partially failed provider addition without reloading backends', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-provider-partial-'))
+    roots.push(root)
+    const store = new ProviderConfigStore(join(root, 'agent'))
+    vi.spyOn(store, 'addProvider').mockRejectedValue(new Error('Pi 已保存凭据，但 models.json 写入失败'))
+    const service = { invalidate: vi.fn() } as unknown as ProviderAuthService
+    const bridge = new AgentBridge(new RunStore(join(root, 'runs.json')), undefined, store, service)
+    const reload = vi.spyOn(bridge as unknown as { reloadBackendsAfterProviderMutation(): Promise<[]> }, 'reloadBackendsAfterProviderMutation')
+    await expect(bridge.addModelProvider({} as Parameters<AgentBridge['addModelProvider']>[0]))
+      .rejects.toThrow('Pi 已保存凭据')
+    expect(service.invalidate).toHaveBeenCalledTimes(1)
+    expect(reload).not.toHaveBeenCalled()
+    expect((bridge as unknown as { providerMutationInFlight: boolean }).providerMutationInFlight).toBe(false)
+  })
+
   it('routes Pi secret prompts through the existing extension UI queue', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pion-provider-auth-'))
     roots.push(root)

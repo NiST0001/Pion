@@ -5,7 +5,7 @@ import {
 } from '../../src/shared/mcp'
 import type { McpExposure, McpServerState } from '../../src/shared/mcp'
 
-// Literal fixtures checked against SDK 1.0.4 extensions/mcp/index.js formatStatus.
+// Literal fixtures checked against SDK 1.4.0 dist/extensions/mcp/index.js formatStatus.
 // No SDK factory, server manager, user config, credentials or transport is invoked.
 // These limits protect Pion's projection, not the SDK's construction of strings.
 const exposures: McpExposure[] = ['codemode', 'deferred', 'direct', 'hidden']
@@ -59,9 +59,9 @@ const privateFields = {
   structuredContent: { raw: 'PRIVATE_STRUCTURED' }, permittedToolCount: 0, unknown: { nested: 'PRIVATE_UNKNOWN' }
 }
 
-describe('parseNativeMcpStatus: SDK 1.0.4 text projection only', () => {
+describe('parseNativeMcpStatus: SDK 1.4.0 text projection only', () => {
   it('pins the supported formatter and Pion projection limits', () => {
-    expect(MCP_STATUS_SDK_VERSION).toBe('1.0.4')
+    expect(MCP_STATUS_SDK_VERSION).toBe('1.4.0')
     expect(MCP_STATUS_MAX_BYTES).toBe(64 * 1024)
     expect(MCP_STATUS_MAX_SERVERS).toBe(128)
   })

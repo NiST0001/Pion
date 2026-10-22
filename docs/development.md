@@ -143,11 +143,11 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 ## pi SDK 兼容与缓存预热
 
-Pion 的 pi 依赖范围与锁定解析以 `package.json` / `package-lock.json` 为准，Node 最低要求仍为 22.19。升级依赖不会更新正在运行的安装版。子代理从 `AgentSession.systemPrompt` 继承有效系统提示，不读取新版已移入 transcript 的旧 `agent.state.systemPrompt` 字段。消息撤销校验支持 SDK 的独立 `usage`、`context_edit` 与不保留旧消息的压缩边界；上下文编辑只影响模型输入，不改写原始聊天记录或撤销时恢复的原文。旧进程真实退出屏障仍须保留。
+Pion 当前将 pi 精确锁定为 1.4.0，依赖与解析以 `package.json` / `package-lock.json` 为准，Node 最低要求仍为 22.19。升级依赖不会更新正在运行的安装版。子代理从 `AgentSession.systemPrompt` 继承有效系统提示，不读取新版已移入 transcript 的旧 `agent.state.systemPrompt` 字段。消息撤销校验支持 SDK 的独立 `usage`、`context_edit` 与不保留旧消息的压缩边界；上下文编辑只影响模型输入，不改写原始聊天记录或撤销时恢复的原文。旧进程真实退出屏障仍须保留。
 
 ### SDK 与 CLI 能力边界
 
-Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP、codemode 和 tool-search factories，`runtime-host.ts` 与 `capabilities.ts` 共用此注册入口。三者沿用 `builtin` / `replaceable` 身份；旧 `pi-mcp-adapter` 注册的 `/mcp` 可以替换原生 builtin，不能双启或仅凭原生注册宣称原生 MCP 已活动。用户禁用扩展、`noExtensions` 和显式工具集合（包括空集）必须持续生效，不能只依赖启动时的 `defaultTools`。能力扫描仅加载 factory 注册，不连接 MCP 服务器、不读取认证凭据，也不是服务器可用性检查。`ExtensionToolContext.executeTool` / `tools` 是执行上下文契约，不自动新增工具。
+Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP、codemode 和 tool-search factories，`runtime-host.ts` 与 `capabilities.ts` 共用此注册入口。三者沿用 `builtin` / `replaceable` 身份；Pion 不再临时覆写 `defaultTools` 来开启 codemode/tool_search，两者遵循 Pi 原生默认 inactive，由用户显式 `defaultTools`（如 `["+codemode", "+tool_search"]`）或 MCP 的 codemode/deferred 曝光按需激活；旧 `pi-mcp-adapter` 注册的 `/mcp` 可以替换原生 builtin，不能双启或仅凭原生注册宣称原生 MCP 已活动。用户禁用扩展、`noExtensions` 和显式工具集合（包括空集）必须持续生效，不能只依赖启动时的 `defaultTools`。能力扫描仅加载 factory 注册，不连接 MCP 服务器、不读取认证凭据，也不是服务器可用性检查。`ExtensionToolContext.executeTool` / `tools` 是执行上下文契约，不自动新增工具。
 
 #### 原生 MCP 配置与启动边界
 
@@ -159,7 +159,7 @@ Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP�
 
 “技能与工具 → MCP”查看所选现有后端的状态、登记工具数和曝光方式。刷新只读主进程缓存，不创建后端或 manager，不发 prompt、调用模型、启动/重连服务器或认证；服务器原有的启动副作用仍按上一节处理。旧插件接管 `/mcp`、原生未启用、没有后端、等待/超时及格式不支持均单独显示，不从工具目录、注册或历史推断连接。工具数来自 `connection.tools.length`，不是当前模式可见或获准数量；`starting` / `disabled` 是原生格式的派生显示，不是额外的连接状态。
 
-SDK 没有公开结构化状态 getter。`agent/mcp-status-observer.ts` 仅适配已核对的 SDK 1.0.4：捕获真正 builtin 的空参数 handler，检查成功的原生启动和 `getCommands()` 的 builtin 来源，并使用所属 SDK `extensionRunner.createCommandContext()` 的真实 RPC 上下文。局部采集只允许一次 info notify，未知访问或被吞掉的禁止访问均 fail-closed，不执行旧插件同名 handler。每 3 秒更新，2 秒 deadline 只关闭采集；实际 pending 未收口前，同 RPC owner 跨 SDK 替换保持一个槽，不排队。关闭/替换使迟到结果失效，不声称取消了原生连接等待。
+SDK 没有公开结构化状态 getter。`agent/mcp-status-observer.ts` 仅适配已核对的 SDK 1.4.0：捕获真正 builtin 的空参数 handler，检查成功的原生启动和 `getCommands()` 的 builtin 来源，并使用所属 SDK `extensionRunner.createCommandContext()` 的真实 RPC 上下文。局部采集只允许一次 info notify，未知访问或被吞掉的禁止访问均 fail-closed，不执行旧插件同名 handler。每 3 秒更新，2 秒 deadline 只关闭采集；实际 pending 未收口前，同 RPC owner 跨 SDK 替换保持一个槽，不排队。关闭/替换使迟到结果失效，不声称取消了原生连接等待。
 
 `shared/mcp.ts` 按 SDK 文字格式作白名单投影：最多 128 台服务器、64 KiB 单行私有通知；只保留名称、状态、曝光和 connected 的工具数。原始错误、配置尾部及其中的路径、URL、headers、命令参数不进入状态列表；未知格式整份转为未知。限制只覆盖 Pion 投影，不限制 SDK 构造原始状态字符串的开销。`__pion_mcp_status_v1` 是私有传输标记，不是插件身份或认证边界。
 
@@ -184,6 +184,10 @@ RPC `prompt` / `steer` / `followUp` 的返回值表示输入接受、排队或�
 会话可从首条用户消息开始持久化，不应等待助手回复才承认会话文件。分支回退仍保留独立 `usage`、`context_edit`、retain-none 压缩边界、真实退出屏障与路径隔离；`stop-for-history.ts` 对私有 `RpcClient.process` 的适配须随锁定 SDK 复核，不能把 `stop()` 返回视为实际退出。
 
 ### 提供商升级注意事项
+
+新增自定义提供商的密钥提交复用 Pi 公共 `ModelRuntime.login`，由 Pi 原生凭证存储锁内合并；Pion 不再整写 `auth.json` 或用旧快照回滚。临时 runtime 从仅目标提供商的私有最小配置初始化（不含用户密钥），禁初始刷新，不调用会触发全量后台刷新及无关 `!command` 凭据解析的 `registerProvider`；登录后只等待目标同步，finally 清理临时配置。空密钥仅在 `models.json` 写非敏感本地 fallback，不读写或迁移旧凭据；已有 OAuth 按 Pi 原生 handler 规则解析，无 handler 时不静默降级。凭据先于模型元数据提交，两者不是原子事务：同步/元数据保存失败会明确说明可能已保存或已保存，不自动重试、不回滚凭据；宿主认证目录在成功或失败后失效，失败不自动重载后端。
+
+Pi 1.4.0 将 `kimi-coding` 改为 Chat Completions；自定义 `models.json` base URL 覆写需要包含 `/v1`。Pion 不自动改写用户端点或历史模型选择。任务、提问、子代理和计划模式在上游仍主要是扩展示例/基础 API，并非当前桌面契约的完整等价实现；保留必要的 Pion 领域与权限适配。原生通用生图不等同 Codex 订阅 Images API，不替换认证或付费路径。
 
 OpenAI 的 “Sign in with ChatGPT” 登录通过 SDK 请求稳定安装设备 UUID。`ProviderAuthService` 按需使用 SDK `SettingsManager` 的 global-only 设置，不混入项目设置，并等待 `flush()`、检查独立错误队列；保存失败不能宣称设备 ID 已稳定。此登录接入不读取或迁移用户凭据。生图仍请求所属后端的旧 `openai-codex` OAuth，不自动切换到 `openai`，新聊天登录不能视为生图认证已兼容。
 

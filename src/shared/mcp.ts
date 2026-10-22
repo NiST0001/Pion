@@ -1,7 +1,7 @@
 /** Read-only MCP observations, separate from tool registration and chat history. */
 export const MCP_STATUS_WIDGET_KEY = '__pion_mcp_status_v1'
 export const MCP_STATUS_PROTOCOL_VERSION = 1
-export const MCP_STATUS_SDK_VERSION = '1.0.4'
+export const MCP_STATUS_SDK_VERSION = '1.4.0'
 export const MCP_STATUS_INTERVAL_MS = 3_000
 export const MCP_STATUS_QUERY_DEADLINE_MS = 2_000
 export const MCP_STATUS_STALE_MS = 12_000
@@ -89,7 +89,7 @@ export function projectMcpObservedStatus(value: unknown): McpObservedStatus | un
   return { availability: value.availability as McpAvailability, phase: value.phase as McpObservationPhase,
     ...(value.reason ? { reason: value.reason as McpStatusReason } : {}), servers, diagnosticsOmitted: value.diagnosticsOmitted }
 }
-/** SDK 1.0.4 format only. Bounds apply to our projection, NOT SDK string construction. */
+/** SDK 1.4.0 format only. Bounds apply to our projection, NOT SDK string construction. */
 export function parseNativeMcpStatus(text: unknown): McpObservedStatus {
   const bad = () => unavailableMcpStatus('unsupported-format', 'native')
   if (typeof text !== 'string' || text.length === 0 || text.length > MCP_STATUS_MAX_BYTES

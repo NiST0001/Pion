@@ -88,7 +88,34 @@ it('captures each backend’s own model runtime and only resolves Codex OAuth wh
   expect(mocks.auth).toHaveBeenCalledTimes(1)
 })
 
-it('freezes raw explicit loadouts before defaults and RPC MCP lifecycle binding', async () => {
+it.each([
+  { selection: undefined }, { selection: [] }, { selection: ['read'] },
+  { selection: ['-codemode', '-tool_search'] }, { selection: ['+codemode', '+tool_search'] }
+])('delegates default activation to Pi without overriding settings ($selection)', async ({ selection }) => {
+  const settings = mocks.settings()
+  const raw = selection === undefined ? {} : { defaultTools: selection }
+  settings.getSettings = () => raw
+  const getDefaultTools = vi.fn(() => selection)
+  settings.getDefaultTools = getDefaultTools
+  // Present registered native helpers: the removed host policy would force
+  // +codemode/+tool_search for an undefined loadout even before MCP connects.
+  mocks.services.mockResolvedValue({
+    settingsManager: settings, modelRuntime: { getAuth: mocks.auth }, diagnostics: [],
+    resourceLoader: { getExtensions: () => ({ extensions: [
+      { path: 'builtin:codemode', tools: new Map([['codemode', { definition: { name: 'codemode' } }]]) },
+      { path: 'builtin:tool-search', tools: new Map([['tool_search', { definition: { name: 'tool_search' } }]]) }
+    ] }) }
+  })
+  await createPionRuntime(['--mode', 'rpc'], cwd)
+  expect(settings.applyOverrides).not.toHaveBeenCalled()
+  expect(settings.getSettings()).toEqual(raw)
+  expect(getDefaultTools).not.toHaveBeenCalled()
+  expect(mocks.services.mock.calls[0][0].settingsManager).toBe(settings)
+  expect(mocks.session.mock.calls[0][0]).not.toHaveProperty('tools')
+  expect(mocks.session.mock.calls[0][0]).not.toHaveProperty('noTools')
+})
+
+it('freezes raw explicit loadouts before RPC MCP lifecycle binding', async () => {
   const settings = mocks.settings()
   settings.getSettings = () => ({ defaultTools: ['+codemode', '+mcp__docs__*', '-mcp__docs__delete*'] })
   settings.getDefaultTools = () => ['codemode', 'mcp__docs__*']

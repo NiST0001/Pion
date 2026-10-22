@@ -2,7 +2,7 @@ import {
   createCodemodeExtension, createMcpExtension, createToolSearchExtension,
   type ExtensionAPI, type ExtensionFactory, type ExtensionToolContext, type ToolDefinition,
   type ToolResultEvent, type ToolResultEventResult,
-  type InlineExtension, type ResourceLoader, type SettingsManager
+  type InlineExtension
 } from '@earendil-works/pi-coding-agent'
 import { collectToolImages } from '../../shared/tool-images'
 import type { createMcpStatusObserver } from './mcp-status-observer'
@@ -157,7 +157,7 @@ function loadoutPattern(pattern: string): RegExp | undefined {
 
 /** Initialize before MCP's session_start, and filter declarations after it.
  * This is an execution ceiling, not a sandbox or replacement for permission/plan guards.
- * Pass the raw effective settings BEFORE supplying Pion's ephemeral native defaults.
+ * Pass the raw effective settings without altering Pi's native activation defaults.
  * SDK getDefaultTools() resolves modifiers away, including negative wildcard entries.
  */
 export function createPionNativeLoadoutBoundary(entries: readonly string[] | undefined): {
@@ -236,22 +236,4 @@ export function createPionNativeExtensions(observer?: Pick<ReturnType<typeof cre
     { name: 'tool-search', builtin: true, replaceable: true, factory: createToolSearchExtension() },
     { name: 'mcp', builtin: true, replaceable: true, factory: guardedNativeFactory(observer ? observer.wrapNative(mcp) : mcp, 'mcp') }
   ]
-}
-
-/** Only supply host defaults when the user has not selected a tool loadout at all.
- * applyOverrides is ephemeral; never persist settings or revive disabled/replaced builtins.
- * Loading registers MCP lifecycle hooks only. RPC binds them and SDK replacement shuts them down.
- */
-export function applyPionNativeToolDefaults(
-  settingsManager: Pick<SettingsManager, 'getDefaultTools' | 'applyOverrides'>,
-  resourceLoader: Pick<ResourceLoader, 'getExtensions'>
-): void {
-  if (settingsManager.getDefaultTools() !== undefined) return
-  const available = new Set<string>()
-  for (const extension of resourceLoader.getExtensions().extensions) {
-    if (extension.path !== 'builtin:codemode' && extension.path !== 'builtin:tool-search') continue
-    for (const { definition } of extension.tools.values()) available.add(definition.name)
-  }
-  const additions = ['codemode', 'tool_search'].filter((name) => available.has(name)).map((name) => `+${name}`)
-  if (additions.length) settingsManager.applyOverrides({ defaultTools: additions })
 }

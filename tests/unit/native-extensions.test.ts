@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { Type } from 'typebox'
 import { DefaultResourceLoader, SettingsManager, type ExtensionAPI, type ExtensionToolContext, type ToolDefinition, type ToolResultEvent, type ToolResultEventResult, type ResourceLoader } from '@earendil-works/pi-coding-agent'
-import { applyPionNativeToolDefaults, createPionNativeExtensions, createPionNativeLoadoutBoundary, NATIVE_SCRIPT_DEADLINE_MS, NATIVE_SCRIPT_MAX_MODEL_CALLS } from '../../src/main/agent/native-extensions'
+import { createPionNativeExtensions, createPionNativeLoadoutBoundary, NATIVE_SCRIPT_DEADLINE_MS, NATIVE_SCRIPT_MAX_MODEL_CALLS } from '../../src/main/agent/native-extensions'
 import { loadAgentCapabilities } from '../../src/main/agent/capabilities'
 
 const mocks = vi.hoisted(() => ({
@@ -40,8 +40,8 @@ beforeEach(async () => {
   vi.clearAllMocks()
   root = await mkdtemp(join(tmpdir(), 'pion-native-extensions-'))
   mocks.agentDir = join(root, 'agent')
-  mocks.codemode.mockImplementation(() => (pi: ExtensionAPI) => pi.registerTool(definition('codemode')))
-  mocks.search.mockImplementation(() => (pi: ExtensionAPI) => pi.registerTool(definition('tool_search')))
+  mocks.codemode.mockImplementation(() => (pi: ExtensionAPI) => pi.registerTool({ ...definition('codemode'), defaultActive: false }))
+  mocks.search.mockImplementation(() => (pi: ExtensionAPI) => pi.registerTool({ ...definition('tool_search'), defaultActive: false }))
   mocks.mcp.mockImplementation(() => (pi: ExtensionAPI) => {
     pi.registerCommand('mcp', { description: 'Mock MCP', handler: async () => {} })
     pi.on('session_start', mocks.start)
@@ -72,12 +72,13 @@ it('creates fresh named, replaceable CLI builtins for every backend with models 
 
 async function loader(settings: Parameters<typeof SettingsManager.inMemory>[0] = {}, extra: ConstructorParameters<typeof DefaultResourceLoader>[0]['extensionFactories'] = []) {
   const settingsManager = SettingsManager.inMemory(settings, { projectTrusted: false })
+  const overrides = vi.spyOn(settingsManager, 'applyOverrides')
   const resourceLoader = new DefaultResourceLoader({
     cwd: root, agentDir: mocks.agentDir, settingsManager,
     extensionFactories: [...createPionNativeExtensions(), ...extra]
   })
   await resourceLoader.reload()
-  return { settingsManager, resourceLoader }
+  return { settingsManager, resourceLoader, overrides }
 }
 
 it('leaves legacy /mcp and replacement tools in control without duplicate registration or connections', async () => {
@@ -99,9 +100,7 @@ it('leaves legacy /mcp and replacement tools in control without duplicate regist
 it('honors disabled builtin settings and SDK noExtensions without host bypasses', async () => {
   const disabled = await loader({ extensions: ['-builtin:mcp', '-builtin:codemode', '-builtin:tool-search'] })
   expect(disabled.resourceLoader.getExtensions().extensions).toEqual([])
-  const overrides = vi.spyOn(disabled.settingsManager, 'applyOverrides')
-  applyPionNativeToolDefaults(disabled.settingsManager, disabled.resourceLoader)
-  expect(overrides).not.toHaveBeenCalled()
+  expect(disabled.overrides).not.toHaveBeenCalled()
   const noExtensions = new DefaultResourceLoader({
     cwd: root, agentDir: mocks.agentDir, settingsManager: SettingsManager.inMemory({}),
     extensionFactories: createPionNativeExtensions(), noExtensions: true
@@ -127,39 +126,29 @@ it('loads native builtins only after the SDK trust decision without granting pro
   expect(mocks.start).not.toHaveBeenCalled()
 })
 
-it('adds only registered native defaults ephemerally while retaining SDK coding defaults', async () => {
-  const { settingsManager, resourceLoader } = await loader()
-  const globalBefore = settingsManager.getGlobalSettings()
-  const projectBefore = settingsManager.getProjectSettings()
-  const overrides = vi.spyOn(settingsManager, 'applyOverrides')
-  applyPionNativeToolDefaults(settingsManager, resourceLoader)
-  expect(overrides).toHaveBeenCalledWith({ defaultTools: ['+codemode', '+tool_search'] })
-  expect(settingsManager.getDefaultTools()).toEqual(['read', 'bash', 'edit', 'write', 'codemode', 'tool_search'])
-  expect(settingsManager.getGlobalSettings()).toEqual(globalBefore)
-  expect(settingsManager.getProjectSettings()).toEqual(projectBefore)
-  applyPionNativeToolDefaults(settingsManager, resourceLoader)
-  expect(overrides).toHaveBeenCalledTimes(1)
+it('leaves native helpers inactive and Pi defaults untouched when no loadout is configured', async () => {
+  const { settingsManager, resourceLoader, overrides } = await loader()
+  expect(settingsManager.getSettings().defaultTools).toBeUndefined()
+  expect(settingsManager.getDefaultTools()).toBeUndefined()
+  expect(settingsManager.getGlobalSettings()).toEqual({})
+  expect(settingsManager.getProjectSettings()).toEqual({})
+  expect(overrides).not.toHaveBeenCalled()
+  for (const [path, name] of [['builtin:codemode', 'codemode'], ['builtin:tool-search', 'tool_search']]) {
+    expect(resourceLoader.getExtensions().extensions.find((entry) => entry.path === path)!.tools.get(name)!.definition.defaultActive).toBe(false)
+  }
+  expect(mocks.start).not.toHaveBeenCalled()
 })
 
 it.each([
   { selection: [] }, { selection: ['read'] },
-  { selection: ['-codemode', '-tool_search'] }, { selection: ['+grep'] }
+  { selection: ['-codemode', '-tool_search'] }, { selection: ['+grep'] },
+  { selection: ['+codemode', '+tool_search'] }
 ])('does not override an explicit user loadout $selection', async ({ selection }) => {
-  const { settingsManager, resourceLoader } = await loader({ defaultTools: selection })
-  const expected = settingsManager.getDefaultTools()
-  const overrides = vi.spyOn(settingsManager, 'applyOverrides')
-  applyPionNativeToolDefaults(settingsManager, resourceLoader)
+  const expected = SettingsManager.inMemory({ defaultTools: selection }).getDefaultTools()
+  const { settingsManager, overrides } = await loader({ defaultTools: selection })
+  expect(settingsManager.getSettings().defaultTools).toEqual(selection)
   expect(settingsManager.getDefaultTools()).toEqual(expected)
   expect(overrides).not.toHaveBeenCalled()
-})
-
-it('never supplies defaults for tools belonging only to a replacement extension', () => {
-  const settings = { getDefaultTools: () => undefined, applyOverrides: vi.fn() }
-  const resourceLoader = { getExtensions: () => ({ extensions: [{
-    path: '/legacy.ts', tools: new Map([['codemode', { definition: definition('codemode') }]])
-  }] }) } as unknown as Pick<ResourceLoader, 'getExtensions'>
-  applyPionNativeToolDefaults(settings, resourceLoader)
-  expect(settings.applyOverrides).not.toHaveBeenCalled()
 })
 
 it.each([false, true])('capability reload uses the same builtin registry without binding/connecting (trusted=%s)', async (projectTrusted) => {

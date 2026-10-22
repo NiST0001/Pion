@@ -245,7 +245,7 @@ export class AgentBridge {
   }
 
   private observeSubagentProcessExit(backend: BackendRecord): void {
-    // Private adapter reviewed against pinned SDK 1.0.4, like stop-for-history.
+    // Private adapter reviewed against pinned SDK 1.4.0, like stop-for-history.
     // Missing/changed internals or a null handle do not establish actual exit.
     const client = backend.client
     if (!Object.prototype.hasOwnProperty.call(client, 'process')) return
@@ -4277,8 +4277,12 @@ export class AgentBridge {
   async addModelProvider(input: AddModelProviderInput): Promise<ModelOption[]> {
     this.beginProviderMutation()
     try {
-      await this.providerConfigStore.addProvider(input)
-      this.providerAuthService.invalidate()
+      try {
+        await this.providerConfigStore.addProvider(input)
+      } finally {
+        // Pi may commit credentials before metadata publication fails.
+        this.providerAuthService.invalidate()
+      }
       return await this.reloadBackendsAfterProviderMutation()
     } finally {
       this.providerMutationInFlight = false

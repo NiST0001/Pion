@@ -1,5 +1,7 @@
+import { CredentialSynchronizationError, ModelRuntime } from '@earendil-works/pi-coding-agent'
 import { randomUUID } from 'node:crypto'
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import type { AddModelProviderInput, ModelProviderApi } from '../shared/types'
 
@@ -11,7 +13,6 @@ const SUPPORTED_APIS = new Set<ModelProviderApi>([
 ])
 
 interface JsonFile {
-  exists: boolean
   value: Record<string, unknown>
 }
 
@@ -39,10 +40,10 @@ async function readJsonFile(path: string, label: string): Promise<JsonFile> {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
     const value = objectRecord(parsed)
     if (!value) throw new Error(`${label} 顶层必须是 JSON 对象`)
-    return { exists: true, value }
+    return { value }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { exists: false, value: {} }
+      return { value: {} }
     }
     if (error instanceof SyntaxError) throw new Error(`${label} 不是有效的 JSON`)
     throw error
@@ -148,10 +149,7 @@ export class ProviderConfigStore {
   }
 
   private async addProviderNow(input: NormalizedProviderInput): Promise<void> {
-    const [modelsFile, authFile] = await Promise.all([
-      readJsonFile(this.modelsPath, 'models.json'),
-      readJsonFile(this.authPath, 'auth.json')
-    ])
+    const modelsFile = await readJsonFile(this.modelsPath, 'models.json')
     const configuredProviders = modelsFile.value.providers
     if (configuredProviders !== undefined && !objectRecord(configuredProviders)) {
       throw new Error('models.json 的 providers 必须是 JSON 对象')
@@ -161,7 +159,7 @@ export class ProviderConfigStore {
       throw new Error(`提供商 ${input.providerId} 已存在，请直接编辑 models.json`)
     }
 
-    const models = input.modelIds.map((id) => ({
+    const models: NonNullable<Parameters<ModelRuntime['registerProvider']>[1]['models']> = input.modelIds.map((id) => ({
       id,
       name: id,
       reasoning: input.reasoning,
@@ -173,6 +171,11 @@ export class ProviderConfigStore {
     const provider = {
       baseUrl: input.baseUrl,
       api: input.api,
+      // Pi resolves stored credentials before this non-secret local-server fallback.
+      // Stored OAuth requires the provider's native OAuth handler; Pi does not
+      // silently fall back when that handler is absent or token refresh fails.
+      // An empty key must never replace an existing credential (including OAuth).
+      ...(!input.apiKey ? { apiKey: 'pion-local' } : {}),
       ...(input.authHeader ? { authHeader: true } : {}),
       models
     }
@@ -181,26 +184,61 @@ export class ProviderConfigStore {
       providers: { ...providers, [input.providerId]: provider }
     }
 
-    const existingCredential = authFile.value[input.providerId]
-    const credential = input.apiKey
-      ? { type: 'api_key', key: input.apiKey }
-      : existingCredential ?? { type: 'api_key', key: 'pion-local' }
-    const nextAuth: Record<string, unknown> = {
-      ...authFile.value,
-      [input.providerId]: credential
+    if (input.apiKey) {
+      // Use only public SDK APIs. Pi owns credential locking/merging; Pion never
+      // snapshots auth.json, so a concurrent login/refresh cannot be rolled back.
+      let runtimeConfigDir: string | undefined
+      try {
+        // registerProvider starts a detached, all-provider availability refresh:
+        // even offline that can execute unrelated stored !command credentials.
+        // Load only this target's static config instead, then await login's scoped
+        // synchronization. Neither user config nor unrelated credentials resolve.
+        runtimeConfigDir = await mkdtemp(join(tmpdir(), 'pion-provider-login-'))
+        const runtimeModelsPath = join(runtimeConfigDir, 'models.json')
+        await writeFile(runtimeModelsPath, JSON.stringify({
+          providers: { [input.providerId]: provider }
+        }), { mode: 0o600 })
+        const runtime = await ModelRuntime.create({
+          authPath: this.authPath,
+          modelsPath: runtimeModelsPath,
+          // This one-shot static catalog has no remote cache to persist.
+          modelsStore: {
+            read: async () => undefined,
+            write: async () => undefined,
+            delete: async () => undefined
+          },
+          allowModelNetwork: false,
+          refreshOnCreate: false
+        })
+        let prompted = false
+        await runtime.login(input.providerId, 'api_key', {
+          prompt: async (prompt) => {
+            if (prompt.type !== 'secret' || prompted) {
+              throw new Error('此提供商需要交互式认证，请使用提供商登录入口')
+            }
+            prompted = true
+            return input.apiKey
+          },
+          notify: () => undefined
+        })
+      } catch (error) {
+        // SDK synchronization errors carry the credential/cause. Do not leak
+        // either through IPC, and never compensate by restoring old credentials.
+        if (error instanceof CredentialSynchronizationError) {
+          throw new Error('Pi 已保存凭据，但认证状态同步失败；models.json 未更新，请刷新提供商状态后重试')
+        }
+        throw new Error('Pi 凭据提交失败；models.json 未更新，凭据可能已保存，请检查 Pi 认证存储或使用提供商登录入口')
+      } finally {
+        if (runtimeConfigDir) await rm(runtimeConfigDir, { recursive: true, force: true })
+      }
     }
 
-    await writePrivateJson(this.authPath, nextAuth)
     try {
       await writePrivateJson(this.modelsPath, nextModels)
     } catch (error) {
-      try {
-        if (authFile.exists) await writePrivateJson(this.authPath, authFile.value)
-        else await rm(this.authPath, { force: true })
-      } catch {
-        // Preserve the original write error; a later retry can repair credentials.
-      }
-      throw error
+      if (!input.apiKey) throw error
+      const detail = error instanceof Error ? error.message : '未知文件错误'
+      throw new Error(`Pi 已保存凭据，但 models.json 写入失败；凭据未回滚，请检查配置后重试：${detail}`)
     }
   }
 }

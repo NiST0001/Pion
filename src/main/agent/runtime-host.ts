@@ -5,7 +5,7 @@ import {
   type CreateAgentSessionRuntimeFactory, type AgentSession, type ModelRuntime
 } from '@earendil-works/pi-coding-agent'
 import { createAskUserTool } from './ask-user'
-import { applyPionNativeToolDefaults, createPionNativeExtensions, createPionNativeLoadoutBoundary } from './native-extensions'
+import { createPionNativeExtensions, createPionNativeLoadoutBoundary } from './native-extensions'
 import { createImageGenerationTool } from './image-generation'
 import { createMcpStatusObserver, type McpStatusReadSlot } from './mcp-status-observer'
 import { createSubagentControl, createSubagentRunner } from './subagents'
@@ -57,7 +57,7 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
       // Read only this existing runtime's snapshot. No refresh, login or auth lookup.
       () => models.getAvailableSnapshot().slice(0, 4096).map(({ provider, id }) => ({ provider, id })))
     const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: options.approved })
-    // Capture raw modifiers before Pion supplies extras; do not read credentials.
+    // Preserve raw modifiers for the execution ceiling; Pi owns default activation.
     const loadout = createPionNativeLoadoutBoundary(settingsManager.getSettings().defaultTools)
     const mcpStatus = createMcpStatusObserver({ slot: mcpReadSlot,
       createContext: () => parent?.extensionRunner?.createCommandContext() })
@@ -66,7 +66,6 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
       modelRuntimeSignal: AbortSignal.timeout(15_000),
       resourceLoaderOptions: { additionalExtensionPaths: options.extensions, extensionFactories: [...createPionNativeExtensions(mcpStatus), loadout.capture, subagents.extension, loadout.declarations, mcpStatus.extension] }
     })
-    applyPionNativeToolDefaults(settingsManager, services.resourceLoader)
     const patterns = settingsManager.getEnabledModels()
     const scope = patterns?.length
       ? await resolveModelScopeWithDiagnostics(patterns, services.modelRuntime, { signal: AbortSignal.timeout(15_000) })

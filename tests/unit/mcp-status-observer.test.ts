@@ -17,7 +17,7 @@ describe('MCP observer isolated suites', () => {
 let createObserver: typeof import('../../src/main/agent/mcp-status-observer')['createMcpStatusObserver']
 beforeAll(async () => {
   vi.resetModules()
-  vi.doMock('@earendil-works/pi-coding-agent', () => ({ VERSION: '1.0.4' }))
+  vi.doMock('@earendil-works/pi-coding-agent', () => ({ VERSION: '1.4.0' }))
   try {
     const module = await import('../../src/main/agent/mcp-status-observer')
     createObserver = module.createMcpStatusObserver
@@ -269,7 +269,8 @@ describe('MCP observer factory registration and lifecycle eligibility', () => {
     expect(h.factory).not.toHaveBeenCalled()
   })
 
-  it.each(['1.0.3', '1.0.5', '1.1.0', 'unknown'])('does not issue a native query for unsupported SDK %s', async (sdkVersion) => {
+  it.each(['1.0.3', '1.0.4', '1.0.5', '1.1.0', '1.4.1', '1.5.0', '2.0.0', '1.4.0-rc.1', '1.4.0+fixture', 'unknown'])(
+    'does not issue a native query for unsupported SDK %s', async (sdkVersion) => {
     const h = setup({ sdkVersion })
     await h.start()
     await vi.advanceTimersByTimeAsync(MCP_STATUS_INTERVAL_MS)
@@ -378,6 +379,9 @@ describe('MCP command identity preflight and postflight', () => {
 })
 
 describe('isolated read-only native command context', () => {
+  // SDK 1.4.0 dist/extensions/mcp/index.js: empty args select no action;
+  // RPC (not TUI) awaits pending, then calls ctx.ui.notify(formatStatus(), 'info').
+  // Exercise that contract with mocks only, never the native factory/lifecycle.
   it('passes literal empty args and only actual RPC mode plus isolated notify, leaving captured UI methods untouched', async () => {
     let isolated: ExtensionCommandContext | undefined
     const h = setup({ handler: async (args, ctx) => {
@@ -476,7 +480,7 @@ describe('bounded private status protocol, not raw native diagnostics', () => {
     await h.start()
     const notice = h.latest()
     expect(MCP_STATUS_PROTOCOL_VERSION).toBe(1)
-    expect(MCP_STATUS_SDK_VERSION).toBe('1.0.4')
+    expect(MCP_STATUS_SDK_VERSION).toBe('1.4.0')
     expect(MCP_STATUS_WIDGET_KEY).toBe('__pion_mcp_status_v1')
     expect(notice).toMatchObject({ version: 1, revision: 1, cwd, sessionPath: firstSessionPath,
       availability: 'native', phase: 'ready', diagnosticsOmitted: true, servers: [ready.servers[0], { name: 'beta', state: 'failed', exposure: 'direct' }] })

@@ -8,6 +8,14 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.84',
+    changes: [
+      '内置 Pi 升级并锁定至 1.4.0；codemode 与 tool search 遵循 Pi 原生激活设置，不再由 Pion 额外默认开启。保留桌面权限、计划模式与生命周期适配。',
+      '自定义提供商密钥改由 Pi 原生认证接口保存，不再整份覆盖或回滚 auth.json；避免解析无关提供商的凭据命令，配置保存部分失败时明确报告并刷新认证目录。',
+      '更新 MCP 只读状态的版本适配；升级 Electron 44.9.3、Vite 7.3.7、Vitest 4.1.12 及相关传递依赖，修复依赖审计报告的安全问题。'
+    ]
+  },
+  {
     version: '0.1.83',
     changes: [
       '接入第一阶段 Pi 原生命令：模型与思考级别选择、恢复会话、会话名称与完整统计、复制最后回复、本地导出，以及设置、信任、快捷键和 Pi SDK 日志入口；原生命令不会作为提示词发送或加入消息队列。',
