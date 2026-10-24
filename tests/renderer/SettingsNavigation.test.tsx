@@ -304,10 +304,10 @@ describe('SettingsModal session name ownership', () => {
     expect(actions.renameSession).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     await act(async () => { saved.reject(new Error('名称写入失败')); await saved.promise.catch(() => undefined) })
-    expect(screen.getByRole('alert')).toHaveTextContent('名称写入失败')
+    expect(screen.getByText('名称写入失败')).toHaveAttribute('role', 'alert')
     expect(screen.getByRole('button', { name: '保存' })).toBeEnabled()
     fireEvent.change(input, { target: { value: '重试前的新草稿' } })
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByText('名称写入失败')).not.toBeInTheDocument()
   })
 
   it.each([false, true])('ignores a late rename acknowledgement after a real identity change (returnToFirst=%s)', async (returnToFirst) => {

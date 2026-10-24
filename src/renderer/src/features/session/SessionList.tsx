@@ -47,6 +47,7 @@ interface SessionItemActions {
   activePath?: string
   runningSessionPaths: ReadonlySet<string>
   unreadSessionPaths?: ReadonlySet<string>
+  attentionSessionPaths?: ReadonlySet<string>
   onSelect: (path: string) => void
   onReorder?: (sessions: SessionMeta[]) => void
   onDelete: (path: string) => Promise<void>
@@ -67,6 +68,7 @@ export function SessionItems({
   activePath,
   runningSessionPaths,
   unreadSessionPaths,
+  attentionSessionPaths,
   previewDensity,
   onSelect,
   onReorder,
@@ -135,6 +137,7 @@ export function SessionItems({
   return (
     <>
       {sessions.map((session) => {
+        const attention = attentionSessionPaths?.has(session.path)
         const children = subagentSessions?.filter((child) => child.parentSessionPath === session.path && child.cwd === session.projectCwd) ?? []
         return (
         <Fragment key={session.path}>
@@ -169,14 +172,18 @@ export function SessionItems({
           }}
           title={session.optimistic
             ? '正在保存新会话…'
-            : `${unreadSessionPaths?.has(session.path) ? '未读：有新的运行结果\n' : ''}${session.path}\n${onReorder ? '拖拽调整顺序 · ' : ''}点击星标收藏 · 右键查看更多操作`}
+            : `${attention ? '待处理：等待回答或权限确认\n' : ''}${unreadSessionPaths?.has(session.path) ? '未读：有新的运行结果\n' : ''}${session.path}\n${onReorder ? '拖拽调整顺序 · ' : ''}点击星标收藏 · 右键查看更多操作`}
         >
           <div className="side-session-content">
             {onReorder && !session.optimistic && <GripVertical size={13} className="side-session-drag" aria-hidden="true" />}
             <div className="side-session-main">
               <div className="side-session-title-row">
-                {unreadSessionPaths?.has(session.path) && (
-                  <span className="side-session-unread-indicator" aria-label="未读会话" title="有新的运行结果" />
+                {(attention || unreadSessionPaths?.has(session.path)) && (
+                  <span
+                    className={`side-session-unread-indicator${attention ? ' attention' : ''}`}
+                    aria-label={attention ? '等待回答或权限确认' : '未读会话'}
+                    title={attention ? '等待回答或权限确认' : '有新的运行结果'}
+                  />
                 )}
                 <span className="side-item-label">
                   {session.name || session.preview || '未命名会话'}

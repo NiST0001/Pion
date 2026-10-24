@@ -20,8 +20,7 @@ export const ToolActivityHeader = memo(function ToolActivityHeader({
 }: ToolActivityHeaderProps): ReactElement {
   // Freeze the original reveal mode: older prepend/history backfill must not
   // restart a mounted live row, and an initially static row never gains motion.
-  const initialMode = useRef(noReveal ? undefined : historical ? 'history' : 'live').current
-  const mode = noReveal ? undefined : initialMode
+  const mode = useRef(noReveal ? undefined : historical ? 'history' : 'live').current
   // The complete row joins the shared waterfall once; count updates keep DOM.
   return <button
     type="button"

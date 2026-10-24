@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { flushSync } from 'react-dom'
-import { Settings, Store, PanelLeft, PanelRight, TerminalSquare, Globe, RotateCcw, PanelsTopLeft } from 'lucide-react'
+import { Settings, Store, PanelLeft, PanelRight, TerminalSquare, Globe, ChartColumn, RotateCcw, PanelsTopLeft } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
 import { useSlashCommands } from './hooks/useSlashCommands'
 import { DESKTOP_SLASH_COMMAND_NAMES, PREPARATION_SLASH_COMMAND_NAMES } from '../../shared/slash-commands'
@@ -12,7 +12,7 @@ import { useMessageRevert } from './hooks/useMessageRevert'
 import { useQueuedMessageEdit } from './hooks/useQueuedMessageEdit'
 import { useRunTelemetry } from './hooks/useRunTelemetry'
 import { useVerification } from './hooks/useVerification'
-import { useAppInteractionState } from './hooks/useAppInteractionState'
+import { isSessionInteractionRequest, useAppInteractionState } from './hooks/useAppInteractionState'
 import { useConversationNavigation } from './hooks/useConversationNavigation'
 import { useConversationOverlays } from './hooks/useConversationOverlays'
 import { useWorkflows } from './hooks/useWorkflows'
@@ -44,6 +44,7 @@ import {
   saveShowMetricDuration
 } from './utils/metricsSettings'
 import { TaskPanel } from './features/session/TaskPanel'
+import { PendingInteractionSessions } from './features/session/PendingInteractionSessions'
 import { QueuedMessagesCard } from './features/session/QueuedMessagesCard'
 import { ComposerSupportPanels } from './features/session/ComposerSupportPanels'
 import { ChatTimeline } from './features/chat/ChatTimeline'
@@ -137,7 +138,6 @@ export function App(): ReactElement {
     cwd: resourceCwd
   })
   const displayedRun = runTelemetry.activeRun ?? runTelemetry.latestRun
-  const conversationShellRef = useConversationOverlays(Boolean(displayedRun))
   const [showMetricDuration, setShowMetricDuration] = useState(() => readShowMetricDuration())
   const [showMetricCost, setShowMetricCost] = useState(() => readShowMetricCost())
   const sessionTotals = useMemo(() => {
@@ -230,12 +230,10 @@ export function App(): ReactElement {
     toolPermissionBusy,
     toolPermissionError,
     toolPermissionRequests,
-    toolPermissionResolveBusy,
-    toolPermissionResolveError,
+    toolPermissionResolutions,
     extensionUiRequests,
     modelProviderAuthState,
-    extensionUiResolveBusy,
-    extensionUiResolveError,
+    extensionUiResolutions,
     handleCompletionNotificationsChange,
     handleProjectTrustChange,
     handleToolPermissionChange,
@@ -245,11 +243,25 @@ export function App(): ReactElement {
   } = useAppInteractionState({
     hasBridge,
     cwd: resourceCwd,
+    sessionPath: resourceSessionPath,
     policyEnabled: policyResourcesEnabled,
     agentBusy: state.busy,
     statusPhase: state.status.phase,
     updateProjectTrust: actions.setProjectTrust
   })
+  const sessionToolPermissionRequests = toolPermissionRequests.filter((request) =>
+    isSessionInteractionRequest(request, resourceCwd, resourceSessionPath))
+  const sessionExtensionUiRequests = extensionUiRequests.filter((request) =>
+    isSessionInteractionRequest(request, resourceCwd, resourceSessionPath))
+  const globalExtensionUiRequests = extensionUiRequests.filter((request) => request.scope === 'global')
+  const hasSessionInteractions = sessionToolPermissionRequests.length > 0 || sessionExtensionUiRequests.length > 0
+  const hasVisibleInteractions = hasSessionInteractions || globalExtensionUiRequests.length > 0
+  const conversationShellRef = useConversationOverlays(Boolean(displayedRun), hasSessionInteractions && !viewingChild)
+  const attentionSessionPathSet = useMemo(() => new Set([
+    ...toolPermissionRequests,
+    ...extensionUiRequests.filter((request) => request.scope !== 'global')
+  ].flatMap((request) => request.sessionPath ? [request.sessionPath] : [])), [toolPermissionRequests, extensionUiRequests])
+
   const handleSessionPreviewDensityChange = useCallback((density: SessionPreviewDensity): void => {
     setSessionPreviewDensity(density)
     saveSessionPreviewDensity(density)
@@ -310,6 +322,7 @@ export function App(): ReactElement {
   const pluginStoreMounted = useDeferredMount(pluginStoreOpen)
   const branchDialogMounted = useDeferredMount(branchDialogCwd !== null)
   const settingsMounted = useDeferredMount(settingsOpen)
+  const usageOverviewMounted = useDeferredMount(operationsPanel === 'stats')
   const newSessionInFlight = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const agentTodos = useMemo(() => (state.tasks ?? []).filter((task) => task.status !== 'deleted'), [state.tasks])
@@ -363,7 +376,7 @@ export function App(): ReactElement {
       ? '请等待所选会话就绪'
       : state.busy || state.compacting || state.session.isStreaming || state.session.isCompacting
         || runningSessionPathSet.has(state.session.sessionFile) || rollbackBusy || migrationBusy
-        || toolPermissionRequests.length > 0 || extensionUiRequests.length > 0
+        || hasVisibleInteractions
         ? '请等待执行、压缩和收尾完成'
         : state.queued.steering > 0 || state.queued.followUp > 0 || (state.session.pendingMessageCount ?? 0) > 0
           ? '请先处理或移除排队消息'
@@ -880,6 +893,7 @@ export function App(): ReactElement {
           setBrowserMounted(true)
           setBrowserOpen((open) => !open)
         }}><Globe size={13} />浏览器</button>
+        <button type="button" aria-haspopup="dialog" onClick={() => setOperationsPanel('stats')}><ChartColumn size={13} />使用总览</button>
         <span className="dock-toolbar-spacer" />
         <button type="button" className="dock-reset" aria-label="重置布局" title="恢复默认布局" onClick={dock.reset}><RotateCcw size={13} /></button>
       </div>
@@ -904,6 +918,7 @@ export function App(): ReactElement {
               activePath={activePath}
               runningSessionPaths={runningSessionPathSet}
               unreadSessionPaths={unreadSessionPathSet}
+              attentionSessionPaths={attentionSessionPathSet}
               favoritePaths={favoritePathSet}
               onToggleFavorite={handleToggleFavorite}
               onSelectSession={(session) => void handleSelectSession(session.projectCwd ?? state.status.cwd ?? '', session.path)}
@@ -924,6 +939,7 @@ export function App(): ReactElement {
               activePath={activePath}
               runningSessionPaths={runningSessionPathSet}
               unreadSessionPaths={unreadSessionPathSet}
+              attentionSessionPaths={attentionSessionPathSet}
               onSelect={(cwd) => void handleSelectProject(cwd)}
               onAdd={() => void handleAddProject()}
               onRemove={(cwd) => void actions.removeProject(cwd)}
@@ -951,6 +967,13 @@ export function App(): ReactElement {
             <button type="button" onClick={() => setBranchNotice('')} aria-label="关闭分支操作提示">关闭</button>
           </div>}
           <div className="sidebar-footer">
+            <PendingInteractionSessions
+              toolPermissionRequests={toolPermissionRequests}
+              extensionUiRequests={extensionUiRequests}
+              sessionsByProject={state.sessionsByProject}
+              sessions={state.sessions}
+              onSelectSession={(cwd, path) => void handleSelectSession(cwd, path)}
+            />
             <button className="sidebar-settings" onClick={() => {
               setSettingsNavigation(undefined)
               setSettingsOpen(true)
@@ -1053,22 +1076,43 @@ export function App(): ReactElement {
                 onReview={handleReviewLatestChanges}
                 onSelectChange={handleSelectInlineChange}
               />
-            <ToolPermissionModal
-              request={toolPermissionRequests[0] ?? null}
-              queueLength={toolPermissionRequests.length}
-              busy={toolPermissionResolveBusy}
-              error={toolPermissionResolveError}
-              onResolve={(resolution) => void handleToolPermissionResolve(resolution)}
-            />
-            {extensionUiRequests[0] && (
+            <div className="session-interaction-panels"
+              hidden={viewingChild || !hasSessionInteractions}
+              inert={viewingChild || undefined}>
+              {toolPermissionRequests.map((request) => (
+                <ToolPermissionModal
+                  key={request.id}
+                  request={request}
+                  active={!viewingChild && request.id === sessionToolPermissionRequests[0]?.id}
+                  queueLength={sessionToolPermissionRequests.length}
+                  busy={toolPermissionResolutions.get(request.id)?.busy ?? false}
+                  error={toolPermissionResolutions.get(request.id)?.error ?? ''}
+                  onResolve={(resolution) => void handleToolPermissionResolve(request.id, resolution)}
+                />
+              ))}
+              {extensionUiRequests.filter((request) => request.scope !== 'global').map((request) => (
+                <ExtensionUiModal
+                  key={request.id}
+                  request={request}
+                  active={!viewingChild && request.id === sessionExtensionUiRequests[0]?.id}
+                  queueLength={sessionExtensionUiRequests.length}
+                  busy={extensionUiResolutions.get(request.id)?.busy ?? false}
+                  error={extensionUiResolutions.get(request.id)?.error ?? ''}
+                  onResolve={(response) => void handleExtensionUiResolve(request.id, response)}
+                />
+              ))}
+            </div>
+            {globalExtensionUiRequests.map((request, index) => (
               <ExtensionUiModal
-                request={extensionUiRequests[0]}
-                queueLength={extensionUiRequests.length}
-                busy={extensionUiResolveBusy}
-                error={extensionUiResolveError}
-                onResolve={handleExtensionUiResolve}
+                key={request.id}
+                request={request}
+                active={index === 0}
+                queueLength={globalExtensionUiRequests.length}
+                busy={extensionUiResolutions.get(request.id)?.busy ?? false}
+                error={extensionUiResolutions.get(request.id)?.error ?? ''}
+                onResolve={(response) => void handleExtensionUiResolve(request.id, response)}
               />
-            )}
+            ))}
           </div>
 
           <div className="composer-dock" aria-hidden={viewingChild || undefined} inert={viewingChild || undefined}
@@ -1100,6 +1144,7 @@ export function App(): ReactElement {
                   })}
                 />}
             />
+            <div className="composer-input-scroll">
             {queueEditor.error && <div className="queue-edit-notice" role="status">
               <span>{queueEditor.error}</span>
               {queueEditor.canRestore && <button type="button" onClick={queueEditor.restoreRetained}>
@@ -1167,6 +1212,7 @@ export function App(): ReactElement {
               })}
               onAbort={() => void actions.abort()}
             />
+            </div>
           </div>
           </div>
         </div>
@@ -1225,6 +1271,7 @@ export function App(): ReactElement {
         operations={{
           kind: operationsPanel,
           onClose: closeOperationsPanel,
+          usage: { mounted: usageOverviewMounted, api: hasBridge ? window.pion : undefined },
           workflow: {
             cwd: state.status.cwd,
             workflows: workflows.workflows,
@@ -1324,7 +1371,7 @@ export function App(): ReactElement {
         command={{
           mounted: commandDialogMounted,
           dialog: slashCommands.dialog ? { ...slashCommands.dialog,
-            open: !settingsOpen && !viewingChild && toolPermissionRequests.length === 0 && extensionUiRequests.length === 0 }
+            open: !settingsOpen && !viewingChild && !hasVisibleInteractions }
             : { open: false, requestId: 0, title: '', onClose: () => {} }
         }}
         settings={{

@@ -150,17 +150,22 @@ function lineWrapper(
   }
 }
 
-// A bounded batch window, not one timer per character. Deadlines are stamped
-// only after commit; subsequent tokens keep the original class and delay.
+// A bounded batch window, not one timer per character. A managed line may
+// wait offscreen indefinitely; only its admission can start the fade clock.
 interface LiveFadeBatch {
   ordinal: number
   start: number
   end: number
-  expiresAt: number
+  schedule: { delay: number; expiresAt: number } | null
+}
+interface LiveTailSnapshot {
+  ordinal: number
+  length: number
+  staticLines: ReadonlySet<number>
 }
 interface LiveTailTracker {
-  committed: { ordinal: number, length: number } | null
-  current: { ordinal: number, length: number } | null
+  committed: LiveTailSnapshot | null
+  current: LiveTailSnapshot | null
   batches: LiveFadeBatch[]
   pending: LiveFadeBatch[]
   allowNew: boolean
@@ -172,20 +177,20 @@ const MAX_LIVE_FADE_CHARACTERS = 4096
 function wrapLiveLineChars(
   node: HastNode & { children: HastNode[] },
   state: { seen: number },
-  batches: LiveFadeBatch[]
+  batches?: ReadonlyMap<number, LiveFadeBatch>
 ): void {
   for (let index = 0; index < node.children.length; index++) {
     const child = node.children[index]
     if (isTextNode(child)) {
       const replacement: HastNode[] = Array.from(child.value).map((character, offset) => {
         const absoluteIndex = state.seen + offset
-        const batch = batches.find((candidate) => absoluteIndex >= candidate.start && absoluteIndex < candidate.end)
+        const batch = batches?.get(absoluteIndex)
         return {
           type: 'element',
           tagName: 'span',
           properties: {
             className: [SCREEN_TEXT_REVEAL_CHARACTER_CLASS, ...(batch ? [SCREEN_TEXT_REVEAL_LIVE_CLASS] : [])],
-            ...(batch ? { style: `--screen-text-reveal-delay:${Math.min((absoluteIndex - batch.start) * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)}ms` } : {})
+            ...(batch ? { style: `--screen-text-reveal-delay:${(batch.schedule?.delay ?? 0) + Math.min((absoluteIndex - batch.start) * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)}ms${batch.schedule ? '' : ';animation-play-state:paused'}` } : {})
           },
           children: [{ type: 'text', value: character }]
         }
@@ -246,35 +251,57 @@ function wrapLineTree(node: HastNode, mode: TextRevealMode, liveTail?: LiveTailT
 
 function rehypeLineReveal(mode: TextRevealMode, liveTail?: LiveTailTracker) {
   return () => (tree: unknown): void => {
+    // StrictMode can transform twice with the same projection object. Only
+    // this run's draft is reset; committed batches remain read-only until layout.
+    if (liveTail) {
+      liveTail.lines = []
+      liveTail.pending = []
+      liveTail.current = null
+    }
     if (typeof tree !== 'object' || tree === null) return
     const root = tree as HastNode
     wrapLineTree(root, mode, liveTail)
     if (mode !== 'live' || !liveTail || liveTail.lines.length === 0) return
     const ordinal = liveTail.lines.length - 1
-    if (!liveTail.allowNew) {
-      liveTail.lines.forEach((line, index) => {
-        if (index > (liveTail.committed?.ordinal ?? -1)) {
-          const classes = line.properties?.className as string[]
-          line.properties = { ...line.properties, className: [...classes, SCREEN_TEXT_REVEAL_STATIC_CLASS] }
-        }
-      })
-    }
+    const staticLines = new Set<number>()
+    liveTail.lines.forEach((line, index) => {
+      // Settlement may append plain lines. Keep their eligibility after the
+      // committed tail advances, including later cleanup and live renders.
+      if (liveTail.committed?.staticLines.has(index)
+        || (!liveTail.allowNew && index > (liveTail.committed?.ordinal ?? -1))) {
+        staticLines.add(index)
+        const classes = line.properties?.className as string[]
+        line.properties = { ...line.properties, className: [...classes, SCREEN_TEXT_REVEAL_STATIC_CLASS] }
+      }
+    })
     const length = textLength(liveTail.lines[ordinal])
     const start = liveTail.committed?.ordinal === ordinal ? liveTail.committed.length : 0
     const remaining = MAX_LIVE_FADE_CHARACTERS - liveTail.batches.reduce((sum, batch) => sum + batch.end - batch.start, 0)
     if (liveTail.allowNew && length > start && remaining > 0 && liveTail.batches.length < MAX_LIVE_FADE_BATCHES) {
-      liveTail.pending.push({ ordinal, start, end: Math.min(length, start + remaining), expiresAt: 0 })
+      liveTail.pending.push({ ordinal, start, end: Math.min(length, start + remaining), schedule: null })
     }
-    const batches = [...liveTail.batches, ...liveTail.pending]
+    // Index only the bounded active characters once. Preserve first-batch
+    // precedence even when appended Markdown changes rendered text lengths.
+    const batchesByLine = new Map<number, Map<number, LiveFadeBatch>>()
+    for (const batch of [...liveTail.batches, ...liveTail.pending]) {
+      let lineBatches = batchesByLine.get(batch.ordinal)
+      if (!lineBatches) {
+        lineBatches = new Map()
+        batchesByLine.set(batch.ordinal, lineBatches)
+      }
+      for (let index = batch.start; index < batch.end; index++) {
+        if (!lineBatches.has(index)) lineBatches.set(index, batch)
+      }
+    }
     liveTail.lines.forEach((line, lineOrdinal) => {
-      const lineBatches = batches.filter((batch) => batch.ordinal === lineOrdinal)
+      const lineBatches = batchesByLine.get(lineOrdinal)
       // Keep the current tail's positional spans stable even after cleanup.
       // Completed lines retain spans only while their fades are unfinished.
-      if (lineOrdinal === ordinal || lineBatches.length > 0) {
+      if (lineOrdinal === ordinal || lineBatches) {
         wrapLiveLineChars(line, { seen: 0 }, lineBatches)
       }
     })
-    liveTail.current = { ordinal, length }
+    liveTail.current = { ordinal, length, staticLines }
   }
 }
 
@@ -377,44 +404,99 @@ export const Markdown = memo(function Markdown({
   readOnly?: boolean
   revealMode?: TextRevealMode
 }): React.ReactElement {
+  const [highlightPlugin] = useState(() => {
+    // ReactMarkdown creates a processor per render; reuse this instance's
+    // transformer instead of registering lowlight's languages on each cleanup.
+    const transform = rehypeHighlight()
+    return () => transform
+  })
+  const rootRef = useRef<HTMLDivElement>(null)
   const committedRef = useRef<{
     text: string
-    tail: { ordinal: number, length: number } | null
+    tail: LiveTailSnapshot | null
     batches: LiveFadeBatch[]
+    projection: object
   } | null>(null)
   const [, refresh] = useState(0)
   const committed = committedRef.current
   const continues = committed !== null && text.startsWith(committed.text)
   const now = performance.now()
-  const batches = continues ? committed.batches.filter((batch) => batch.expiresAt > now) : []
+  const batches = continues ? committed.batches.filter((batch) => !batch.schedule || batch.schedule.expiresAt > now) : []
   const allowNew = revealMode === 'live' && !readOnly
     && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-  const effectiveMode = batches.length > 0 ? 'live' : revealMode
+  // A line's fade can outlast its characters. Keep committed live wrappers
+  // (and their links) in place after settlement instead of reparenting them.
+  const effectiveMode = continues && committed.tail !== null ? 'live' : revealMode
   const liveTail: LiveTailTracker = {
     committed: continues ? committed.tail : null,
     current: null, batches, pending: [], allowNew, lines: []
   }
+  const projection = {}
   useLayoutEffect(() => {
-    const commitTime = performance.now()
-    const nextBatches = [...liveTail.batches, ...liveTail.pending.map((batch) => ({
-      ...batch,
-      expiresAt: commitTime + SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS
-        + Math.min((batch.end - batch.start - 1) * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)
-    }))]
-    committedRef.current = { text, tail: liveTail.current ?? (continues ? committed.tail : null), batches: nextBatches }
-    if (nextBatches.length === 0) return
-    const deadline = Math.min(...nextBatches.map((batch) => batch.expiresAt))
-    const timer = window.setTimeout(() => refresh((value) => value + 1), Math.max(1, Math.ceil(deadline - performance.now())))
-    return () => window.clearTimeout(timer)
+    // Repeated StrictMode setup must reuse this commit, not restamp its fades.
+    const snapshot = committedRef.current?.projection === projection ? committedRef.current : {
+      text, tail: liveTail.current ?? (continues ? committed.tail : null),
+      batches: [...liveTail.batches, ...liveTail.pending], projection
+    }
+    committedRef.current = snapshot
+    const root = rootRef.current
+    const owner = root?.closest<HTMLElement>('[data-line-reveal-owner="true"]') ?? null
+    let active = true
+    let timer: number | undefined
+    const isCurrent = (): boolean => active && committedRef.current === snapshot
+      && rootRef.current === root && Boolean(root?.isConnected)
+      && (root?.closest('[data-line-reveal-owner="true"]') ?? null) === owner
+    const scheduleCleanup = (): void => {
+      window.clearTimeout(timer)
+      const deadline = Math.min(...snapshot.batches.map((batch) => batch.schedule?.expiresAt ?? Infinity))
+      if (!Number.isFinite(deadline)) return
+      timer = window.setTimeout(() => {
+        if (isCurrent()) refresh((value) => value + 1)
+      }, Math.max(1, Math.ceil(deadline - performance.now())))
+    }
+    const admit = (event?: Event): void => {
+      if (!isCurrent() || (event && event.target !== owner)) return
+      const lines = root!.querySelectorAll<HTMLElement>(`.${SCREEN_TEXT_REVEAL_LINE_CLASS}`)
+      const admittedAt = performance.now()
+      let changed = false
+      snapshot.batches = snapshot.batches.map((batch) => {
+        if (batch.schedule) return batch
+        const line = lines[batch.ordinal]
+        if (!line) return batch
+        const lineStart = Number(line.dataset.lineRevealStart)
+        if (owner && (line.dataset.lineRevealReady !== 'true'
+          || line.dataset.lineRevealStart === undefined || !Number.isFinite(lineStart))) return batch
+        // Unmanaged Markdown keeps its original immediate suffix behavior.
+        // A ready-but-still-queued line must also retain its future start.
+        const delay = owner ? Math.max(0, lineStart - admittedAt) : 0
+        changed = true
+        return { ...batch, schedule: {
+          delay,
+          expiresAt: admittedAt + delay + SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS
+            + Math.min((batch.end - batch.start - 1) * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS)
+        } }
+      })
+      if (changed) refresh((value) => value + 1)
+      scheduleCleanup()
+    }
+    if (snapshot.batches.some((batch) => !batch.schedule)) {
+      owner?.addEventListener('pion:line-reveal', admit)
+      admit()
+    } else scheduleCleanup()
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+      owner?.removeEventListener('pion:line-reveal', admit)
+    }
   })
 
   return (
-    <div className="markdown">
+    <div className="markdown" ref={rootRef}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={effectiveMode
-          ? [rehypeHighlight, rehypeLineReveal(effectiveMode, liveTail)]
-          : [rehypeHighlight]}
+          ? [highlightPlugin, rehypeLineReveal(effectiveMode, liveTail)]
+          : [highlightPlugin]}
         components={readOnly ? READ_ONLY_MARKDOWN_COMPONENTS : MARKDOWN_COMPONENTS}
         skipHtml={readOnly}
       >

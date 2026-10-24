@@ -16,6 +16,7 @@ export interface SessionModelPreferenceStore {
 interface PionSettingsFile {
   windowEffectsEnabled?: boolean
   completionNotificationsEnabled?: boolean
+  usageBackgroundCollectionEnabled?: boolean
   sessionModels?: Record<string, SessionModelPreference>
 }
 
@@ -25,6 +26,7 @@ const DEFAULT_COMPLETION_NOTIFICATIONS_ENABLED = true
 export class AppSettings implements SessionModelPreferenceStore {
   private settings: PionSettingsFile = {}
   private writeQueue: Promise<void> = Promise.resolve()
+  private usageWriteQueue: Promise<void> = Promise.resolve()
 
   private get filePath(): string {
     return join(app.getPath('userData'), 'pion-settings.json')
@@ -37,6 +39,9 @@ export class AppSettings implements SessionModelPreferenceStore {
       if (typeof parsed === 'object' && parsed !== null) {
         const record = parsed as Record<string, unknown>
         if (typeof record.windowEffectsEnabled === 'boolean') this.settings.windowEffectsEnabled = record.windowEffectsEnabled
+        if (typeof record.usageBackgroundCollectionEnabled === 'boolean') {
+          this.settings.usageBackgroundCollectionEnabled = record.usageBackgroundCollectionEnabled
+        }
         const value = record.completionNotificationsEnabled
         if (typeof value === 'boolean') this.settings.completionNotificationsEnabled = value
         if (typeof record.sessionModels === 'object' && record.sessionModels !== null) {
@@ -73,6 +78,23 @@ export class AppSettings implements SessionModelPreferenceStore {
       this.settings = { ...this.settings, windowEffectsEnabled: previous }
       throw error
     }
+  }
+
+  get usageBackgroundCollectionEnabled(): boolean {
+    return this.settings.usageBackgroundCollectionEnabled ?? true
+  }
+
+  setUsageBackgroundCollectionEnabled(enabled: boolean): Promise<void> {
+    const write = this.usageWriteQueue.catch(() => undefined).then(async () => {
+      const previous = this.settings.usageBackgroundCollectionEnabled
+      this.settings = { ...this.settings, usageBackgroundCollectionEnabled: enabled }
+      try { await this.persist() } catch (error) {
+        this.settings = { ...this.settings, usageBackgroundCollectionEnabled: previous }
+        throw error
+      }
+    })
+    this.usageWriteQueue = write
+    return write
   }
 
   get completionNotificationsEnabled(): boolean {

@@ -28,6 +28,7 @@
 @import './styles/commands.css';
 @import './styles/extension-ui.css';
 @import './styles/operations-modal.css';
+@import './styles/usage-overview.css';
 @import './styles/chrome.css';
 @import './styles/refinements.css';
 @import './styles/refinements/sidebar.css';

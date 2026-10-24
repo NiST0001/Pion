@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   ChevronRight,
@@ -135,9 +135,16 @@ const SubagentBatchRow = memo(function SubagentBatchRow({ task, mode, frameMode 
   </li>
 })
 
-export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noReveal, readOnly = false }: { tool: ToolItem; historical?: boolean; noReveal?: boolean; readOnly?: boolean }): ReactElement {
+export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noReveal, initialHeaderReveal, readOnly = false }: {
+  tool: ToolItem; historical?: boolean; noReveal?: boolean; readOnly?: boolean
+  /** Group expansion/paged insertion affects only this newly mounted heading. */
+  initialHeaderReveal?: 'history' | 'static'
+}): ReactElement {
   const [open, setOpen] = useState(false)
   const revealSuppressed = noReveal === true
+  // Backfill/source changes and reopening never replace a mounted head's mode.
+  const headerMode = useRef(initialHeaderReveal === 'static' ? undefined
+    : initialHeaderReveal ?? (revealSuppressed ? undefined : historical ? 'history' : 'live')).current
   const isEdit = tool.name === 'edit' && Boolean(tool.diff)
   const isWrite = tool.name === 'write'
   const isShell = tool.name === 'bash' || tool.name === 'powershell'
@@ -147,16 +154,16 @@ export const ToolCallItem = memo(function ToolCallItem({ tool, historical, noRev
   const stats = useMemo(() => tool.diff ? diffStats(tool.diff) : null, [tool.diff])
   const liveOutput = tool.live === true && !historical
   const detailMode = revealSuppressed ? undefined : historical ? 'history' : liveOutput ? 'live' : undefined
-  // New frames use the header's live reveal even when there is no streaming
-  // detail output (e.g. a newly received terminal batch result).
+  // Batch rows keep their source eligibility, independent of a first-expansion
+  // header override, including terminal results without streaming detail output.
   const frameMode = revealSuppressed ? undefined : historical ? 'history' : 'live'
 
   return (
     <div className={`tool-call tool-${tool.status}${historical ? ' history-reveal' : ''}`}>
       <button
-        className={`tool-head${revealSuppressed ? '' : ` ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${historical ? SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS : SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS}`}`}
+        className={`tool-head${headerMode ? ` ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${headerMode === 'history' ? SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS : SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS}` : ''}`}
         data-live-output="tool-head"
-        ref={revealSuppressed ? undefined : assignLineRevealDelay}
+        ref={headerMode ? assignLineRevealDelay : undefined}
         onClick={() => setOpen((v) => !v)}
         type="button"
         aria-expanded={open}

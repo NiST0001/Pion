@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url'
 import { AgentBridge } from './agent/agent-bridge'
 import { AppSettings } from './app-settings'
 import { RunStore } from './run-store'
+import { getAgentDir } from '@earendil-works/pi-coding-agent'
+import { UsageLedger } from './usage-ledger'
+import { UsageLedgerError } from './usage-ledger-store'
 import { VerificationService } from './verification'
 import { GitService } from './git-service'
 import { ToolPermissionStore } from './tool-permissions'
@@ -21,6 +24,7 @@ import { QuestionSettingsStore } from './question-settings'
 import { assertThemeSettingsOwner, ThemeSettingsStore } from './theme-settings'
 import { ProviderVisibilityStore } from './provider-visibility'
 import { registerAgentIpc } from './ipc/agent'
+import { registerUsageIpc } from './ipc/usage'
 import { registerGitIpc } from './ipc/git'
 import { registerWindowIpc } from './ipc/window'
 import { registerComputerUseIpc, projectComputerUseState } from './ipc/computer-use'
@@ -41,6 +45,10 @@ const userDataOverride = process.env.PION_USER_DATA_DIR?.trim()
 if (userDataOverride) app.setPath('userData', resolve(userDataOverride))
 
 const runStore = new RunStore(join(app.getPath('userData'), 'pion-runs.json'))
+const usageLedger = new UsageLedger({
+  ledgerPath: join(app.getPath('userData'), 'pion-usage-ledger.json'),
+  sessionRoot: join(getAgentDir(), 'sessions')
+})
 const terminals = new TerminalService()
 const appSettings = new AppSettings()
 const subagentSettings = new SubagentSettingsStore()
@@ -150,6 +158,7 @@ const providerVisibility = new ProviderVisibilityStore(join(app.getPath('userDat
 const bridge = new AgentBridge(runStore, appSettings, undefined, undefined, providerVisibility)
 const capabilitySettings = new CapabilitySettingsStore(join(app.getPath('userData'), 'pion-capabilities.json'))
 bridge.configureCapabilitySettings(capabilitySettings)
+bridge.configureUsageLedger(usageLedger)
 const verification = new VerificationService(join(app.getPath('userData'), 'pion-verification.json'))
 const workflowPermissionStore = new ToolPermissionStore()
 const workflows = new WorkflowManager({
@@ -349,6 +358,7 @@ function registerIpc(): void {
     getMainWindowId: () => mainWindowId,
     reserveMutation: (operation) => bridge.withSessionOperation(operation)
   })
+  registerUsageIpc({ ipcMain, ledger: usageLedger, appSettings, getMainWindowId: () => mainWindowId })
   registerAgentIpc({ ipcMain, bridge, projects, pushProjects, getMainWindowId: () => mainWindowId,
     assertWorktreeDeletionIdle: (cwd) => {
       terminals.assertWorktreeDeletionIdle(cwd)
@@ -448,6 +458,7 @@ function registerIpc(): void {
 app.whenReady().then(async () => {
   await Promise.all([appSettings.load(), bridge.loadToolPermissions(), verification.load(), workflows.load()])
   completionNotificationsEnabled = appSettings.completionNotificationsEnabled
+  usageLedger.setBackgroundCollectionEnabled(appSettings.usageBackgroundCollectionEnabled)
   registerIpc()
   nativeTheme.on('updated', () => { void windowEffects.refresh() })
   createWindow()
@@ -457,24 +468,34 @@ app.whenReady().then(async () => {
   })
 })
 
+let windowShutdown: Promise<unknown> = Promise.resolve()
 app.on('window-all-closed', () => {
-  void Promise.all([bridge.stop(), verification.flush(), workflows.shutdown()])
+  windowShutdown = Promise.all([bridge.stop(), verification.flush(), workflows.shutdown()])
+  void windowShutdown.catch((error) => console.error('[pion] window shutdown incomplete:', error))
   if (process.platform !== 'darwin') app.quit()
 })
 
 let captureQuitSettled = false
 let captureQuitPending = false
 app.on('before-quit', (event) => {
+  usageLedger.stopBackgroundCollection()
   if (!captureQuitSettled) {
     event.preventDefault()
     computerUseQuitting = true
     if (!captureQuitPending) {
       captureQuitPending = true
-      void stopLocalCapture().then(state => {
+      void stopLocalCapture().then(async state => {
         if (state.actualPending) return // Never force-exit an unknown helper lease.
+        await windowShutdown
+        await bridge.stop()
+        try { await usageLedger.flush() } catch (error) {
+          // Data collection failures do not trap quit. Unknown physical closes do.
+          if (error instanceof UsageLedgerError && error.closeUnknown) throw error
+          console.warn('[pion] usage collection incomplete at quit:', error)
+        }
         captureQuitSettled = true
         app.quit()
-      }).catch(error => console.error('[pion] ComputerUse shutdown unverified:', error))
+      }).catch(error => console.error('[pion] shutdown unverified:', error))
     }
     return
   }

@@ -3,16 +3,16 @@ import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { readSessionTokenTotal } from '../../src/main/agent/session-token-total'
+import { readSessionTokenTotal, readSessionUsageSnapshot } from '../../src/main/agent/session-token-total'
 
 vi.mock('node:fs/promises', async (original) => {
   const actual = await original<typeof import('node:fs/promises')>()
-  return { ...actual, open: vi.fn(actual.open), stat: vi.fn(actual.stat) }
+  return { ...actual, open: vi.fn(actual.open), lstat: vi.fn(actual.lstat) }
 })
 beforeEach(async () => {
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
   vi.mocked(fs.open).mockReset().mockImplementation(actual.open)
-  vi.mocked(fs.stat).mockReset().mockImplementation(actual.stat)
+  vi.mocked(fs.lstat).mockReset().mockImplementation(actual.lstat)
 })
 
 const timestamp = '2026-01-01T00:00:00.000Z'
@@ -63,6 +63,91 @@ describe('persisted whole-file session token projection', () => {
       } }
     ])
     expect(await readSessionTokenTotal(path)).toBe(280)
+  })
+
+  it('projects bounded numeric receipts without content, preserves SDK total and summary/tool attribution', async () => {
+    const entries = [header, { ...assistant('first'), message: { ...assistant('first').message,
+      responseModel: 'response-model', content: [{ type: 'text', text: 'PRIVATE-PROMPT' }] } },
+    { ...base('message', 'tool', 'first'), message: { role: 'toolResult', toolCallId: 'native-call', toolName: 'codemode',
+      isError: false, timestamp: 2, content: [], usage: usage(20), details: { usage: usage(999) } } },
+    { ...base('compaction', 'compact', 'tool'), summary: 'PRIVATE-SUMMARY', firstKeptEntryId: 'first', tokensBefore: 100, usage: usage(30) }]
+    const path = await file(entries)
+    const snapshot = await readSessionUsageSnapshot(path)
+    expect(snapshot.total).toBe(60)
+    expect(snapshot.receipts.map(receipt => receipt.source)).toEqual(['model', 'tool-summary', 'tool-summary'])
+    expect(snapshot.receipts[0]).toMatchObject({ modelId: 'response-model', usage: { total: 10, output: 1, reasoning: 1, cacheWrite: 1 } })
+    expect(snapshot.receipts[1].provider).toBeUndefined()
+    expect(JSON.stringify(snapshot)).not.toContain('PRIVATE-')
+    const clone = await file([{ ...header, id: 'child', parentSession: path }, entries[1],
+      { ...entries[2], parentId: null }, { ...entries[3], parentId: null, firstKeptEntryId: 'compact' }])
+    const copied = await readSessionUsageSnapshot(clone)
+    expect(copied.parentSession).toBe(path)
+    expect(copied.receipts.map(receipt => receipt.digest)).toEqual(snapshot.receipts.map(receipt => receipt.digest))
+  })
+
+  it('reads ledger lines past the sidebar limit and yields once per 64 KiB block without changing identity deduplication', async () => {
+    const original = assistant('first', 10, null, 'response-1')
+    const first = { ...original, message: { ...original.message, content: [{ type: 'text', text: 'x'.repeat(1024 * 1024) }] } }
+    const path = await file([header, first, first, { ...first, id: 'second', parentId: 'first' }])
+    const yieldRead = vi.fn(async () => {})
+    const snapshot = await readSessionUsageSnapshot(path, { id: header.id, cwd: header.cwd }, { yield: yieldRead })
+    expect(snapshot.total).toBe(10)
+    expect(snapshot.receipts.map(receipt => receipt.entryId)).toEqual(['first', 'second'])
+    expect(yieldRead).toHaveBeenCalledTimes(Math.ceil(snapshot.bytes / (64 * 1024)))
+    expect(await readSessionTokenTotal(path)).toBeUndefined()
+  })
+
+  it('streams ledger files past 32 MiB while the sidebar still refuses them', async () => {
+    const path = await file([header])
+    const handle = await fs.open(path, 'a')
+    try {
+      // Each line remains within the sidebar line limit; only total file size exceeds it.
+      const content = 'x'.repeat(512 * 1024)
+      for (let index = 0; index < 65; index++) {
+        await handle.writeFile(JSON.stringify({ ...base('session_info', `name-${index}`), name: content }) + '\n')
+      }
+      await handle.writeFile(JSON.stringify(assistant('last')) + '\n')
+    } finally { await handle.close() }
+    expect((await readSessionUsageSnapshot(path)).total).toBe(10)
+    expect(await readSessionTokenTotal(path)).toBeUndefined()
+  })
+
+  it('reads all ledger entries beyond the sidebar entry count', async () => {
+    const path = await file([header])
+    const handle = await fs.open(path, 'a')
+    try {
+      for (let batch = 0; batch < 100; batch++) {
+        const lines = Array.from({ length: 1000 }, (_, index) => JSON.stringify(base('session_info', `entry-${batch * 1000 + index}`)))
+        await handle.writeFile(lines.join('\n') + '\n')
+      }
+      await handle.writeFile(JSON.stringify(assistant('last')) + '\n')
+    } finally { await handle.close() }
+    expect((await readSessionUsageSnapshot(path)).total).toBe(10)
+    expect(await readSessionTokenTotal(path)).toBeUndefined()
+  })
+
+  it('closes the actual reader when the cooperative yield callback fails', async () => {
+    const path = await file([header])
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    const handle = await actual.open(path, 'r')
+    const close = vi.spyOn(handle, 'close')
+    vi.mocked(fs.open).mockResolvedValueOnce(handle)
+    await expect(readSessionUsageSnapshot(path, undefined, { yield: async () => { throw new Error('pause failed') } }))
+      .rejects.toMatchObject({ closeUnknown: false })
+    expect(close).toHaveBeenCalledOnce()
+  })
+
+  it('distinguishes unconfirmed close for the ledger while the old API remains unknown', async () => {
+    const path = await file([header])
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    vi.mocked(fs.open).mockImplementation(async (...args) => {
+      const handle = await actual.open(...args)
+      const close = handle.close.bind(handle)
+      vi.spyOn(handle, 'close').mockImplementation(async () => { await close(); throw new Error('private failure') })
+      return handle
+    })
+    await expect(readSessionUsageSnapshot(path)).rejects.toMatchObject({ closeUnknown: true, message: 'Session usage unavailable' })
+    expect(await readSessionTokenTotal(path)).toBeUndefined()
   })
 
   it('refuses tokens belonging to a changed SDK header ID or cwd', async () => {
@@ -170,7 +255,7 @@ describe('persisted whole-file session token projection', () => {
       })
     }
     vi.mocked(fs.open).mockResolvedValue(handle as unknown as Awaited<ReturnType<typeof fs.open>>)
-    vi.mocked(fs.stat).mockResolvedValue({ ...snapshot, ino: failure === 'replaced' ? 9n : 2n } as never)
+    vi.mocked(fs.lstat).mockResolvedValue({ ...snapshot, ino: failure === 'replaced' ? 9n : 2n } as never)
     expect(await readSessionTokenTotal('/fixture/session.jsonl')).toBeUndefined()
     expect(close).toHaveBeenCalledTimes(1)
   })

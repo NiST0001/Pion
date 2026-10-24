@@ -1,0 +1,78 @@
+.operations-modal-stats { width: min(960px, calc(100vw - 40px)); }
+.operations-modal-stats .operations-modal-body { overscroll-behavior: contain; scrollbar-gutter: stable; }
+.usage-overview { display: grid; gap: 14px; padding: 4px; font-variant-numeric: tabular-nums; }
+.usage-overview-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.usage-overview-toolbar > span, .usage-overview-note { color: var(--fg-faint); font-size: 11px; line-height: 1.6; }
+.usage-overview-note { margin: 6px 0 0; }
+.usage-overview-filters { display: flex; flex-wrap: wrap; gap: 12px; }
+.usage-overview-filters label { display: flex; align-items: center; gap: 8px; color: var(--fg-muted); font-size: 11px; }
+.usage-overview-filters .pion-select { min-width: 132px; }
+.usage-overview-period { margin-top: 0; }
+.usage-overview button {
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--fg-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.usage-overview button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.usage-overview button:disabled { opacity: .5; cursor: default; }
+.usage-overview-refresh { display: inline-flex; flex: none; align-items: center; gap: 6px; }
+.run-metrics-grid.usage-overview-cards { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.usage-overview-cards > span {
+  gap: 7px;
+  padding: 13px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--surface-tint);
+}
+.usage-overview-cards strong { font-size: 20px; letter-spacing: -.03em; }
+.usage-overview-cards small { line-height: 1.4; }
+.usage-overview-cards > span:first-child strong { color: var(--accent-strong); }
+.usage-overview-section { min-width: 0; }
+.usage-overview-section h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 9px; font-size: 12px; font-weight: 650; }
+.usage-overview-section h3 small { color: var(--fg-faint); font-size: 10px; font-weight: 400; }
+.run-metrics-grid.usage-overview-token-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.usage-overview-token-grid strong { font-size: 13px; }
+.usage-overview-coverage, .usage-overview-scope { padding-top: 12px; border-top: 1px solid var(--border-soft); }
+.usage-overview-error { margin: 0; color: var(--danger); line-height: 1.6; }
+.usage-overview-warnings { margin: 8px 0 0; padding-left: 18px; color: var(--danger); font-size: 11px; line-height: 1.7; }
+.usage-overview-distributions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.usage-overview-table-wrap { overflow: auto; overscroll-behavior: contain; border-radius: var(--radius-sm); }
+.usage-overview-table { width: 100%; min-width: 320px; border-collapse: collapse; table-layout: fixed; font-size: 11px; }
+.usage-overview-table th, .usage-overview-table td { padding: 7px 6px; border-bottom: 1px solid var(--border-soft); text-align: right; vertical-align: top; }
+.usage-overview-table th:first-child { width: 46%; text-align: left; }
+.usage-overview-table thead { color: var(--fg-faint); }
+.usage-overview-table th { font-weight: 500; }
+.usage-overview-table td { color: var(--fg-muted); overflow-wrap: anywhere; }
+.usage-overview-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-overview-table th small { display: block; margin-top: 3px; color: var(--fg-faint); font-size: 10px; font-weight: 400; }
+.usage-overview-pagination { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 8px; }
+.usage-overview-pagination span { color: var(--fg-faint); font-size: 10px; text-align: center; }
+.usage-overview-pagination button { flex: none; font-size: 11px; }
+.usage-overview-scope p { margin: 6px 0 0; color: var(--fg-faint); font-size: 11px; line-height: 1.65; }
+html.pion-keyboard-focus .usage-overview :is(button, [tabindex]):focus-visible { outline: 1px solid var(--fg-dim); outline-offset: -2px; }
+
+@media (max-width: 700px) {
+  .operations-modal-stats { width: 100%; }
+  .run-metrics-grid.usage-overview-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .run-metrics-grid.usage-overview-token-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .usage-overview-distributions { grid-template-columns: minmax(0, 1fr); }
+  .usage-overview-cards strong { font-size: 18px; }
+}
+
+@media (forced-colors: active) {
+  .usage-overview-cards > span, .usage-overview button { background: Canvas; border-color: ButtonText; color: CanvasText; }
+  .usage-overview-cards > span:first-child strong { color: CanvasText; }
+  .usage-overview-table th, .usage-overview-table td, .usage-overview-coverage, .usage-overview-scope { border-color: CanvasText; }
+  .usage-overview-error, .usage-overview-warnings { color: CanvasText; }
+  .usage-overview button:disabled { color: GrayText; opacity: 1; }
+  html.pion-keyboard-focus .usage-overview :is(button, [tabindex]):focus-visible { outline-color: Highlight; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .operations-modal-stats, .usage-overview button { animation: none; transition: none; }
+}

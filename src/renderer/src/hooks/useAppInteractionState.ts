@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentStatus,
   ExtensionUiRequest,
@@ -16,15 +16,69 @@ import type {
 interface UseAppInteractionStateOptions {
   hasBridge: boolean
   cwd?: string
+  sessionPath?: string
   policyEnabled: boolean
   agentBusy: boolean
   statusPhase: AgentStatus['phase']
   updateProjectTrust: (cwd: string, decision: boolean | null) => Promise<ProjectTrustInfo>
 }
 
+export function isSessionInteractionRequest(
+  request: { cwd: string; sessionPath?: string; scope?: 'workspace' | 'global' },
+  cwd?: string,
+  sessionPath?: string
+): boolean {
+  return request.scope !== 'global' && !!cwd && request.cwd === cwd && request.sessionPath === sessionPath
+}
+
+interface RequestResolution {
+  busy: boolean
+  error: string
+}
+
+/** Keep actual IPC slots and errors attached to the request, not the selected session. */
+function useRequestResolutions(requests: readonly { id: string }[]) {
+  const requestsRef = useRef(requests)
+  requestsRef.current = requests
+  const pending = useRef(new Set<string>())
+  const [states, setStates] = useState<ReadonlyMap<string, RequestResolution>>(() => new Map())
+
+  useEffect(() => {
+    const ids = new Set(requests.map((request) => request.id))
+    setStates((current) => {
+      const next = new Map([...current].filter(([id]) => ids.has(id) || pending.current.has(id)))
+      return next.size === current.size ? current : next
+    })
+  }, [requests])
+
+  const resolve = useCallback(async (id: string, action: () => Promise<void>): Promise<void> => {
+    if (pending.current.has(id)) return
+    pending.current.add(id)
+    setStates((current) => new Map(current).set(id, { busy: true, error: '' }))
+    let message = ''
+    try {
+      await action()
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    } finally {
+      pending.current.delete(id)
+      setStates((current) => {
+        const next = new Map(current)
+        if (message && requestsRef.current.some((request) => request.id === id)) {
+          next.set(id, { busy: false, error: message })
+        } else next.delete(id)
+        return next
+      })
+    }
+  }, [])
+
+  return { states, resolve }
+}
+
 export function useAppInteractionState({
   hasBridge,
   cwd,
+  sessionPath,
   policyEnabled,
   agentBusy,
   statusPhase,
@@ -38,12 +92,13 @@ export function useAppInteractionState({
   const [toolPermissionBusy, setToolPermissionBusy] = useState(false)
   const [toolPermissionError, setToolPermissionError] = useState('')
   const [toolPermissionRequests, setToolPermissionRequests] = useState<ToolPermissionRequest[]>([])
-  const [toolPermissionResolveBusy, setToolPermissionResolveBusy] = useState(false)
-  const [toolPermissionResolveError, setToolPermissionResolveError] = useState('')
   const [extensionUiRequests, setExtensionUiRequests] = useState<ExtensionUiRequest[]>([])
   const [modelProviderAuthState, setModelProviderAuthState] = useState<ModelProviderAuthState | null>(null)
-  const [extensionUiResolveBusy, setExtensionUiResolveBusy] = useState(false)
-  const [extensionUiResolveError, setExtensionUiResolveError] = useState('')
+  const toolPermissionResolutions = useRequestResolutions(toolPermissionRequests)
+  const extensionUiResolutions = useRequestResolutions(extensionUiRequests)
+  const scope = useMemo(() => ({ cwd, sessionPath }), [cwd, sessionPath])
+  const scopeRef = useRef(scope)
+  scopeRef.current = scope
 
   useEffect(() => {
     if (!hasBridge) return
@@ -92,40 +147,36 @@ export function useAppInteractionState({
   useEffect(() => {
     if (!hasBridge) return
     let active = true
+    let pushed = false
     const off = window.pion.onToolPermissionRequests((requests) => {
+      pushed = true
       if (active) setToolPermissionRequests(requests)
     })
     void window.pion.getPendingToolPermissionRequests().then((requests) => {
-      if (active) setToolPermissionRequests(requests)
-    })
+      if (active && !pushed) setToolPermissionRequests(requests)
+    }).catch((error: unknown) => console.error('[pion] failed to load permission requests:', error))
     return () => {
       active = false
       off()
     }
   }, [hasBridge])
-
-  useEffect(() => {
-    setToolPermissionResolveError('')
-  }, [toolPermissionRequests[0]?.id])
 
   useEffect(() => {
     if (!hasBridge) return
     let active = true
+    let pushed = false
     const off = window.pion.onExtensionUiRequests((requests) => {
+      pushed = true
       if (active) setExtensionUiRequests(requests)
     })
     void window.pion.getPendingExtensionUiRequests().then((requests) => {
-      if (active) setExtensionUiRequests(requests)
-    })
+      if (active && !pushed) setExtensionUiRequests(requests)
+    }).catch((error: unknown) => console.error('[pion] failed to load interaction requests:', error))
     return () => {
       active = false
       off()
     }
   }, [hasBridge])
-
-  useEffect(() => {
-    setExtensionUiResolveError('')
-  }, [extensionUiRequests[0]?.id])
 
   useEffect(() => {
     if (!hasBridge) return
@@ -198,47 +249,50 @@ export function useAppInteractionState({
   }, [cwd, toolPermissionBusy])
 
   const handleToolPermissionResolve = useCallback(async (
+    id: string,
     resolution: ToolPermissionResolution
   ): Promise<void> => {
-    const request = toolPermissionRequests[0]
-    if (!request || toolPermissionResolveBusy) return
-    setToolPermissionResolveBusy(true)
-    setToolPermissionResolveError('')
-    try {
-      await window.pion.resolveToolPermission(request.id, resolution)
-      setToolPermissionRequests((current) => current.filter((item) => item.id !== request.id))
-      if (cwd) setToolPermissionPolicy(await window.pion.getToolPermissionPolicy(cwd))
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      setToolPermissionResolveError(message)
-      if (message.includes('已结束') || message.includes('已关闭')) {
-        setToolPermissionRequests((current) => current.filter((item) => item.id !== request.id))
+    const request = toolPermissionRequests.find((item) => item.id === id)
+    const owner = scopeRef.current
+    if (!hasBridge || !request || !isSessionInteractionRequest(request, owner.cwd, owner.sessionPath)) return
+    await toolPermissionResolutions.resolve(id, async () => {
+      try {
+        await window.pion.resolveToolPermission(id, resolution)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (message.includes('已结束') || message.includes('已关闭')) {
+          setToolPermissionRequests((current) => current.filter((item) => item.id !== id))
+        }
+        throw error
       }
-    } finally {
-      setToolPermissionResolveBusy(false)
-    }
-  }, [cwd, toolPermissionRequests, toolPermissionResolveBusy])
+      setToolPermissionRequests((current) => current.filter((item) => item.id !== id))
+      if (scopeRef.current !== owner || !owner.cwd) return
+      const policy = await window.pion.getToolPermissionPolicy(owner.cwd)
+      if (scopeRef.current === owner) setToolPermissionPolicy(policy)
+    })
+  }, [hasBridge, toolPermissionRequests, toolPermissionResolutions.resolve])
 
   const handleExtensionUiResolve = useCallback(async (
+    id: string,
     response: ExtensionUiResponse
   ): Promise<void> => {
-    const request = extensionUiRequests[0]
-    if (!request || extensionUiResolveBusy) return
-    setExtensionUiResolveBusy(true)
-    setExtensionUiResolveError('')
-    try {
-      await window.pion.resolveExtensionUiRequest(request.id, response)
-      setExtensionUiRequests((current) => current.filter((item) => item.id !== request.id))
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      setExtensionUiResolveError(message)
-      if (message.includes('已结束') || message.includes('已关闭')) {
-        setExtensionUiRequests((current) => current.filter((item) => item.id !== request.id))
+    const request = extensionUiRequests.find((item) => item.id === id)
+    const owner = scopeRef.current
+    if (!hasBridge || !request || (request.scope !== 'global'
+      && !isSessionInteractionRequest(request, owner.cwd, owner.sessionPath))) return
+    await extensionUiResolutions.resolve(id, async () => {
+      try {
+        await window.pion.resolveExtensionUiRequest(id, response)
+        setExtensionUiRequests((current) => current.filter((item) => item.id !== id))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (message.includes('已结束') || message.includes('已关闭')) {
+          setExtensionUiRequests((current) => current.filter((item) => item.id !== id))
+        }
+        throw error
       }
-    } finally {
-      setExtensionUiResolveBusy(false)
-    }
-  }, [extensionUiRequests, extensionUiResolveBusy])
+    })
+  }, [hasBridge, extensionUiRequests, extensionUiResolutions.resolve])
 
   return {
     completionNotificationsEnabled,
@@ -250,12 +304,10 @@ export function useAppInteractionState({
     toolPermissionBusy,
     toolPermissionError,
     toolPermissionRequests,
-    toolPermissionResolveBusy,
-    toolPermissionResolveError,
+    toolPermissionResolutions: toolPermissionResolutions.states,
     extensionUiRequests,
     modelProviderAuthState,
-    extensionUiResolveBusy,
-    extensionUiResolveError,
+    extensionUiResolutions: extensionUiResolutions.states,
     handleCompletionNotificationsChange,
     handleProjectTrustChange,
     handleToolPermissionChange,

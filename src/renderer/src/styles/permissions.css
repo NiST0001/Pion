@@ -12,6 +12,15 @@
   pointer-events: none;
 }
 
+.session-interaction-panels > .tool-permission-backdrop {
+  position: static;
+  inset: auto;
+  bottom: auto;
+  padding: 0;
+  flex: none;
+  width: 100%;
+}
+
 .tool-permission-modal {
   pointer-events: auto;
   width: min(620px, 100%);
@@ -25,34 +34,7 @@
   box-shadow: var(--shadow-pop);
 }
 
-.tool-permission-head {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 15px 17px;
-  border-bottom: 1px solid var(--border-soft);
-  background: linear-gradient(110deg, var(--accent-soft), var(--surface-tint));
-}
-
-.tool-permission-head h2 {
-  color: var(--fg);
-  font-size: 15px;
-  font-weight: 680;
-}
-
-.tool-permission-head .icon-button {
-  margin-left: auto;
-}
-
-.tool-permission-head-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 38px;
-  height: 38px;
-  border: 1px solid rgba(var(--accent-rgb), 0.32);
-  border-radius: 10px;
-  background: var(--bg-elev);
+.tool-permission-modal .session-interaction-icon {
   color: var(--warn);
 }
 

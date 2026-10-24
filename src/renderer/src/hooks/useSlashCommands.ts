@@ -37,7 +37,7 @@ interface UseSlashCommandsOptions {
   onNewSession: () => Promise<void>
   onCloneSession: () => Promise<void>
   onSelectSession: (cwd: string, path: string) => Promise<void>
-  onOpenOperations: (kind: 'verification' | 'agents') => void
+  onOpenOperations: (kind: 'verification' | 'agents' | 'stats') => void
   onModeChange: (mode: AgentMode) => void
   onRequestYolo: (enabled: boolean) => void
 }
@@ -298,9 +298,9 @@ export function useSlashCommands(options: UseSlashCommandsOptions) {
         if (!api) throw new Error('preload 桥未加载')
         close()
         api.closeWindow()
-      } else if (name === 'verify' || name === 'agents') {
+      } else if (name === 'verify' || name === 'agents' || name === 'stats') {
         close()
-        captured.onOpenOperations(name === 'verify' ? 'verification' : 'agents')
+        captured.onOpenOperations(name === 'verify' ? 'verification' : name)
       } else if (name === 'plan') {
         const value = argument.toLowerCase()
         if (!['', 'start', 'exit', 'off'].includes(value)) throw new Error('用法：/plan start 或 /plan exit')

@@ -4,7 +4,8 @@ import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { initialState, type AgentState } from '../../src/renderer/src/agent/types'
-import type { SessionMeta } from '../../src/shared/types'
+import type { ExtensionUiRequest, SessionMeta, ToolPermissionRequest } from '../../src/shared/types'
+import { isSessionInteractionRequest } from '../../src/renderer/src/hooks/useAppInteractionState'
 import type { SubagentSessionList, SubagentSessionSnapshot, SubagentSessionSummary } from '../../src/shared/subagent-sessions'
 import type { PionApi } from '../../src/shared/pion-api'
 
@@ -14,6 +15,10 @@ import type { PionApi } from '../../src/shared/pion-api'
 // The real readonly observer uses an entirely in-memory, mocked IPC API below;
 // no SDK, network, filesystem or existing user configuration is consulted.
 const owner = { value: null as unknown }
+const interactionRequests = { current: [] as ExtensionUiRequest[] }
+const permissionRequests = { current: [] as ToolPermissionRequest[] }
+const resolveInteraction = vi.fn()
+const resolvePermission = vi.fn()
 let App: typeof import('../../src/renderer/src/App').App
 
 // Keep registrations suite-local: coverage/all imports multiple suites in one
@@ -142,9 +147,14 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
       rootRef: { current: null }, panelProps: () => ({}), dragProps: () => ({}), dividers: [],
       movePanel: vi.fn(), reset: vi.fn(), clearDrop: vi.fn()
     }) }))
-    vi.doMock('../../src/renderer/src/hooks/useAppInteractionState', () => ({ useAppInteractionState: () => ({
-      projectTrust: null, toolPermissionRequests: [], extensionUiRequests: []
-    }) }))
+    vi.doMock('../../src/renderer/src/hooks/useAppInteractionState', () => ({
+      isSessionInteractionRequest,
+      useAppInteractionState: () => ({
+        projectTrust: null, toolPermissionRequests: permissionRequests.current, extensionUiRequests: interactionRequests.current,
+        toolPermissionResolutions: new Map(), handleToolPermissionResolve: resolvePermission,
+        extensionUiResolutions: new Map(), handleExtensionUiResolve: resolveInteraction
+      })
+    }))
     vi.doMock('../../src/renderer/src/hooks/useMessageRevert', () => ({ useMessageRevert: () => ({
       draftFrozen: false, canRevert: false,
       onDraftAvailabilityChange: vi.fn(), onRestoreDraftConsumed: vi.fn()
@@ -184,6 +194,10 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
   afterEach(() => {
     cleanup()
     owner.value = null
+    interactionRequests.current = []
+    permissionRequests.current = []
+    resolveInteraction.mockReset()
+    resolvePermission.mockReset()
     vi.useRealTimers()
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
@@ -230,6 +244,134 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     expect(f.apiMocks.getSubagentSession).toHaveBeenCalledWith('child', 'backend')
     expectNoParentBackendAction(f.actions)
     expect(f.fallback.size).toBe(0)
+  })
+
+  it('keeps pending questions in their own sessions, preserves drafts, and projects the shared blue markers', async () => {
+    const f = setup()
+    const questions: ExtensionUiRequest[] = [parentPath, otherPath].map((sessionPath, index) => ({
+      id: `question-${index}`, cwd, sessionPath, method: 'editor', title: `会话问题 ${index}`,
+      question: true, createdAt: 1, timeoutAt: null
+    }))
+    interactionRequests.current = questions
+    const view = render(<App />)
+    await paint()
+    expect(screen.queryByRole('region', { name: questions[1].title })).not.toBeInTheDocument()
+    for (const path of [parentPath, otherPath]) {
+      expect(row(view.container, path).querySelector('.side-session-unread-indicator')).toHaveClass('attention')
+    }
+    expect(screen.getByRole('button', { name: /Agent 提问/ })).toHaveAttribute('aria-expanded', 'true')
+    const answerA = screen.getByRole('textbox', { name: questions[0].title })
+    fireEvent.change(answerA, { target: { value: 'A 未提交回答' } })
+    fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
+    await paint()
+    expect(screen.queryByRole('region')).not.toBeInTheDocument()
+    fireEvent.click(row(view.container, otherPath))
+    await paint()
+    expect(screen.queryByRole('region', { name: questions[0].title })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Agent 提问/ })).toHaveAttribute('aria-expanded', 'true')
+    const answerB = screen.getByRole('textbox', { name: questions[1].title })
+    fireEvent.change(answerB, { target: { value: 'B 回答' } })
+    fireEvent.click(screen.getByRole('button', { name: /提交回答/ }))
+    expect(resolveInteraction).toHaveBeenCalledExactlyOnceWith(questions[1].id, { value: 'B 回答' })
+    fireEvent.click(row(view.container, parentPath))
+    await paint()
+    expect(screen.getByRole('textbox', { name: questions[0].title })).toBe(answerA)
+    expect(answerA).toHaveValue('A 未提交回答')
+    expect(answerB).toHaveValue('B 回答')
+    expect(row(view.container, parentPath).querySelector('.attention')).not.toBeNull()
+    interactionRequests.current = []
+    view.rerender(<App />)
+    expect(view.container.querySelector('.side-session-unread-indicator')).toBeNull()
+    expect(view.container.querySelector('.extension-ui-backdrop')).toBeNull()
+    expect(f.actions.abort).not.toHaveBeenCalled()
+  })
+
+  it('deduplicates pending sessions and quick-jumps to an uncached project using its original request owner', async () => {
+    const f = setup()
+    const remoteCwd = '/uncached-project'
+    const remotePath = '/uncached-project/sessions/remote.jsonl'
+    const remoteTitle = '跨项目待处理请求'
+    const parentQuestion: ExtensionUiRequest = {
+      id: 'parent-question', cwd, sessionPath: parentPath, method: 'editor', title: '父会话提问',
+      question: true, createdAt: 1, timeoutAt: null
+    }
+    const remoteQuestion: ExtensionUiRequest = {
+      ...parentQuestion, id: 'remote-question', cwd: remoteCwd, sessionPath: remotePath, title: remoteTitle
+    }
+    const permission: ToolPermissionRequest = {
+      id: 'remote-permission', cwd: remoteCwd, sessionPath: remotePath, toolName: 'bash',
+      category: 'shell', policyCategories: ['shell'], summary: remoteTitle, detail: '等待明确授权',
+      risks: [], canRemember: false, createdAt: 1, timeoutAt: Date.now() + 120_000
+    }
+    interactionRequests.current = [parentQuestion, remoteQuestion, {
+      ...parentQuestion, id: 'global-auth', cwd: '/auth-only', sessionPath: '/auth-only.jsonl',
+      title: '全局认证请求', source: 'provider-auth', scope: 'global', question: false
+    }]
+    permissionRequests.current = [permission]
+    expect(f.state.sessionsByProject[remoteCwd]).toBeUndefined()
+    const view = render(<App />)
+    await paint()
+    const draft = view.container.querySelector<HTMLTextAreaElement>('.composer textarea')!
+    fireEvent.change(draft, { target: { value: '跨项目前保留的父草稿' } })
+    fireEvent.mouseEnter(screen.getByRole('button', { name: /待处理请求.*2.*个会话/ }))
+    const requests = screen.getByRole('region', { name: '待处理请求会话' })
+    expect(within(requests).getAllByRole('button')).toHaveLength(2)
+    expect(within(requests).queryByText('全局认证请求')).not.toBeInTheDocument()
+    const remoteButton = within(requests).getByText(remoteTitle).closest('button')!
+    expect(remoteButton).not.toBeNull()
+    expectNoParentBackendAction(f.actions)
+    expect(resolveInteraction).not.toHaveBeenCalled()
+    expect(resolvePermission).not.toHaveBeenCalled()
+    expect(view.container.querySelector('.composer textarea')).toBe(draft)
+    expect(draft).toHaveValue('跨项目前保留的父草稿')
+
+    fireEvent.click(remoteButton)
+    await paint()
+    expect(f.actions.switchSession).toHaveBeenCalledExactlyOnceWith(remotePath, remoteCwd)
+    expect(f.actions.start).not.toHaveBeenCalled()
+    expect(f.actions.send).not.toHaveBeenCalled()
+    expect(resolveInteraction).not.toHaveBeenCalled()
+    expect(resolvePermission).not.toHaveBeenCalled()
+    expect(interactionRequests.current).toContain(remoteQuestion)
+    expect(permissionRequests.current).toEqual([permission])
+    expect(screen.getByRole('button', { name: /待处理请求.*2.*个会话/ })).toBeInTheDocument()
+  })
+
+  it('quick-jumps from a child view to its pending parent without switching the SDK or losing mounted drafts', async () => {
+    const f = setup()
+    const question: ExtensionUiRequest = {
+      id: 'pending-parent', cwd, sessionPath: parentPath, method: 'editor', title: '父会话仍待回答',
+      question: true, createdAt: 1, timeoutAt: null
+    }
+    interactionRequests.current = [question]
+    const view = render(<App />)
+    await paint()
+    const draft = view.container.querySelector<HTMLTextAreaElement>('.composer textarea')!
+    const parentBubble = view.container.querySelector('.bubble-user')
+    const answer = screen.getByRole('textbox', { name: question.title })
+    fireEvent.change(draft, { target: { value: '快跳保留的父草稿' } })
+    fireEvent.change(answer, { target: { value: '尚未提交的问题草稿' } })
+    fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
+    await paint()
+    expect(childScroll(view.container)).toBeInTheDocument()
+    fireEvent.focus(screen.getByRole('button', { name: /待处理请求.*1.*个会话/ }))
+    const requests = screen.getByRole('region', { name: '待处理请求会话' })
+    expectNoParentBackendAction(f.actions)
+    expect(resolveInteraction).not.toHaveBeenCalled()
+    fireEvent.click(within(requests).getByText('父任务').closest('button')!)
+    await paint()
+    expect(view.container.querySelector('.child-chat-scroll')).toBeNull()
+    expect(view.container.querySelector('.bubble-user')).toBe(parentBubble)
+    expect(view.container.querySelector('.composer textarea')).toBe(draft)
+    expect(draft).toBeVisible()
+    expect(draft).toHaveValue('快跳保留的父草稿')
+    expect(screen.getByRole('textbox', { name: question.title })).toBe(answer)
+    expect(answer).toHaveValue('尚未提交的问题草稿')
+    expect(interactionRequests.current).toEqual([question])
+    expect(row(view.container, parentPath).querySelector('.attention')).not.toBeNull()
+    expectNoParentBackendAction(f.actions)
+    expect(resolveInteraction).not.toHaveBeenCalled()
+    expect(resolvePermission).not.toHaveBeenCalled()
   })
 
   it('routes ordinary chat links through the existing internal browser without touching the parent backend', async () => {

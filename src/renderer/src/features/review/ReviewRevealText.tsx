@@ -1,19 +1,20 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useDisclosureRevealReady } from '../common/DisclosureRevealGate'
-import {
-  appendedCharacterCount, armScreenTextReveal, RevealText,
-  SCREEN_TEXT_REVEAL_DURATION_MS, SCREEN_TEXT_REVEAL_MAX_DELAY_MS,
-  SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS,
-  type TextRevealMode
-} from '../../utils/screenTextReveal'
+import { RevealText, type TextRevealMode } from '../../utils/screenTextReveal'
+import { subscribeTextRevealOrder, type OrderedTextReveal } from '../../utils/textRevealOrder'
 
 // Bound both initial character DOM and geometry work, including single-line
 // JSON/minified output. Invisible chunks remain inexpensive ordinary text.
 export const REVIEW_REVEAL_CHUNK_SIZE = 160
-const observers = new WeakMap<Element, {
-  observer: IntersectionObserver
-  callbacks: Map<Element, () => void>
-}>()
+
+/** A streamed low surrogate may complete the last committed code point. */
+function safePrefixLength(text: string, prefix: string): number {
+  if (!text.startsWith(prefix)) return 0
+  const end = prefix.length
+  const before = text.charCodeAt(end - 1)
+  const after = text.charCodeAt(end)
+  return before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff ? end - 1 : end
+}
 
 const RevealChunk = memo(function RevealChunk({ text, mode }: {
   text: string; mode: TextRevealMode
@@ -21,95 +22,57 @@ const RevealChunk = memo(function RevealChunk({ text, mode }: {
   const ready = useDisclosureRevealReady()
   const ref = useRef<HTMLSpanElement>(null)
   const [reducedMotion] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false)
-  const [phase, setPhase] = useState<'waiting' | 'animating' | 'done'>(reducedMotion ? 'done' : 'waiting')
-  const previousText = useRef(text)
-  const hasAnimated = useRef(false)
-  // Authoritative replacements cannot keep obsolete text/geometry, even if
-  // that means ending old fades. Defer their character allocation until release.
-  const replacementWaiting = !ready && hasAnimated.current && !text.startsWith(previousText.current)
-  // A closed gate must not commit incoming tokens to RevealText: it owns the
-  // still-running fades, and must see the entire deferred suffix on release.
-  const animationText = !ready && hasAnimated.current ? previousText.current : text
-  const deferredText = !ready && hasAnimated.current && text.startsWith(animationText)
-    ? text.slice(animationText.length) : ''
-  const revealCount = hasAnimated.current ? appendedCharacterCount(previousText.current, animationText) : undefined
-  useEffect(() => {
+  const [admitted, setAdmitted] = useState<{ text: string; mode: TextRevealMode; ordered: OrderedTextReveal } | null>(null)
+  const subscription = useRef<ReturnType<typeof subscribeTextRevealOrder> | null>(null)
+  const append = admitted?.mode === mode && text.startsWith(admitted.text)
+  const animation = append ? admitted : null
+  const stamped = useRef<typeof admitted>(null)
+
+  useLayoutEffect(() => {
+    if (!animation || stamped.current === animation || !ref.current) return
+    stamped.current = animation
+    // Publish only after the admitted character DOM commits. Later lines must
+    // not overtake a visible predecessor still waiting for React/its root clock.
+    ref.current.dataset.textRevealStart = String(performance.now() + animation.ordered.delay)
+  }, [animation])
+
+  useLayoutEffect(() => {
+    if (admitted && !append) setAdmitted(null)
+  }, [admitted, append])
+
+  useLayoutEffect(() => {
     const element = ref.current
-    if (!element || reducedMotion || !ready || phase !== 'waiting') return
-    // Keep the outer conversation/review as root: IntersectionObserver then
-    // accounts for nested output scrollers and horizontal diff clipping too.
-    const root = element.closest('.review-detail-body, .chat-scroll') ?? element.parentElement
-    if (!root || typeof IntersectionObserver === 'undefined') {
-      setPhase('animating')
-      return
-    }
-    let group = observers.get(root)
-    if (!group) {
-      const callbacks = new Map<Element, () => void>()
-      const observer = new IntersectionObserver((entries) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) continue
-          callbacks.get(entry.target)?.()
-          callbacks.delete(entry.target)
-          observer.unobserve(entry.target)
-        }
-      }, { root })
-      group = { observer, callbacks }
-      observers.set(root, group)
-    }
-    const observedGroup = group
-    observedGroup.callbacks.set(element, () => setPhase('animating'))
-    observedGroup.observer.observe(element)
+    if (!element || reducedMotion || !ready) return
+    const owned = subscribeTextRevealOrder(element)
+    subscription.current = owned
     return () => {
-      observedGroup.callbacks.delete(element)
-      observedGroup.observer.unobserve(element)
-      if (observedGroup.callbacks.size === 0) {
-        observedGroup.observer.disconnect()
-        if (observers.get(root) === observedGroup) observers.delete(root)
-      }
+      owned.dispose()
+      if (subscription.current === owned) subscription.current = null
     }
-  }, [reducedMotion, ready, phase])
+  }, [reducedMotion, ready])
 
   useLayoutEffect(() => {
-    // Only consume text actually offered to the animation. Waiting chunks
-    // release their full current text; played chunks release only new suffixes.
-    if (!ready || reducedMotion || phase === 'waiting') return
-    if (phase === 'done' && previousText.current !== text) {
-      setPhase('animating')
-      return
-    }
-    if (phase === 'animating') previousText.current = text
-  }, [text, phase, reducedMotion, ready])
+    const owned = subscription.current
+    if (!owned || !ready || reducedMotion) return
+    if (animation?.text === text) { owned.wait(null); return }
+    // Count only the bounded pending suffix. A low surrogate completing the
+    // prior code point must also get a slot, without replaying earlier text.
+    let count = 0
+    for (const _character of text.slice(animation ? safePrefixLength(text, animation.text) : 0)) count++
+    owned.wait({ count, mode, admit: ordered => setAdmitted({ text, mode, ordered }) })
+    return () => owned.wait(null)
+  }, [text, mode, animation, ready, reducedMotion])
 
-  useLayoutEffect(() => {
-    const element = ref.current
-    if (phase !== 'animating' || !element) return
-    hasAnimated.current = true
-    if (mode === 'history') {
-      const container = element.closest<HTMLElement>('.review-detail-body, .chat-scroll') ?? element
-      armScreenTextReveal(container, element)
-    }
-    // Live RevealText owns its independent suffix windows. Keep it mounted so
-    // another token cannot recycle an older fade before that fade completes.
-    if (mode === 'live') return
-    const timer = window.setTimeout(() => setPhase('done'),
-      SCREEN_TEXT_REVEAL_MAX_DELAY_MS + SCREEN_TEXT_REVEAL_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS)
-    return () => window.clearTimeout(timer)
-  }, [phase, animationText, mode])
-
-  return <span ref={ref} style={{ opacity: phase === 'waiting' || replacementWaiting ? 0 : undefined }}
-    onAnimationEnd={(event) => {
-      // Earlier characters finish first; only the final fading character can
-      // reclaim the whole chunk without interrupting its remaining suffix.
-      if (mode === 'history' && event.animationName === 'screen-text-reveal'
-        && event.target === ref.current?.lastElementChild) setPhase('done')
-    }}>
-    {replacementWaiting ? text : phase === 'animating'
-      ? <><RevealText text={animationText} mode={mode} revealCount={revealCount} />
-        {deferredText && <span style={{ opacity: 0 }}>{deferredText}</span>}</>
-      : deferredText
-        ? <>{animationText}<span style={{ opacity: 0 }}>{deferredText}</span></>
-        : text}
+  // RevealText alone owns character ranges and their original deadlines. Keep
+  // the admitted instance/text untouched while a new suffix waits for geometry,
+  // disclosure or its parent line. Replacements discard invalid old fades now.
+  return <span ref={ref}
+    data-text-reveal-pending={!reducedMotion && text !== '' && animation?.text !== text ? 'true' : undefined}
+    style={{ opacity: !reducedMotion && !animation ? 0 : undefined }}>
+    {reducedMotion ? text : animation ? <>
+      <RevealText text={animation.text} mode={animation.mode} ordered={animation.ordered} />
+      {text.length > animation.text.length && <span style={{ opacity: 0 }}>{text.slice(animation.text.length)}</span>}
+    </> : text}
   </span>
 })
 
@@ -117,13 +80,20 @@ const RevealChunk = memo(function RevealChunk({ text, mode }: {
 export const ReviewRevealText = memo(function ReviewRevealText({ text, mode = 'history' }: {
   text: string; mode?: TextRevealMode
 }) {
-  const characters = useMemo(() => Array.from(text), [text])
+  const committed = useRef({ text: '', chunks: [] as string[] })
   const chunks = useMemo(() => {
-    const result: string[] = []
+    const previous = committed.current
+    const append = text.startsWith(previous.text)
+    const result = append ? previous.chunks.slice(0, -1) : []
+    // Revisit only the old tail, even when full: its last high surrogate may
+    // combine with the appended low surrogate. Complete earlier chunks stay put.
+    const characters = Array.from(append
+      ? (previous.chunks.at(-1) ?? '') + text.slice(previous.text.length) : text)
     for (let start = 0; start < characters.length; start += REVIEW_REVEAL_CHUNK_SIZE) {
       result.push(characters.slice(start, start + REVIEW_REVEAL_CHUNK_SIZE).join(''))
     }
     return result
-  }, [characters])
+  }, [text])
+  useLayoutEffect(() => { committed.current = { text, chunks } }, [text, chunks])
   return <>{chunks.map((chunk, index) => <RevealChunk key={index} text={chunk} mode={mode} />)}</>
 })

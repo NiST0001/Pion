@@ -8,6 +8,7 @@ import type { SubagentSessionList, SubagentSessionSnapshot } from './subagent-se
 import type { SubagentSettings } from './subagents'
 import type { CapabilitySettingsSnapshot, CapabilitySettingsUpdate } from './capability-settings'
 import type { QuestionSettings } from './question-settings'
+import type { UsageOverview, UsageOverviewQuery } from './usage-overview'
 import type { ThemeId } from './theme'
 import type { McpStatusSnapshot, McpStatusTarget } from './mcp'
 import type { PiChangelog, SessionCommandInfo, SessionCommandTarget } from './slash-command-protocol'
@@ -90,6 +91,10 @@ export interface ComputerUseLocalApi {
 }
 
 export interface PionApi {
+  /** Backfill and read the durable local usage ledger; never starts an Agent. */
+  getUsageOverview(query?: UsageOverviewQuery): Promise<UsageOverview>
+  getUsageBackgroundCollection(): Promise<boolean>
+  setUsageBackgroundCollection(enabled: boolean): Promise<boolean>
   computerUse: ComputerUseLocalApi
   openTerminal(cwd: string, cols: number, rows: number): Promise<import('./terminal').TerminalSnapshot>
   writeTerminal(id: string, data: string): Promise<void>

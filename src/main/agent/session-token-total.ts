@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
-import { open, stat } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { open, lstat } from 'node:fs/promises'
+import { isAbsolute, resolve } from 'node:path'
+import type { TokenUsage } from '../../shared/operations'
 
 const MAX_FILE_BYTES = 32 * 1024 * 1024
 const MAX_LINE_BYTES = 1024 * 1024
@@ -13,10 +14,45 @@ const ENTRY_TYPES = new Set([
 type RecordValue = Record<string, unknown>
 const record = (value: unknown): value is RecordValue => !!value && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0
+const boundedText = (value: unknown, max: number): value is string => text(value) && value.length <= max && !value.includes('\0')
 const identity = (value: unknown): value is string => text(value) && value.length <= 256 && /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(value)
 const timestamp = (value: unknown): boolean => text(value) && Number.isFinite(Date.parse(value))
 const tokens = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+
+export interface SessionUsageReceipt {
+  entryId: string
+  digest: string
+  event?: string
+  eventDigest?: string
+  source: 'model' | 'tool-summary'
+  provider?: string
+  modelId?: string
+  at: number
+  usage: TokenUsage
+}
+
+export interface SessionUsageSnapshot {
+  id: string
+  cwd: string
+  createdAt: number
+  parentSession?: string
+  receipt: string
+  stamp: string
+  bytes: number
+  total: number
+  receipts: SessionUsageReceipt[]
+}
+
+/** A cache hint only after a complete validated read, not source authentication. */
+export function sessionUsageFileStamp(stat: { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint }): string {
+  return digest([stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(value => value.toString()))
+}
+
+/** Only the ledger needs to distinguish an unconfirmed descriptor close. */
+export class SessionUsageReadError extends Error {
+  constructor(readonly closeUnknown = false) { super('Session usage unavailable') }
+}
 
 function usageTokens(value: unknown): number | undefined {
   if (!record(value)) return undefined
@@ -56,12 +92,30 @@ function usageTokens(value: unknown): number | undefined {
  * unknown, not a partial total or a fabricated zero.
  */
 export async function readSessionTokenTotal(path: string, expected?: { id: string; cwd: string }): Promise<number | undefined> {
+  try { return (await readSessionUsage(path, expected, false)).total } catch { return undefined }
+}
+
+/** Ledger reads every entry without sidebar budgets; never retains transcript content. */
+export async function readSessionUsageSnapshot(
+  path: string, expected?: { id: string; cwd: string }, options?: { yield?: () => Promise<void> }
+): Promise<SessionUsageSnapshot> {
+  return readSessionUsage(path, expected, true, options)
+}
+
+async function readSessionUsage(
+  path: string, expected: { id: string; cwd: string } | undefined, collectReceipts: boolean,
+  options?: { yield?: () => Promise<void> }
+): Promise<SessionUsageSnapshot> {
   let handle: Awaited<ReturnType<typeof open>> | undefined
-  let result: number | undefined
+  let result: SessionUsageSnapshot | undefined
+  let closeUnknown = false
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     const before = await handle.stat({ bigint: true })
-    if (!before.isFile() || before.size === 0n || before.size > BigInt(MAX_FILE_BYTES)) return undefined
+    if (!before.isFile() || before.size === 0n || (!collectReceipts && before.size > BigInt(MAX_FILE_BYTES))) throw new Error('file budget')
+    const fileHash = createHash('sha256')
+    const receipts: SessionUsageReceipt[] = []
+    let header: Pick<SessionUsageSnapshot, 'id' | 'cwd' | 'createdAt' | 'parentSession'> | undefined
     const entries = new Map<string, string>()
     const events = new Map<string, string>()
     const decoder = new TextDecoder('utf-8', { fatal: true })
@@ -69,17 +123,20 @@ export async function readSessionTokenTotal(path: string, expected?: { id: strin
     let total = 0
     let lines = 0
     const consume = (line: Buffer): void => {
-      if (line.length > MAX_LINE_BYTES) throw new Error('line budget')
+      if (!collectReceipts && line.length > MAX_LINE_BYTES) throw new Error('line budget')
       const value: unknown = JSON.parse(decoder.decode(line))
       if (!record(value)) throw new Error('record')
       if (!hasHeader) {
         if (value.type !== 'session' || (value.version !== 2 && value.version !== 3)
-          || !identity(value.id) || !timestamp(value.timestamp) || !text(value.cwd)) throw new Error('header')
+          || !identity(value.id) || !timestamp(value.timestamp) || !boundedText(value.cwd, 4096)
+          || (value.parentSession !== undefined && (!boundedText(value.parentSession, 4096) || !isAbsolute(value.parentSession)))) throw new Error('header')
         if (expected && (value.id !== expected.id || resolve(value.cwd as string) !== resolve(expected.cwd))) throw new Error('changed owner')
+        header = { id: value.id, cwd: value.cwd, createdAt: Date.parse(value.timestamp as string),
+          ...(value.parentSession !== undefined ? { parentSession: value.parentSession as string } : {}) }
         hasHeader = true
         return
       }
-      if (++lines > MAX_ENTRIES || !text(value.type) || !ENTRY_TYPES.has(value.type)
+      if ((!collectReceipts && ++lines > MAX_ENTRIES) || !text(value.type) || !ENTRY_TYPES.has(value.type)
         || !identity(value.id) || !timestamp(value.timestamp)
         || (value.parentId !== null && (!identity(value.parentId) || !entries.has(value.parentId)))) throw new Error('entry identity')
       const hash = digest(value)
@@ -91,6 +148,11 @@ export async function readSessionTokenTotal(path: string, expected?: { id: strin
       let count = 0
       let eventId: string | undefined
       let eventHash: string | undefined
+      let rawUsage: RecordValue | undefined
+      let source: SessionUsageReceipt['source'] = 'tool-summary'
+      let provider: string | undefined
+      let modelId: string | undefined
+      let at = Date.parse(value.timestamp as string)
       if (value.type === 'message') {
         if (!record(value.message) || !text(value.message.role)) throw new Error('message')
         const message = value.message
@@ -100,7 +162,8 @@ export async function readSessionTokenTotal(path: string, expected?: { id: strin
         if (message.role === 'assistant' || message.role === 'toolResult') {
           if (!Array.isArray(message.content) || !tokens(message.timestamp)) throw new Error('message shape')
           if (message.role === 'assistant') {
-            if (!text(message.provider) || !text(message.model) || !text(message.api)
+            if (!boundedText(message.provider, 256) || !boundedText(message.model, 256) || !text(message.api)
+              || (message.responseModel !== undefined && !boundedText(message.responseModel, 256))
               || !['stop', 'length', 'toolUse', 'error', 'aborted', 'deferred'].includes(message.stopReason as string)) throw new Error('assistant')
             if (message.responseId !== undefined) {
               if (!text(message.responseId)) throw new Error('response identity')
@@ -116,16 +179,29 @@ export async function readSessionTokenTotal(path: string, expected?: { id: strin
             const parsed = usageTokens(message.usage)
             if (parsed === undefined) throw new Error('message usage')
             count = parsed
+            rawUsage = message.usage as RecordValue
+            at = message.timestamp as number
+            if (message.role === 'assistant') {
+              source = 'model'
+              provider = message.provider as string
+              modelId = (message.responseModel ?? message.model) as string
+            }
           }
         } else if (message.usage !== undefined) throw new Error('unrecognized message usage')
       } else if (value.type === 'usage' || value.type === 'compaction' || value.type === 'branch_summary') {
-        if (value.type === 'usage' && (!text(value.kind) || !text(value.provider) || !text(value.model))) throw new Error('usage attribution')
+        if (value.type === 'usage' && (!text(value.kind) || !boundedText(value.provider, 256) || !boundedText(value.model, 256))) throw new Error('usage attribution')
         if (value.type === 'compaction' && (typeof value.summary !== 'string' || !identity(value.firstKeptEntryId) || !tokens(value.tokensBefore))) throw new Error('compaction shape')
         if (value.type === 'branch_summary' && (typeof value.summary !== 'string' || !identity(value.fromId))) throw new Error('summary shape')
         if (value.type === 'usage' || value.usage !== undefined) {
           const parsed = usageTokens(value.usage)
           if (parsed === undefined) throw new Error('entry usage')
           count = parsed
+          rawUsage = value.usage as RecordValue
+          if (value.type === 'usage') {
+            source = 'model'
+            provider = value.provider as string
+            modelId = value.model as string
+          }
         }
       } else {
         if (value.usage !== undefined) throw new Error('unknown usage source')
@@ -154,6 +230,24 @@ export async function readSessionTokenTotal(path: string, expected?: { id: strin
             break
         }
       }
+      if (rawUsage && collectReceipts) {
+        if (Math.abs(at) > 8_640_000_000_000_000) throw new Error('usage date')
+        const cost = rawUsage.cost as RecordValue
+        const usage: TokenUsage = {
+          input: rawUsage.input as number, output: rawUsage.output as number,
+          cacheRead: rawUsage.cacheRead as number, cacheWrite: rawUsage.cacheWrite as number,
+          reasoning: (rawUsage.reasoning ?? 0) as number, total: rawUsage.totalTokens as number, costUsd: cost.total as number
+        }
+        // Only usage-bearing identity participates: fork re-chaining, labels,
+        // summary targets and firstKeptEntryId are deliberately excluded.
+        const payloadHash = value.type === 'message' ? digest(value.message)
+          : value.type === 'usage' ? digest(value.kind) : digest(value.summary)
+        receipts.push({ entryId: value.id, source, ...(provider ? { provider, modelId } : {}), at, usage,
+          digest: digest([value.type, source, provider ?? null, modelId ?? null, at, payloadHash,
+            usage, rawUsage.cacheWrite1h ?? null, rawUsage.reasoning ?? null,
+            [cost.input, cost.output, cost.cacheRead, cost.cacheWrite, cost.total], eventId ?? null]),
+          ...(eventId && eventHash ? { event: digest(eventId), eventDigest: eventHash } : {}) })
+      }
       if (eventId && eventHash) {
         const previous = events.get(eventId)
         if (previous !== undefined) {
@@ -166,37 +260,53 @@ export async function readSessionTokenTotal(path: string, expected?: { id: strin
       if (!Number.isSafeInteger(total)) throw new Error('total overflow')
     }
     const chunk = Buffer.alloc(64 * 1024)
-    let pending = Buffer.alloc(0)
+    let pending: Buffer[] = []
+    let pendingBytes = 0
     let bytes = 0
     while (true) {
       const { bytesRead } = await handle.read(chunk, 0, chunk.length, null)
       if (bytesRead === 0) break
       bytes += bytesRead
-      if (bytes > MAX_FILE_BYTES || BigInt(bytes) > before.size) throw new Error('file growth')
-      const data = Buffer.concat([pending, chunk.subarray(0, bytesRead)])
+      fileHash.update(chunk.subarray(0, bytesRead))
+      if (!Number.isSafeInteger(bytes) || (!collectReceipts && bytes > MAX_FILE_BYTES) || BigInt(bytes) > before.size) throw new Error('file growth')
+      const data = chunk.subarray(0, bytesRead)
       let start = 0
       for (let end = data.indexOf(10); end !== -1; end = data.indexOf(10, start)) {
-        consume(data.subarray(start, end))
+        const segment = data.subarray(start, end)
+        if (pendingBytes) {
+          pending.push(segment)
+          // Concatenate once per complete line, not once per chunk (quadratic for long lines).
+          consume(Buffer.concat(pending, pendingBytes + segment.length))
+          pending = []
+          pendingBytes = 0
+        } else consume(segment)
         start = end + 1
       }
-      pending = Buffer.from(data.subarray(start))
-      if (pending.length > MAX_LINE_BYTES) throw new Error('line budget')
+      if (start < data.length) {
+        pending.push(Buffer.from(data.subarray(start)))
+        pendingBytes += data.length - start
+        if (!collectReceipts && pendingBytes > MAX_LINE_BYTES) throw new Error('line budget')
+      }
+      await options?.yield?.()
     }
     // An incomplete final line may be an in-flight append, never a partial total.
-    if (pending.length !== 0 || !hasHeader || BigInt(bytes) !== before.size) throw new Error('incomplete file')
+    if (pendingBytes !== 0 || !hasHeader || BigInt(bytes) !== before.size) throw new Error('incomplete file')
     const after = await handle.stat({ bigint: true })
-    const current = await stat(path, { bigint: true })
+    const current = await lstat(path, { bigint: true })
     for (const snapshot of [after, current]) {
       if (!snapshot.isFile() || snapshot.dev !== before.dev || snapshot.ino !== before.ino
         || snapshot.size !== before.size || snapshot.mtimeNs !== before.mtimeNs || snapshot.ctimeNs !== before.ctimeNs) throw new Error('changed file')
     }
-    result = total
+    if (!header) throw new Error('header')
+    result = { ...header, receipt: fileHash.digest('hex'),
+      stamp: sessionUsageFileStamp(before), bytes, total, receipts }
   } catch {
     result = undefined
   } finally {
     if (handle) {
-      try { await handle.close() } catch { result = undefined }
+      try { await handle.close() } catch { result = undefined; closeUnknown = true }
     }
   }
+  if (!result) throw new SessionUsageReadError(closeUnknown)
   return result
 }

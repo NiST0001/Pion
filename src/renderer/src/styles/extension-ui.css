@@ -1,3 +1,36 @@
+.session-interaction-panels {
+  position: absolute;
+  z-index: 31;
+  left: 50%;
+  bottom: calc(var(--conversation-interaction-bottom-clearance, var(--conversation-bottom-clearance, 0px)) + 14px);
+  width: min(620px, calc(100% - 32px));
+  max-height: max(0px, calc(100% - var(--conversation-interaction-bottom-clearance, var(--conversation-bottom-clearance, 0px)) - 28px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  transform: translateX(-50%);
+}
+
+.session-interaction-panels[hidden] { display: none; }
+
+/* Only tiny docks bound the support row; its own scrollbar keeps expanded
+   tasks/queues reachable instead of pushing the interaction header offscreen. */
+.conversation-shell.has-compact-support > .composer-dock > .composer-support-row {
+  max-height: var(--conversation-support-max-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Keep task/queue popovers outside the input's scroll clip. */
+.conversation-shell.has-compact-interactions > .composer-dock > .composer-input-scroll {
+  max-height: var(--conversation-composer-max-height);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .extension-ui-backdrop {
   position: absolute;
   inset: 0;
@@ -10,10 +43,19 @@
   pointer-events: none;
 }
 
-/* Workspace questions share the permission panel's measured composer offset.
+/* Standalone fallback; the session stack owns positioning in the workbench.
    Global provider-auth dialogs remain centered in the full window. */
 .extension-ui-backdrop:not(.is-global) {
   bottom: var(--conversation-bottom-clearance, 0px);
+}
+
+.session-interaction-panels > .extension-ui-backdrop:not(.is-global) {
+  position: static;
+  inset: auto;
+  bottom: auto;
+  padding: 0;
+  flex: none;
+  width: 100%;
 }
 
 .extension-ui-backdrop.is-global {
@@ -38,6 +80,133 @@
   box-shadow: var(--shadow-pop);
   pointer-events: auto;
   animation: pion-pop-in var(--motion-normal) var(--motion-ease-out) both;
+}
+
+.extension-ui-backdrop[hidden],
+.tool-permission-backdrop[hidden] {
+  display: none;
+}
+
+.extension-ui-dialog.session-interaction-panel,
+.tool-permission-modal.session-interaction-panel {
+  max-height: none;
+  flex: none;
+}
+
+.session-interaction-toggle {
+  display: flex;
+  align-items: center;
+  flex: none;
+  width: 100%;
+  min-width: 0;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid transparent;
+  border-radius: inherit;
+  background: var(--surface-tint);
+  color: var(--fg);
+  text-align: left;
+}
+
+.session-interaction-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.session-interaction-toggle[aria-expanded='true'] {
+  border-bottom-color: var(--border-soft);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.session-interaction-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.session-interaction-copy {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 1px;
+}
+
+.session-interaction-label {
+  overflow: hidden;
+  color: var(--fg-faint);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-interaction-title {
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-interaction-toggle[aria-expanded='true'] .session-interaction-title {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.session-interaction-meta {
+  display: grid;
+  flex: none;
+  gap: 1px;
+  color: var(--fg-faint);
+  font-size: 10px;
+  text-align: right;
+}
+
+.session-interaction-meta > span {
+  white-space: nowrap;
+}
+
+.session-interaction-warning { color: var(--warn); }
+.session-interaction-error { color: var(--danger); }
+
+.session-interaction-chevron {
+  flex: none;
+  color: var(--fg-faint);
+  transition: transform 180ms var(--motion-ease-out);
+}
+
+.session-interaction-toggle[aria-expanded='true'] .session-interaction-chevron {
+  transform: rotate(180deg);
+}
+
+.session-interaction-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: min(420px, max(0px, calc(100vh - var(--conversation-interaction-bottom-clearance, var(--conversation-bottom-clearance, 128px)) - 100px)));
+  overflow: hidden;
+}
+
+.session-interaction-content > :is(.extension-ui-body, .tool-permission-body) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overscroll-behavior: contain;
+}
+
+.session-interaction-content > footer {
+  flex: none;
+}
+
+.extension-ui-wait {
+  margin: 0 0 8px;
+  color: var(--fg-faint);
+  font-size: 10px;
 }
 
 .extension-ui-head {
@@ -219,6 +388,11 @@ html.pion-keyboard-focus .extension-ui-dialog button:focus-visible {
   outline-offset: 2px;
 }
 
+html.pion-keyboard-focus .session-interaction-panel .session-interaction-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 58%, transparent);
+  outline-offset: -3px;
+}
+
 @media (max-width: 680px) {
   .extension-ui-backdrop {
     align-items: flex-end;
@@ -240,5 +414,23 @@ html.pion-keyboard-focus .extension-ui-dialog button:focus-visible {
   .extension-ui-backdrop,
   .extension-ui-dialog {
     animation: none;
+  }
+
+  .session-interaction-chevron { transition: none; }
+}
+
+@media (forced-colors: active) {
+  .session-interaction-toggle,
+  .session-interaction-panel .session-interaction-icon {
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  .session-interaction-warning,
+  .session-interaction-error { color: CanvasText; }
+
+  html.pion-keyboard-focus .session-interaction-panel .session-interaction-toggle:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -3px;
   }
 }

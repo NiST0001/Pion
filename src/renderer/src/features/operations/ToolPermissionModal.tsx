@@ -15,6 +15,7 @@ import type {
   ToolPermissionResolution,
   ToolPermissionRisk
 } from '../../../../shared/types'
+import { SessionInteractionPanel } from '../common/SessionInteractionPanel'
 
 const CATEGORY_LABELS: Record<ToolPermissionCategory, string> = {
   read: '读取文件',
@@ -35,6 +36,7 @@ interface ToolPermissionModalProps {
   queueLength: number
   busy: boolean
   error: string
+  active?: boolean
   onResolve: (resolution: ToolPermissionResolution) => void
 }
 
@@ -43,59 +45,38 @@ export function ToolPermissionModal({
   queueLength,
   busy,
   error,
+  active = true,
   onResolve
 }: ToolPermissionModalProps): ReactElement | null {
   const [, setClock] = useState(0)
 
   useEffect(() => {
-    if (!request) return
+    if (!request || !active) return
     const interval = window.setInterval(() => setClock((value) => value + 1), 1_000)
     return () => window.clearInterval(interval)
-  }, [request])
-
-  useEffect(() => {
-    if (!request) return
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape' || busy) return
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      onResolve('deny')
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [busy, onResolve, request])
+  }, [active, request?.id])
 
   if (!request) return null
   const secondsLeft = Math.max(0, Math.ceil((request.timeoutAt - Date.now()) / 1_000))
+  const disabled = busy || !active
+  const resolve = (resolution: ToolPermissionResolution): void => {
+    if (!disabled) onResolve(resolution)
+  }
 
   return (
-    <div className="tool-permission-backdrop">
-      <section
-        className="tool-permission-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="tool-permission-title"
-      >
-        <header className="tool-permission-head">
-          <div className="tool-permission-head-icon">
-            <ShieldAlert size={20} />
-          </div>
-          <div>
-            <div className="modal-kicker">TOOL PERMISSION</div>
-            <h2 id="tool-permission-title">Agent 请求执行操作</h2>
-          </div>
-          <button
-            type="button"
-            className="icon-button"
-            disabled={busy}
-            title="拒绝"
-            aria-label="拒绝工具调用"
-            onClick={() => onResolve('deny')}
-          >
-            <X size={16} />
-          </button>
-        </header>
-
+    <SessionInteractionPanel
+      active={active}
+      backdropClassName="tool-permission-backdrop"
+      className="tool-permission-modal"
+      icon={<ShieldAlert size={16} />}
+      label={`工具授权 · ${CATEGORY_LABELS[request.category]}${queueLength > 1 ? ` · 另有 ${queueLength - 1} 项` : ''}`}
+      title={request.summary}
+      meta={<>
+        <span>{secondsLeft} 秒</span>
+        {request.risks.length > 0 && <span className="session-interaction-warning">有风险</span>}
+        {error && <span className="session-interaction-error">提交失败</span>}
+      </>}
+    >
         <div className="tool-permission-body">
           <div className="tool-permission-meta">
             <span className={`tool-permission-category category-${request.category}`}>
@@ -130,24 +111,24 @@ export function ToolPermissionModal({
           <button
             type="button"
             className="tool-permission-deny"
-            disabled={busy}
-            onClick={() => onResolve('deny')}
+            disabled={disabled}
+            onClick={() => resolve('deny')}
           >
             <X size={13} /> 拒绝
           </button>
           <div className="tool-permission-allow-actions">
             <button
               type="button"
-              disabled={busy}
-              onClick={() => onResolve('allow-once')}
+              disabled={disabled}
+              onClick={() => resolve('allow-once')}
             >
               <Check size={13} /> 仅这一次
             </button>
             {request.canRemember && request.risks.length === 0 && (
               <button
                 type="button"
-                disabled={busy}
-                onClick={() => onResolve('allow-session')}
+                disabled={disabled}
+                onClick={() => resolve('allow-session')}
               >
                 当前会话允许
               </button>
@@ -156,15 +137,14 @@ export function ToolPermissionModal({
               <button
                 type="button"
                 className="tool-permission-allow-project"
-                disabled={busy}
-                onClick={() => onResolve('allow-project')}
+                disabled={disabled}
+                onClick={() => resolve('allow-project')}
               >
                 <ShieldCheck size={13} /> 此项目始终允许
               </button>
             )}
           </div>
         </footer>
-      </section>
-    </div>
+    </SessionInteractionPanel>
   )
 }

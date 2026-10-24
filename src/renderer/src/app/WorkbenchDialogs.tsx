@@ -27,11 +27,17 @@ const LazyTaskHistoryPanel = lazy(() => import('../features/session/TaskHistoryP
   .then((module) => ({ default: module.TaskHistoryPanel })))
 const LazyCommandDialog = lazy(() => import('../features/commands/CommandDialog')
   .then((module) => ({ default: module.CommandDialog })))
+const LazyUsageOverviewModal = lazy(() => import('../features/operations/UsageOverviewModal')
+  .then((module) => ({ default: module.UsageOverviewModal })))
 
 interface WorkbenchDialogsProps {
   operations: {
     kind: ComponentProps<typeof OperationsModal>['kind'] | null
     onClose: ComponentProps<typeof OperationsModal>['onClose']
+    usage?: {
+      mounted: boolean
+      api?: ComponentProps<typeof LazyUsageOverviewModal>['api']
+    }
     workflow: Omit<ComponentProps<typeof WorkflowPanel>, 'embedded'>
     verification: Omit<ComponentProps<typeof VerificationPanel>, 'embedded'>
   }
@@ -63,13 +69,10 @@ export function WorkbenchDialogs({
 }: WorkbenchDialogsProps): ReactElement {
   return (
     <>
-      {operations.kind && (
+      {operations.kind && operations.kind !== 'stats' && (
         <OperationsModal kind={operations.kind} onClose={operations.onClose}>
-          {operations.kind === 'agents' ? (
-            <WorkflowPanel embedded {...operations.workflow} />
-          ) : (
-            <VerificationPanel embedded {...operations.verification} />
-          )}
+          {operations.kind === 'agents' && <WorkflowPanel embedded {...operations.workflow} />}
+          {operations.kind === 'verification' && <VerificationPanel embedded {...operations.verification} />}
         </OperationsModal>
       )}
 
@@ -150,6 +153,11 @@ export function WorkbenchDialogs({
       {settings.mounted && (
         <Suspense fallback={null}>
           <LazySettingsModal {...settings.dialog} />
+        </Suspense>
+      )}
+      {operations.usage?.mounted && (
+        <Suspense fallback={null}>
+          <LazyUsageOverviewModal open={operations.kind === 'stats'} api={operations.usage.api} onClose={operations.onClose} />
         </Suspense>
       )}
     </>

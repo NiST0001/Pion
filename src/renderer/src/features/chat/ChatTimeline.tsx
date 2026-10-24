@@ -5,16 +5,14 @@ import type { FileChange, TimelineItem } from '../../agent/types'
 import type { WorkingStatus } from '../../agent/workingStatus'
 import { EmptyState } from '../common/EmptyState'
 import { ModifiedFilesCard } from '../review/ModifiedFilesCard'
+import { ReviewRevealText } from '../review/ReviewRevealText'
 import { ChatMessage } from './ChatMessage'
 import { ToolCallItem } from './ToolCallItem'
 import { ToolActivityHeader } from './ToolActivityHeader'
 import { DisclosureRevealGate } from '../common/DisclosureRevealGate'
 import { groupToolActivity, summarizeToolActivity, type ToolTimelineItem } from '../../agent/toolActivityGroups'
-import {
-  assignPendingLineDelays,
-  resetLineRevealClock,
-  RevealText
-} from '../../utils/screenTextReveal'
+import { assignLineRevealDelay, SCREEN_TEXT_REVEAL_LINE_CLASS, SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS } from '../../utils/screenTextReveal'
+import { watchLineReveals } from '../../utils/lineReveal'
 
 export interface ChatTimelineProps {
   /** Real selected transcript identity; not a backend-readiness or content revision. */
@@ -62,6 +60,10 @@ export interface ChatTimelineProps {
 // Flat sibling keys prevent prepend/merged groups from reparenting their DOM.
 function ToolActivityItem({ item, visible, readOnly }: { item: ToolTimelineItem; visible: boolean; readOnly: boolean }) {
   const mounted = useRef(false)
+  // Only a wrapper first seen closed participates in the user's first reveal.
+  // Passive history additions to an already open group are already reading,
+  // not a new expansion; don't start a new cascade above its displayed tail.
+  const initiallyCollapsed = useRef(!visible).current
   const [present, setPresent] = useState(visible)
   useLayoutEffect(() => {
     if (visible) { mounted.current = true; setPresent(true); return }
@@ -79,7 +81,8 @@ function ToolActivityItem({ item, visible, readOnly }: { item: ToolTimelineItem;
     hidden={!visible && !present} inert={!visible} aria-hidden={!visible || undefined}>
     <div className="tool-activity-inner">
       <DisclosureRevealGate open={visible}>
-        {(visible || mounted.current) && <ToolCallItem tool={item.tool} historical={item.historical} noReveal={item.noReveal} readOnly={readOnly} />}
+        {(visible || mounted.current) && <ToolCallItem tool={item.tool} historical={item.historical} noReveal={item.noReveal}
+          initialHeaderReveal={initiallyCollapsed ? 'history' : item.historical ? 'static' : undefined} readOnly={readOnly} />}
       </DisclosureRevealGate>
     </div>
   </div>
@@ -154,24 +157,17 @@ export function ChatTimeline({
     return { scope, keys }
   })
 
-  // A cleared timeline means a session switch; start a fresh waterfall clock.
-  useLayoutEffect(() => {
-    if (timeline.length === 0) resetLineRevealClock()
-  }, [timeline.length])
-
-  // History lines defer their delay to this settle scan: once paging batches
-  // quiet down, everything pending is assigned in DOM order as one cascade.
-  // Live lines assign themselves at attach and are never pending here.
   useLayoutEffect(() => {
     const container = scrollRef.current
     if (!container || hidden) return
-    const timer = window.setTimeout(() => assignPendingLineDelays(container), 120)
-    return () => window.clearTimeout(timer)
-  }, [timeline, scrollRef, hidden, expandedGroups])
+    // Initial admission waits for RAF, after parent navigation/layout effects.
+    // Mutations merge history and live rows on this viewport's own clock.
+    return watchLineReveals(container)
+  }, [scope, scrollRef, hidden])
 
   return (
     <main className={`chat-scroll${className ? ` ${className}` : ''}`} ref={scrollRef} onScroll={onScroll}
-      aria-hidden={hidden || undefined} inert={hidden}
+      data-line-reveal-owner="true" data-line-reveal-scope={scope} aria-hidden={hidden || undefined} inert={hidden}
       style={hidden ? { ...style, visibility: 'hidden', pointerEvents: 'none' } : style}>
       <div className="chat-scroll-surface" ref={scrollSurfaceRef}>
       {notice && <div className="compaction-marker" role="note">{notice}</div>}
@@ -198,8 +194,10 @@ export function ChatTimeline({
               return nodes
             }
             return item.kind === 'compaction' ? (
-              <div key={item.id} className={`compaction-marker${item.historical ? ' history-reveal' : ''}`}>
-                {item.historical ? <RevealText text={item.summary} mode="history" /> : item.summary}
+              <div key={item.id}
+                ref={item.historical && !item.noReveal ? assignLineRevealDelay : undefined}
+                className={`compaction-marker${item.historical && !item.noReveal ? ` history-reveal ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS}` : ''}`}>
+                {item.historical && !item.noReveal ? <ReviewRevealText text={item.summary} mode="history" /> : item.summary}
               </div>
             ) : (
               <ChatMessage

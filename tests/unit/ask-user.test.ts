@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type { ExtensionToolContext } from '@earendil-works/pi-coding-agent'
 import { askUserTool, createAskUserTool } from '../../src/main/agent/ask-user'
 import { QUESTION_WAIT_WIDGET_KEY } from '../../src/shared/question-settings'
+import { decodeQuestionCustomAnswer, encodeQuestionCustomAnswer } from '../../src/shared/question-answer'
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks() })
 
@@ -17,6 +18,29 @@ it('waits for an explicit choice and returns the original answer', async () => {
   const result = await askUserTool.execute('q', { question, options: ['Windows', 'Linux'] }, undefined, undefined, ctx)
   expect(ui.select).toHaveBeenCalledWith(`AI 提问：${question}`, ['1. Windows', '2. Linux', '自定义回答…'], { signal: undefined, timeout: expect.any(Number) })
   expect(result.details).toMatchObject({ question, answer: 'Linux', status: 'answered' })
+  expect(ui.input).not.toHaveBeenCalled()
+})
+
+it.each([
+  { name: 'custom text', answer: '  macOS\nwith Linux  ', expected: 'macOS\nwith Linux', truncated: false },
+  { name: 'long custom text', answer: 'a'.repeat(9000), expected: 'a'.repeat(8000), truncated: true }
+])('decodes $name from the original select without opening another dialog', async ({ answer, expected, truncated }) => {
+  const { ui, ctx } = context()
+  const encoded = encodeQuestionCustomAnswer(answer)
+  expect(decodeQuestionCustomAnswer(encoded)).toBe(answer)
+  ui.select.mockResolvedValue(encoded)
+  const result = await askUserTool.execute('q', { question, options: ['Windows', 'Linux'] }, undefined, undefined, ctx)
+  expect(result.details).toMatchObject({ status: 'answered', answer: expected, truncated })
+  expect(ui.select).toHaveBeenCalledTimes(1)
+  expect(ui.input).not.toHaveBeenCalled()
+})
+
+it('rejects unknown select values rather than treating them as custom answers', async () => {
+  const { ui, ctx } = context()
+  ui.select.mockResolvedValue('macOS')
+  expect(decodeQuestionCustomAnswer('macOS')).toBeUndefined()
+  await expect(askUserTool.execute('q', { question, options: ['Windows', 'Linux'] }, undefined, undefined, ctx))
+    .rejects.toThrow('无效的回答选项')
   expect(ui.input).not.toHaveBeenCalled()
 })
 

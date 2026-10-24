@@ -32,7 +32,8 @@ export const DESKTOP_SLASH_COMMANDS: SlashCommandInfo[] = [
   { name: 'plan', description: '切换 Pion 只读计划模式，不直接执行实现', source: 'pion' },
   { name: 'yolo', description: '请求切换本会话 YOLO 工具权限模式', source: 'pion' },
   { name: 'verify', description: '打开项目自动验证面板', source: 'pion' },
-  { name: 'agents', description: '打开隔离多 Agent 工作流面板', source: 'pion' }
+  { name: 'agents', description: '打开隔离多 Agent 工作流面板', source: 'pion' },
+  { name: 'stats', description: '查看所有会话的 Token 与费用使用总览', source: 'pion' }
 ]
 
 export const DESKTOP_SLASH_COMMAND_NAMES: string[] = DESKTOP_SLASH_COMMANDS.map((command) => command.name)
@@ -45,7 +46,7 @@ export const PENDING_PI_SLASH_COMMAND_NAMES: string[] = [
  * backend mutations as sendDisabled exceptions just because they are native. */
 export const PREPARATION_SLASH_COMMAND_NAMES: string[] = [
   'settings', 'resume', 'session', 'trust', 'hotkeys', 'changelog', 'debug',
-  'plan', 'yolo', 'verify', 'agents',
+  'plan', 'yolo', 'verify', 'agents', 'stats',
   ...PENDING_PI_SLASH_COMMAND_NAMES
 ]
 

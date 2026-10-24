@@ -3,7 +3,8 @@
 import '@testing-library/jest-dom/vitest'
 import { readFileSync } from 'node:fs'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
-import { createRef } from 'react'
+import { createRef, StrictMode, Suspense } from 'react'
+import rehypeHighlight from 'rehype-highlight'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as modelError from '../../src/renderer/src/agent/modelError'
 import { reducer } from '../../src/renderer/src/agent/reducer'
@@ -11,14 +12,15 @@ import { entriesToTimeline } from '../../src/renderer/src/agent/timeline'
 import { initialState } from '../../src/renderer/src/agent/types'
 import { ChatMessage } from '../../src/renderer/src/features/chat/ChatMessage'
 import { Markdown } from '../../src/renderer/src/features/chat/Markdown'
-import { SCREEN_TEXT_REVEAL_LIVE_DURATION_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS, SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS } from '../../src/renderer/src/utils/screenTextReveal'
+import { SCREEN_TEXT_REVEAL_LIVE_DURATION_MS, SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS, SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS } from '../../src/renderer/src/utils/screenTextReveal'
 import { ChatTimeline } from '../../src/renderer/src/features/chat/ChatTimeline'
 import type { ChatTimelineProps } from '../../src/renderer/src/features/chat/ChatTimeline'
 import {
-  assignPendingLineDelays,
   resetLineRevealClock,
   takeLineRevealSlot
 } from '../../src/renderer/src/utils/screenTextReveal'
+
+vi.mock('rehype-highlight', { spy: true })
 
 const persistedUserMessage = {
   kind: 'user',
@@ -27,6 +29,49 @@ const persistedUserMessage = {
   text: '调整这条消息之后的会话',
   historical: true
 } as const
+
+function revealTimelineProps(timeline: ChatTimelineProps['timeline']): ChatTimelineProps {
+  return {
+    scrollRef: createRef<HTMLDivElement>(), onScroll: vi.fn(), timeline,
+    timelineLoading: false, busy: false, starting: false, hasSessions: true,
+    canFork: false, onFork: vi.fn(), agentActivity: false, workingStatus: { label: '' },
+    latestRunChanges: [], runCheckpoint: null, rollbackBusy: false, rollbackError: '',
+    onUndo: vi.fn(), onReview: vi.fn(), onSelectChange: vi.fn()
+  }
+}
+
+function mockLineRevealFrames(lineTop: (element: HTMLElement) => number = () => 120) {
+  const frames = new Map<number, FrameRequestCallback>()
+  let frameId = 0
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+    const id = ++frameId
+    frames.set(id, callback)
+    return id
+  })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { frames.delete(id) })
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const owner = this.classList.contains('chat-scroll')
+    const top = owner ? 100 : lineTop(this)
+    const height = owner ? 600 : 20
+    return { top, bottom: top + height, left: 0, right: 600, width: 600, height, x: 0, y: top, toJSON() {} }
+  })
+  return async () => {
+    await act(async () => {
+      await Promise.resolve() // Merge committed mutations before the explicit frame.
+      const callbacks = [...frames.values()]
+      frames.clear()
+      callbacks.forEach(callback => callback(performance.now()))
+      await Promise.resolve()
+    })
+  }
+}
+
+async function flushRevealStages(flushFrame: () => Promise<void>, ready: () => boolean): Promise<void> {
+  // Allow line admission, text admission/React commit, then the following line.
+  // Never drain an unbounded mutation/RAF loop or advance fade deadlines.
+  for (let stage = 0; stage < 4 && !ready(); stage++) await flushFrame()
+  expect(ready()).toBe(true)
+}
 
 describe('ChatMessage', () => {
   afterEach(() => {
@@ -62,26 +107,35 @@ describe('ChatMessage', () => {
     expect(bubble).not.toHaveClass('user-send-entering')
   })
 
-  it('fades live user text with shared bounded chunks without requeueing the bubble or replaying backfills', () => {
+  it('fades live user text with shared bounded chunks without requeueing the bubble or replaying backfills', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('IntersectionObserver', undefined)
-    resetLineRevealClock()
+    const flushFrame = mockLineRevealFrames()
     const item = { kind: 'user' as const, id: 45, text: '原始 **文字**\n下一行🙂', live: true }
-    const view = render(<ChatMessage item={item} canFork={false} />)
+    const props = revealTimelineProps([item])
+    const view = render(<ChatTimeline {...props} />)
     const bubble = view.container.querySelector<HTMLElement>('.bubble-user')!
     const content = bubble.querySelector('.bubble-content')!
+    expect(bubble).not.toHaveAttribute('data-line-reveal-ready')
+    expect(content.querySelector('.screen-text-reveal-live')).toBeNull()
+    await flushFrame() // Parent line admission precedes its chunk's commit.
+    expect(bubble).toHaveAttribute('data-line-reveal-ready', 'true')
+    expect(content.querySelector('[data-text-reveal-pending="true"]')).not.toBeNull()
+    await flushRevealStages(flushFrame, () => content.querySelector('[data-text-reveal-start]') !== null
+      && content.querySelector('[data-text-reveal-pending="true"]') === null)
     const first = content.querySelector('.screen-text-reveal-live')!
     const delay = bubble.style.getPropertyValue('--screen-text-reveal-delay')
     expect(content.textContent).toBe(item.text)
     expect(content.querySelector('strong, .markdown')).toBeNull()
     expect(content.querySelectorAll('.screen-text-reveal-line')).toHaveLength(0)
     expect(first).toBeInTheDocument()
-    view.rerender(<ChatMessage item={{ ...item, entryId: 'saved' }} canFork={false} />)
+    view.rerender(<ChatTimeline {...props} timeline={[{ ...item, entryId: 'saved' }]} />)
     expect(content.querySelector('.screen-text-reveal-live')).toBe(first)
     expect(bubble.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
     act(() => vi.advanceTimersByTime(SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS + SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS))
     expect(content.querySelector('[data-screen-reveal-character]')).toBeNull()
-    view.rerender(<ChatMessage item={{ ...item, entryId: 'saved', text: item.text + '新增' }} canFork={false} />)
+    view.rerender(<ChatTimeline {...props} timeline={[{ ...item, entryId: 'saved', text: item.text + '新增' }]} />)
+    await flushRevealStages(flushFrame, () => content.querySelector('[data-text-reveal-pending="true"]') === null)
     expect(view.container.querySelector('.bubble-content')).toBe(content)
     expect(Array.from(content.querySelectorAll('.screen-text-reveal-live'), (node) => node.textContent).join('')).toBe('新增')
   })
@@ -97,18 +151,26 @@ describe('ChatMessage', () => {
     expect(view.container.querySelector('.bubble-content span')).toBeNull()
   })
 
-  it('uses visible history chunks for user text, with cleanup and no live or send replay', () => {
+  it('uses visible history chunks for user text, with cleanup and no live or send replay', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('IntersectionObserver', undefined)
+    const flushFrame = mockLineRevealFrames()
     const item = { kind: 'user' as const, id: 47, text: '历史🙂\n文字', historical: true, live: true }
-    const view = render(<ChatMessage item={item} canFork={false} readOnly />)
+    const props = revealTimelineProps([item])
+    const view = render(<ChatTimeline {...props} readOnly />)
     const content = view.container.querySelector('.bubble-content')!
+    expect(content.querySelector('.screen-text-reveal-history')).toBeNull()
+    await flushFrame()
+    expect(content.closest('.bubble-user')).toHaveAttribute('data-line-reveal-ready', 'true')
+    expect(content.querySelector('[data-text-reveal-pending="true"]')).not.toBeNull()
+    await flushRevealStages(flushFrame, () => content.querySelector('[data-text-reveal-start]') !== null
+      && content.querySelector('[data-text-reveal-pending="true"]') === null)
     expect(content.querySelector('.screen-text-reveal-history')).toBeInTheDocument()
     expect(content.querySelector('.screen-text-reveal-live')).toBeNull()
     expect(view.container.querySelector('.user-send-entering')).toBeNull()
     act(() => vi.advanceTimersByTime(468))
     expect(content.querySelector('[data-screen-reveal-character]')).toBeNull()
-    view.rerender(<ChatMessage item={{ ...item, entryId: 'persisted' }} canFork={false} readOnly />)
+    view.rerender(<ChatTimeline {...props} timeline={[{ ...item, entryId: 'persisted' }]} readOnly />)
     expect(view.container.querySelector('.bubble-content')).toBe(content)
     expect(content.querySelector('[data-screen-reveal-character]')).toBeNull()
   })
@@ -867,6 +929,158 @@ describe('ChatMessage', () => {
     expect(view.container.querySelector('.markdown .screen-text-reveal-live')).toHaveTextContent('f')
   })
 
+  it('starts pending Markdown batches at their managed line clock even after settlement and a long history queue', async () => {
+    vi.useFakeTimers()
+    const flushFrame = mockLineRevealFrames()
+    const history = { kind: 'assistant' as const, id: 1, text: Array.from({ length: 55 }, (_, index) => `历史${index}`).join('\n'),
+      thinking: '', historical: true, streaming: false }
+    const live = { kind: 'assistant' as const, id: 2, text: 'abc', thinking: '', streaming: true, live: true }
+    const props = revealTimelineProps([history, live])
+    const view = render(<StrictMode><ChatTimeline {...props} /></StrictMode>)
+    const markdown = view.container.querySelectorAll('.markdown')[1]
+    const line = markdown.querySelector<HTMLElement>('.screen-text-reveal-line')!
+    const character = markdown.querySelector<HTMLElement>('.screen-text-reveal-live')!
+    expect(line).not.toHaveAttribute('data-line-reveal-ready')
+    expect(character.style.animationPlayState).toBe('paused')
+    expect(vi.getTimerCount()).toBe(0)
+    act(() => vi.advanceTimersByTime(2000))
+    view.rerender(<StrictMode><ChatTimeline {...props} timeline={[history, { ...live, live: false, streaming: false }]} /></StrictMode>)
+    expect(markdown.querySelector('.screen-text-reveal-live')).toBe(character)
+    expect(character.style.animationPlayState).toBe('paused')
+    expect(vi.getTimerCount()).toBe(0)
+
+    await flushFrame()
+    const delay = character.style.getPropertyValue('--screen-text-reveal-delay')
+    expect(delay).toBe('1100ms') // 55 historical lines, not the live ref's commit order.
+    expect(line.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+    expect(line.closest('.bubble-assistant')).toHaveAttribute('data-line-reveal-start', line.dataset.lineRevealStart)
+    expect(character.style.animationPlayState).toBe('')
+    expect(vi.getTimerCount()).toBe(1)
+    act(() => vi.advanceTimersByTime(900)) // Longer than the former commit-based maximum deadline.
+    expect(markdown.querySelector('.screen-text-reveal-live')).toBe(character)
+    expect(character.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+    const deadline = Number(line.dataset.lineRevealStart)
+      + SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS + 2 * SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS
+    act(() => vi.advanceTimersByTime(Math.ceil(deadline - performance.now()) - 1))
+    expect(markdown.querySelector('.screen-text-reveal-live')).toBe(character)
+    act(() => vi.advanceTimersByTime(1))
+    expect(markdown.querySelector('.screen-text-reveal-live')).toBeNull()
+    expect(markdown.querySelector('.screen-text-reveal-line')).toBe(line)
+    expect(markdown).toHaveTextContent('abc')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('waits for the actual offscreen line without delaying ready-line suffixes or retiring its pending characters', async () => {
+    vi.useFakeTimers()
+    let belowViewport = true
+    const flushFrame = mockLineRevealFrames(element => belowViewport
+      && element.matches('.markdown .screen-text-reveal-line') && element.textContent === 'new' ? 900 : 120)
+    const live = { kind: 'assistant' as const, id: 1, text: 'old', thinking: '', streaming: true, live: true }
+    const props = revealTimelineProps([live])
+    const view = render(<ChatTimeline {...props} />)
+    await flushFrame()
+    const markdown = view.container.querySelector('.markdown')!
+    const firstLine = markdown.querySelector('.screen-text-reveal-line')!
+    const first = markdown.querySelector<HTMLElement>('.screen-text-reveal-live')!
+    const firstDelay = first.style.getPropertyValue('--screen-text-reveal-delay')
+    act(() => vi.advanceTimersByTime(10))
+    view.rerender(<ChatTimeline {...props} timeline={[{ ...live, text: 'oldx' }]} />)
+    const suffix = markdown.querySelectorAll<HTMLElement>('.screen-text-reveal-live')[3]
+    expect(suffix.style.getPropertyValue('--screen-text-reveal-delay')).toBe('0ms')
+    expect(first.style.getPropertyValue('--screen-text-reveal-delay')).toBe(firstDelay)
+    expect(markdown.querySelector('.screen-text-reveal-live')).toBe(first)
+    view.rerender(<ChatTimeline {...props} timeline={[{ ...live, text: 'oldx\nnew' }]} />)
+    await flushFrame()
+    const nextLine = markdown.querySelectorAll<HTMLElement>('.screen-text-reveal-line')[1]
+    const pending = nextLine.querySelector<HTMLElement>('.screen-text-reveal-live')!
+    expect(nextLine).not.toHaveAttribute('data-line-reveal-ready')
+    expect(pending.style.animationPlayState).toBe('paused')
+    act(() => vi.advanceTimersByTime(2000))
+    expect(firstLine.querySelector('.screen-text-reveal-live')).toBeNull()
+    expect(firstLine).toHaveTextContent('oldx')
+    expect(nextLine.querySelector('.screen-text-reveal-live')).toBe(pending)
+    expect(vi.getTimerCount()).toBe(0)
+    view.rerender(<ChatTimeline {...props} timeline={[{ ...live, text: 'oldx\nnew', live: false, streaming: false }]} />)
+    belowViewport = false
+    fireEvent.scroll(props.scrollRef.current!)
+    await flushFrame()
+    expect(nextLine).toHaveAttribute('data-line-reveal-ready', 'true')
+    expect(pending.style.animationPlayState).toBe('')
+    expect(pending.style.getPropertyValue('--screen-text-reveal-delay')).toBe('0ms')
+    expect(nextLine.querySelector('.screen-text-reveal-live')).toBe(pending)
+    expect(markdown.querySelector('.screen-text-reveal-line')).toBe(firstLine)
+    expect(vi.getTimerCount()).toBe(1)
+    const owner = props.scrollRef.current!
+    view.unmount()
+    act(() => owner.dispatchEvent(new Event('pion:line-reveal')))
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([false, true])('reuses highlighting across Markdown updates and fade cleanups without replaying old fades (StrictMode: %s)', (strictMode) => {
+    vi.useFakeTimers()
+    const initializeHighlight = vi.mocked(rehypeHighlight)
+    initializeHighlight.mockClear()
+    const options = { wrapper: strictMode ? StrictMode : undefined }
+    const text = '```js\nconst answer = 42\n```\n\nabc'
+    const view = render(<Markdown text={text} revealMode="live" />, options)
+    // StrictMode probes the state initializer twice in development; neither
+    // token updates nor cleanup renders should add to that mount baseline.
+    const initializations = initializeHighlight.mock.calls.length
+    expect(initializations).toBe(strictMode ? 2 : 1)
+    expect(view.container.querySelector('.hljs-keyword')).toHaveTextContent('const')
+    act(() => vi.advanceTimersByTime(100))
+    view.rerender(<Markdown text={text + 'd'} revealMode="live" />)
+    const originalSuffix = view.container.querySelectorAll('.screen-text-reveal-live')[3]
+    expect(initializeHighlight).toHaveBeenCalledTimes(initializations)
+    // The original abc batch ends first; d keeps its own later deadline.
+    act(() => vi.advanceTimersByTime(SCREEN_TEXT_REVEAL_LIVE_DURATION_MS))
+    expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(1)
+    expect(view.container.querySelector('.screen-text-reveal-live')).toBe(originalSuffix)
+    expect(originalSuffix).toHaveTextContent('d')
+    expect(initializeHighlight).toHaveBeenCalledTimes(initializations)
+    act(() => vi.advanceTimersByTime(100))
+    expect(view.container.querySelector('.screen-text-reveal-live')).toBeNull()
+    view.rerender(<Markdown text={text + 'd'} />)
+    view.rerender(<Markdown text={text + 'de'} revealMode="live" />)
+    expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(1)
+    expect(view.container.querySelector('.screen-text-reveal-live')).toHaveTextContent('e')
+    expect(originalSuffix).toBeInTheDocument()
+    expect(initializeHighlight).toHaveBeenCalledTimes(initializations)
+    render(<Markdown text={text} />, options)
+    expect(initializeHighlight).toHaveBeenCalledTimes(initializations * 2)
+  })
+
+  it('keeps settled live line and link identities when the last character expires before the line fade ends', () => {
+    vi.useFakeTimers()
+    resetLineRevealClock()
+    takeLineRevealSlot('live')
+    const text = '[a](https://example.test)'
+    const view = render(<Markdown text={text} revealMode="live" />)
+    const line = view.container.querySelector<HTMLElement>('.screen-text-reveal-line-live')!
+    const link = view.getByRole('link', { name: 'a' })
+    const character = link.querySelector('.screen-text-reveal-live')
+    const delay = line.style.getPropertyValue('--screen-text-reveal-delay')
+    expect(delay).toBe('40ms')
+    view.rerender(<Markdown text={text} />)
+    const characterDeadline = SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS
+    act(() => vi.advanceTimersByTime(characterDeadline - 1))
+    expect(link.querySelector('.screen-text-reveal-live')).toBe(character)
+    act(() => vi.advanceTimersByTime(1))
+    // At 508ms the line is still inside its original 40ms + 560ms fade.
+    expect(view.container.querySelector('.screen-text-reveal-live')).toBeNull()
+    expect(view.container.querySelector('.screen-text-reveal-line-live')).toBe(line)
+    expect(line).not.toHaveClass('screen-text-reveal-static')
+    expect(line.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+    expect(view.getByRole('link', { name: 'a' })).toBe(link)
+    expect(vi.getTimerCount()).toBe(0)
+    act(() => vi.advanceTimersByTime(200))
+    view.rerender(<Markdown text={text + ' settled'} />)
+    expect(view.container.querySelector('.screen-text-reveal-line-live')).toBe(line)
+    expect(view.getByRole('link', { name: 'a' })).toBe(link)
+    expect(line.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+    expect(view.container.querySelector('.screen-text-reveal-live')).toBeNull()
+  })
+
   it('preserves completed-line fades through a new line and streaming settlement, then cleans up without losing text', () => {
     vi.useFakeTimers()
     const view = render(<Markdown text="abc" revealMode="live" />)
@@ -884,17 +1098,118 @@ describe('ChatMessage', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('bounds pending Markdown fades and uses one cleanup timer with unmount cleanup', () => {
+  it('keeps newly settled lines static across cleanup and continuous commits without restarting old line fades', () => {
     vi.useFakeTimers()
-    const view = render(<Markdown text={'x'.repeat(5000)} revealMode="live" />)
+    resetLineRevealClock()
+    const view = render(<Markdown text="abc" revealMode="live" />)
+    const originalLine = view.container.querySelector<HTMLElement>('.screen-text-reveal-line-live')!
+    const originalCharacter = originalLine.querySelector('.screen-text-reveal-live')
+    const delay = originalLine.style.getPropertyValue('--screen-text-reveal-delay')
+    act(() => vi.advanceTimersByTime(10))
+    view.rerender(<Markdown text={'abc\ndef'} />)
+    const settledLine = view.container.querySelectorAll('.screen-text-reveal-line-live')[1]
+    expect(settledLine).toHaveClass('screen-text-reveal-static')
+    expect(view.container.querySelector('.screen-text-reveal-live')).toBe(originalCharacter)
+    expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(3)
+    act(() => vi.advanceTimersByTime(SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS + 10))
+    expect(view.container.querySelector('.screen-text-reveal-live')).toBeNull()
+    expect(view.container.querySelector('.screen-text-reveal-line-live')).toBe(originalLine)
+    expect(originalLine).not.toHaveClass('screen-text-reveal-static')
+    expect(originalLine.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+    expect(view.container.querySelectorAll('.screen-text-reveal-line-live')[1]).toBe(settledLine)
+    expect(settledLine).toHaveClass('screen-text-reveal-static')
+    view.rerender(<Markdown text={'abc\ndef\nghi'} />)
+    const nextSettledLine = view.container.querySelectorAll('.screen-text-reveal-line-live')[2]
+    expect(settledLine).toHaveClass('screen-text-reveal-static')
+    expect(nextSettledLine).toHaveClass('screen-text-reveal-static')
+    view.rerender(<Markdown text={'abc\ndef\nghij'} revealMode="live" />)
+    expect(view.container.querySelectorAll('.screen-text-reveal-line-live')[1]).toBe(settledLine)
+    expect(view.container.querySelectorAll('.screen-text-reveal-line-live')[2]).toBe(nextSettledLine)
+    expect(settledLine).toHaveClass('screen-text-reveal-static')
+    expect(nextSettledLine).toHaveClass('screen-text-reveal-static')
+    expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(1)
+    expect(view.container.querySelector('.screen-text-reveal-live')).toHaveTextContent('j')
+    view.rerender(<Markdown text={'replacement\nnew'} revealMode="live" />)
+    expect(view.container.querySelector('.screen-text-reveal-static')).toBeNull()
+  })
+
+  it('reprojects StrictMode drafts within the live budget without consuming suspended suffixes', () => {
+    vi.useFakeTimers()
+    const pending = new Promise<never>(() => {})
+    let suspendedRenders = 0
+    function Gate({ suspended }: { suspended: boolean }): null {
+      if (suspended) {
+        suspendedRenders++
+        throw pending
+      }
+      return null
+    }
+    const frame = (text: string, suspended = false) => (
+      <StrictMode>
+        <Suspense fallback={null}>
+          <Markdown text={text} revealMode="live" />
+          <Gate suspended={suspended} />
+        </Suspense>
+      </StrictMode>
+    )
+    const prefix = 'a'.repeat(2048)
+    const text = prefix + 'c'.repeat(2048)
+    const view = render(frame(prefix))
+    const original = view.container.querySelector('.screen-text-reveal-live')
+    expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(2048)
+    act(() => vi.advanceTimersByTime(100))
+    view.rerender(frame(prefix + 'b'.repeat(2048), true))
+    expect(suspendedRenders).toBeGreaterThan(0)
+    view.rerender(frame(text))
+    expect(view.container.querySelector('.screen-text-reveal-live')).toBe(original)
+    expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(4096)
+    expect(Array.from(view.container.querySelectorAll('.screen-text-reveal-live'), (node) => node.textContent).join('')).toBe(text)
+    view.rerender(frame(text + 'd'))
     expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(4096)
     expect(vi.getTimerCount()).toBe(1)
     act(() => vi.advanceTimersByTime(SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS + 10))
     expect(view.container.querySelector('.screen-text-reveal-live')).toBeNull()
     expect(vi.getTimerCount()).toBe(0)
-    view.rerender(<Markdown text={'x'.repeat(5000) + 'y'} revealMode="live" />)
+    view.rerender(frame(text + 'de'))
     expect(view.container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(1)
+    expect(view.container.querySelector('.screen-text-reveal-live')).toHaveTextContent('e')
+  })
+
+  it('bounds managed pending Markdown and rejects an old-text notification after replacement', async () => {
+    vi.useFakeTimers()
+    const flushFrame = mockLineRevealFrames()
+    const listen = vi.spyOn(HTMLElement.prototype, 'addEventListener')
+    const live = { kind: 'assistant' as const, id: 1, text: 'x'.repeat(5000), thinking: '', streaming: true, live: true }
+    const props = revealTimelineProps([live])
+    const view = render(<ChatTimeline {...props} />)
+    const owner = props.scrollRef.current!
+    const registration = listen.mock.calls.findIndex(([type], index) => type === 'pion:line-reveal'
+      && listen.mock.contexts[index] === owner)
+    const staleAdmit = listen.mock.calls[registration][1] as EventListener
+    const notification = new Event('pion:line-reveal')
+    act(() => owner.dispatchEvent(notification))
+    expect(view.container.querySelectorAll('.markdown .screen-text-reveal-live')).toHaveLength(4096)
+    expect(view.container.querySelector('.markdown')?.textContent).toBe(live.text)
+    expect(vi.getTimerCount()).toBe(0)
+    act(() => vi.advanceTimersByTime(2000))
+    expect(view.container.querySelectorAll('.markdown .screen-text-reveal-live')).toHaveLength(4096)
+    view.rerender(<ChatTimeline {...props} timeline={[{ ...live, text: 'replacement' }]} />)
+    act(() => staleAdmit(notification))
+    expect(view.container.querySelectorAll('.markdown .screen-text-reveal-live')).toHaveLength(11)
+    expect(view.container.querySelector('.markdown')?.textContent).toBe('replacement')
+    expect(vi.getTimerCount()).toBe(0)
+    await flushFrame()
+    expect(vi.getTimerCount()).toBe(1)
+    act(() => vi.advanceTimersByTime(SCREEN_TEXT_REVEAL_LIVE_DURATION_MS + SCREEN_TEXT_REVEAL_LIVE_MAX_DELAY_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS + 10))
+    expect(view.container.querySelector('.markdown .screen-text-reveal-live')).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+    view.rerender(<ChatTimeline {...props} timeline={[{ ...live, text: 'replacement readonly' }]} readOnly />)
+    expect(view.container.querySelector('.markdown .screen-text-reveal-live')).toBeNull()
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
+    view.rerender(<ChatTimeline {...props} timeline={[{ ...live, text: 'replacement readonly reduced' }]} />)
+    expect(view.container.querySelector('.markdown .screen-text-reveal-live')).toBeNull()
     view.unmount()
+    act(() => staleAdmit(notification))
     expect(vi.getTimerCount()).toBe(0)
   })
 
@@ -966,34 +1281,38 @@ describe('ChatMessage', () => {
     expect(container.querySelectorAll('.screen-text-reveal-live')).toHaveLength(6)
   })
 
-  it('fades the assistant bubble in together with its first line', () => {
+  it('fades the actual timeline assistant bubble with its first line only after earlier user text commits', async () => {
+    const flushFrame = mockLineRevealFrames()
     vi.spyOn(performance, 'now').mockReturnValue(1000)
-    resetLineRevealClock()
-    takeLineRevealSlot() // occupy an earlier slot so the line delay is non-zero
-    const { container } = render(
-      <ChatMessage
-        item={{
-          kind: 'assistant',
-          id: 5,
-          text: '第一行\n第二行',
-          thinking: '',
-          streaming: false,
-          historical: true
-        }}
-        canFork={false}
-      />
-    )
-    // History lines wait for the settle scan, which assigns DOM-order delays
-    // and lets the bubble copy its first line's slot.
-    assignPendingLineDelays(container)
-
-    const bubble = container.querySelector<HTMLElement>('.bubble-assistant')
-    const firstLine = container.querySelector<HTMLElement>('.markdown .screen-text-reveal-line')
-    expect(bubble?.className).toContain('screen-text-reveal-line')
-    expect(firstLine).not.toBeNull()
-    const lineDelay = firstLine?.style.getPropertyValue('--screen-text-reveal-delay')
-    expect(lineDelay).toBe('40ms')
-    expect(bubble?.style.getPropertyValue('--screen-text-reveal-delay')).toBe('20ms')
-    vi.restoreAllMocks()
+    const props = revealTimelineProps([
+      { kind: 'user', id: 4, text: '更早一行', historical: true },
+      { kind: 'assistant', id: 5, text: '第一行\n第二行', thinking: '', streaming: false, historical: true }
+    ])
+    const { container } = render(<ChatTimeline {...props} />)
+    const userBubble = container.querySelector<HTMLElement>('.bubble-user')!
+    const userChunk = userBubble.querySelector<HTMLElement>('[data-text-reveal-pending="true"]')!
+    const bubble = container.querySelector<HTMLElement>('.bubble-assistant')!
+    const firstLine = bubble.querySelector<HTMLElement>('.markdown .screen-text-reveal-line')!
+    expect(userChunk).toBeInTheDocument()
+    expect(bubble).not.toHaveAttribute('data-line-reveal-ready')
+    expect(firstLine).not.toHaveAttribute('data-line-reveal-ready')
+    await flushFrame()
+    expect(userBubble).toHaveAttribute('data-line-reveal-ready', 'true')
+    expect(userChunk).toHaveAttribute('data-text-reveal-pending', 'true')
+    expect(bubble).not.toHaveAttribute('data-line-reveal-ready')
+    expect(firstLine).not.toHaveAttribute('data-line-reveal-ready')
+    await flushRevealStages(flushFrame, () => userChunk.dataset.textRevealPending !== 'true'
+      && userChunk.dataset.textRevealStart !== undefined)
+    expect(userChunk.querySelector('.screen-text-reveal-history')).toBeInTheDocument()
+    expect(userChunk).toHaveAttribute('data-text-reveal-start', '1000')
+    await flushRevealStages(flushFrame, () => firstLine.dataset.lineRevealReady === 'true')
+    expect(container.querySelector('.bubble-user')).toBe(userBubble)
+    expect(userBubble.querySelector('[data-text-reveal-start]')).toBe(userChunk)
+    expect(container.querySelector('.bubble-assistant')).toBe(bubble)
+    expect(bubble.querySelector('.markdown .screen-text-reveal-line')).toBe(firstLine)
+    expect(firstLine.style.getPropertyValue('--screen-text-reveal-delay')).toBe('20ms')
+    expect(bubble.style.getPropertyValue('--screen-text-reveal-delay')).toBe('20ms')
+    expect(bubble.dataset.lineRevealStart).toBe(firstLine.dataset.lineRevealStart)
+    expect(bubble.dataset.lineRevealStart).toBe('1020')
   })
 })

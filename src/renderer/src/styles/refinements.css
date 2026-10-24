@@ -909,8 +909,8 @@ button.tool-head.screen-text-reveal-line {
   animation: none;
 }
 
-/* The animation only starts once the line's fixed delay has been assigned
-   (ref callback while streaming, settle scan while reading history). */
+/* Managed history/live lines start together in the viewport's ordered scan;
+   standalone consumers retain their compatibility ref/scan path. */
 .screen-text-reveal-line[data-line-reveal-ready="true"] {
   animation: screen-text-reveal 280ms linear
     var(--screen-text-reveal-delay, 0ms) both;

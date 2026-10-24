@@ -11,7 +11,7 @@
 | src/main/ipc/git.ts | Git 工作区路由注册，透传快照 ID、差异 scope、选择与冲突内容，不新建 GitService |
 | src/main/ipc/computer-use.ts | 手动本地窗口观察的 typed IPC，逐路由主窗口/活主帧及异步 scope/frame fence；状态去 owner/receipt，显式 capture 仅返回独立有界 PNG 缩略图，不返回原图或创建服务 |
 | src/main/ipc/window.ts | 窗口控制、原生外观及终端路由，注入窗口查找与所属服务，保留主帧检查及 owner ID 转发 |
-| src/preload/index.ts | 暴露 window.pion 的类型化桥接 |
+| src/preload/index.ts | 暴露 window.pion 的类型化桥接，含使用总览无路径year/month/date/startDay查询与后台采集开关 |
 | src/shared/ipc.ts | 请求与事件频道 |
 | src/shared/pion-api.ts | PionApi 接口 |
 | src/shared/types.ts | 共享类型入口；历史用户索引另带可选的实际消息时钟，与 entry 追加时间分开，提供共享归一化；历史分页响应另带所选分支的最新任务快照及压缩边界元数据 |
@@ -36,6 +36,45 @@
 | src/renderer/src/main.tsx | React 启动入口 |
 | src/renderer/src/App.tsx | 工作台装配、布局与交互编排，持有会话/面板控制器、原生命令/定向设置导航及弹窗首次挂载门控 |
 | src/renderer/src/app/WorkbenchDialogs.tsx | 受控工作台弹窗装配：操作面板、确认对话框与独立 lazy/Suspense 槽位；只返回 Fragment，不迁移 App 状态或聊天区权限浮层 |
+
+## 提问、请求快跳与使用总览
+
+| 路径 | 用途 |
+| --- | --- |
+| src/shared/question-answer.ts | 原生select自定义回答选项与私有编解码，严格question/非global判定；marker不替代真实提问receipt |
+| src/main/agent/ask-user.ts、agent-bridge.ts | 自定义答案校验/解码与SDK value转换，保原请求deadline；权限UI按captured backend投影归属，私有策略路径不变；真实root落盘通知调度账本，删除/复制分叉/迁移前capture与selection/stop屏障 |
+| src/renderer/src/hooks/useAppInteractionState.ts | 全量pending订阅、exact cwd/path归属、真实request.id响应及请求级RPC槽/错误，推送挡迟到查询，全局认证独立 |
+| src/renderer/src/features/common/SessionInteractionPanel.tsx | 提问/权限共用默认展开可收起卡片，retainContent/inert保草稿与展开状态，不抢焦点 |
+| src/renderer/src/features/common/ExtensionUiModal.tsx、features/operations/ToolPermissionModal.tsx | 仅所属会话交互；自定义回答本地往返保草稿/期限，明确提交才RPC；全局认证保持居中 |
+| src/renderer/src/features/session/PendingInteractionSessions.tsx | 侧栏设置左边请求快跳，按真实cwd/path合并，悬浮只展示缓存，点击普通选择，不回答/授权/清pending |
+| src/renderer/src/features/project/Sidebar.tsx、features/session/SessionList.tsx | 快跳接线、待处理蓝点复用未读标记，阅读/运行不清除 |
+| src/renderer/src/hooks/useConversationOverlays.ts | 任务/队列真实顶部独立避让；短停靠区输入与浮层限高，不加聊天滚动余量 |
+| src/renderer/src/styles/extension-ui.css、styles/permissions.css、styles/sidebar.css、styles/refinements/project.css | 提问/权限卡片堆叠、14px间距/短区域滚动、快跳有界列表与待处理蓝点 |
+| src/shared/usage-overview.ts | 全局/账期费用Token、真实session/receipt数、分布/全局coverage、互斥query与返回period；主进程调度/capture接口 |
+| src/shared/usage-period.ts | year/month/date/startDay校验、UTC自然年/日及短月截日的半开月账期，无FS/模型调用 |
+| src/main/ipc/usage.ts | 注入既有账本/设置，typed查询与后台开关先持久后应用，异步前后owner/活主帧检查，无后端/网络/认证 |
+| src/main/usage-ledger.ts | 固定SDK根完整补录、后台开关/低频串行让出/stamp跳读、前台提升与退出dirty flush；capture、真实singleflight、已核验lineage去重，全历史去重后年/月/日投影 |
+| src/main/usage-ledger-store.ts | userData长期JSON账本、严格schema/校验和、无容量/记录数人为上限；wx锁、暂存sync/close、原子发布与目录身份复查，未知close隔离，不清未知锁 |
+| src/main/agent/session-token-total.ts | 共用只读流式解析：账本无文件/行/条目数量限制，64KiB块可让出、仅元信息/哈希receipts；侧栏保原预算，SDK header及文件快照校验，不打开writer |
+| src/main/index.ts、app-settings.ts | 注入userData账本/固定SDK根，持久后台采集开关、延后补录、退出等windowShutdown/bridge.stop再flush，不全扫 |
+| src/renderer/src/App.tsx、app/WorkbenchDialogs.tsx、hooks/useSlashCommands.ts | 工具栏与准备期/stats共用全局stats宿主，独立lazy槽，保会话/草稿身份 |
+| src/renderer/src/features/operations/UsageOverviewModal.tsx、useUsageOverview.ts | 全局SDK估算/Token/覆盖、项目模型分页、全部时间近30日或完整年/月/日；互斥筛选与起始日偏好、返回period标金额，真实RPC槽跨关闭保留，代际拒迟到 |
+| src/renderer/src/features/settings/SessionPage.tsx | UsageCollectionSettings复用Toggle，持久后台自动采集设置，实际保存槽/迟到身份与错误显示 |
+| src/renderer/src/styles/usage-overview.css | 总览卡片、独立滚动/分页分布与口径提示，主题/窄窗/键盘及forced-colors |
+
+### 对应回归入口
+
+- `tests/unit/agent-bridge-extension-ui.test.ts`、`ask-user.test.ts`：真实backend权限归属与自定义回答receipt/单字段/非空/长度/支持范围；普通扩展/认证/混合响应拒绝。
+- `tests/renderer/sessionInteractions.test.tsx`、`ExtensionUiModal.test.tsx`、`ToolPermissionModal.test.tsx`：请求归属/草稿/默认展开/切换/请求级RPC，自定义回答本地返回不发RPC。
+- `tests/renderer/PendingInteractionSessions.test.tsx`、`Sidebar.test.tsx`、`SessionList.test.tsx`：快跳合并/悬浮/键盘/普通导航与蓝点，不自动回答授权。
+- `tests/renderer/conversationOverlays.test.tsx`、`SubagentConversation.test.tsx`：任务/队列动态避让、短区域与隐藏inert。
+- `tests/unit/usage-ledger.test.ts`、`usage-ledger-unlimited.test.ts`：去重/lineage/alias/stamp/父删除/覆盖、旧容量取消、后台调度/开关/dirty flush、隐私、坏账本/锁/原子失败及真实close singleflight。
+- `tests/unit/usage-period.test.ts`、`usage-ledger-period.test.ts`：互斥校验/UTC边界/短月/闰年、全历史去重后过滤与完整日期分布、异query共扫描独立投影。
+- `tests/unit/usage-ledger-bridge.test.ts`：删除/复制分叉/迁移前capture、失败保源、启动路径槽/stop代际与真实停止Promise，root事件与私有/嵌套排除。
+- `tests/unit/usage-ipc.test.ts`、`session-token-total.test.ts`：owner/主帧/迟到身份、preload/注册与只读双入口解析/预算/元信息隐私。
+- `tests/renderer/UsageOverview.test.tsx`、`usageOverviewPeriods.test.tsx`：展示/覆盖/分页、真实hook筛选代际/A→B→A/只读最新选择、关闭保槽/失败保原period、API/getter身份。
+- `tests/renderer/UsageCollectionSettings.test.tsx`：后台开关加载/保存/失败/卸载与重开等实际写入，不扫描。
+- `tests/unit/slash-commands.test.ts`、`tests/renderer/slashCommandActions.test.tsx`、`WorkbenchDialogs.test.tsx`：准备期/stats原生分派与独立lazy宿主。
 
 ## 主进程功能
 
@@ -168,6 +207,16 @@
 - `browser/BrowserNavigationContext.ts`：仅宿主 renderer 的链接导航 Context；普通 Markdown HTTP(S) 链接阻止默认开窗，经 App 打开同一 BrowserPanel，非法链接/无 Provider 不退回外部窗口，只读子会话不可导航，不新增 IPC 或 guest API。
 - `common/PionSelect.tsx`、`styles/pion-select.css`：主题一致的自绘 combobox/listbox，分组、禁用、键盘/typeahead/IME，body portal 视口翻转及仅菜单滚动；菜单 Escape 不关闭设置，触发器保持焦点，保留 fieldset 禁用及 forced-colors/减少动效，设置中不使用系统原生 select。`tests/renderer/PionSelect.test.tsx` 覆盖交互、定位、作用域清理及样式契约。
 - `common/`：通用对话框、空状态和扩展 UI；`AnimatedDisclosure.tsx` 按需挂载详情，提供可反转的短收起过渡，默认结束后释放DOM；retainContent用于有状态批次，首次懒挂载后隐藏保DOM/摘要状态，close立即inert，减少动效即时隐藏/快速重开清计时器。`DisclosureRevealGate.tsx`共享展开文字阶段门（200ms布局收口/减少动效即时/嵌套祖先AND/owned清理）；AnimatedDisclosure与ChatTimeline工具组接入，motion.css仅暂停门内行动画，ReviewRevealText延迟观察/字符分配，不重挂DOM或暂停字符回收时钟；AnimatedDisclosure/ReviewRevealText/ToolCallItem/toolActivityTimeline回归覆盖阶段先后。
+
+## 视口有序渐显
+
+- `src/renderer/src/utils/lineReveal.ts`：所属时间线单RAF，history/live按DOM顺序准入，泡泡首行同步；可见pending文字真实commit/展开门收口前挡后行，屏外裁切不阻塞，真实animationend退役，不写滚动。
+- `src/renderer/src/utils/textRevealOrder.ts`：字符块跨实例按root/DOM排序，IO只唤醒；父/兄弟line绝对start及opening gate屏障、整批cap与scope尾时钟、owned订阅/observer/RAF清理。
+- `src/renderer/src/utils/historyReveal.ts`、`screenTextReveal.tsx`：共享常量、受管ref登记与兼容行启用；按实际后缀准入冻结延迟/期限，保旧DOM/未完成fade及Unicode边界。
+- `src/renderer/src/features/chat/ChatTimeline.tsx`、`ToolActivityHeader.tsx`、`ToolCallItem.tsx`、`Markdown.tsx`：受管视口顺序、工具组首开标题统一history/被动补历史静态、详情资格不变；Markdown实例复用transformer/批次索引，未line start不消费淡入/回收期限。
+- `src/renderer/src/features/review/ReviewRevealText.tsx`、`features/common/DisclosureRevealGate.tsx`：已提交完整块复用与尾块追加、真实字符commit反向屏障、嵌套可见门open/ready区分及迟到清理。
+- `tests/renderer/lineReveal.test.tsx`、`historyReveal.test.tsx`、`screenTextReveal.test.tsx`、`ReviewRevealText.test.tsx`：视口/DOM顺序、可见前置文字与门、屏外不阻塞、scope/隐藏/迟到及后缀期限/Unicode回归。
+- `tests/renderer/ChatTimeline.test.tsx`、`ChatMessage.test.tsx`、`ToolActivityHeader.test.tsx`、`ToolCallItem.test.tsx`、`toolActivityTimeline.test.tsx`、`historyPaging.test.tsx`：组首开标题/noReveal及live资格、被动历史补入、真实animationend退役与分页/身份保留。回归文件不等同浏览器动画/性能实测。
 
 ## 样式与渐入
 

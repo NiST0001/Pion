@@ -54,6 +54,72 @@
   color: var(--fg);
 }
 
+.pending-interaction-jump { display: flex; flex: none; }
+.pending-interaction-trigger { flex: none; }
+.pending-interaction-label { display: none; }
+.pending-interaction-count {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--cyan);
+  font-size: 10px;
+  line-height: 16px;
+}
+.pending-interaction-trigger[data-pending='true'] { color: var(--cyan); }
+.pending-interaction-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: min(360px, calc(100vh - 140px));
+  padding: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-pop);
+}
+/* Keep hover continuous while moving from the entry into the floating list. */
+.pending-interaction-popover::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -8px;
+  height: 8px;
+}
+.pending-interaction-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.pending-interaction-session {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  text-align: left;
+}
+.pending-interaction-session:hover { background: var(--bg-hover); }
+.pending-interaction-title, .pending-interaction-cwd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pending-interaction-title { font-size: 12px; }
+.pending-interaction-cwd, .pending-interaction-empty { color: var(--fg-faint); font-size: 11px; }
+.pending-interaction-empty { padding: 8px; }
+.pending-interaction-kinds { display: flex; gap: 8px; color: var(--cyan); font-size: 10px; }
+html.pion-keyboard-focus .pending-interaction-trigger:focus-visible,
+html.pion-keyboard-focus .pending-interaction-session:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: -2px;
+}
+@media (forced-colors: active) {
+  .pending-interaction-count, .pending-interaction-kinds,
+  .pending-interaction-trigger[data-pending='true'] { color: ButtonText; }
+}
+
 .side-section {
   margin-bottom: 4px;
 }

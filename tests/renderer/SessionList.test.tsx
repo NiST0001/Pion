@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { SessionItems } from '../../src/renderer/src/features/session/SessionList'
-import { ProjectList } from '../../src/renderer/src/features/project/Sidebar'
+import { FavoriteSessions, ProjectList } from '../../src/renderer/src/features/project/Sidebar'
 import type { SessionMeta } from '../../src/shared/types'
 import type { SubagentSessionSummary } from '../../src/shared/subagent-sessions'
 
@@ -231,6 +231,84 @@ describe('SessionItems running indicator state', () => {
     expect(row).not.toHaveClass('running')
     expect(row).toHaveClass('active', 'unread')
     expect(row?.querySelector('.side-item-label')).toHaveTextContent(session.preview!)
+  })
+})
+
+describe('SessionItems attention indicator', () => {
+  it.each([false, true])('keeps one pending marker on an active running row until its request ends (unread: %s)', (unread) => {
+    const session = { ...optimistic, path: '/pending.jsonl', optimistic: false }
+    const props = {
+      sessions: [session], activePath: session.path, runningSessionPaths: new Set([session.path]),
+      unreadSessionPaths: new Set(unread ? [session.path] : []), previewDensity: 'compact' as const,
+      favoritePaths: new Set<string>(), onSelect: vi.fn(), onDelete: vi.fn(), onCopy: vi.fn(),
+      onRename: vi.fn(), onOpenTaskHistory: vi.fn(), getForkMessages: vi.fn().mockResolvedValue([]),
+      onFork: vi.fn().mockResolvedValue(''), onToggleFavorite: vi.fn()
+    }
+    const { container, rerender } = render(<SessionItems {...props} attentionSessionPaths={new Set([session.path])} />)
+    const row = container.querySelector<HTMLElement>('.side-session')!
+    const marker = row.querySelector('.side-session-unread-indicator')!
+    expect(row).toHaveClass('active', 'running')
+    expect(row.classList.contains('unread')).toBe(unread)
+    expect(row.querySelectorAll('.side-session-unread-indicator')).toHaveLength(1)
+    expect(marker).toHaveClass('attention')
+    expect(marker).toHaveAttribute('aria-label', '等待回答或权限确认')
+    expect(marker).toHaveAttribute('title', '等待回答或权限确认')
+    expect(marker).toBeVisible()
+    fireEvent.click(row)
+    expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(session.path)
+    expect(row.querySelector('.side-session-unread-indicator')).toBe(marker)
+    expect(marker).toHaveClass('attention')
+
+    rerender(<SessionItems {...props} attentionSessionPaths={new Set()} />)
+    expect(container.querySelector('.side-session')).toBe(row)
+    expect(row).toHaveClass('active', 'running')
+    expect(row.querySelector('.attention')).toBeNull()
+    if (unread) {
+      expect(row.querySelector('.side-session-unread-indicator')).toBe(marker)
+      expect(marker).toHaveAttribute('aria-label', '未读会话')
+      expect(marker).toHaveAttribute('title', '有新的运行结果')
+    } else {
+      expect(row.querySelector('.side-session-unread-indicator')).toBeNull()
+    }
+  })
+
+  it('passes pending paths through favorites and the project/folder/worktree tree', () => {
+    const session = { ...optimistic, path: '/pending.jsonl', projectCwd: '/tmp/worktree', optimistic: false }
+    const props = {
+      searchQuery: '', runningSessionPaths: new Set<string>(), attentionSessionPaths: new Set([session.path]),
+      previewDensity: 'compact' as const, favoritePaths: new Set<string>(), onToggleFavorite: vi.fn(),
+      onSelectSession: vi.fn(), onDelete: vi.fn(), onCopy: vi.fn(), onRename: vi.fn(),
+      onOpenTaskHistory: vi.fn(), getForkMessages: vi.fn().mockResolvedValue([]), onFork: vi.fn().mockResolvedValue('')
+    }
+    const { container } = render(<>
+      <FavoriteSessions {...props} sessions={[session]} />
+      <ProjectList {...props}
+        projects={[{ cwd: '/tmp/project', name: '项目', addedAt: 1, lastUsedAt: 1 }]}
+        sessionsByProject={{ [session.projectCwd]: [session] }}
+        branchesByProject={{ '/tmp/project': [{ cwd: session.projectCwd, name: 'feature', isMain: false }] }}
+        onSelect={vi.fn()} onAdd={vi.fn()} onRemove={vi.fn()} onNewSession={vi.fn()} onNewBranch={vi.fn()}
+        onRenameBranch={vi.fn()} onReorder={vi.fn()}
+      />
+    </>)
+    const rows = container.querySelectorAll('.side-session')
+    expect(rows).toHaveLength(2)
+    for (const row of rows) {
+      expect(row).not.toHaveClass('unread', 'active', 'running')
+      expect(row.querySelectorAll('.side-session-unread-indicator')).toHaveLength(1)
+      expect(row.querySelector('.side-session-unread-indicator')).toHaveClass('attention')
+      expect(row.querySelector('.side-session-unread-indicator')).toHaveAttribute('aria-label', '等待回答或权限确认')
+    }
+  })
+
+  it('only recolors the shared dot using the blue theme token with a system-color fallback', () => {
+    const css = readFileSync('src/renderer/src/styles/refinements/project.css', 'utf8')
+    const attention = css.match(/\.side-session-unread-indicator\.attention\s*\{([^}]+)\}/)?.[1] ?? ''
+    expect(attention).toContain('background: var(--cyan)')
+    expect(attention).not.toMatch(/accent|width|height|border-radius|display|visibility|opacity/)
+    const forced = css.match(/@media \(forced-colors: active\)\s*\{\s*\.side-session-unread-indicator\.attention\s*\{([^}]+)\}/)?.[1] ?? ''
+    expect(forced).toContain('background: Highlight')
+    expect(forced).toContain('border: 1px solid Highlight')
+    expect(forced).toContain('box-shadow: none')
   })
 })
 

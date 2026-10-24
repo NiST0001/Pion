@@ -6,6 +6,7 @@ import type { TerminalService } from '../../src/main/terminal-service'
 import type { WindowEffectsService } from '../../src/main/window-effects'
 import { registerAgentIpc } from '../../src/main/ipc/agent'
 import { registerGitIpc } from '../../src/main/ipc/git'
+import { registerUsageIpc } from '../../src/main/ipc/usage'
 import { registerWindowIpc } from '../../src/main/ipc/window'
 import { registerComputerUseIpc } from '../../src/main/ipc/computer-use'
 import type { ComputerUseService } from '../../src/main/computer-use/service'
@@ -854,7 +855,14 @@ it('composes the domain registrars without duplicate channels', () => {
     createLocalOwner: () => { throw new Error('not invoked') },
     getLocalOwner: () => { throw new Error('not invoked') }
   })
+  const usageLedger = { getOverview: vi.fn(), setBackgroundCollectionEnabled: vi.fn() }
+  registerUsageIpc({
+    ipcMain: h.ipcMain, ledger: usageLedger,
+    appSettings: { usageBackgroundCollectionEnabled: true, setUsageBackgroundCollectionEnabled: vi.fn() },
+    getMainWindowId: () => 41
+  })
   const expected = new Set([
+    IPC.UsageOverview, IPC.GetUsageBackgroundCollection, IPC.SetUsageBackgroundCollection,
     IPC.ComputerUseGetState, IPC.ComputerUseStart, IPC.ComputerUseCapture, IPC.ComputerUseStop,
     ...agentRoutes.map(([channel]) => channel), ...sessionCommandRoutes.map(([channel]) => channel),
     IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
@@ -864,6 +872,8 @@ it('composes the domain registrars without duplicate channels', () => {
     ...gitRoutes.map(([channel]) => channel), ...effectRoutes.map(([channel]) => channel),
     ...terminalRoutes.map(([channel]) => channel), IPC.WindowState
   ])
+  expect(usageLedger.getOverview).not.toHaveBeenCalled()
+  expect(usageLedger.setBackgroundCollectionEnabled).not.toHaveBeenCalled()
   expect([...h.handlers.keys()].sort()).toEqual([...expected].sort())
   expect([...h.listeners.keys()]).toEqual([IPC.WindowControl])
 })

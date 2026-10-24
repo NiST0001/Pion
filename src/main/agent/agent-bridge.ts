@@ -4,6 +4,8 @@ import { link, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:f
 import { BrowserWindow, clipboard } from 'electron'
 import { subagentSettingsFilePath } from '../subagent-settings'
 import { questionSettingsFilePath } from '../question-settings'
+import type { UsageLedgerCollector } from '../../shared/usage-overview'
+import { encodeQuestionCustomAnswer, supportsCustomQuestionAnswer } from '../../shared/question-answer'
 import { capabilityEnabled, CAPABILITY_RUNTIME_COMMAND, type CapabilitySettingsSnapshot, type CapabilitySettingsUpdate } from '../../shared/capability-settings'
 import type { CapabilitySettingsStore } from '../capability-settings'
 import { readCapabilityResources } from '../capability-catalogue'
@@ -274,6 +276,9 @@ export class AgentBridge {
     }
   }
   private stopping = false
+  private stopInFlight?: Promise<void>
+  private sessionRemovalPaths?: Set<string>
+  private usageLedger?: UsageLedgerCollector
   private capabilitySettings?: CapabilitySettingsStore
   private capabilityScheduleQueued = false
   private capabilityQuarantinedCwds?: Set<string>
@@ -539,6 +544,10 @@ export class AgentBridge {
 
   private getActiveBackend(): BackendRecord | null {
     return this.activeKey ? this.backendPool.get(this.activeKey) ?? null : null
+  }
+
+  configureUsageLedger(ledger: UsageLedgerCollector): void {
+    this.usageLedger = ledger
   }
 
   configureCapabilitySettings(store: CapabilitySettingsStore): void {
@@ -974,6 +983,13 @@ export class AgentBridge {
     }
   }
 
+  private assertSessionLoadAllowed(sessionPath?: string): void {
+    this.assertSessionNotQuarantined(sessionPath)
+    if (sessionPath && this.sessionRemovalPaths?.has(resolve(sessionPath))) {
+      throw new Error('正在归档并删除会话，请稍后重试')
+    }
+  }
+
   /** IPC reservation covers even the pre-dispatch awaits before backend.busy is set. */
   async withSessionOperation<T>(operation: () => T | Promise<T>, allowCapabilityInteraction = false): Promise<T> {
     // Main IPC may opt in ONLY for resolving an already-owned permission/UI
@@ -1164,7 +1180,12 @@ export class AgentBridge {
   }
 
   getPendingToolPermissionRequests(): ToolPermissionRequest[] {
-    return this.pendingRequests.getToolPermissionRequests()
+    return this.pendingRequests.getToolPermissionRequests().map((request) => {
+      // UI ownership follows the captured backend, not a canonical policy path
+      // or extension metadata. Keep the private request unchanged for deny/grant.
+      const backend = this.pendingRequests.getToolPermission(request.id)?.scope?.backend
+      return backend ? { ...request, cwd: backend.cwd, sessionPath: backend.sessionPath } : request
+    })
   }
 
   getPendingExtensionUiRequests(): ExtensionUiRequest[] {
@@ -1282,16 +1303,27 @@ export class AgentBridge {
     const request = extensionPending?.request ?? providerPending?.request
     if (!request) throw new Error('交互请求已结束')
     if (!response || typeof response !== 'object') throw new Error('无效的交互响应')
-    const cancelled = 'cancelled' in response && response.cancelled === true
-    const hasValue = 'value' in response
-      && typeof response.value === 'string'
-      && response.value.length <= 256_000
-    const valid = cancelled || (request.method === 'confirm'
-      ? 'confirmed' in response && typeof response.confirmed === 'boolean'
-      : request.method === 'select'
-        ? hasValue && Boolean(request.options?.includes(response.value))
-        : hasValue)
-    if (!valid) throw new Error('无效的交互响应')
+    let resolvedResponse = response
+    if ('customAnswer' in response) {
+      if (Array.isArray(response) || Object.keys(response).length !== 1
+        || !extensionPending || providerPending || request.source === 'provider-auth'
+        || !supportsCustomQuestionAnswer(request) || typeof response.customAnswer !== 'string'
+        || !response.customAnswer.trim() || response.customAnswer.length > 256_000) {
+        throw new Error('无效的交互响应')
+      }
+      resolvedResponse = { value: encodeQuestionCustomAnswer(response.customAnswer) }
+    } else {
+      const cancelled = 'cancelled' in response && response.cancelled === true
+      const hasValue = 'value' in response
+        && typeof response.value === 'string'
+        && response.value.length <= 256_000
+      const valid = cancelled || (request.method === 'confirm'
+        ? 'confirmed' in response && typeof response.confirmed === 'boolean'
+        : request.method === 'select'
+          ? hasValue && Boolean(request.options?.includes(response.value))
+          : hasValue)
+      if (!valid) throw new Error('无效的交互响应')
+    }
 
     if (providerPending) {
       this.clearProviderAuthUiRequest(requestId)
@@ -1307,7 +1339,7 @@ export class AgentBridge {
     }
     // Ordinary cancellation/negative answers do not establish or clear a pause.
     // Timeout callbacks latch independently, before sending their cancellation.
-    this.respondToExtensionUi(pending.scope!.client, pending.extensionRequestId, response)
+    this.respondToExtensionUi(pending.scope!.client, pending.extensionRequestId, resolvedResponse)
     this.clearExtensionUiRequest(requestId)
   }
 
@@ -2406,6 +2438,9 @@ export class AgentBridge {
         content = await readFile(source, 'utf8')
         assertOwner()
       }
+      // Preserve the source alias and receipts before migration can remove it.
+      await this.usageLedger?.captureSession(source)
+      assertOwner()
       const lines = content.split('\n')
       const header = JSON.parse(lines[0]) as { type?: string; cwd?: string }
       if (header.type !== 'session' || !header.cwd || resolve(header.cwd) !== resolve(fromCwd)) {
@@ -2420,6 +2455,8 @@ export class AgentBridge {
       assertOwner()
       await link(staged, targetPath) // Atomic no-replace publication; never overwrite a target.
       published = targetPath
+      await this.usageLedger?.captureSession(targetPath)
+      assertOwner()
       await unlink(staged)
       staged = undefined
       assertOwner()
@@ -3005,6 +3042,13 @@ export class AgentBridge {
         this.trackBackendEvent(backend, event, type)
         return
       }
+      // Only root persistence/completion notices dirty the ledger. Nested and
+      // private UI packets above are never separate billable records.
+      if (backend.sessionPath && (type === 'message_end' || type === 'agent_settled'
+        || (type === 'entry_appended' && ['usage', 'compaction', 'branch_summary'].includes(
+          (event as { entry?: { type?: string } }).entry?.type ?? '')))) {
+        this.usageLedger?.scheduleSession(backend.sessionPath)
+      }
       const liveState = backend.liveState ??= new LiveSessionProjection()
       liveState.record(event)
       if (type === 'agent_start' || type === 'agent_settled'
@@ -3145,7 +3189,7 @@ export class AgentBridge {
     cwd: string,
     sessionPath?: string
   ): Promise<BackendRecord> {
-    this.assertSessionNotQuarantined(sessionPath)
+    this.assertSessionLoadAllowed(sessionPath)
     if (this.capabilityQuarantinedCwds?.has(resolve(cwd))) throw new Error('此项目仍有能力应用收尾未知的后端，未新建替代连接')
     const cliPath = pionRuntimePath()
     const args = await this.backendArgs(cwd, sessionPath)
@@ -3153,7 +3197,7 @@ export class AgentBridge {
     const capabilityStore = this.capabilitySettings
     const capabilityPreferences = await capabilityStore?.get()
     this.assertHistoryAvailable()
-    this.assertSessionNotQuarantined(sessionPath)
+    this.assertSessionLoadAllowed(sessionPath)
     const subagentViewNonce = randomUUID()
     const questionUiNonce = randomUUID()
     const client = new RpcClient({
@@ -3340,6 +3384,7 @@ export class AgentBridge {
     if (!sessionPath) return
     const normalizedPath = resolve(sessionPath)
     backend.sessionPath = normalizedPath
+    if ((state?.messageCount ?? 0) > 0) this.usageLedger?.scheduleSession(normalizedPath)
     if (backend.liveState) this.subagentSessionStore?.bindParent(backend.liveState.backendId, normalizedPath)
     this.updateRunSession(backend, normalizedPath, state.sessionId)
     // Parsed history is refreshed by its file signature or explicit history mutations,
@@ -3400,7 +3445,15 @@ export class AgentBridge {
     this.pushQueueSnapshot(backend)
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.stopInFlight) return this.stopInFlight
+    this.sessionSelectionGeneration += 1
+    const operation = this.stopBackends()
+    this.stopInFlight = operation.finally(() => { this.stopInFlight = undefined })
+    return this.stopInFlight
+  }
+
+  private async stopBackends(): Promise<void> {
     this.stopping = true
     // Logical stop cannot retire an in-flight replacement or release its pool slot.
     await Promise.allSettled([...this.backendPool.values()].flatMap(backend => backend.capability?.applyPromise ? [backend.capability.applyPromise] : []))
@@ -3759,7 +3812,7 @@ export class AgentBridge {
 
   private activateLogicalSession(sessionPath: string, cwd?: string): void {
     const target = resolve(sessionPath)
-    this.assertSessionNotQuarantined(target)
+    this.assertSessionLoadAllowed(target)
     this.activeSessionPath = target
     this.activeKey = this.backendKeysBySessionPath.get(target) ?? target
     this.activeCwd = resolve(cwd ?? this.activeCwd ?? this.status.cwd ?? dirname(target))
@@ -3791,12 +3844,32 @@ export class AgentBridge {
     const text = messageText(entry.message as unknown as WireMessage)
     const currentPath = manager.getSessionFile()
     if (!currentPath) throw new Error('当前会话尚未持久化')
+    this.assertSessionLoadAllowed(currentPath)
     const path = entry.parentId
       ? manager.createBranchedSession(entry.parentId)
       : this.createEmptyChildSession(manager, currentPath)
     if (!path) throw new Error('无法创建分支会话')
     this.sessionListCache?.invalidate(manager.getCwd())
     return { path: resolve(path), text }
+  }
+
+  private assertUsageSelection(generation: number, createdPath?: string): void {
+    if (this.stopInFlight || generation !== this.sessionSelectionGeneration) {
+      throw new Error(createdPath
+        ? `会话副本已创建，但选择已变化，未自动切换。副本路径：${createdPath}`
+        : '会话已切换，未继续复制或分叉')
+    }
+  }
+
+  private async captureForkUsage(sourcePath: string, childPath: string): Promise<void> {
+    if (!this.usageLedger) return
+    try {
+      // Refresh source evidence, then bind the newly created child's real header.
+      await this.usageLedger.captureSession(sourcePath)
+      if (await pathExists(childPath)) await this.usageLedger.captureSession(childPath)
+    } catch {
+      throw new Error(`会话副本已创建，但用量归档未完成；本次操作未删除原会话。副本路径：${childPath}`)
+    }
   }
 
   private async rememberTranscriptModel(sessionPath: string): Promise<void> {
@@ -3818,13 +3891,19 @@ export class AgentBridge {
 
   /** Fork the selected session without starting or switching a backend. */
   async forkAt(entryId: string): Promise<{ text: string; cancelled: boolean }> {
+    this.assertHistoryAvailable()
     if (!this.activeSessionPath) throw new Error('当前会话尚未持久化')
+    const selection = this.sessionSelectionGeneration
     const target = resolve(this.activeSessionPath)
     this.sessionManagers.delete(target)
     this.sessionManagerSignatures.delete(target)
     const manager = this.openSessionManager(target)
+    await this.usageLedger?.captureSession(target)
+    this.assertUsageSelection(selection)
     const result = this.createForkedSession(manager, entryId)
+    await this.captureForkUsage(target, result.path)
     await this.rememberTranscriptModel(result.path)
+    this.assertUsageSelection(selection, result.path)
     this.activateLogicalSession(result.path, manager.getCwd())
     await this.pushSessionInfo()
     void this.refreshSidebarSessions()
@@ -4152,7 +4231,7 @@ export class AgentBridge {
    */
   private async resolveListedSession(sessionPath: string): Promise<string> {
     const requested = resolve(sessionPath)
-    this.assertSessionNotQuarantined(requested)
+    this.assertSessionLoadAllowed(requested)
     if (!(await pathExists(requested))) throw new Error('会话不存在')
     try {
       const manager = await this.openCurrentSessionManager(requested)
@@ -4160,6 +4239,7 @@ export class AgentBridge {
     } catch {
       throw new Error('会话不存在')
     }
+    this.assertSessionLoadAllowed(requested)
     return requested
   }
 
@@ -4215,12 +4295,27 @@ export class AgentBridge {
   }
 
   async deleteSession(sessionPath: string): Promise<DeleteSessionResult> {
+    this.assertHistoryAvailable()
     const target = await this.resolveListedSession(sessionPath)
+    const removals = this.sessionRemovalPaths ??= new Set<string>()
+    if (removals.has(target)) throw new Error('会话删除仍在处理，请稍后重试')
+    removals.add(target)
+    try { return await this.removeArchivedSession(target) }
+    finally { removals.delete(target) }
+  }
+
+  private async removeArchivedSession(target: string): Promise<DeleteSessionResult> {
     const backendKey = this.backendKeysBySessionPath.get(target) ?? target
     await this.stopBackend(backendKey)
-    const active = this.activeSessionPath === target
 
     this.assertSessionNotQuarantined(target)
+    // A failed/unknown ledger capture must not silently discard uncollected usage.
+    await this.usageLedger?.captureSession(target)
+    this.assertSessionNotQuarantined(target)
+    if (this.stopInFlight || this.backendPool.pendingStartCount > 0 || this.backendKeysBySessionPath.has(target)
+      || [...this.backendPool.values()].some(backend => backend.sessionPath && resolve(backend.sessionPath) === target)) {
+      throw new Error('会话已重新启用，未删除')
+    }
     await unlink(target)
     this.deletedSubagentParentPaths ??= new Set()
     this.deletedSubagentParentPaths.add(target)
@@ -4233,6 +4328,7 @@ export class AgentBridge {
     await this.sessionModelPreferences?.deleteSessionModel(target)
     this.sessionManagers.delete(target)
     this.sessionManagerSignatures.delete(target)
+    const active = this.activeSessionPath === target
     if (active) {
       this.activeSessionPath = undefined
       this.activeKey = this.newSessionKey(this.activeCwd ?? this.status.cwd ?? dirname(target))
@@ -4245,16 +4341,23 @@ export class AgentBridge {
   }
 
   async copySession(sessionPath: string): Promise<{ cancelled: boolean }> {
+    this.assertHistoryAvailable()
+    const selection = this.sessionSelectionGeneration
     const target = await this.resolveListedSession(sessionPath)
     this.sessionManagers.delete(target)
     this.sessionManagerSignatures.delete(target)
     const manager = this.openSessionManager(target)
     const leafId = manager.getLeafId()
     if (!leafId) return { cancelled: true }
+    await this.usageLedger?.captureSession(target)
+    this.assertUsageSelection(selection)
+    this.assertSessionLoadAllowed(target)
     const path = manager.createBranchedSession(leafId)
     if (!path) return { cancelled: true }
+    await this.captureForkUsage(target, path)
     this.sessionListCache?.invalidate(manager.getCwd())
     await this.rememberTranscriptModel(path)
+    this.assertUsageSelection(selection, path)
     this.activateLogicalSession(path, manager.getCwd())
     await this.pushSessionInfo()
     void this.refreshSidebarSessions()
@@ -4275,12 +4378,18 @@ export class AgentBridge {
     sessionPath: string,
     entryId: string
   ): Promise<{ text: string; cancelled: boolean }> {
+    this.assertHistoryAvailable()
+    const selection = this.sessionSelectionGeneration
     const target = await this.resolveListedSession(sessionPath)
     this.sessionManagers.delete(target)
     this.sessionManagerSignatures.delete(target)
     const manager = this.openSessionManager(target)
+    await this.usageLedger?.captureSession(target)
+    this.assertUsageSelection(selection)
     const result = this.createForkedSession(manager, entryId)
+    await this.captureForkUsage(target, result.path)
     await this.rememberTranscriptModel(result.path)
+    this.assertUsageSelection(selection, result.path)
     this.activateLogicalSession(result.path, manager.getCwd())
     await this.pushSessionInfo()
     void this.refreshSidebarSessions()

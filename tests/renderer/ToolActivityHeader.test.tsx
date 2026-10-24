@@ -106,6 +106,27 @@ describe('ToolActivityHeader', () => {
     expect(raw.getByRole('button')).not.toHaveClass(reveal.SCREEN_TEXT_REVEAL_LINE_CLASS)
   })
 
+  it.each([false, true])('retains its initial class/ref/start when a prepended first item has noReveal (historical=%s)', (historical) => {
+    const attach = vi.spyOn(reveal, 'assignLineRevealDelay')
+    const view = render(<ToolActivityHeader summary={summary} open={false} onToggle={() => {}} historical={historical} />)
+    const button = view.getByRole('button')
+    reveal.assignPendingLineDelays(view.container)
+    const initialClass = button.className
+    const start = button.dataset.lineRevealStart
+    const delay = button.style.getPropertyValue('--screen-text-reveal-delay')
+    const attachments = attach.mock.calls.length
+    view.rerender(<ToolActivityHeader summary={{ ...summary, total: 8 }} open onToggle={() => {}} historical={!historical} noReveal />)
+    expect(view.getByRole('button')).toBe(button)
+    expect(button.className).toBe(initialClass)
+    expect(button.dataset.lineRevealStart).toBe(start)
+    expect(button.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+    expect(attach).toHaveBeenCalledTimes(attachments)
+    view.rerender(<ToolActivityHeader summary={summary} open={false} onToggle={() => {}} historical={!historical} />)
+    expect(button.className).toBe(initialClass)
+    expect(button.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+    expect(attach).toHaveBeenCalledTimes(attachments)
+  })
+
   it('does not allocate a line or character reveal for noReveal', () => {
     const attach = vi.spyOn(reveal, 'assignLineRevealDelay')
     const { container, rerender } = render(<ToolActivityHeader summary={summary} open={false} onToggle={() => {}} historical noReveal />)

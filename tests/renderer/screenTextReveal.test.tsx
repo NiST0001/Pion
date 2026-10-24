@@ -188,6 +188,45 @@ describe('screen text reveal', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it.each(['history', 'live'] as const)('preserves the ordered %s range deadline and only schedules new suffixes', (mode) => {
+    vi.useFakeTimers()
+    const view = render(<RevealText text="ab" mode={mode} ordered={{ delay: 600, maxDelay: 0 }} />)
+    const original = [...view.container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+    expect(original.map(node => node.style.getPropertyValue('--screen-text-reveal-delay'))).toEqual(['600ms', '600ms'])
+    act(() => vi.advanceTimersByTime(500))
+    view.rerender(<RevealText text="abc" mode={mode} ordered={{ delay: 100, maxDelay: 0 }} />)
+    const characters = [...view.container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+    expect(characters[0]).toBe(original[0])
+    expect(characters[1]).toBe(original[1])
+    expect(characters.map(node => node.style.getPropertyValue('--screen-text-reveal-delay'))).toEqual(['600ms', '600ms', '100ms'])
+    act(() => vi.advanceTimersByTime(99))
+    expect(original[0]).toBeInTheDocument()
+    act(() => vi.advanceTimersByTime(1000))
+    expect(view.container.querySelector('[data-screen-reveal-character]')).toBeNull()
+    view.rerender(<RevealText text="abcd" mode={mode} ordered={{ delay: 0, maxDelay: 180 }} />)
+    expect([...view.container.querySelectorAll('[data-screen-reveal-character]')].map(node => node.textContent)).toEqual(['d'])
+    view.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('gives a completed surrogate only the new ordered range while preserving its prior prefix', () => {
+    vi.useFakeTimers()
+    const view = render(<RevealText text={'a\ud83d'} mode="history" ordered={{ delay: 100, maxDelay: 180 }} />)
+    const prefix = view.container.querySelector('[data-screen-reveal-character]')
+    act(() => vi.advanceTimersByTime(50))
+    view.rerender(<RevealText text="a🙂" mode="history" ordered={{ delay: 400, maxDelay: 180 }} />)
+    const characters = view.container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')
+    expect(characters[0]).toBe(prefix)
+    expect(characters[1].textContent).toBe('🙂')
+    expect(characters[1].style.getPropertyValue('--screen-text-reveal-delay')).toBe('400ms')
+    act(() => vi.advanceTimersByTime(400))
+    expect(view.container.querySelector('[data-screen-reveal-character]')).toBe(characters[1])
+    expect(characters[1].style.getPropertyValue('--screen-text-reveal-delay')).toBe('400ms')
+    act(() => vi.advanceTimersByTime(500))
+    expect(view.container.querySelector('[data-screen-reveal-character]')).toBeNull()
+    expect(view.container.textContent).toBe('a🙂')
+  })
+
   it('animates only the appended suffix of a live value', () => {
     expect(appendedCharacterCount('', 'abc')).toBe(3)
     expect(appendedCharacterCount('abc', 'abcdef')).toBe(3)

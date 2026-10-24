@@ -3,11 +3,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
+import type { PendingRequestStore } from '../../src/main/agent/pending-requests'
+import type { ProviderAuthUi } from '../../src/main/agent/provider-auth-ui'
 import { RunStore } from '../../src/main/run-store'
 import { DEFAULT_TOOL_PERMISSION_RULES, RUN_CHECKPOINT_MARKER, TOOL_PERMISSION_MARKER, ToolPermissionStore } from '../../src/main/tool-permissions'
 import { IMAGE_GENERATION_TOOL_NAME } from '../../src/shared/image-generation'
 import { QUESTION_WAIT_WIDGET_KEY } from '../../src/shared/question-settings'
-import type { ExtensionUiRequest, RunOperation } from '../../src/shared/types'
+import { QUESTION_CUSTOM_ANSWER_OPTION, encodeQuestionCustomAnswer } from '../../src/shared/question-answer'
+import type { ExtensionUiRequest, ExtensionUiResponse, RunOperation } from '../../src/shared/types'
 
 const roots: string[] = []
 
@@ -78,7 +81,73 @@ async function fixture(): Promise<{
   }
 }
 
+function beginNativeQuestion(h: Awaited<ReturnType<typeof fixture>>): void {
+  h.prepareQuestion()
+  h.emit({ type: 'extension_ui_request', method: 'setWidget', widgetKey: QUESTION_WAIT_WIDGET_KEY,
+    widgetLines: [JSON.stringify({ version: 1, nonce: 'nonce', toolCallId: 'native-question', phase: 'begin', timeoutMs: 60_000 })] })
+}
+
 describe('AgentBridge extension UI requests', () => {
+  it('encodes only validated native custom answers into the existing SDK select value', async () => {
+    const h = await fixture()
+    beginNativeQuestion(h)
+    h.handle({ type: 'extension_ui_request', id: 'native-select', method: 'select', title: '目标平台',
+      options: ['1. Windows', '2. Linux', QUESTION_CUSTOM_ANSWER_OPTION] })
+    const request = h.bridge.getPendingExtensionUiRequests()[0]
+    expect(request.question).toBe(true)
+    for (const value of ['unknown choice', encodeQuestionCustomAnswer('untyped custom answer')]) {
+      await expect(h.bridge.resolveExtensionUiRequest(request.id, { value })).rejects.toThrow('无效的交互响应')
+    }
+    for (const customAnswer of [undefined, null, 42, '', ' \t ', 'a'.repeat(256_001)]) {
+      await expect(h.bridge.resolveExtensionUiRequest(request.id,
+        { customAnswer, value: '1. Windows', confirmed: true, cancelled: true } as unknown as ExtensionUiResponse))
+        .rejects.toThrow('无效的交互响应')
+    }
+    for (const extra of [{ value: '1. Windows' }, { cancelled: true }, { confirmed: true }]) {
+      await expect(h.bridge.resolveExtensionUiRequest(request.id,
+        { customAnswer: 'macOS', ...extra } as unknown as ExtensionUiResponse)).rejects.toThrow('无效的交互响应')
+    }
+    expect(h.bridge.getPendingExtensionUiRequests()).toEqual([request])
+    expect(h.writes).toEqual([])
+    const customAnswer = `  ${'a'.repeat(255_996)}  `
+    await h.bridge.resolveExtensionUiRequest(request.id, { customAnswer })
+    expect(h.bridge.getPendingExtensionUiRequests()).toEqual([])
+    expect(JSON.parse(h.writes[0])).toEqual({
+      type: 'extension_ui_response', id: 'native-select', value: encodeQuestionCustomAnswer(customAnswer)
+    })
+  })
+
+  it.each(['ordinary', 'native-input', 'native-no-custom', 'global'])('rejects custom answers outside a supported native select (%s)', async (mode) => {
+    const h = await fixture()
+    if (mode !== 'ordinary') beginNativeQuestion(h)
+    h.handle({ type: 'extension_ui_request', id: 'unsupported-custom', method: mode === 'native-input' ? 'input' : 'select',
+      title: 'AI 提问：相同标题不能证明原生来源',
+      options: mode === 'native-no-custom' ? ['1. Windows', '2. Linux'] : ['1. Windows', QUESTION_CUSTOM_ANSWER_OPTION] })
+    const request = h.bridge.getPendingExtensionUiRequests()[0]
+    if (mode === 'global') {
+      const internal = h.bridge as unknown as { pendingRequests: PendingRequestStore }
+      internal.pendingRequests.getExtensionUi(request.id)!.request.scope = 'global'
+    }
+    await expect(h.bridge.resolveExtensionUiRequest(request.id, { customAnswer: 'macOS' })).rejects.toThrow('无效的交互响应')
+    expect(h.bridge.getPendingExtensionUiRequests()).toHaveLength(1)
+    expect(h.writes).toEqual([])
+    await h.bridge.resolveExtensionUiRequest(request.id, { cancelled: true })
+  })
+
+  it('rejects custom answers for global provider authentication even with question-like options', async () => {
+    const h = await fixture()
+    const internal = h.bridge as unknown as { providerAuthUi: ProviderAuthUi }
+    const answer = internal.providerAuthUi.request('auth', { method: 'select', title: '登录', question: true,
+      options: [QUESTION_CUSTOM_ANSWER_OPTION] }, [])
+    const request = h.bridge.getPendingExtensionUiRequests()[0]
+    expect(request).toMatchObject({ scope: 'global', source: 'provider-auth' })
+    await expect(h.bridge.resolveExtensionUiRequest(request.id, { customAnswer: 'token' })).rejects.toThrow('无效的交互响应')
+    expect(h.bridge.getPendingExtensionUiRequests()).toHaveLength(1)
+    expect(h.writes).toEqual([])
+    await h.bridge.resolveExtensionUiRequest(request.id, { cancelled: true })
+    expect(await answer).toEqual({ cancelled: true })
+  })
+
   it.each(['valid', 'wrong-nonce', 'unknown-tool', 'nested', 'ended'])('consumes private question widgets and admits only the captured running source (%s)', async (mode) => {
     const h = await fixture()
     h.prepareQuestion()
@@ -252,6 +321,28 @@ describe('AgentBridge extension UI requests', () => {
       summary: '需要修改项目文件'
     }))
     off()
+  })
+
+  it('projects backend ownership without replacing the canonical permission policy path', async () => {
+    const value = await fixture()
+    const policyCwd = value.backend.cwd as string
+    const sessionPath = join(policyCwd, 'parent.jsonl')
+    Object.assign(value.backend, { cwd: join(policyCwd, 'project-link'), sessionPath })
+    const store = (value.bridge as unknown as { toolPermissionStore: ToolPermissionStore }).toolPermissionStore
+    const policy = { cwd: policyCwd, source: 'saved' as const, rules: { ...DEFAULT_TOOL_PERMISSION_RULES } }
+    const grant = vi.spyOn(store, 'allowProjectCategories').mockResolvedValue(policy)
+    value.handle({
+      type: 'extension_ui_request', id: 'alias-permission', method: 'select',
+      title: `${TOOL_PERMISSION_MARKER}${JSON.stringify({
+        cwd: policyCwd, sessionPath: '/different-metadata-session.jsonl', toolName: 'write',
+        category: 'write', policyCategories: ['write'], summary: '修改文件', detail: '', risks: [], canRemember: true
+      })}`
+    })
+    const request = value.bridge.getPendingToolPermissionRequests()[0]
+    expect(request).toMatchObject({ cwd: value.backend.cwd, sessionPath })
+    await value.bridge.resolveToolPermission(request.id, 'allow-project')
+    expect(grant).toHaveBeenCalledWith(policyCwd, ['write'])
+    expect(value.bridge.getPendingToolPermissionRequests()).toEqual([])
   })
 
   it('answers a stale image project grant with deny when a requested category is now denied', async () => {

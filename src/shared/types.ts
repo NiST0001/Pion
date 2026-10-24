@@ -421,6 +421,7 @@ export interface ExtensionUiRequest {
 
 export type ExtensionUiResponse =
   | { value: string }
+  | { customAnswer: string }
   | { confirmed: boolean }
   | { cancelled: true }
 

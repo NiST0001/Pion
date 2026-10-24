@@ -344,6 +344,19 @@
   box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12);
 }
 
+.side-session-unread-indicator.attention {
+  background: var(--cyan);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan) 12%, transparent);
+}
+
+@media (forced-colors: active) {
+  .side-session-unread-indicator.attention {
+    background: Highlight;
+    border: 1px solid Highlight;
+    box-shadow: none;
+  }
+}
+
 .side-session.unread:not(.active) {
   background: rgba(var(--accent-rgb), 0.06);
   box-shadow: inset 2px 0 0 rgba(var(--accent-rgb), 0.7);

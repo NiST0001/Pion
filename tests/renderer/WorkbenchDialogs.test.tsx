@@ -85,7 +85,7 @@ function openedProps(props: Props, open: readonly LazyKind[]): Props {
 }
 
 // Probes measure composition identity, not the real panels' own open/reset effects.
-function createProbe<P extends { onClose: () => void }>(name: LazyKind | 'command', isOpen: (props: P) => boolean) {
+function createProbe<P extends { onClose: () => void }>(name: LazyKind | 'command' | 'usage', isOpen: (props: P) => boolean) {
   const load = vi.fn()
   const mount = vi.fn()
   const unmount = vi.fn()
@@ -591,6 +591,113 @@ describe('WorkbenchDialogs independent command slot', () => {
     expect(settings.unmount).not.toHaveBeenCalled()
     await act(async () => { pending.resolve(undefined); await pending.promise })
     await screen.findByRole('textbox', { name: 'command draft' })
+    expect(screen.getByRole('textbox', { name: 'settings draft' })).toBe(input)
+    expect(settings.unmount).not.toHaveBeenCalled()
+  })
+})
+
+describe('WorkbenchDialogs independent usage slot', () => {
+  type UsageProps = Omit<NonNullable<Props['operations']['usage']>, 'mounted'> & {
+    open: boolean
+    onClose: Props['operations']['onClose']
+  }
+  let WorkbenchDialogs: typeof WorkbenchDialogsComponent
+  let usage: ReturnType<typeof createProbe<UsageProps>>
+  let settings: ReturnType<typeof createProbe<Props['settings']['dialog']>>
+  let usageImportGate: Promise<void> | undefined
+  let releaseUsageImport: (() => void) | undefined
+
+  function UsageHost(props: Props) {
+    const usageMounted = useDeferredMount(props.operations.kind === 'stats')
+    const settingsMounted = useDeferredMount(props.settings.dialog.open)
+    return <WorkbenchDialogs {...props}
+      operations={{ ...props.operations, usage: { mounted: usageMounted, api: props.operations.usage?.api } }}
+      settings={{ ...props.settings, mounted: settingsMounted }}
+    />
+  }
+
+  beforeEach(async () => {
+    vi.resetModules()
+    usage = createProbe<UsageProps>('usage', (props) => props.open)
+    settings = createProbe<Props['settings']['dialog']>('settings', (props) => props.open)
+    usageImportGate = undefined
+    releaseUsageImport = undefined
+    vi.doMock('../../src/renderer/src/features/operations/UsageOverviewModal', async () => {
+      usage.load()
+      await usageImportGate
+      return { UsageOverviewModal: usage.Component }
+    })
+    vi.doMock('../../src/renderer/src/features/settings/SettingsModal', () => {
+      settings.load()
+      return { SettingsModal: settings.Component }
+    })
+    WorkbenchDialogs = (await import('../../src/renderer/src/app/WorkbenchDialogs')).WorkbenchDialogs
+  })
+
+  afterEach(async () => {
+    await act(async () => {
+      releaseUsageImport?.()
+      await usageImportGate
+    })
+    cleanup()
+    vi.doUnmock('../../src/renderer/src/features/operations/UsageOverviewModal')
+    vi.doUnmock('../../src/renderer/src/features/settings/SettingsModal')
+    vi.resetModules()
+  })
+
+  it('loads usage only on first stats demand and retains its controlled host through closes and other operations kinds', async () => {
+    const props = defaultProps()
+    const api = {} as PionApi
+    props.operations.usage = { mounted: false, api }
+    const { container, rerender } = render(<UsageHost {...props} />)
+    expect(container).toBeEmptyDOMElement()
+    expect(usage.load).not.toHaveBeenCalled()
+    expect(usage.mount).not.toHaveBeenCalled()
+
+    const stats = { ...props.operations, kind: 'stats' as const }
+    await act(async () => { rerender(<UsageHost {...props} operations={stats} />) })
+    const input = await screen.findByRole('textbox', { name: 'usage draft' })
+    fireEvent.change(input, { target: { value: 'retain usage data' } })
+    expect(usage.record.mock.calls.at(-1)![0]).toEqual({ open: true, api, onClose: props.operations.onClose })
+    expect(screen.queryByRole('dialog', { name: '项目自动验证' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: '隔离多 Agent' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'usage close' }))
+    expect(props.operations.onClose).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('textbox', { name: 'usage draft' })).toBe(input)
+
+    for (const kind of ['agents', 'verification', null] as const) {
+      rerender(<UsageHost {...props} operations={{ ...props.operations, kind }} />)
+      expect(screen.queryByRole('textbox', { name: 'usage draft' })).not.toBeInTheDocument()
+      expect(usage.record.mock.calls.at(-1)![0].open).toBe(false)
+      expect(usage.unmount).not.toHaveBeenCalled()
+    }
+    rerender(<UsageHost {...props} operations={stats} />)
+    expect(screen.getByRole('textbox', { name: 'usage draft' })).toHaveValue('retain usage data')
+    expect(usage.load).toHaveBeenCalledTimes(1)
+    expect(usage.mount).toHaveBeenCalledTimes(1)
+    expect(usage.unmount).not.toHaveBeenCalled()
+  })
+
+  it('does not suspend or reset existing settings while usage downloads in its own lazy boundary', async () => {
+    const pending = deferred<void>()
+    usageImportGate = pending.promise
+    releaseUsageImport = () => pending.resolve(undefined)
+    const props = openedProps(defaultProps(), ['settings'])
+    const { rerender } = render(<UsageHost {...props} />)
+    const input = await screen.findByRole('textbox', { name: 'settings draft' })
+    fireEvent.change(input, { target: { value: 'preserve settings' } })
+    input.focus()
+    await act(async () => { rerender(<UsageHost {...props} operations={{ ...props.operations, kind: 'stats' }} />) })
+    await waitFor(() => expect(usage.load).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('textbox', { name: 'usage draft' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'settings draft' })).toBe(input)
+    expect(input).toBeVisible()
+    expect(input).toHaveFocus()
+    expect(input).toHaveValue('preserve settings')
+    expect(settings.mount).toHaveBeenCalledTimes(1)
+    expect(settings.unmount).not.toHaveBeenCalled()
+    await act(async () => { pending.resolve(undefined); await pending.promise })
+    await screen.findByRole('textbox', { name: 'usage draft' })
     expect(screen.getByRole('textbox', { name: 'settings draft' })).toBe(input)
     expect(settings.unmount).not.toHaveBeenCalled()
   })

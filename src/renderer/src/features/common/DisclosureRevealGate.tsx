@@ -23,6 +23,6 @@ export function DisclosureRevealGate({ open, children }: { open: boolean; childr
 
   const ready = parentReady && open && (reducedMotion || localSettled)
   return <DisclosureRevealReadyContext.Provider value={ready}>
-    <div className="disclosure-reveal-gate" data-text-reveal-ready={ready}>{children}</div>
+    <div className="disclosure-reveal-gate" data-text-reveal-open={open} data-text-reveal-ready={ready}>{children}</div>
   </DisclosureRevealReadyContext.Provider>
 }

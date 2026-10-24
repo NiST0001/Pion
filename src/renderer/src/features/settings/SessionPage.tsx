@@ -1,4 +1,5 @@
-import type { ReactElement } from 'react'
+import { useEffect, useRef, useState, type ReactElement } from 'react'
+import type { PionApi } from '../../../../shared/pion-api'
 import { Download, Loader2, RefreshCw } from 'lucide-react'
 import type { ModelOption, SessionInfo } from '../../../../shared/types'
 import { PageHeading } from './SettingsPageHeading'
@@ -241,6 +242,7 @@ export function SessionPage({
         </div>
       </div>
 
+      <UsageCollectionSettings />
       <QuestionSettings />
       <SubagentSettings models={models} />
 
@@ -281,13 +283,75 @@ export function SessionPage({
   )
 }
 
-function Toggle({ on, onChange }: { on: boolean; onChange: (value: boolean) => void }): ReactElement {
+const usageWrites = new WeakMap<PionApi, Promise<boolean>>()
+
+export function UsageCollectionSettings(): ReactElement {
+  const api = typeof window === 'undefined' ? undefined : window.pion
+  const [enabled, setEnabled] = useState<boolean>()
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const generation = useRef(0)
+  useEffect(() => {
+    const revision = ++generation.current
+    setEnabled(undefined)
+    setSaving(false)
+    setError('')
+    const load = async () => {
+      if (!api) throw new Error('后台自动采集设置不可用')
+      await usageWrites.get(api)?.catch(() => undefined)
+      return api.getUsageBackgroundCollection()
+    }
+    void load().then(value => {
+      if (generation.current === revision) setEnabled(value)
+    }, reason => {
+      if (generation.current === revision) setError(String(reason))
+    })
+    return () => { ++generation.current }
+  }, [api])
+
+  const save = async (value: boolean) => {
+    if (!api || enabled === undefined || usageWrites.has(api)) return
+    const revision = generation.current
+    setSaving(true)
+    setError('')
+    const pending = Promise.resolve().then(() => api.setUsageBackgroundCollection(value))
+    usageWrites.set(api, pending)
+    try {
+      const saved = await pending
+      if (generation.current === revision) setEnabled(saved)
+    } catch (reason) {
+      if (generation.current === revision) setError(String(reason))
+    } finally {
+      if (usageWrites.get(api) === pending) usageWrites.delete(api)
+      if (generation.current === revision) setSaving(false)
+    }
+  }
+  return <div className="settings-section" aria-busy={enabled === undefined || saving}>
+    <div className="settings-section-title">使用总览</div>
+    <div className="setting-row">
+      <div>
+        <div className="setting-label">后台自动采集</div>
+        <div className="setting-desc">关闭后不自动扫描，打开使用总览时补录</div>
+      </div>
+      <Toggle on={enabled ?? true} onChange={value => { void save(value) }}
+        disabled={enabled === undefined || saving} label="后台自动采集" />
+    </div>
+    {((enabled === undefined && !error) || saving) && <p className="setting-desc" role="status">{saving ? '保存中…' : '读取中…'}</p>}
+    {error && <p className="settings-inline-error" role="alert">{error}</p>}
+  </div>
+}
+
+function Toggle({ on, onChange, disabled, label }: {
+  on: boolean; onChange: (value: boolean) => void; disabled?: boolean; label?: string
+}): ReactElement {
   return (
     <button
       type="button"
       className={`toggle${on ? ' on' : ''}`}
       role="switch"
       aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!on)}
     >
       <span className="toggle-knob" />

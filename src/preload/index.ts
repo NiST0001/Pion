@@ -4,6 +4,7 @@ import type { SubagentSessionList, SubagentSessionSnapshot } from '../shared/sub
 import type { BranchDeleteResult } from '../shared/branches'
 import type { McpStatusSnapshot, McpStatusTarget } from '../shared/mcp'
 import type { PiChangelog, SessionCommandInfo } from '../shared/slash-command-protocol'
+import type { UsageOverview, UsageOverviewQuery } from '../shared/usage-overview'
 import type {
   AgentCapabilities,
   AgentMode,
@@ -62,6 +63,11 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const api: PionApi = {
+  getUsageOverview: (query?: UsageOverviewQuery) => (query === undefined
+    ? ipcRenderer.invoke(IPC.UsageOverview)
+    : ipcRenderer.invoke(IPC.UsageOverview, query)) as Promise<UsageOverview>,
+  getUsageBackgroundCollection: () => ipcRenderer.invoke(IPC.GetUsageBackgroundCollection) as Promise<boolean>,
+  setUsageBackgroundCollection: (enabled: boolean) => ipcRenderer.invoke(IPC.SetUsageBackgroundCollection, enabled) as Promise<boolean>,
   computerUse: {
     getState: () => ipcRenderer.invoke(IPC.ComputerUseGetState),
     start: (consent) => ipcRenderer.invoke(IPC.ComputerUseStart, consent),

@@ -15,15 +15,15 @@ const PI_CORE_COMMAND_NAMES = [
 ]
 
 describe('desktop slash command catalog', () => {
-  it('includes all 24 Pi core commands, diagnostics, llama and the four Pion commands exactly once', () => {
+  it('includes all 24 Pi core commands, diagnostics, llama and Pion commands exactly once', () => {
     expect(PI_CORE_COMMAND_NAMES).toHaveLength(24)
     expect(DESKTOP_SLASH_COMMAND_NAMES).toEqual([
-      ...PI_CORE_COMMAND_NAMES, 'debug', 'llama', 'plan', 'yolo', 'verify', 'agents'
+      ...PI_CORE_COMMAND_NAMES, 'debug', 'llama', 'plan', 'yolo', 'verify', 'agents', 'stats'
     ])
     expect(DESKTOP_SLASH_COMMAND_NAMES).toEqual(DESKTOP_SLASH_COMMANDS.map((command) => command.name))
     expect(new Set(DESKTOP_SLASH_COMMAND_NAMES).size).toBe(DESKTOP_SLASH_COMMAND_NAMES.length)
     expect(DESKTOP_SLASH_COMMANDS.filter((command) => command.source === 'pion').map((command) => command.name))
-      .toEqual(['plan', 'yolo', 'verify', 'agents'])
+      .toEqual(['plan', 'yolo', 'verify', 'agents', 'stats'])
     expect(DESKTOP_SLASH_COMMANDS.filter((command) => command.source === 'builtin')).toHaveLength(26)
     expect(BUILTIN_SLASH_COMMANDS).toBe(DESKTOP_SLASH_COMMANDS)
   })
@@ -43,7 +43,7 @@ describe('desktop slash command catalog', () => {
     for (const name of PREPARATION_SLASH_COMMAND_NAMES) expect(DESKTOP_SLASH_COMMAND_NAMES).toContain(name)
     for (const name of [
       'settings', 'resume', 'session', 'trust', 'hotkeys', 'changelog', 'debug',
-      'plan', 'yolo', 'verify', 'agents', ...PENDING_PI_SLASH_COMMAND_NAMES
+      'plan', 'yolo', 'verify', 'agents', 'stats', ...PENDING_PI_SLASH_COMMAND_NAMES
     ]) expect(PREPARATION_SLASH_COMMAND_NAMES).toContain(name)
     for (const name of ['compact', 'new', 'name', 'clone', 'model', 'thinking', 'login', 'logout', 'export', 'quit']) {
       expect(PREPARATION_SLASH_COMMAND_NAMES).not.toContain(name)

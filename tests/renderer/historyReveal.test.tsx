@@ -8,7 +8,8 @@ import {
 import {
   armScreenTextReveal,
   assignPendingLineDelays,
-  resetLineRevealClock
+  resetLineRevealClock,
+  takeLineRevealSlot
 } from '../../src/renderer/src/utils/screenTextReveal'
 
 function rect(top: number, left: number, height = 20, width = 200): DOMRect {
@@ -112,31 +113,71 @@ describe('history text reveal', () => {
     expect(character).toHaveClass('screen-text-reveal-armed')
   })
 
-  it('animates only the bottom two viewport heights and shows older lines instantly', () => {
+  it('reveals the rest of an armed row as it scrolls into view without remeasuring old characters', () => {
+    const container = document.createElement('div')
+    container.innerHTML = '<div class="history-reveal"><span class="screen-text-reveal-history" data-screen-reveal-character>a</span><span class="screen-text-reveal-history" data-screen-reveal-character>b</span></div>'
+    document.body.append(container)
+    const row = container.firstElementChild as HTMLElement
+    const [first, second] = [...row.children] as HTMLElement[]
+    const viewport = vi.fn(() => rect(100, 0, 80, 300))
+    const rowMeasure = vi.fn(() => rect(120, 0, 200, 200))
+    const firstMeasure = vi.fn(() => rect(120, 0, 10, 8))
+    let secondTop = 240
+    container.getBoundingClientRect = viewport
+    row.getBoundingClientRect = rowMeasure
+    first.getBoundingClientRect = firstMeasure
+    second.getBoundingClientRect = () => rect(secondTop, 0, 10, 8)
+    armPendingHistoryRevealRows(container)
+    expect(row).toHaveClass('history-reveal-armed')
+    expect(first).toHaveClass('screen-text-reveal-armed')
+    expect(second).not.toHaveClass('screen-text-reveal-armed')
+    expect(viewport).toHaveBeenCalledTimes(1)
+    const delay = first.style.getPropertyValue('--screen-text-reveal-delay')
+    viewport.mockClear()
+    rowMeasure.mockClear()
+    firstMeasure.mockClear()
+    secondTop = 160
+    armPendingHistoryRevealRows(container)
+    expect(second).toHaveClass('screen-text-reveal-armed')
+    expect(first.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+    expect(firstMeasure).not.toHaveBeenCalled()
+    expect(rowMeasure).not.toHaveBeenCalled()
+    expect(viewport).toHaveBeenCalledTimes(1)
+  })
+
+  it('measures lines before writes and only spends cascade slots inside the bounded window', () => {
     const container = document.createElement('div')
     document.body.append(container)
     container.getBoundingClientRect = () => rect(100, 0, 500, 400)
     const makeLine = (top: number): HTMLElement => {
       const line = document.createElement('span')
       line.className = 'screen-text-reveal-line screen-text-reveal-line-history'
-      line.getBoundingClientRect = () => rect(top, 0, 20, 200)
+      line.getBoundingClientRect = () => {
+        expect([...container.children].every(element => (element as HTMLElement).dataset.lineRevealReady !== 'true')).toBe(true)
+        return rect(top, 0, 20, 200)
+      }
       container.append(line)
       return line
     }
 
-    // 窗口：容器底部 600 - 2*500 = -400；top=0 的行在窗口之上，top=500/580 的在窗口内
+    // Only [-400, 600] joins this cascade; offscreen lines take no slot.
     const oldLine = makeLine(-600)
     const inWindow1 = makeLine(500)
     const inWindow2 = makeLine(580)
+    const belowWindow = makeLine(900)
     const nowSpy = vi.spyOn(performance, 'now').mockReturnValue(1000)
     resetLineRevealClock()
     assignPendingLineDelays(container)
+    const nextLiveDelay = takeLineRevealSlot('live')
     nowSpy.mockRestore()
 
     expect(oldLine).toHaveClass('screen-text-reveal-static')
     expect(oldLine.style.getPropertyValue('--screen-text-reveal-delay')).toBe('')
     expect(inWindow1.style.getPropertyValue('--screen-text-reveal-delay')).toBe('0ms')
     expect(inWindow2.style.getPropertyValue('--screen-text-reveal-delay')).toBe('20ms')
+    expect(belowWindow).toHaveClass('screen-text-reveal-static')
+    expect(belowWindow.style.getPropertyValue('--screen-text-reveal-delay')).toBe('')
+    expect(nextLiveDelay).toBe(40)
   })
 
   it('does not arm characters outside the scroll viewport', () => {

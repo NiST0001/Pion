@@ -1,6 +1,7 @@
 import { defineTool } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { open } from 'node:fs/promises'
+import { QUESTION_CUSTOM_ANSWER_OPTION, decodeQuestionCustomAnswer } from '../../shared/question-answer'
 import { DEFAULT_QUESTION_SETTINGS, QUESTION_SETTINGS_MAX_BYTES, QUESTION_WAIT_WIDGET_KEY, parseQuestionWaitMetadata, validateQuestionSettings, type QuestionSettings, type QuestionWaitMetadata } from '../../shared/question-settings'
 
 // Shared across SDK replacements; a timed-out disk operation retains its slot.
@@ -86,11 +87,12 @@ export function createAskUserTool(readSettings: () => Promise<QuestionSettings> 
     let answer: string | undefined
     if (options.length) {
       const labels = options.map((option, index) => `${index + 1}. ${option}`)
-      const other = '自定义回答…'
-      const selected = await dialog((opts) => ctx.ui.select(title, [...labels, other], opts))
+      const selected = await dialog((opts) => ctx.ui.select(title, [...labels, QUESTION_CUSTOM_ANSWER_OPTION], opts))
       if (signal?.aborted) return stop('aborted')
       if (selected === undefined) return stop('cancelled')
-      if (selected !== other) {
+      const customAnswer = decodeQuestionCustomAnswer(selected)
+      if (customAnswer !== undefined) answer = customAnswer
+      else if (selected !== QUESTION_CUSTOM_ANSWER_OPTION) {
         const index = labels.indexOf(selected)
         if (index < 0) throw new Error('无效的回答选项')
         answer = options[index]

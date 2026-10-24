@@ -150,7 +150,7 @@ function deferred<T>() {
 const knownNames = [
   'settings', 'model', 'thinking', 'scoped-models', 'login', 'logout', 'new', 'resume', 'name',
   'session', 'tree', 'fork', 'clone', 'compact', 'import', 'copy', 'export', 'share', 'bug', 'trust',
-  'reload', 'hotkeys', 'changelog', 'quit', 'debug', 'llama', 'plan', 'yolo', 'verify', 'agents'
+  'reload', 'hotkeys', 'changelog', 'quit', 'debug', 'llama', 'plan', 'yolo', 'verify', 'agents', 'stats'
 ]
 
 describe('native slash command interception', () => {
@@ -191,6 +191,7 @@ describe('native slash command interception', () => {
     expectNoMutation(h)
     for (const method of Object.values(h.api)) expect(method).not.toHaveBeenCalled()
     expect(h.callbacks.onOpenSettings).not.toHaveBeenCalled()
+    expect(h.callbacks.onOpenOperations).not.toHaveBeenCalled()
     expect(h.callbacks.onModeChange).not.toHaveBeenCalled()
     expect(h.callbacks.onRequestYolo).not.toHaveBeenCalled()
   })
@@ -204,15 +205,17 @@ describe('native slash command interception', () => {
     }
     expectNoMutation(h)
     expect(h.callbacks.onOpenSettings).not.toHaveBeenCalled()
+    expect(h.callbacks.onOpenOperations).not.toHaveBeenCalled()
     expect(h.callbacks.onModeChange).not.toHaveBeenCalled()
     expect(h.callbacks.onRequestYolo).not.toHaveBeenCalled()
     for (const method of Object.values(h.api)) expect(method).not.toHaveBeenCalled()
   })
 
-  it.each(['settings', 'logout', 'new', 'clone', 'resume', 'copy', 'session', 'trust', 'debug', 'changelog', 'quit'])('rejects an unexpected /%s argument before any side effect', async (name) => {
+  it.each(['settings', 'logout', 'new', 'clone', 'resume', 'copy', 'session', 'trust', 'debug', 'changelog', 'quit', 'stats'])('rejects an unexpected /%s argument before any side effect', async (name) => {
     const h = harness()
     expect(await execute(h, `/${name} extra`)).toBe(true)
     expect(h.result.current.dialog?.error).toContain('不接受参数')
+    expect(h.callbacks.onOpenOperations).not.toHaveBeenCalled()
     expectNoMutation(h)
     for (const method of Object.values(h.api)) expect(method).not.toHaveBeenCalled()
   })
@@ -405,12 +408,26 @@ describe('native navigation and existing application controllers', () => {
   })
 
   it.each([
-    ['/verify', 'verification'], ['/agents', 'agents']
+    ['/verify', 'verification'], ['/agents', 'agents'], ['/stats', 'stats']
   ] as const)('opens the existing operations panel for %s', async (text, kind) => {
     const h = harness()
     await execute(h, text)
     expect(h.callbacks.onOpenOperations).toHaveBeenCalledExactlyOnceWith(kind)
     expectNoMutation(h)
+  })
+
+  it.each(['busy', 'starting', 'stopped', 'no bridge'] as const)('opens /stats while %s without consulting any backend or leaving command information open', async (phase) => {
+    const state = phase === 'stopped' ? { ...initialState } : readyState()
+    if (phase === 'busy') state.busy = true
+    if (phase === 'starting') state.status = { phase: 'starting', cwd: target.cwd }
+    const h = harness({ state, ...(phase === 'no bridge' ? { api: undefined } : {}) })
+    await execute(h, '/hotkeys')
+    expect(h.result.current.dialog?.title).toBe('Pion 快捷键')
+    expect(await execute(h, '/stats')).toBe(true)
+    expect(h.callbacks.onOpenOperations).toHaveBeenCalledExactlyOnceWith('stats')
+    expect(h.result.current.dialog).toBeNull()
+    expectNoMutation(h)
+    for (const method of Object.values(h.api)) expect(method).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -782,13 +799,24 @@ describe('App native command composition source contracts (no GUI)', () => {
     expect(app).toContain('await handleCopySession(state.status.cwd')
   })
 
+  it('opens usage from the existing toolbar and retains a first-open host on the shared operations state', () => {
+    const app = readFileSync('src/renderer/src/App.tsx', 'utf8')
+    const toolbar = app.slice(app.indexOf('<div className="dock-toolbar"'), app.indexOf('<div className="app-body dock-workspace"'))
+    expect(toolbar).toMatch(/<button type="button" aria-haspopup="dialog" onClick=\{\(\) => setOperationsPanel\('stats'\)\}>[\s\S]*?使用总览<\/button>/)
+    expect(app).toContain("const usageOverviewMounted = useDeferredMount(operationsPanel === 'stats')")
+    expect(app).toContain('onOpenOperations: setOperationsPanel')
+    expect(app).toContain('usage: { mounted: usageOverviewMounted, api: hasBridge ? window.pion : undefined }')
+    const dockVisibility = app.slice(app.indexOf('const dockVisible ='), app.indexOf('const dock = useDockLayout('))
+    expect(dockVisibility).not.toContain('stats')
+  })
+
   it('owns a sticky command slot, independent lazy/Suspense boundary and command stylesheet import', () => {
     const app = readFileSync('src/renderer/src/App.tsx', 'utf8')
     const dialogs = readFileSync('src/renderer/src/app/WorkbenchDialogs.tsx', 'utf8')
     const css = readFileSync('src/renderer/src/styles.css', 'utf8')
     expect(app).toContain('const commandDialogMounted = useDeferredMount(slashCommands.dialog !== null)')
     expect(app).toMatch(/command=\{\{\s*mounted: commandDialogMounted,/)
-    expect(app).toContain('open: !settingsOpen && !viewingChild && toolPermissionRequests.length === 0 && extensionUiRequests.length === 0')
+    expect(app).toContain('open: !settingsOpen && !viewingChild && !hasVisibleInteractions')
     expect(dialogs).toContain("const LazyCommandDialog = lazy(() => import('../features/commands/CommandDialog')")
     expect(dialogs).toMatch(/\{command\?\.mounted && \(\s*<Suspense fallback=\{null\}>\s*<LazyCommandDialog \{\.\.\.command\.dialog\} \/>\s*<\/Suspense>\s*\)\}/)
     expect(css).toContain("@import './styles/commands.css';")
