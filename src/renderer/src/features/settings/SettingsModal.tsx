@@ -7,6 +7,7 @@ import {
   Palette,
   ShieldCheck,
   SlidersHorizontal,
+  Wrench,
   X
 } from 'lucide-react'
 import type {
@@ -23,6 +24,7 @@ import type {
 } from '../../../../shared/types'
 import { ModelsPage } from './ModelsPage'
 import { SessionPage } from './SessionPage'
+import { CapabilitySettingsPage } from './CapabilitySettingsPage'
 import { SecurityPage } from './SecurityPage'
 import { AppearancePage } from './AppearancePage'
 import { AboutPage } from './AboutPage'
@@ -52,6 +54,8 @@ export interface SettingsActions {
 
 interface SettingsModalProps {
   open: boolean
+  cwd?: string
+  capabilityScope?: string
   navigationRequest?: SettingsNavigationRequest
   session: SessionInfo | null
   models: ModelOption[]
@@ -87,6 +91,8 @@ interface SettingsModalProps {
 
 export function SettingsModal({
   open,
+  cwd,
+  capabilityScope,
   navigationRequest,
   session,
   models,
@@ -133,6 +139,7 @@ export function SettingsModal({
   const [nameError, setNameError] = useState('')
   const nameWritePending = useRef(false)
   const providerActionSlot = useRef<Promise<void> | null>(null)
+  const capabilityActionSlot = useRef<Promise<void> | null>(null)
   const nameOwner = useRef({ sessionId: session?.sessionId, revision: 0, edited: false })
   if (nameOwner.current.sessionId !== session?.sessionId) {
     nameOwner.current = { sessionId: session?.sessionId, revision: 0, edited: false }
@@ -328,6 +335,13 @@ export function SettingsModal({
               onClick={() => navigateToPage('session')}
             />
             <NavItem
+              active={page === 'capabilities'}
+              icon={<Wrench size={15} />}
+              label="工具与能力"
+              description="工具、MCP、Skill 与快捷开关"
+              onClick={() => navigateToPage('capabilities')}
+            />
+            <NavItem
               active={page === 'security'}
               icon={<ShieldCheck size={15} />}
               label="安全与信任"
@@ -424,6 +438,10 @@ export function SettingsModal({
                 exporting={exporting}
                 onExport={() => void handleExport()}
               />
+            )}
+
+            {page === 'capabilities' && (
+              <CapabilitySettingsPage cwd={cwd} scope={capabilityScope} actionSlot={capabilityActionSlot} />
             )}
 
             {page === 'security' && (

@@ -1,4 +1,4 @@
-export type SettingsPage = 'models' | 'session' | 'security' | 'appearance' | 'about' | 'diagnostics'
+export type SettingsPage = 'models' | 'session' | 'capabilities' | 'security' | 'appearance' | 'about' | 'diagnostics'
 
 export interface SettingsNavigationRequest {
   /** Consumed only while open. Strictly increasing safe integer per host; same/older ids never replay. */

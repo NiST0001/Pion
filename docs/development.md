@@ -145,9 +145,23 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 Pion 当前将 pi 精确锁定为 1.4.0，依赖与解析以 `package.json` / `package-lock.json` 为准，Node 最低要求仍为 22.19。升级依赖不会更新正在运行的安装版。子代理从 `AgentSession.systemPrompt` 继承有效系统提示，不读取新版已移入 transcript 的旧 `agent.state.systemPrompt` 字段。消息撤销校验支持 SDK 的独立 `usage`、`context_edit` 与不保留旧消息的压缩边界；上下文编辑只影响模型输入，不改写原始聊天记录或撤销时恢复的原文。旧进程真实退出屏障仍须保留。
 
+### 工具与能力开关
+
+设置 → 工具与能力提供工具、MCP、Skill、子代理和扩展入口的独立开关。极简只开启 Pi 核心八工具，标准将全部 desired 开启，无 Skill 只关闭技能；它们只是一次性批量写入，之后单项修改不受模式约束。配置独立保存到 `userData/pion-capabilities.json`，不改写用户 Pi/MCP/认证文件；旧配置缺文件时 inherit 原行为，坏文件拒绝默认覆盖。
+
+`capability-catalogue.ts` 通过只读 SettingsManager storage 和已安装包元数据枚举，跳过未安装/不匹配资源、禁止包管理器全局位置探测命令，不构造 ResourceLoader/ModelRuntime 或执行工厂。目录不启动会话、认证或 MCP；动态能力仅由已有可信运行时补充，unknown 不推测。资源使用来源绑定 ID，目录 revision 与 desired revision 分开。
+
+`runtime-host.ts` 在加载前过滤可选扩展入口，`agent/capability-policy.ts` 再过滤最终 Skill、工具声明/发现/嵌套和晚注册；`defaultTools` 正负规则及计划/权限/实验门继续作为执行 ceiling。`agent/capability-mcp.ts` 对锁定 SDK 1.4.0 适配纯 `config.js` 读取器，在 native MCP 启动前覆盖真实 enabled，不执行配置命令/凭据解析；该读取器并非公开 root export，版本/布局不符时 fail closed。disabled 定义仍保留，不能让同名注册补位。旧插件自行管理的连接不受原生服务器开关接管，需关闭相应扩展入口。
+
+Bridge 显式保存后将全部 retained 后端标待应用，仅在所属轮次及实际调用/检查点/完成监听器收口后，优先于下一本地 FIFO 用公开同路径 `switchSession` 替换 runtime；未落盘空会话以 `newSession` 恢复精确模型、思考、名称和模式/子代理偏好并映射新路径。旧分支/队列与 Composer/草稿不重建，SDK cancelled 保旧来源；替换未知失败及 MCP 真实 close 失败隔离，不自动重启/重试连接。`native-extensions.ts` 保留真实 close Promise；SDK replacement 与 RPC 外层可能重复 bind，同 factory 共享 start/close Promise，不重复启动。状态回执只读真正命名来源的 getCommands 描述、绝不发成 prompt，应用 epoch 拒旧查询和中间默认模型。
+
+SDK 1.4.0 RpcClient 会将业务负响应抹成普通 Error。`agent/capability-state.ts` 的窄版本适配仅观察所属实际 client 的原始 getData 解码结果，以 WeakMap 关联 `set_model`/`compact` 的有限明确无副作用否定；未知 transport/timeout 或同文普通 Error 均不视为安全收口。升级 SDK 时应复核或替换该内部适配，不能仅靠错误字符串放宽隔离。
+
+设置页保跨卸载实际保存槽、API/cwd/scope/generation 隔离与可见 pending 轮询，分开展示保存/应用状态及 desired/available；IPC 复查所属窗口/活主帧。完整协议见[功能约束](feature-contracts.md#工具与能力开关)。相关回归源码位于 `tests/unit/capability-{settings,catalogue,mcp,policy,bridge,ipc}.test.ts` 与 `tests/renderer/CapabilitySettingsPage.test.tsx`；本次仅静态检查，未执行测试、类型检查、构建、GUI、真实模型或 MCP。源码修改不更新正在运行的安装版，不能据此宣称已发布或远端资源已停止。
+
 ### SDK 与 CLI 能力边界
 
-Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP、codemode 和 tool-search factories，`runtime-host.ts` 与 `capabilities.ts` 共用此注册入口。三者沿用 `builtin` / `replaceable` 身份；Pion 不再临时覆写 `defaultTools` 来开启 codemode/tool_search，两者遵循 Pi 原生默认 inactive，由用户显式 `defaultTools`（如 `["+codemode", "+tool_search"]`）或 MCP 的 codemode/deferred 曝光按需激活；旧 `pi-mcp-adapter` 注册的 `/mcp` 可以替换原生 builtin，不能双启或仅凭原生注册宣称原生 MCP 已活动。用户禁用扩展、`noExtensions` 和显式工具集合（包括空集）必须持续生效，不能只依赖启动时的 `defaultTools`。能力扫描仅加载 factory 注册，不连接 MCP 服务器、不读取认证凭据，也不是服务器可用性检查。`ExtensionToolContext.executeTool` / `tools` 是执行上下文契约，不自动新增工具。
+Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP、codemode 和 tool-search factories，`runtime-host.ts` 与 `capabilities.ts` 共用此注册入口。三者沿用 `builtin` / `replaceable` 身份；未设置 Pion 能力偏好时不临时覆写 `defaultTools` 来开启 codemode/tool_search，两者遵循 Pi 原生默认 inactive；用户显式 `defaultTools`（如 `["+codemode", "+tool_search"]`）、MCP 的 codemode/deferred 曝光或 Pion 单项开关可请求激活，但能力开关不扩大显式 SDK 执行范围；旧 `pi-mcp-adapter` 注册的 `/mcp` 可以替换原生 builtin，不能双启或仅凭原生注册宣称原生 MCP 已活动。用户禁用扩展、`noExtensions` 和显式工具集合（包括空集）必须持续生效，不能只依赖启动时的 `defaultTools`。能力扫描仅加载 factory 注册，不连接 MCP 服务器、不读取认证凭据，也不是服务器可用性检查。`ExtensionToolContext.executeTool` / `tools` 是执行上下文契约，不自动新增工具。
 
 #### 原生 MCP 配置与启动边界
 

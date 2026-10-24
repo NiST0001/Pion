@@ -73,6 +73,15 @@ export class BackendPool {
           && !backend.busy
           && !backend.historyMutation
           && !backend.sessionExportPending
+          && !backend.capability?.applyPromise
+          && !backend.capability?.quarantined
+          && (!backend.capability || backend.capability.state === 'applied')
+          && !backend.promptDispatch
+          && !backend.steeringDispatchPromises?.size
+          && !backend.controlDispatchPromises?.size
+          && !backend.checkpointCreatePromise
+          && !backend.checkpointRefreshPromise
+          && !backend.subagentsModePending
           && !backend.historyStopFailed
           && backend.phase !== 'starting'
           && backend.pendingRunIds.length === 0

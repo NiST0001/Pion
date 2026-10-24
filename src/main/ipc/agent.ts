@@ -1,10 +1,11 @@
-import type { IpcMain } from 'electron'
+import type { IpcMain, IpcMainInvokeEvent } from 'electron'
 import type { AgentBridge } from '../agent/agent-bridge'
 import type { ProjectStore } from '../projects'
 import { IPC } from '../../shared/ipc'
 import type { BranchDeleteRequest } from '../../shared/branches'
 import type { McpStatusTarget } from '../../shared/mcp'
 import type { SessionCommandTarget } from '../../shared/slash-command-protocol'
+import type { CapabilitySettingsUpdate } from '../../shared/capability-settings'
 import type {
   AddModelProviderInput,
   ExtensionUiResponse,
@@ -23,6 +24,7 @@ interface AgentIpcDependencies {
   projects: Pick<ProjectStore, 'touchCanonical'>
   pushProjects: () => Promise<void>
   assertWorktreeDeletionIdle?: (cwd: string) => void | Promise<void>
+  getMainWindowId?: () => number | undefined
 }
 
 // Reserve asynchronous mutations from IPC entry, including the gap before a
@@ -40,7 +42,7 @@ const SESSION_OPERATIONS = new Set<string>([
   IPC.ToolPermissionResolve, IPC.ExtensionUiResolve, IPC.BranchCreate, IPC.BranchRename
 ])
 
-export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects, assertWorktreeDeletionIdle }: AgentIpcDependencies): void {
+export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects, assertWorktreeDeletionIdle, getMainWindowId }: AgentIpcDependencies): void {
   // A destructive operation uses its own exclusive gate, not its own reservation count.
   host.handle(IPC.BranchDelete, (event, request: BranchDeleteRequest) => {
     if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口删除分支')
@@ -49,7 +51,10 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   })
   const ipcMain: Pick<IpcMain, 'handle'> = {
     handle: (channel, listener) => host.handle(channel, SESSION_OPERATIONS.has(channel)
-      ? (event, ...args) => bridge.withSessionOperation(() => listener(event, ...args))
+      ? (event, ...args) => channel === IPC.ToolPermissionResolve || channel === IPC.ExtensionUiResolve
+        // Replacement hooks can still need their original approval/close response.
+        ? bridge.withSessionOperation(() => listener(event, ...args), true)
+        : bridge.withSessionOperation(() => listener(event, ...args))
       : listener)
   }
   // agent lifecycle -----------------------------------------------------------
@@ -229,6 +234,23 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   )
 
   // agent settings ------------------------------------------------------------
+  const capabilityOwner = (event: IpcMainInvokeEvent): (() => void) => {
+    const owner = getMainWindowId?.()
+    const sender = event.sender
+    const frame = event.senderFrame
+    const assertCurrent = (): void => {
+      if (owner === undefined || getMainWindowId?.() !== owner || sender.id !== owner || sender.isDestroyed()
+        || !frame || frame.detached || event.senderFrame !== frame || sender.mainFrame !== frame) {
+        throw new Error('只允许所属主窗口管理工具与能力')
+      }
+    }
+    assertCurrent()
+    return assertCurrent
+  }
+  ipcMain.handle(IPC.GetCapabilitySettings, (event, cwd?: string) =>
+    bridge.getCapabilitySettings(cwd, capabilityOwner(event)))
+  ipcMain.handle(IPC.UpdateCapabilitySettings, (event, request: CapabilitySettingsUpdate) =>
+    bridge.updateCapabilitySettings(request, capabilityOwner(event)))
   ipcMain.handle(IPC.AgentSetAutoCompaction, (_event, enabled: boolean) =>
     bridge.setAutoCompaction(enabled)
   )

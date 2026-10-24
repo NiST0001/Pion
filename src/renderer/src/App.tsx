@@ -1331,6 +1331,8 @@ export function App(): ReactElement {
           mounted: settingsMounted,
           dialog: {
             open: settingsOpen,
+            cwd: resourceCwd,
+            capabilityScope: mcpScope,
             navigationRequest: settingsNavigation,
             session: state.session,
             models: state.models,

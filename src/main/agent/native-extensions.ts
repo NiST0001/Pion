@@ -2,7 +2,7 @@ import {
   createCodemodeExtension, createMcpExtension, createToolSearchExtension,
   type ExtensionAPI, type ExtensionFactory, type ExtensionToolContext, type ToolDefinition,
   type ToolResultEvent, type ToolResultEventResult,
-  type InlineExtension
+  type InlineExtension, type McpExtensionOptions
 } from '@earendil-works/pi-coding-agent'
 import { collectToolImages } from '../../shared/tool-images'
 import type { createMcpStatusObserver } from './mcp-status-observer'
@@ -162,6 +162,7 @@ function loadoutPattern(pattern: string): RegExp | undefined {
  */
 export function createPionNativeLoadoutBoundary(entries: readonly string[] | undefined): {
   capture: ExtensionFactory; declarations: ExtensionFactory; initialize: (tools: readonly string[]) => void
+  allowed: (name: string) => boolean
 } {
   const explicit = entries !== undefined
   const empty = entries?.length === 0
@@ -203,6 +204,7 @@ export function createPionNativeLoadoutBoundary(entries: readonly string[] | und
     // runtime-host invokes this before RPC binds extensions. Inline extensions
     // are loaded after builtins by SDK regardless of extensionFactories order.
     initialize: (tools) => { initial ??= new Set(tools) },
+    allowed,
     capture: (pi) => {
       // Never capture here: SDK runs builtin MCP handlers before inline ones.
       // An explicit boundary not initialized by the host must remain fail-closed.
@@ -228,9 +230,89 @@ export function createPionNativeLoadoutBoundary(entries: readonly string[] | und
   }
 }
 
+/** SDK reports and swallows shutdown-handler errors. Retain the original close
+ * outcome outside that dispatch, so a replacement cannot start new connections
+ * after a failed/unknown native close. This is not a remote physical-stop receipt. */
+export function createPionNativeMcpCloseBarrier() {
+  let started = false
+  let closing = false
+  let failed = false
+  const operations: Promise<void>[] = []
+  const assertClosed = async (): Promise<void> => {
+    if (!started) return // A disabled/replaced factory never owned a session.
+    if (!closing) throw new Error('原生 MCP 尚无收尾回执；未启动替代运行时。')
+    await Promise.all(operations)
+    if (failed) throw new Error('原生 MCP 收尾失败；未启动替代运行时。')
+  }
+  return {
+    async start(): Promise<void> {
+      // ResourceLoader may also reload through a trusted extension. The same
+      // native factory must not bypass the close fence on that path either.
+      if (started) await assertClosed()
+      operations.length = 0
+      closing = false
+      started = true
+    },
+    close(operation: () => unknown): Promise<void> {
+      closing = true
+      let result: unknown
+      try { result = operation() }
+      catch { failed = true; result = Promise.reject(new Error('原生 MCP 收尾失败；未启动替代运行时。')) }
+      const pending = Promise.resolve(result).then(() => undefined, () => {
+        failed = true
+        throw new Error('原生 MCP 收尾失败；未启动替代运行时。')
+      })
+      operations.push(pending)
+      void pending.catch(() => undefined)
+      return pending
+    },
+    assertClosed
+  }
+}
+
+type NativeMcpCloseBarrier = ReturnType<typeof createPionNativeMcpCloseBarrier>
+export interface PionNativeMcpPolicy {
+  loadConfig: NonNullable<McpExtensionOptions['loadConfig']>
+  registrations: (entries: ReturnType<ExtensionAPI['getMcpServers']>) => ReturnType<ExtensionAPI['getMcpServers']>
+  closeBarrier: NativeMcpCloseBarrier
+}
+
+function policyMcpFactory(factory: ExtensionFactory, policy: PionNativeMcpPolicy): ExtensionFactory {
+  return (pi) => {
+    // SDK 1.4 replacement and its RPC caller both bind the same new runtime.
+    // Memoize only this factory instance; a reload still needs the close fence.
+    let startPromise: Promise<unknown> | undefined
+    let closePromise: Promise<void> | undefined
+    const retired = () => new Error('原生 MCP 已进入收尾；未重新启动旧运行时。')
+    return factory(new Proxy(pi, {
+      get(target, property) {
+        if (property === 'getMcpServers') return () => policy.registrations(target.getMcpServers())
+        if (property === 'on') return (event: string, handler: (...args: unknown[]) => unknown) => {
+          const wrapped = event === 'session_start' ? (...args: unknown[]) => {
+            if (closePromise) return Promise.reject(retired())
+            return startPromise ??= policy.closeBarrier.start().then(() => {
+              // Shutdown can arrive while the previous factory's close is pending.
+              if (closePromise) throw retired()
+              return handler(...args)
+            })
+          } : event === 'session_shutdown' ? (...args: unknown[]) =>
+            closePromise ??= policy.closeBarrier.close(() => handler(...args)) : handler
+          return Reflect.apply(target.on, target, [event, wrapped])
+        }
+        const value: unknown = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      }
+    }))
+  }
+}
+
 /** Match CLI builtin identity/replacement rules; never share session-scoped MCP state. */
-export function createPionNativeExtensions(observer?: Pick<ReturnType<typeof createMcpStatusObserver>, 'wrapNative'>): InlineExtension[] {
-  const mcp = createMcpExtension()
+export function createPionNativeExtensions(
+  observer?: Pick<ReturnType<typeof createMcpStatusObserver>, 'wrapNative'>,
+  policy?: PionNativeMcpPolicy
+): InlineExtension[] {
+  const native = policy ? createMcpExtension({ loadConfig: policy.loadConfig }) : createMcpExtension()
+  const mcp = policy ? policyMcpFactory(native, policy) : native
   return [
     { name: 'codemode', builtin: true, replaceable: true, factory: guardedNativeFactory(createCodemodeExtension({ models: true }), 'codemode') },
     { name: 'tool-search', builtin: true, replaceable: true, factory: createToolSearchExtension() },

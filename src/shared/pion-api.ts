@@ -6,6 +6,7 @@
 import type { BranchDeleteRequest, BranchDeleteResult } from './branches'
 import type { SubagentSessionList, SubagentSessionSnapshot } from './subagent-sessions'
 import type { SubagentSettings } from './subagents'
+import type { CapabilitySettingsSnapshot, CapabilitySettingsUpdate } from './capability-settings'
 import type { QuestionSettings } from './question-settings'
 import type { ThemeId } from './theme'
 import type { McpStatusSnapshot, McpStatusTarget } from './mcp'
@@ -262,6 +263,10 @@ export interface PionApi {
   onSubagentSessions(listener: (list: SubagentSessionList) => void): () => void
   getQuestionSettings(): Promise<QuestionSettings>
   setQuestionSettings(settings: QuestionSettings): Promise<QuestionSettings>
+  /** Desired switches and read-only local catalogue; never starts an Agent/MCP connection. */
+  getCapabilitySettings(cwd?: string): Promise<CapabilitySettingsSnapshot>
+  /** One revision-checked toggle/preset transaction; existing runs apply after real settlement. */
+  updateCapabilitySettings(request: CapabilitySettingsUpdate): Promise<CapabilitySettingsSnapshot>
   getSubagentSettings(): Promise<SubagentSettings>
   setSubagentSettings(settings: SubagentSettings): Promise<SubagentSettings>
   setModel(provider: string, modelId: string): Promise<void>

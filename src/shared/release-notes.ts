@@ -8,6 +8,14 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.85',
+    changes: [
+      '设置新增“工具与能力”，可逐项开关工具、MCP、Skill、扩展和子代理。',
+      '提供极简、标准、无 Skill 三种一次性批量操作，之后仍可自由调整。',
+      '开关在当前会话空闲或本轮实际结束后应用，保留会话、模型选择与输入草稿。'
+    ]
+  },
+  {
     version: '0.1.84',
     changes: [
       '内置 Pi 升级并锁定至 1.4.0；codemode 与 tool search 遵循 Pi 原生激活设置，不再由 Pion 额外默认开启。保留桌面权限、计划模式与生命周期适配。',

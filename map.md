@@ -17,6 +17,7 @@
 | src/shared/types.ts | 共享类型入口；历史用户索引另带可选的实际消息时钟，与 entry 追加时间分开，提供共享归一化；历史分页响应另带所选分支的最新任务快照及压缩边界元数据 |
 | src/shared/task-history.ts | 原生自定义任务快照/旧版工具结果校验；新原生目标按 planId 跨轮归档，旧记录保持用户轮次投影；共享未完成状态判定，区分有效空快照与错误/缺失结果 |
 | src/shared/image-generation.ts | 生图工具身份、官方请求别名与实验 2.5 Flare/Sunburst 白名单；size/quality 与有界引用路径准入（字面 @）；v2 必需请求操作/尺寸/质量/引用数及实际 PNG 保存元数据，实际版本未知；只读 v1/v2 投影不补造旧设置默认值 |
+| src/shared/capability-settings.ts | 工具/MCP/Skill/扩展/子代理的 desired、available、应用状态、修订及三种一次性动作；八核心工具与私有运行时命名来源/有界回执契约，不保存 mode |
 | src/shared/mcp.ts | MCP 只读状态类型、SDK 格式/私有单行协议的有界白名单、状态安全复制；连接状态与登记工具数不推断曝光/执行权限，不返回原始配置或诊断 |
 | src/shared/slash-commands.ts | Pi 核心/Pion 原生命令共享目录、明确待接入项、后端准备可用子集及完整名称解析；资源命令仍归 SDK |
 | src/shared/slash-command-protocol.ts | 只读现有会话目标身份、SDK 完整统计及内置 Pi 日志的跨进程契约，不请求创建后端 |
@@ -47,13 +48,19 @@
 | src/main/agent/live-session-state.ts | 后端私有当前轮显示快照：后台 root 输出持续归并、独立实例/revision 和有界行数/字节；实时事件与快照共用稳定消息身份，不伪造 SDK 时间戳/持久 ID；字段级截断、最终空消息权威、静态安全预览及子代理批次名称/状态/有界摘要（明确预算裁剪，任务参数只保留名字）；选回时随 SessionInfo 恢复，不重放请求或计费 |
 | src/main/agent/session-token-total.ts | 有界只读已落盘全文件Token投影（含分支、独立usage与toolResult），SDK header与文件快照绑定，未知不补零；列表缓存扫描内每目录4并发；session-token-total.test.ts 覆盖身份/异常/预算/用量来源 |
 | src/main/agent/session-list-cache.ts | exact cwd 的轻量会话列表缓存、在途扫描合并及并发界限；落盘软失效避免持续输出饿死扫描，显式变更硬失效防止旧行复活；不缓存 SDK 全量消息文本 |
-| src/main/agent/backend-pool.ts | 后端保留和容量管理，真实命令导出在途不可驱逐 |
+| src/main/agent/backend-pool.ts | 后端保留和容量管理，真实命令导出、能力待应用/应用中及未知收尾不可驱逐 |
+| src/main/capability-settings.ts | 独立 userData/pion-capabilities.json 严格校验与有界读取、串行原子保存、修订/owner 冲突；三预设仅单次写入，坏文件不默认覆盖 |
+| src/main/capability-ids.ts | 资源来源绑定的 opaque ID；全局 MCP 定义跨 cwd 稳定，项目覆盖与扩展登记隔离 |
+| src/main/capability-catalogue.ts | 只读配置/已安装包/Skill 元数据目录，不执行工厂、安装、包管理器探测、认证或连接；源修订与 desired 分开，动态元数据仅收可信现有 runtime，私有路径不进 renderer |
+| src/main/agent/capability-mcp.ts | 锁定 SDK 纯配置读取器与原生注册 facade，spawn/!command/OAuth 前覆盖 enabled，disabled 行防同名复活；旧插件自有连接明确不接管 |
+| src/main/agent/capability-policy.ts | immutable 偏好、加载前/最终 Skill 与直接/发现/嵌套/迟到工具过滤；SDK ceiling/计划/来源交集，命名私有 getCommands 回执微任务刷新/退休，不发送 prompt |
+| src/main/agent/capability-state.ts | 后端应用状态、真实空闲门、runtime/client/cwd/path/revision/epoch 回执校验与可信元数据缓存；版本限定原始 RPC 解码负响应观察，仅有限明确业务拒绝免未知隔离 |
 | src/main/agent/backend-events.ts | 后端事件、busy 与完成状态；所属agent_settled实际收口凭证，不以正常stop或错误长期锁队列 |
 | src/main/agent/queue-projection.ts | 本地/原生队列与原始本地runId同位置投影，native缺身份项不可编辑；tests/renderer/queue-projection.test.tsx 联查STATE/reducer身份回填，不解析文本图片 |
 | src/main/agent/task-planning.ts | 原生任务工具与扩展；未完成目标跨消息延续，全部完成快照持久归档并可读，之后 create 建立新目标身份/编号；同目标先重开旧任务再追加，显式 clear 重置当前计划；分支完整快照提交失败回滚内存，嵌套可恢复，保留单一进行中约束 |
 | src/main/agent/wire.ts | SDK 条目映射、所选分支祖先链与模式推导、沿当前叶节点恢复最新任务快照；保留压缩边界及 token 数供实时/历史归并 |
 | src/main/agent-runtime.ts、src/main/agent/runtime-host.ts、src/main/agent/runtime-lifecycle.ts | 编译后的 SDK RPC 子进程入口、私有启动参数、项目隔离/信任与会话替换时重建内置工具；启动失败/返回先等待 owner 清理再退出；生图工具捕获所属 backend 的 SDK ModelRuntime，执行获准后才解析 Codex OAuth/刷新 |
-| src/main/agent/native-extensions.ts | CLI 同源 MCP/codemode/tool-search 的 builtin/replaceable factories，运行时与能力扫描共用；不覆写 Pi 默认激活，codemode/tool_search 由用户 defaultTools 或 MCP 曝光激活，尊重禁用/替换/noExtensions；显式工具集合以初始 SDK 集合和正负匹配规则持续限制直接及嵌套执行，迟到发现不扩大边界；codemode models:true、每脚本模型调用预算与主机期限/父中止、原 SDK usage 保留，有界图片结果 fail-closed 投影并清除 structuredContent，不承诺任意文字/base64 脱敏或请求实际停止 |
+| src/main/agent/native-extensions.ts | CLI 同源 MCP/codemode/tool-search 的 builtin/replaceable factories，运行时与原能力扫描共用；未设 Pion 能力偏好时不覆写 Pi 默认激活，显式偏好仍受 defaultTools/入口边界限制；尊重禁用/替换/noExtensions，原生 MCP start/close 按 factory 去重并守真实 close 屏障；显式工具集合以初始 SDK 集合和正负匹配规则持续限制直接及嵌套执行，迟到发现不扩大边界；codemode models:true、每脚本模型调用预算与主机期限/父中止、原 SDK usage 保留，有界图片结果 fail-closed 投影并清除 structuredContent，不承诺任意文字/base64 脱敏或请求实际停止 |
 | src/main/agent/mcp-status-observer.ts | 已核对 SDK 版本的 builtin:mcp 空参数 RPC handler 采集；真实 command context、成功原生启动/命令来源双门，每次仅一次 info notify、未知/被吞禁止访问 fail-closed；周期通知、generation/关闭失效、实际 pending 跨 SDK 替换单槽，不创建 manager/连接或调用模型 |
 | src/main/agent/mcp-status-bridge.ts | 私有 widget 消费/白名单缓存与目标选择 fence；捕获 client、cwd/path/backend、主进程单调 revision 和有限 retired-runtime 身份，单调收件 TTL/过期锁存；getter 只读现有后端缓存、超时未知，不污染 live/正文/任务/计费 |
 | src/main/agent/image-generation.ts | SDK 单张文字生图/参考图编辑工具：size/quality 请求及 ≤5 个项目相对 PNG/JPEG 输入，前置拒绝非法/未知参数（含 mask/input_fidelity），显式不同于输入的 PNG 新路径；调用原生读取器后请求订阅服务，v2 请求设置与经输出 PNG 校验的保存尺寸分离，不返回输入字节/metadata/路径数组；原有目录/身份检查、私有同目录 wx 暂存和 hard-link no-replace 发布，不删最终目标，失败保留完整恢复文件，清理失败报告残留；预览真实解码跨实例单槽，提交后失败不回滚 |
@@ -148,6 +155,7 @@
 - `settings/`：设置、模型选择器与按职责拆分的页面。
   - `settingsNavigation.ts`：设置页与递增请求 ID、提供商过滤/认证意图的纯类型；导航不自动登录/登出，不永久挂载页面。
   - `SettingsModal.tsx`：设置外壳、导航与操作编排，继续持有会话名称草稿、真实重命名/提供商动作槽、压缩/导出状态、诊断日志及主题保存 revision；原页面按导航/关闭卸载但不释放实际动作槽，新页面等所属收口再读取目录，保重命名失败/IME/重复提交门。
+  - `CapabilitySettingsPage.tsx`：五类逐项开关与极简/标准/无 Skill 一次性动作，desired/available 及保存/待应用状态分开；宿主保存槽跨卸载保留，API/cwd/scope/generation 隔离及仅可见 pending 轮询，不启动后端。
   - `ModelsPage.tsx`、`SessionPage.tsx`、`SecurityPage.tsx`：模型与提供商、会话行为与工具、安全信任与权限页面；模型页消费宿主跨卸载操作槽，名称保存显示在途/错误且 IME 不提交；新增页面通过受控 props 回调操作，不反向依赖弹窗。
   - `AppearancePage.tsx`、`AboutPage.tsx`、`DiagnosticsPage.tsx`：外观、版本与更新日志、会话状态与 stderr 页面；`SettingsInfoRow.tsx` 为关于/诊断共用的信息行。
   - `QuestionSettings.tsx` 在会话页设置下一题的等待期限（默认10分钟、1–300或不自动超时），typed IPC/owner/迟到读取保存隔离，不扩展工具授权期限；`tests/renderer/QuestionSettings.test.tsx` 与 `tests/unit/question-settings{,-pending,-ipc}.test.ts` 覆盖校验/单槽/owner保存与设置UI。
@@ -166,6 +174,7 @@
 - `src/renderer/src/styles.css`：样式导入顺序。
 - `src/renderer/src/styles/`：按功能拆分的 CSS；`refinements/` 为细化样式。
 - `styles/refinements/project.css`：会话运行整周圆角光环与独立柔和光晕同步呼吸（减少动态效果静态可见、强制色关闭光晕并使用系统 Highlight 轮廓，不旋转/扫描文字）、未读标记和项目列表细节。
+- `styles/capability-settings.css`：复用设置卡片/胶囊开关的能力分组、批量动作、状态与不可用提示，主题变量/共享圆角及键盘/forced-colors 门。
 - `styles/commands.css`：原生命令弹窗、独立结果滚动与纯文字信息，主题/forced-colors/减少动效；`styles/refinements.css` 的斜杠菜单独立滚动，不截断命令目录。
 - `styles/dock.css`、`styles/terminal.css`：模块化工作区、拖动反馈、分隔条及终端面板。
 - `styles/subagent-sessions.css`：子会话列表使用可收缩名称列与 max-content 单行状态列，面板缩窄仅省略标题；`SessionList.test.tsx` 登记样式约束回归，不把 JSDOM 断言当实机几何验证。
@@ -183,6 +192,10 @@
 
 以下为测试源码职责，实际验证范围以对应执行记录为准，不把文件清单当成全部通过的证明。
 
+- `tests/unit/capability-settings.test.ts`、`capability-catalogue.test.ts`、`capability-mcp.test.ts`：独立有界文件/坏配置/owner/修订/一次性预设、只读目录无工厂/安装/命令/认证、资源 ID/源修订及 MCP 真实 enabled 启动前覆盖/同名禁用门；不连接真实服务器。
+- `tests/unit/capability-policy.test.ts`：最小/标准/单项工具、SDK 显式 ceiling 与通配语义、最终 Skill/late registry 过滤、动态来源回执/退休、子代理全局交集、原生 MCP 双重 bind 去重及 pending/失败 close 屏障；不请求模型或启用真实 MCP。
+- `tests/unit/capability-bridge.test.ts`：可信只读回执与目录、运行/实际 RPC/完成/检查点收口后优先应用、取消保旧 runtime、空会话名称/精确模型偏好、原 FIFO/会话子代理开关、epoch 与迟到 SessionInfo、明确 SDK 负响应/未知隔离及无 busy loop。
+- `tests/unit/capability-ipc.test.ts`、`tests/renderer/CapabilitySettingsPage.test.tsx`：typed IPC/preload 同源路由、owner/活主帧异步复查、五类开关/三一次性动作、错误/修订/无后端与待应用、跨卸载真实保存/读取槽、隐藏轮询及 API/cwd/scope 迟到隔离；不运行真实 Electron。
 - `tests/unit/slash-commands.test.ts`、`command-arguments.test.ts`：完整 Pi/Pion 目录、明确待接入项、精确命令/非法多行拦截及字面导出路径校验。
 - `tests/unit/slash-command-bridge.test.ts`：模拟既有后端/owner/选择/client/运行 fence、完整统计/最后助手正文/内置日志、无模型副作用、HTML 空/未落盘预检、实际导出保护与未知文件隔离，以及真实事件处理函数在导出期间保留 agent_start 并作废发布；preload 新 API 透传。
 - `tests/unit/slash-command-files.test.ts`、`slash-command-pool.test.ts`：模拟文件预算/身份/close 未知、SDK 当前分支 JSONL、私有暂存/no-replace/恢复残留与导出在途池驱逐保护，不是实际文件系统或 SDK 兼容验收。

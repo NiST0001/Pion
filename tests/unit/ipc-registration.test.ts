@@ -43,7 +43,7 @@ function collectIpc() {
 
 function mainEvent(id = 41, iframe = false): IpcMainInvokeEvent & IpcMainEvent {
   const mainFrame = {}
-  return { sender: { id, mainFrame }, senderFrame: iframe ? {} : mainFrame } as unknown as IpcMainInvokeEvent & IpcMainEvent
+  return { sender: { id, mainFrame, isDestroyed: () => false }, senderFrame: iframe ? {} : mainFrame } as unknown as IpcMainInvokeEvent & IpcMainEvent
 }
 
 function agentHarness(
@@ -57,7 +57,7 @@ function agentHarness(
   const bridge = { ...methods, withSessionOperation }
   // This harness supplies only the methods exercised by each route case, not
   // the bridge's private runtime/lifecycle state.
-  registerAgentIpc({ ipcMain: ipc.ipcMain, bridge: bridge as unknown as AgentBridge, projects, pushProjects, assertWorktreeDeletionIdle })
+  registerAgentIpc({ ipcMain: ipc.ipcMain, bridge: bridge as unknown as AgentBridge, projects, pushProjects, assertWorktreeDeletionIdle, getMainWindowId: () => 41 })
   return { ...ipc, bridge, withSessionOperation, projects, pushProjects }
 }
 
@@ -326,7 +326,8 @@ describe('agent IPC registration', () => {
       ...agentRoutes.map(([channel]) => channel), ...sessionCommandRoutes.map(([channel]) => channel),
       IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
       IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete, IPC.AgentEditQueued,
-      IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels
+      IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels,
+      IPC.GetCapabilitySettings, IPC.UpdateCapabilitySettings
     ])].sort())
     expect(h.listeners.size).toBe(0)
     expect(h.withSessionOperation).not.toHaveBeenCalled()
@@ -343,7 +344,11 @@ describe('agent IPC registration', () => {
     const returned = h.invoke(channel, mainEvent(), ...args)
     if (reserved) {
       await expect(returned).resolves.toBe(result)
-      expect(h.withSessionOperation).toHaveBeenCalledExactlyOnceWith(expect.any(Function))
+      if (channel === IPC.ToolPermissionResolve || channel === IPC.ExtensionUiResolve) {
+        expect(h.withSessionOperation).toHaveBeenCalledExactlyOnceWith(expect.any(Function), true)
+      } else {
+        expect(h.withSessionOperation).toHaveBeenCalledExactlyOnceWith(expect.any(Function))
+      }
       expect(h.withSessionOperation.mock.contexts[0]).toBe(h.bridge)
     } else {
       expect(returned).toBe(result)
@@ -855,6 +860,7 @@ it('composes the domain registrars without duplicate channels', () => {
     IPC.AgentStart, IPC.AgentSetYolo, IPC.AgentSetSubagents,
     IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete, IPC.AgentEditQueued,
     IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels,
+    IPC.GetCapabilitySettings, IPC.UpdateCapabilitySettings,
     ...gitRoutes.map(([channel]) => channel), ...effectRoutes.map(([channel]) => channel),
     ...terminalRoutes.map(([channel]) => channel), IPC.WindowState
   ])

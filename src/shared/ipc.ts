@@ -86,6 +86,8 @@ export const IPC = {
   SetTheme: 'pion:set-theme',
   GetQuestionSettings: 'pion:get-question-settings',
   SetQuestionSettings: 'pion:set-question-settings',
+  GetCapabilitySettings: 'pion:get-capability-settings',
+  UpdateCapabilitySettings: 'pion:update-capability-settings',
   GetSubagentSettings: 'pion:get-subagent-settings',
   SetSubagentSettings: 'pion:set-subagent-settings',
   AgentModels: 'pion:agent-models',

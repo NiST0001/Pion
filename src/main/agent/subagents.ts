@@ -67,7 +67,7 @@ function addUsage(total: Usage, usage: Usage) {
 }
 
 /** Per-parent-runtime control. No plugin installation, global toggle or recursive delegation. */
-export function createSubagentControl(run: Runner, getSettings: () => SubagentSettings | Promise<SubagentSettings> = readRuntimeSubagentSettings, publisher?: SubagentSessionPublisher, getModelCatalog?: () => readonly SubagentModelSelection[]) {
+export function createSubagentControl(run: Runner, getSettings: () => SubagentSettings | Promise<SubagentSettings> = readRuntimeSubagentSettings, publisher?: SubagentSessionPublisher, getModelCatalog?: () => readonly SubagentModelSelection[], capabilityAllowed: () => boolean = () => true, onChanged: () => void = () => undefined) {
   let enabled = DEFAULT_SUBAGENTS_ENABLED
   let batchActive = false
   const active = new Set<AbortController>()
@@ -88,12 +88,12 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
     pi.on('session_start', () => {
       abortActive()
       planModeActive = false
-      enabled = DEFAULT_SUBAGENTS_ENABLED
+      enabled = DEFAULT_SUBAGENTS_ENABLED && capabilityAllowed()
       sync(true)
     })
     pi.on('session_shutdown', () => { stop(); publisher?.halt() })
     // Plan-mode restoration can hide this tool. Explicit off remains off until
-    // the user turns it back on; a fresh backend starts with the default on.
+    // the user turns it back on; fresh backends use the capability-constrained default.
     pi.on('before_agent_start', async (event) => {
       const nextPlanModeActive = event.systemPrompt.includes('[PION PLAN MODE]')
       if (nextPlanModeActive) {
@@ -133,6 +133,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
     pi.registerCommand('pion-subagents', {
       description: 'Pion 内置子代理开关：on / off（额外模型用量）',
       handler: async (args, ctx) => {
+        if (args.trim() === 'on' && !capabilityAllowed()) throw new Error('子代理已在设置中关闭。')
         if (args.trim() === 'on' && !ctx.isIdle()) throw new Error('请等待当前执行完成后开启子代理')
         if (args.trim() !== 'on' && args.trim() !== 'off') throw new Error('用法：/pion-subagents on|off')
         if (args.trim() === 'off') stop()
@@ -141,6 +142,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
         // The owning backend mirrors this event, including commands entered
         // directly rather than through the composer toggle.
         pi.appendEntry('pion-subagents-state', { enabled })
+        onChanged()
       }
     })
   }
@@ -160,7 +162,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
     // Serialize batches, not their children (which run together via Promise.all).
     executionMode: 'sequential',
     async execute(_id, params, signal, onUpdate) {
-      if (!enabled) throw new Error('子代理已关闭；请由用户通过输入框开启。')
+      if (!enabled || !capabilityAllowed()) throw new Error('子代理已关闭；请由用户通过输入框或设置开启。')
       if (!Array.isArray(params.tasks) || params.tasks.length < 1 || params.tasks.length > SUBAGENT_LIMITS.maxParallel.max) throw new Error('子代理任务数量超出安全上限。')
       // Capture before the first await: callers cannot change selections while
       // settings/admission are pending. Malformed selections reject the whole call.
@@ -257,7 +259,7 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
       }
     }
   })
-  return { tool, extension, stop }
+  return { tool, extension, stop, isEnabled: () => enabled && capabilityAllowed() }
 }
 
 /** Children get only built-in coding tools, each routed through the parent's

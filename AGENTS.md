@@ -30,6 +30,7 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 ## Agent 与会话关键规则
 
 - SDK factory 与原生扩展入口共用，保持 builtin/replaceable 身份、RPC/项目信任/用户配置；插件接管不能双启。系统 Node 的运行时入口及共享块须解包，兼顾 Windows 路径。
+- 工具/扩展/MCP/Skill/子代理开关独立保存在 pion-capabilities.json；三种预设只是一次批量写入，不持久化或强制 mode，单项可继续修改。当前会话仅真实空闲/所属轮次与实际 RPC 收口后应用，保会话、精确模型与草稿，优先于下一 FIFO；读目录不执行工厂、安装、连接或认证。开关与信任/权限/计划/SDK 显式工具范围取交集，MCP 在 spawn/!command/OAuth 前覆盖 enabled，未知 close 隔离不自动重启；私有回执核真实命名来源和 runtime epoch，不发 prompt。详见功能约束「工具与能力开关」。
 - Pi 核心斜杠命令由桌面原生拦截，未接入项明确标注，不把 TUI 命令送入 prompt/队列或终端回退；资源命令仍归 SDK。只读命令不启动后端或认证，变更守真实 pending 与会话身份；导出占槽不屏蔽 SDK 事件，未知私有文件收尾仅隔离对应文件能力。详见功能约束的原生斜杠命令章节。
 - 子代理仅继承父级可见内置编码工具、实时权限/检查点，无插件或递归委派。独立工作合并并发批次，分配不重叠文件；未指定子模型省略 `task.model`，使用设置默认，仅用户明确选择才覆盖或传 null 继承父模型。不猜 ID、静默回退或重复计费。
 - 生图仅复用所属 Codex OAuth，无 API-key/付费回退；非法参数前置拒绝，失败不自动重试、换型号、降设置或改路径。只写显式新项目 PNG、不覆盖输入；参考原文件含 metadata 上传，严格有界校验与 no-replace 发布，保留恢复路径。请求型号/尺寸/质量不冒称实际值。

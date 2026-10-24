@@ -5,6 +5,7 @@ import type {
   ImageContent,
   ExtensionUiResponse,
   RunCheckpointStatus,
+  SessionInfo,
   ToolPermissionRequest,
   TreeNodeLite
 } from '../../shared/types'
@@ -12,6 +13,7 @@ import type { GitRunCheckpoint } from '../checkpoints'
 import type { RunOperation } from '../../shared/operations'
 import type { LiveSessionProjection } from './live-session-state'
 import type { McpStatusSnapshot } from '../../shared/mcp'
+import type { BackendCapabilityState } from './capability-state'
 
 export interface PushedTree {
   tree: TreeNodeLite[]
@@ -76,7 +78,24 @@ export interface BackendMcpStatusCache {
   snapshot: McpStatusSnapshot
 }
 
+export interface BackendSessionInfoScope {
+  client: RpcClient
+  cwd: string
+  capability?: BackendCapabilityState
+  capabilityEpoch?: object
+}
+export interface BackendSessionInfoQuery extends BackendSessionInfoScope {
+  promise: Promise<SessionInfo | null>
+}
+export interface BackendSessionInfoSnapshot extends BackendSessionInfoScope {
+  revision: number
+  sessionPath?: string
+  info: SessionInfo
+}
+
 export interface BackendRecord {
+  /** Desired/application receipts, never chat history or a persistent preset mode. */
+  capability?: BackendCapabilityState
   /** Bounded current-root-turn projection, isolated to this backend instance. */
   liveState?: LiveSessionProjection
   /** Private display routing nonce; not authentication against same-process extensions. */

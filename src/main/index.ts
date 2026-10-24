@@ -16,6 +16,7 @@ import { TerminalService } from './terminal-service'
 import { bindBrowserSecurity } from './browser-security'
 import { WindowEffectsService } from './window-effects'
 import { assertSubagentSettingsOwner, SubagentSettingsStore } from './subagent-settings'
+import { CapabilitySettingsStore } from './capability-settings'
 import { QuestionSettingsStore } from './question-settings'
 import { assertThemeSettingsOwner, ThemeSettingsStore } from './theme-settings'
 import { ProviderVisibilityStore } from './provider-visibility'
@@ -147,6 +148,8 @@ const windowEffects = new WindowEffectsService(appSettings, {
 }, () => nativeTheme.shouldUseHighContrastColors)
 const providerVisibility = new ProviderVisibilityStore(join(app.getPath('userData'), 'pion-provider-visibility.json'))
 const bridge = new AgentBridge(runStore, appSettings, undefined, undefined, providerVisibility)
+const capabilitySettings = new CapabilitySettingsStore(join(app.getPath('userData'), 'pion-capabilities.json'))
+bridge.configureCapabilitySettings(capabilitySettings)
 const verification = new VerificationService(join(app.getPath('userData'), 'pion-verification.json'))
 const workflowPermissionStore = new ToolPermissionStore()
 const workflows = new WorkflowManager({
@@ -346,7 +349,7 @@ function registerIpc(): void {
     getMainWindowId: () => mainWindowId,
     reserveMutation: (operation) => bridge.withSessionOperation(operation)
   })
-  registerAgentIpc({ ipcMain, bridge, projects, pushProjects,
+  registerAgentIpc({ ipcMain, bridge, projects, pushProjects, getMainWindowId: () => mainWindowId,
     assertWorktreeDeletionIdle: (cwd) => {
       terminals.assertWorktreeDeletionIdle(cwd)
       workflows.assertWorktreeDeletionIdle(cwd)

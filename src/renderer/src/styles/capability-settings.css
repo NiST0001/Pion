@@ -1,0 +1,193 @@
+.capability-settings-page {
+  overscroll-behavior: contain;
+}
+
+.capability-presets {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+}
+
+.capability-presets .action-card {
+  border-radius: var(--radius-sm);
+}
+
+.capability-presets .action-card small {
+  overflow: visible;
+  line-height: 1.6;
+  white-space: normal;
+}
+
+.capability-preset-note {
+  margin-top: 10px;
+  line-height: 1.6;
+}
+
+.capability-status-bar,
+.capability-group-heading,
+.capability-item-heading,
+.capability-item-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.capability-status-bar {
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.capability-application {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.capability-application strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.capability-application-failed strong {
+  color: var(--danger);
+}
+
+.capability-application small {
+  color: var(--fg-faint);
+}
+
+.capability-group-heading {
+  justify-content: space-between;
+}
+
+.capability-group-heading .settings-section-title {
+  margin-bottom: 0;
+}
+
+.capability-group-heading > span,
+.capability-origin {
+  flex-shrink: 0;
+  color: var(--fg-faint);
+  font-size: 10.5px;
+}
+
+.capability-group-description {
+  margin: 6px 0 8px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.settings-page.capability-settings-page .capability-row {
+  align-items: center;
+  flex-direction: row;
+  gap: 16px;
+  padding: 12px 0;
+}
+
+.capability-item-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.capability-item-heading {
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.capability-item-copy :is(.setting-label, .setting-desc, .capability-item-name) {
+  overflow-wrap: anywhere;
+}
+
+.capability-item-copy .setting-desc {
+  margin-top: 4px;
+  line-height: 1.6;
+}
+
+.capability-item-name {
+  display: block;
+  margin-top: 3px;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.capability-item-state {
+  flex-wrap: wrap;
+  margin-top: 5px;
+  color: var(--fg-dim);
+  font-size: 10.5px;
+}
+
+.capability-availability {
+  padding: 1px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  color: var(--fg-faint);
+}
+
+.capability-availability.available {
+  color: var(--fg-dim);
+}
+
+.capability-empty {
+  padding: 8px 0;
+}
+
+.capability-notice {
+  margin: 10px 0 14px;
+  line-height: 1.6;
+}
+
+.capability-settings-page .toggle:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+html.pion-keyboard-focus .capability-settings-page button:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+
+@media (max-width: 850px) {
+  .capability-presets {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capability-settings-page :is(.action-card, .ghost-button, .toggle, .toggle-knob) {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .capability-application,
+  .capability-availability {
+    border-color: CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+  .capability-settings-page .toggle {
+    border-color: ButtonText;
+    background: ButtonFace;
+  }
+  .capability-settings-page .toggle-knob {
+    background: ButtonText;
+  }
+  .capability-settings-page .toggle.on {
+    background: Highlight;
+  }
+  .capability-settings-page .toggle.on .toggle-knob {
+    background: HighlightText;
+  }
+  html.pion-keyboard-focus .capability-settings-page button:focus-visible {
+    outline-color: Highlight;
+  }
+}

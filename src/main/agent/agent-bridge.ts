@@ -4,6 +4,10 @@ import { link, mkdir, readFile, realpath, stat, unlink, writeFile } from 'node:f
 import { BrowserWindow, clipboard } from 'electron'
 import { subagentSettingsFilePath } from '../subagent-settings'
 import { questionSettingsFilePath } from '../question-settings'
+import { capabilityEnabled, CAPABILITY_RUNTIME_COMMAND, type CapabilitySettingsSnapshot, type CapabilitySettingsUpdate } from '../../shared/capability-settings'
+import type { CapabilitySettingsStore } from '../capability-settings'
+import { readCapabilityResources } from '../capability-catalogue'
+import { capabilityApplication, capabilityBackendIdle, capabilityCommandFrom, capabilityNeedsApplication, knownCapabilityRpcRejection, newBackendCapabilityState, observeCapabilityRpcRejections, readCapabilityRuntimeNotice, rememberCapabilityRuntimeItems, type CapabilityCommands, type CapabilityRpcRejection } from './capability-state'
 import { QUESTION_WAIT_WIDGET_KEY, parseQuestionWaitMetadata, type QuestionWaitMetadata } from '../../shared/question-settings'
 import { DEFAULT_SUBAGENTS_ENABLED, SUBAGENT_LIMITS } from '../../shared/subagents'
 import { IPC_EVENTS } from '../../shared/ipc'
@@ -151,6 +155,9 @@ import {
 import type {
   BackendPhase,
   BackendRecord,
+  BackendSessionInfoQuery,
+  BackendSessionInfoScope,
+  BackendSessionInfoSnapshot,
   PendingExtensionUi,
   PendingBackendScope,
   PendingProviderAuthUi,
@@ -267,6 +274,9 @@ export class AgentBridge {
     }
   }
   private stopping = false
+  private capabilitySettings?: CapabilitySettingsStore
+  private capabilityScheduleQueued = false
+  private capabilityQuarantinedCwds?: Set<string>
   private readonly backendKeysBySessionPath = new Map<string, string>()
   /** Only failed paths, latched for this bridge's lifetime; pool eviction/stop is not exit proof. */
   private quarantinedSessionPaths?: Set<string>
@@ -295,8 +305,8 @@ export class AgentBridge {
   private steeringMarkers?: WeakMap<BackendRecord, Array<{ token: symbol; message: string }>>
   private questionWaitStages?: WeakMap<BackendRecord, QuestionWaitMetadata & { scope: PendingBackendScope }>
   /** UI deadlines stop waiting, not the underlying RPC; retain its slot until settlement. */
-  private sessionInfoQueries?: WeakMap<BackendRecord, Promise<SessionInfo | null>>
-  private sessionInfoSnapshots?: WeakMap<BackendRecord, { revision: number; sessionPath?: string; info: SessionInfo }>
+  private sessionInfoQueries?: WeakMap<BackendRecord, BackendSessionInfoQuery>
+  private sessionInfoSnapshots?: WeakMap<BackendRecord, BackendSessionInfoSnapshot>
 
   private dispatchLifecycle(backend: BackendRecord): { generation: number; token?: symbol } {
     this.dispatchLifecycles ??= new WeakMap()
@@ -381,6 +391,7 @@ export class AgentBridge {
     lease = this.reserveDispatch(backend), onInvoke?: () => void
   ): Promise<void> {
     this.assertDispatchLease(lease)
+    if (capabilityNeedsApplication(backend)) throw new Error('能力开关尚未应用，输入保持未发送')
     if (backend.promptDispatch || backend.controlDispatchPromises?.size) throw new Error('上一条输入的派发仍在收尾，请稍后再试')
     const lifecycle = this.dispatchLifecycle(backend)
     const generation = lifecycle.generation
@@ -403,6 +414,7 @@ export class AgentBridge {
       // Register before invoking RPC: synchronous lifecycle events must see it.
       this.runStore.update(runId, (run) => { run.dispatchedAt ??= Date.now() })
       onInvoke?.()
+      if (backend.capability) backend.capability.runPending = true
       try { void client.prompt(message, images).then(accept, reject) } catch (error) { reject(error) }
       const disposition = await pending
       if (!this.backendStillOwned(backend) || backend.client !== client) return
@@ -423,6 +435,7 @@ export class AgentBridge {
       if (backend.activeRunId !== runId) return
       backend.activeRunId = undefined
       if (lifecycle.token !== token || lifecycle.generation !== generation) return
+      if (backend.capability) backend.capability.runPending = false
       backend.queueAutoReady = false
       lifecycle.token = undefined
       backend.busy = Boolean(backend.controlDispatchPromises?.size || backend.steeringDispatchPromises?.size
@@ -448,6 +461,7 @@ export class AgentBridge {
           && !backend.runCompletionPromise && !backend.checkpointCreatePromise
           && !backend.checkpointRefreshPromise) backend.busy = false
         if (settledHere) this.dispatchNextLocalFollowUp(backend)
+        this.scheduleCapabilityApplications()
         this.pushRunningSessionPaths()
       }
     }
@@ -456,6 +470,7 @@ export class AgentBridge {
   private async dispatchSteering(
     backend: BackendRecord, message: string, images: ImageContent[], marker: symbol, runId?: string
   ): Promise<void> {
+    if (backend.capability?.applyPromise || backend.capability?.quarantined) throw new Error('能力开关应用中或收尾未知，未插入消息')
     const client = backend.client
     type Disposition = Awaited<ReturnType<BackendRecord['client']['steer']>>
     let accept!: (value: Disposition) => void
@@ -480,6 +495,7 @@ export class AgentBridge {
       this.unmarkDirectSteering(backend, message, marker)
     } finally {
       backend.steeringDispatchPromises.delete(receipt)
+      this.scheduleCapabilityApplications()
     }
   }
   private branchDeletionInFlight = false
@@ -525,12 +541,427 @@ export class AgentBridge {
     return this.activeKey ? this.backendPool.get(this.activeKey) ?? null : null
   }
 
+  configureCapabilitySettings(store: CapabilitySettingsStore): void {
+    if (this.capabilitySettings) throw new Error('能力开关设置已配置')
+    this.capabilitySettings = store
+    store.onChanged(preferences => {
+      for (const backend of this.backendPool.values()) {
+        const state = backend.capability ??= newBackendCapabilityState(preferences.revision)
+        state.requestedRevision = preferences.revision
+        if (!state.applyPromise && !state.quarantined) state.state = 'pending'
+      }
+      this.scheduleCapabilityApplications()
+    })
+  }
+
+  /** Metadata only. Captures the actual selected cwd and live window, never starts an Agent. */
+  private captureCapabilitySettings(cwd: string | undefined, assertCurrent: () => void) {
+    if (cwd !== undefined && (typeof cwd !== 'string' || !cwd || cwd.length > 16_000
+      || !isAbsolute(cwd) || resolve(cwd) !== cwd || /[\u0000-\u001f\u007f]/.test(cwd))) throw new Error('能力设置项目目录无效')
+    const store = this.capabilitySettings
+    if (!store) throw new Error('能力开关设置尚未配置')
+    const win = this.win
+    const frame = win?.webContents.mainFrame
+    const selectedCwd = this.activeCwd
+    const generation = this.sessionSelectionGeneration
+    const key = this.activeKey
+    const sessionPath = this.activeSessionPath
+    const trust = cwd === undefined ? undefined : this.getProjectTrust(cwd)
+    const trustKey = JSON.stringify(trust)
+    const assertOwned = () => {
+      assertCurrent()
+      if (!win || this.win !== win || win.isDestroyed?.() || win.webContents.isDestroyed?.()
+        || win.webContents.mainFrame !== frame || frame?.detached || this.capabilitySettings !== store
+        || (cwd !== undefined && (cwd !== this.activeCwd || this.activeCwd !== selectedCwd
+          || generation !== this.sessionSelectionGeneration || key !== this.activeKey || sessionPath !== this.activeSessionPath
+          || JSON.stringify(this.getProjectTrust(cwd)) !== trustKey))) throw new Error('能力设置所属窗口、项目或信任状态已改变')
+    }
+    assertOwned()
+    return { store, assertOwned, trusted: trust?.decision === 'trusted' }
+  }
+
+  private async readCapabilityCommands(backend: BackendRecord, revision?: number, replacement = false): Promise<CapabilityCommands> {
+    const state = backend.capability
+    if (!state) return backend.client.getCommands()
+    const client = backend.client
+    if (state.noticeClient && state.noticeClient !== client) {
+      state.notice = undefined
+      state.commands = undefined
+      this.quarantineCapabilityBackend(backend)
+      throw new Error('能力回执所属客户端已改变')
+    }
+    // A polling settings page must not inspect a partially replaced runtime.
+    if (state.applyPromise && revision === undefined) return state.commands ?? []
+    const trust = JSON.stringify(this.getProjectTrust(backend.cwd))
+    if (state.noticeTrust !== undefined && state.noticeTrust !== trust) throw new Error('能力回执所属项目信任已改变')
+    if (state.commandsPromise) return state.commandsPromise
+    const cwd = backend.cwd
+    const sessionPath = backend.sessionPath
+    const generation = this.dispatchLifecycle(backend).generation
+    const epoch = state.epoch
+    const runtimeId = state.notice?.runtimeId
+    const pending = (async () => {
+      const commands = await client.getCommands()
+      if (!this.backendStillOwned(backend) || backend.client !== client || backend.capability !== state
+        || backend.cwd !== cwd || backend.sessionPath !== sessionPath || state.epoch !== epoch
+        || JSON.stringify(this.getProjectTrust(cwd)) !== trust
+        || this.dispatchLifecycle(backend).generation !== generation) throw new Error('能力运行时所属会话已改变')
+      let notice: ReturnType<typeof readCapabilityRuntimeNotice>
+      try {
+        notice = readCapabilityRuntimeNotice(commands, { cwd, sessionPath, revision: replacement ? undefined : revision ?? state.appliedRevision,
+          runtimeId, retiredRuntimeIds: state.retiredRuntimeIds })
+      } catch {
+        this.quarantineCapabilityBackend(backend)
+        throw new Error('能力运行时回执来源或身份未确认')
+      }
+      const desired = this.capabilitySettings?.getSnapshot()
+      if (!desired || notice.revision > desired.revision || (replacement && revision !== undefined && notice.revision < revision)) throw new Error('能力运行时修订尚未确认')
+      state.notice = notice
+      state.noticeClient = client
+      state.noticeTrust = trust
+      rememberCapabilityRuntimeItems(state, client, notice, trust)
+      // Only these three command receipts are needed across a replacement.
+      // Never cache arbitrary extension descriptions or private source metadata.
+      const receipts = commands.filter(command => [CAPABILITY_RUNTIME_COMMAND, 'plan', 'pion-subagents'].includes(command.name))
+      if (receipts.length > 8) throw new Error('原生命令来源存在冲突')
+      state.commands = receipts.map(command => ({ name: command.name, source: command.source,
+        description: command.name === CAPABILITY_RUNTIME_COMMAND ? command.description : command.description?.slice(0, 1024),
+        sourceInfo: { path: command.sourceInfo.path.slice(0, 16_000), source: command.sourceInfo.source.slice(0, 128),
+          scope: command.sourceInfo.scope, origin: command.sourceInfo.origin } }))
+      return commands
+    })()
+    state.commandsPromise = pending
+    try { return await pending }
+    finally { if (state.commandsPromise === pending) state.commandsPromise = undefined }
+  }
+
+  async getCapabilitySettings(cwd?: string, assertCurrent: () => void = () => undefined): Promise<CapabilitySettingsSnapshot> {
+    const scope = this.captureCapabilitySettings(cwd, assertCurrent)
+    const preferences = await scope.store.get()
+    scope.assertOwned()
+    const backend = cwd === undefined ? undefined : this.getActiveBackend() ?? undefined
+    const backendClient = backend?.client
+    const backendPath = backend?.sessionPath
+    const backendCapability = backend?.capability
+    const capabilityEpoch = backendCapability?.epoch
+    const assertRuntime = () => {
+      if (backend && (this.getActiveBackend() !== backend || backend.client !== backendClient || backend.sessionPath !== backendPath
+        || backend.capability !== backendCapability || backend.capability?.epoch !== capabilityEpoch)) throw new Error('能力设置所属运行时已改变')
+    }
+    let runtimeNotice = backend?.capability?.noticeClient === backendClient ? backend?.capability?.notice : undefined
+    let unavailable = false
+    if (backend?.cwd === cwd && backend.phase === 'running' && !backend.historyMutation && !backend.historyStopFailed) {
+      try {
+        await this.readCapabilityCommands(backend)
+        runtimeNotice = backend.capability?.noticeClient === backendClient ? backend.capability?.notice : undefined
+      } catch { unavailable = true; runtimeNotice = undefined }
+      scope.assertOwned()
+      assertRuntime()
+    }
+    const trust = cwd === undefined ? undefined : JSON.stringify(this.getProjectTrust(cwd))
+    if (runtimeNotice?.cwd !== cwd || runtimeNotice?.sessionPath !== backend?.sessionPath
+      || backend?.capability?.noticeTrust !== trust) runtimeNotice = undefined
+    const catalogue = backend?.capability?.catalogue
+    const runtimeItems = catalogue && catalogue.client === backendClient && catalogue.cwd === cwd && catalogue.trust === trust
+      ? catalogue.items.map(item => unavailable || !runtimeNotice || backend?.capability?.applyPromise || backend?.capability?.quarantined
+        ? { ...item, available: false, unavailableReason: '所属运行时当前来源未确认。' } : item)
+      : runtimeNotice?.items
+    let resources = await readCapabilityResources({ cwd, projectTrusted: scope.trusted, preferences, runtimeItems })
+    scope.assertOwned()
+    assertRuntime()
+    if (catalogue && runtimeItems && catalogue.client === backendClient && catalogue.cwd === cwd && catalogue.trust === trust) {
+      if (catalogue.sourceRevision && catalogue.sourceRevision !== resources.catalogueRevision) {
+        // Saved preferences are excluded from this source revision. A real
+        // package/config/source change retires missing historical slots.
+        resources = await readCapabilityResources({ cwd, projectTrusted: scope.trusted, preferences, runtimeItems: runtimeNotice?.items })
+        scope.assertOwned()
+        assertRuntime()
+        if (backend?.capability?.catalogue === catalogue) catalogue.items = runtimeNotice?.items.map(item => ({ ...item })) ?? []
+      }
+      if (backend?.capability?.catalogue === catalogue) catalogue.sourceRevision = resources.catalogueRevision
+    }
+    // Never spread resources: extension/skill/prompt/theme paths are private.
+    return { ...(cwd !== undefined ? { cwd } : {}), revision: preferences.revision,
+      catalogueRevision: resources.catalogueRevision, items: resources.items.map(item => ({
+        id: item.id, kind: item.kind, name: item.name, label: item.label, description: item.description,
+        origin: item.origin, enabled: item.enabled, available: item.available,
+        ...(item.unavailableReason ? { unavailableReason: item.unavailableReason } : {})
+      })), notices: [...new Set([...resources.notices, ...(runtimeNotice?.notices ?? []),
+        ...(unavailable || (backend && !runtimeNotice) ? ['所属运行时能力回执暂不可用；动态目录保持未知，未重载或连接。'] : [])])],
+      application: capabilityApplication([...this.backendPool.values()], preferences.revision) }
+  }
+
+  async updateCapabilitySettings(request: CapabilitySettingsUpdate, assertCurrent: () => void = () => undefined): Promise<CapabilitySettingsSnapshot> {
+    if (!request || typeof request !== 'object' || Array.isArray(request)
+      || Object.keys(request).some(key => !['cwd', 'expectedRevision', 'catalogueRevision', 'change'].includes(key))
+      || !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0
+      || typeof request.catalogueRevision !== 'string' || !/^[a-f0-9]{64}$/.test(request.catalogueRevision)) throw new Error('能力开关请求无效')
+    const cwd = request.cwd
+    const expectedRevision = request.expectedRevision
+    const catalogueRevision = request.catalogueRevision
+    const change = structuredClone(request.change)
+    const scope = this.captureCapabilitySettings(cwd, assertCurrent)
+    const current = await this.getCapabilitySettings(cwd, scope.assertOwned)
+    scope.assertOwned()
+    if (current.catalogueRevision !== catalogueRevision || current.revision !== expectedRevision) throw new Error('能力目录或设置已变更，请刷新后重试')
+    const saved = await scope.store.update(expectedRevision, change, current.items, scope.assertOwned)
+    scope.assertOwned()
+    // Return the committed desired value immediately, not a read that waits on
+    // its own runtime replacement (or races an empty session's allocated path).
+    return { ...current, revision: saved.revision,
+      items: current.items.map(item => ({ ...item, enabled: capabilityEnabled(saved, item.id, item.kind, item.enabled) })),
+      application: capabilityApplication([...this.backendPool.values()], saved.revision) }
+  }
+
+  private quarantineCapabilityBackend(backend: BackendRecord): void {
+    if (backend.capability) { backend.capability.state = 'failed'; backend.capability.quarantined = true }
+    this.capabilityQuarantinedCwds ??= new Set()
+    this.capabilityQuarantinedCwds.add(backend.cwd)
+    if (backend.sessionPath) {
+      this.quarantinedSessionPaths ??= new Set()
+      this.quarantinedSessionPaths.add(resolve(backend.sessionPath))
+    }
+  }
+
+  private retryKnownCapabilityApplication(backend: BackendRecord): void {
+    const state = backend.capability
+    if (state?.state === 'failed' && !state.quarantined) {
+      state.attemptedRevision = undefined
+      state.state = 'pending'
+    }
+    this.scheduleCapabilityApplications()
+  }
+
+  /** Native mutation RPCs have no run receipt. A timeout cannot make a later
+   * factory safe; retain their actual Promise and isolate unknown failures. */
+  private async capabilityControl<T>(backend: BackendRecord, operation: () => Promise<T>, negative?: CapabilityRpcRejection): Promise<T> {
+    if (!backend.capability) return operation()
+    if (backend.capability.quarantined || backend.capability.applyPromise) throw new Error('能力运行时正在应用或收尾未知')
+    const client = backend.client
+    observeCapabilityRpcRejections(client)
+    let invoked = false
+    const pending = Promise.resolve().then(() => {
+      if (!this.backendStillOwned(backend) || backend.client !== client) throw new Error('原生命令所属后端已改变')
+      invoked = true
+      return operation()
+    })
+    const controls = backend.controlDispatchPromises ??= new Set()
+    controls.add(pending)
+    try { return await pending }
+    catch (error) {
+      if (invoked && !knownCapabilityRpcRejection(client, error, negative)) this.quarantineCapabilityBackend(backend)
+      throw error
+    } finally {
+      controls.delete(pending)
+      this.scheduleCapabilityApplications()
+    }
+  }
+
+  private capabilityHasPendingInteraction(backend: BackendRecord): boolean {
+    return this.pendingRequests.getToolPermissionRequests().some(request => this.pendingRequests.getToolPermission(request.id)?.backendKey === backend.key)
+      || this.pendingRequests.getExtensionUiRequests().some(request => this.pendingRequests.getExtensionUi(request.id)?.backendKey === backend.key)
+  }
+
+  /** Only explicit saves and reliable lifecycle/operation close hooks call this. Never a getter. */
+  private scheduleCapabilityApplications(): void {
+    if (!this.capabilitySettings || this.capabilityScheduleQueued || this.stopping) return
+    this.capabilityScheduleQueued = true
+    queueMicrotask(() => {
+      this.capabilityScheduleQueued = false
+      if (this.stopping || !this.win || this.win.isDestroyed?.() || this.win.webContents.isDestroyed?.()
+        || this.win.webContents.mainFrame?.detached || this.sessionOperationsInFlight || this.newSessionInFlight || this.providerMutationInFlight
+        || this.sessionMigrationInFlight || this.branchDeletionInFlight || this.messageRevertInFlight
+        || this.sessionCommandExportInFlight || this.backendPool.pendingStartCount
+        || [...this.backendPool.values()].some(backend => backend.capability?.applyPromise)) return
+      for (const backend of this.backendPool.values()) {
+        const state = backend.capability
+        if (!state || !capabilityNeedsApplication(backend) || state.quarantined
+          || state.attemptedRevision === state.requestedRevision || !this.backendStillOwned(backend)
+          || !capabilityBackendIdle(backend) || this.capabilityHasPendingInteraction(backend)) continue
+        state.attemptedRevision = state.requestedRevision
+        state.state = 'applying'
+        state.epoch = {}
+        // Reserve synchronously, before the first state/FS/RPC await.
+        const operation = Promise.resolve().then(() => this.applyCapabilitySettings(backend))
+        state.applyPromise = operation
+        void operation.catch(() => {
+          state.state = 'failed'
+        }).finally(() => {
+          if (state.applyPromise !== operation) return
+          state.applyPromise = undefined
+          state.epoch = {}
+          if (!this.backendStillOwned(backend)) return
+          this.scheduleCapabilityApplications()
+          if (!capabilityNeedsApplication(backend)) {
+            const idleInput = state.idleInputRunId
+            state.idleInputRunId = undefined
+            const index = idleInput ? backend.localFollowUps?.findIndex(item => item.runId === idleInput) ?? -1 : -1
+            if (index >= 0) {
+              void this.promoteLocalFollowUp(backend, index).catch(() => {
+                if (!this.backendStillOwned(backend)) return
+                this.runStore.update(idleInput!, run => { if (run.state === 'queued') run.error = '能力已应用，但输入尚未发送；请手动重试该排队项。' })
+                this.pushQueueSnapshot(backend)
+              })
+            } else this.dispatchNextLocalFollowUp(backend)
+          }
+          void this.pushSessionInfo()
+        })
+        break
+      }
+    })
+  }
+
+  private async applyCapabilitySettings(backend: BackendRecord): Promise<void> {
+    const store = this.capabilitySettings!
+    const capability = backend.capability!
+    const client = backend.client
+    const cwd = backend.cwd
+    const originalPath = backend.sessionPath
+    let expectedPath = originalPath
+    const lifecycle = this.dispatchLifecycle(backend)
+    const generation = lifecycle.generation
+    const win = this.win
+    const frame = win?.webContents.mainFrame
+    const trust = JSON.stringify(this.getProjectTrust(cwd))
+    const preference = backend.subagentsEnabled ?? DEFAULT_SUBAGENTS_ENABLED
+    const mode = this.desiredModes.get(backend.key) ?? backend.modePrimed ?? 'build'
+    let invoked = false
+    const assertOwned = () => {
+      if (!this.backendStillOwned(backend) || backend.client !== client || backend.cwd !== cwd
+        || backend.sessionPath !== expectedPath || backend.capability !== capability || this.capabilitySettings !== store
+        || lifecycle.generation !== generation || (win && (this.win !== win || win.isDestroyed?.()
+          || win.webContents.isDestroyed?.() || win.webContents.mainFrame !== frame || frame?.detached))
+        || JSON.stringify(this.getProjectTrust(cwd)) !== trust || !capabilityBackendIdle(backend) || this.capabilityHasPendingInteraction(backend)
+        || this.sessionMigrationInFlight || this.branchDeletionInFlight || this.messageRevertInFlight
+        || this.sessionCommandExportInFlight || this.newSessionInFlight || this.providerMutationInFlight) throw new Error('能力应用所属会话或实际空闲状态已改变')
+    }
+    try {
+      if (capability.commandsPromise) await capability.commandsPromise.catch(() => undefined)
+      const preferences = await store.get()
+      assertOwned()
+      const before = await client.getState()
+      assertOwned()
+      if (before.isStreaming !== false || before.isCompacting !== false || before.pendingMessageCount !== 0
+        || before.sessionFile !== originalPath) throw new Error('SDK 尚未确认能力应用所需的空闲会话身份')
+      let persisted = false
+      if (originalPath) {
+        try {
+          const file = await stat(originalPath)
+          if (!file.isFile()) throw new Error('会话不是普通文件')
+          persisted = true
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        assertOwned()
+      }
+      if (persisted) {
+        // Opening a missing allocated path would silently create a different session.
+        const manager = this.openSessionManager(originalPath!)
+        if (resolve(manager.getCwd()) !== cwd || manager.getSessionId() !== before.sessionId) throw new Error('持久会话归属已改变')
+      } else if (before.messageCount !== 0) throw new Error('未落盘会话包含消息，未替换运行时')
+      assertOwned()
+      const previousRuntime = capability.notice?.runtimeId
+      if (previousRuntime && capability.retiredRuntimeIds.length >= 64) throw new Error('能力运行时来源替换已达安全上限')
+      invoked = true
+      // Public RPC awaits shutdown and recreates the runtime even for the SAME path.
+      // No private command, /reload, prompt, stop or replacement transport is used.
+      const result = persisted ? await client.switchSession(originalPath!) : await client.newSession()
+      // A cancelled SDK switch/new is a negative receipt: its old runtime is
+      // still live. Do not retire its source, cache, id or MCP observation.
+      if (result.cancelled) { invoked = false; throw new Error('扩展取消了能力运行时替换') }
+      assertOwned()
+      if (previousRuntime) capability.retiredRuntimeIds.push(previousRuntime)
+      if (backend.mcpStatus) backend.mcpStatus.expired = true
+      capability.notice = undefined
+      capability.noticeTrust = undefined
+      capability.commands = undefined
+      const after = await client.getState()
+      assertOwned()
+      if (after.isStreaming !== false || after.isCompacting !== false || after.pendingMessageCount !== 0
+        || (persisted && (after.sessionFile !== originalPath || after.sessionId !== before.sessionId))
+        || (!persisted && after.messageCount !== 0)) throw new Error('替代运行时会话身份未确认')
+      if (!persisted && after.sessionFile !== originalPath) {
+        if (after.sessionFile && (!isAbsolute(after.sessionFile) || resolve(after.sessionFile) !== after.sessionFile)) throw new Error('替代运行时路径无效')
+        if (originalPath && this.backendKeysBySessionPath.get(originalPath) === backend.key) this.backendKeysBySessionPath.delete(originalPath)
+        backend.sessionPath = expectedPath = after.sessionFile
+        if (expectedPath) {
+          this.backendKeysBySessionPath.set(expectedPath, backend.key)
+          this.updateRunSession(backend, expectedPath, after.sessionId)
+        }
+        if (this.activeKey === backend.key && this.activeSessionPath === originalPath) this.activeSessionPath = expectedPath
+      }
+      // Let an overlapping committed file write publish its main-owned revision
+      // before checking the child factory's immutable snapshot receipt.
+      await store.get()
+      assertOwned()
+      const commands = await this.readCapabilityCommands(backend, preferences.revision, true)
+      assertOwned()
+      // A concurrent committed save may be picked up by the factory. Accept
+      // only its verified revision within the desired store's real range.
+      const acknowledged = readCapabilityRuntimeNotice(commands, { cwd, sessionPath: expectedPath,
+        retiredRuntimeIds: capability.retiredRuntimeIds })
+      const appliedRevision = acknowledged.revision
+      // Restore exact model/thinking, including unsaved picker choices. Never choose a fallback.
+      const modelChanged = before.model?.provider !== after.model?.provider || before.model?.id !== after.model?.id
+      if (before.model && modelChanged) {
+        await client.setModel(before.model.provider, before.model.id)
+        assertOwned()
+      } else if (!before.model && after.model) throw new Error('空会话原无模型，替代运行时意外选择了模型')
+      if (modelChanged || after.thinkingLevel !== before.thinkingLevel) {
+        await client.setThinkingLevel(before.thinkingLevel)
+        assertOwned()
+      }
+      if (before.sessionName !== after.sessionName) {
+        if (!before.sessionName) throw new Error('替代运行时意外设置了原本未命名的会话')
+        await client.setSessionName(before.sessionName)
+        assertOwned()
+      }
+      if (before.steeringMode !== after.steeringMode) { await client.setSteeringMode(before.steeringMode); assertOwned() }
+      if (before.followUpMode !== after.followUpMode) { await client.setFollowUpMode(before.followUpMode); assertOwned() }
+      if (before.autoCompactionEnabled !== after.autoCompactionEnabled) { await client.setAutoCompaction(before.autoCompactionEnabled); assertOwned() }
+      if (!capability.planCommandPath || !capabilityCommandFrom(commands, 'plan', capability.planCommandPath)) throw new Error('Pion 计划模式命令来源未确认')
+      if (await client.prompt(mode === 'plan' ? '/plan start' : '/plan exit') !== 'handled') throw new Error('Pion 模式恢复未被原生命令处理')
+      assertOwned()
+      backend.modePrimed = mode
+      if (!preference && acknowledged.subagentsEnabled) {
+        // Named native factory source; an arbitrary same-name plugin is not sufficient.
+        if (!capabilityCommandFrom(commands, 'pion-subagents', '<inline:pion-subagents>')) throw new Error('Pion 子代理命令来源未确认')
+        if (await client.prompt('/pion-subagents off') !== 'handled') throw new Error('Pion 子代理偏好未恢复')
+        assertOwned()
+      }
+      backend.subagentsEnabled = preference // Effective global off is NOT the user's session preference.
+      await this.readCapabilityCommands(backend, appliedRevision)
+      assertOwned()
+      const final = await client.getState()
+      assertOwned()
+      if (final.sessionFile !== expectedPath || final.sessionId !== after.sessionId || final.sessionName !== before.sessionName
+        || final.isStreaming !== false || final.isCompacting !== false || final.pendingMessageCount !== 0
+        || (!persisted && final.messageCount !== 0)
+        || final.model?.provider !== before.model?.provider || final.model?.id !== before.model?.id
+        || final.thinkingLevel !== before.thinkingLevel) throw new Error('能力应用后的会话、名称或模型未确认')
+      if (!persisted && expectedPath && expectedPath !== originalPath && before.model && this.sessionModelPreferences) {
+        // The fresh allocated path must remember the actual picker choice,
+        // not a stale original-path preference. Keep that original entry too.
+        // Thinking/name are restored through the SDK's own session metadata.
+        await this.sessionModelPreferences.setSessionModel(expectedPath, { provider: before.model.provider, modelId: before.model.id })
+        assertOwned()
+      }
+      capability.appliedRevision = appliedRevision
+      capability.state = capability.requestedRevision === appliedRevision ? 'applied' : 'pending'
+    } catch (error) {
+      capability.state = 'failed'
+      // The public SDK rejects timeouts/transport failures without proving that
+      // shutdown, MCP close or the replacement factory has actually finished.
+      if (invoked) this.quarantineCapabilityBackend(backend)
+      throw error
+    }
+  }
+
   /** Synchronous service guard; reservations/actual pending slots cover awaited work. */
   assertWorktreeMutationAvailable(): void {
     this.assertHistoryAvailable()
   }
 
-  private assertHistoryAvailable(): void {
+  private assertHistoryAvailable(allowCapabilityInteraction = false): void {
+    if (!allowCapabilityInteraction && this.capabilitySettings && [...this.backendPool.values()].some(backend => backend.capability?.applyPromise)) throw new Error('能力开关正在应用，请稍后重试')
     if (this.sessionCommandExportInFlight) throw new Error('正在导出会话，请稍后重试')
     if (this.sessionMigrationInFlight) throw new Error('正在迁移会话，请稍后重试')
     if (this.branchDeletionInFlight) throw new Error('正在删除分支，请稍后重试')
@@ -544,13 +975,16 @@ export class AgentBridge {
   }
 
   /** IPC reservation covers even the pre-dispatch awaits before backend.busy is set. */
-  async withSessionOperation<T>(operation: () => T | Promise<T>): Promise<T> {
-    this.assertHistoryAvailable()
+  async withSessionOperation<T>(operation: () => T | Promise<T>, allowCapabilityInteraction = false): Promise<T> {
+    // Main IPC may opt in ONLY for resolving an already-owned permission/UI
+    // receipt raised by a replacement hook; this does not authorize mutations.
+    this.assertHistoryAvailable(allowCapabilityInteraction)
     this.sessionOperationsInFlight += 1
     try {
       return await operation()
     } finally {
       this.sessionOperationsInFlight -= 1
+      this.scheduleCapabilityApplications()
     }
   }
 
@@ -559,6 +993,7 @@ export class AgentBridge {
     const backend = this.getActiveBackend()
     this.assertSessionNotQuarantined(this.activeSessionPath ?? backend?.sessionPath)
     if (backend?.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
+    if (backend?.capability?.applyPromise || backend?.capability?.quarantined) throw new Error('能力开关应用中或实际收尾未知，后端保持隔离')
     return backend?.client ?? null
   }
 
@@ -574,6 +1009,7 @@ export class AgentBridge {
     this.pushUnreadSessions()
     const activeBackend = this.getActiveBackend()
     if (activeBackend) this.pushQueueSnapshot(activeBackend)
+    this.scheduleCapabilityApplications()
   }
 
   unbind(win: BrowserWindow): void {
@@ -615,10 +1051,10 @@ export class AgentBridge {
     const scope = mcpBackendScope(backend)
     const cache = backend.mcpStatus?.snapshot
     if (this.stopping || this.providerReloading || backend.historyMutation || backend.historyStopFailed
-      || (sessionPath && this.quarantinedSessionPaths?.has(sessionPath)) || backend.phase === 'error') {
+      || backend.capability?.quarantined || (sessionPath && this.quarantinedSessionPaths?.has(sessionPath)) || backend.phase === 'error') {
       return unknownMcpStatus('backend-stopped', scope, cache?.revision, cache?.receivedAt)
     }
-    if (backend.phase !== 'running') return waitingMcpStatus(scope, cache?.revision, cache?.receivedAt)
+    if (backend.phase !== 'running' || backend.capability?.applyPromise) return waitingMcpStatus(scope, cache?.revision, cache?.receivedAt)
     return readCachedMcpStatus(backend)
   }
 
@@ -747,7 +1183,9 @@ export class AgentBridge {
   }
 
   private clearToolPermissionRequest(id: string): PendingToolPermission | null {
-    return this.pendingRequests.clearToolPermissionRequest(id)
+    const pending = this.pendingRequests.clearToolPermissionRequest(id)
+    this.scheduleCapabilityApplications()
+    return pending
   }
 
   private clearBackendToolPermissionRequests(backendKey: string): void {
@@ -755,7 +1193,9 @@ export class AgentBridge {
   }
 
   private clearExtensionUiRequest(id: string): PendingExtensionUi | null {
-    return this.pendingRequests.clearExtensionUiRequest(id)
+    const pending = this.pendingRequests.clearExtensionUiRequest(id)
+    this.scheduleCapabilityApplications()
+    return pending
   }
 
   private clearBackendExtensionUiRequests(backendKey: string): void {
@@ -1089,9 +1529,11 @@ export class AgentBridge {
       }
     })()
     backend.checkpointCreatePromise = promise
-    void promise.finally(() => {
+    const release = () => {
       if (backend.checkpointCreatePromise === promise) backend.checkpointCreatePromise = undefined
-    })
+      this.scheduleCapabilityApplications()
+    }
+    void promise.then(release, release)
     return promise
   }
 
@@ -1149,9 +1591,11 @@ export class AgentBridge {
     void promise.then(
       () => {
         if (backend.checkpointRefreshPromise === promise) backend.checkpointRefreshPromise = undefined
+        this.scheduleCapabilityApplications()
       },
       () => {
         if (backend.checkpointRefreshPromise === promise) backend.checkpointRefreshPromise = undefined
+        this.scheduleCapabilityApplications()
       }
     )
     return promise
@@ -1243,6 +1687,7 @@ export class AgentBridge {
   }
 
   async setProjectTrust(cwd: string, decision: boolean | null): Promise<ProjectTrustInfo> {
+    this.assertHistoryAvailable()
     if (decision !== true && decision !== false && decision !== null) {
       throw new Error('无效的项目信任设置')
     }
@@ -1250,6 +1695,7 @@ export class AgentBridge {
     const affected = [...this.backendPool.values()]
       .filter((backend) => resolve(backend.cwd) === normalizedCwd)
     for (const backend of affected) {
+      if (backend.capability?.quarantined) throw new Error('能力应用收尾未知，未重建项目信任后端')
       const state = await backend.client.getState()
       if (state.isStreaming) throw new Error('项目中仍有 Agent 正在运行，请先等待完成或中止运行')
     }
@@ -2138,6 +2584,10 @@ export class AgentBridge {
   }
 
   private dispatchNextLocalFollowUp(backend: BackendRecord): void {
+    if (capabilityNeedsApplication(backend)) {
+      this.scheduleCapabilityApplications()
+      return // Settings application has priority over the next FIFO item.
+    }
     if (
       !this.backendStillOwned(backend)
       || this.messageRevertInFlight
@@ -2249,6 +2699,7 @@ export class AgentBridge {
   }
 
   private async promoteLocalFollowUp(backend: BackendRecord, index: number): Promise<void> {
+    if (capabilityNeedsApplication(backend)) { this.scheduleCapabilityApplications(); throw new Error('能力开关尚未应用，排队消息未发送') }
     const localFollowUps = backend.localFollowUps ?? []
     const item = localFollowUps[index]
     if (!item) throw new Error('排队消息已被发送或移除')
@@ -2561,6 +3012,7 @@ export class AgentBridge {
         this.dispatchLifecycle(backend).generation += 1
       }
       if (type === 'agent_start') {
+        if (backend.capability) backend.capability.runPending = true
         backend.queueSettledRunId = undefined
         backend.queueSettledGeneration = undefined
         backend.queueAutoReady = false
@@ -2606,6 +3058,7 @@ export class AgentBridge {
       const settledRunId = type === 'agent_settled' ? backend.activeRunId : undefined
       this.trackBackendEvent(backend, event, type)
       if (type === 'agent_settled') {
+        if (backend.capability) backend.capability.runPending = false
         const terminal = backend.completionState ?? 'interrupted'
         if (backend.promptDispatch && backend.promptDispatch.runId === settledRunId) {
           backend.promptDispatch.settledGeneration = this.dispatchLifecycle(backend).generation
@@ -2653,6 +3106,8 @@ export class AgentBridge {
           this.dispatchNextLocalFollowUp(backend)
         }
       }
+      if (type === 'agent_settled') this.retryKnownCapabilityApplication(backend)
+      else if (type === 'compaction_end') this.scheduleCapabilityApplications()
       if (runningStateChanged) this.pushRunningSessionPaths()
       // Completion means the JSONL is persisted; queue/token events do not.
       // Soft persistence dirtiness allows one reread of an earlier empty scan
@@ -2691,8 +3146,12 @@ export class AgentBridge {
     sessionPath?: string
   ): Promise<BackendRecord> {
     this.assertSessionNotQuarantined(sessionPath)
+    if (this.capabilityQuarantinedCwds?.has(resolve(cwd))) throw new Error('此项目仍有能力应用收尾未知的后端，未新建替代连接')
     const cliPath = pionRuntimePath()
     const args = await this.backendArgs(cwd, sessionPath)
+    // Read failure must reject BEFORE spawning, never silently use default switches.
+    const capabilityStore = this.capabilitySettings
+    const capabilityPreferences = await capabilityStore?.get()
     this.assertHistoryAvailable()
     this.assertSessionNotQuarantined(sessionPath)
     const subagentViewNonce = randomUUID()
@@ -2705,13 +3164,16 @@ export class AgentBridge {
         PION_SUBAGENT_SETTINGS_FILE: subagentSettingsFilePath(),
         PION_SUBAGENT_VIEW_NONCE: subagentViewNonce,
         PION_QUESTION_SETTINGS_FILE: questionSettingsFilePath(),
-        PION_QUESTION_UI_NONCE: questionUiNonce }
+        PION_QUESTION_UI_NONCE: questionUiNonce,
+        ...(capabilityStore ? { PION_CAPABILITY_SETTINGS_FILE: capabilityStore.filePath } : {}) }
     })
-    const backend = {
+    const backend: BackendRecord = {
       key,
       cwd,
       sessionPath,
       client,
+      ...(capabilityPreferences ? { capability: { ...newBackendCapabilityState(capabilityPreferences.revision),
+        planCommandPath: args[args.indexOf('--extension') + 1] } } : {}),
       liveState: new LiveSessionProjection(),
       subagentViewNonce,
       questionUiNonce,
@@ -2739,6 +3201,26 @@ export class AgentBridge {
         // RPC round trip before exposing this backend as ready.
         const initialState = await client.getState()
         await restoreSessionModelPreference(client, initialState, sessionPath, this.sessionModelPreferences)
+        if (backend.capability) {
+          const policy = backend.capability
+          const latest = await capabilityStore!.get()
+          policy.requestedRevision = latest.revision
+          if (initialState.sessionFile && isAbsolute(initialState.sessionFile) && resolve(initialState.sessionFile) === initialState.sessionFile
+            && (!sessionPath || sessionPath === initialState.sessionFile)) {
+            backend.sessionPath = initialState.sessionFile
+            this.backendKeysBySessionPath.set(initialState.sessionFile, key)
+            if (this.activeKey === key) this.activeSessionPath = initialState.sessionFile
+          }
+          try {
+            await this.readCapabilityCommands(backend)
+            if (!policy.notice || policy.notice.revision > latest.revision) throw new Error('能力运行时初始回执未确认')
+            policy.appliedRevision = policy.notice.revision
+            policy.state = policy.appliedRevision === latest.revision ? 'applied' : 'pending'
+          } catch {
+            policy.state = 'failed'
+            policy.quarantined = true
+          }
+        }
         backend.phase = 'running'
         console.log('[pion] agent subprocess running, session:', sessionPath ?? key)
         if (this.activeKey === key) this.setActiveBackendStatus()
@@ -2766,6 +3248,7 @@ export class AgentBridge {
       })
     backend.startPromise = startPromise
     await startPromise
+    this.scheduleCapabilityApplications()
     return backend
   }
 
@@ -2777,7 +3260,7 @@ export class AgentBridge {
   ): Promise<BackendRecord> {
     this.assertHistoryAvailable()
     this.assertSessionNotQuarantined(sessionPath)
-    return this.backendPool.startWithLimit(
+    const started = this.backendPool.startWithLimit(
       key,
       () => {
         this.assertHistoryAvailable()
@@ -2787,6 +3270,8 @@ export class AgentBridge {
       () => this.stopping,
       (victim) => this.stopBackend(victim)
     )
+    void started.then(() => this.scheduleCapabilityApplications(), () => this.scheduleCapabilityApplications())
+    return started
   }
 
   private async waitForActiveBackend(): Promise<BackendRecord | null> {
@@ -2840,16 +3325,17 @@ export class AgentBridge {
     this.assertHistoryAvailable()
     this.assertSessionNotQuarantined(backend.sessionPath)
     if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
+    if (backend.capability?.quarantined) throw new Error('能力运行时应用收尾未知，后端保持隔离；未自动重启')
     return backend
   }
 
   private async syncBackendSession(backend: BackendRecord): Promise<void> {
-    if (backend.historyMutation || backend.historyStopFailed) return
+    if (backend.historyMutation || backend.historyStopFailed || backend.capability?.applyPromise || backend.capability?.quarantined) return
     const revision = this.historyRevision
     const client = backend.client
     const state = await client.getState().catch(() => null)
     if (backend.client !== client || revision !== this.historyRevision || backend.historyMutation || backend.historyStopFailed
-      || this.backendPool.get(backend.key) !== backend) return
+      || backend.capability?.applyPromise || backend.capability?.quarantined || this.backendPool.get(backend.key) !== backend) return
     const sessionPath = state?.sessionFile
     if (!sessionPath) return
     const normalizedPath = resolve(sessionPath)
@@ -2916,6 +3402,8 @@ export class AgentBridge {
 
   async stop(): Promise<void> {
     this.stopping = true
+    // Logical stop cannot retire an in-flight replacement or release its pool slot.
+    await Promise.allSettled([...this.backendPool.values()].flatMap(backend => backend.capability?.applyPromise ? [backend.capability.applyPromise] : []))
     this.cancelModelProviderAuth()
     const pendingStarts = this.backendPool.pendingStarts()
     await Promise.allSettled(pendingStarts)
@@ -2952,10 +3440,20 @@ export class AgentBridge {
   /** Prompt when idle, steer when mid-run. Starts only this session's backend. */
   async send(message: string, images: ImageContent[] = []): Promise<void> {
     const backend = await this.ensureActiveBackend()
+    if (capabilityNeedsApplication(backend)) {
+      this.enqueueCapturedBackend(backend, null, message, images)
+      this.retryKnownCapabilityApplication(backend)
+      return
+    }
     const lease = this.reserveDispatch(backend)
     const state = await backend.client.getState().catch(() => null)
     this.assertDispatchLease(lease)
     this.assertHistoryAvailable()
+    if (capabilityNeedsApplication(backend)) {
+      this.enqueueCapturedBackend(backend, state, message, images)
+      this.retryKnownCapabilityApplication(backend)
+      return
+    }
     if (state?.isStreaming && !state.isCompacting && !backend.compacting) {
       // Enter uses Pi's steering path, but it is an immediate insertion rather
       // than a user follow-up. Keep it out of the visible queue card.
@@ -3009,17 +3507,22 @@ export class AgentBridge {
   }
 
   private enqueueCapturedBackend(backend: BackendRecord, state: Awaited<ReturnType<BackendRecord['client']['getState']>> | null,
-    message: string, images: ImageContent[]): void {
+    message: string, images: ImageContent[]): RunOperation {
     if (!this.backendStillOwned(backend)) throw new Error('Agent 会话已关闭')
+    if (backend.capability?.quarantined) throw new Error('能力应用收尾未知，输入未发送')
+    const idle = capabilityNeedsApplication(backend) && capabilityBackendIdle(backend)
+      && !backend.localFollowUps?.length && !backend.pendingRunIds.length
     const run = this.createRun(backend, state, message, images, 'follow-up', 'queued')
     backend.localFollowUps ??= []
     backend.localFollowUps.push({ runId: run.id, text: message, images })
+    if (idle) backend.capability!.idleInputRunId = run.id
     this.pushQueueSnapshot(backend)
     this.dispatchNextLocalFollowUp(backend)
+    return run
   }
 
   private hasFollowUpWork(backend: BackendRecord): boolean {
-    return Boolean(backend.busy || backend.compacting || backend.localQueueDispatching
+    return Boolean(capabilityNeedsApplication(backend) || backend.busy || backend.compacting || backend.localQueueDispatching
       || backend.localQueueDispatchPromise || backend.promptDispatch || backend.runCompletionPromise
       || backend.steeringDispatchPromises?.size || backend.controlDispatchPromises?.size || backend.localFollowUps?.length)
   }
@@ -3028,6 +3531,11 @@ export class AgentBridge {
   async queue(message: string, images: ImageContent[] = []): Promise<void> {
     const backend = await this.ensureActiveBackend()
     this.assertHistoryAvailable()
+    if (capabilityNeedsApplication(backend)) {
+      this.enqueueCapturedBackend(backend, null, message, images)
+      this.retryKnownCapabilityApplication(backend)
+      return
+    }
     if (this.hasFollowUpWork(backend)) {
       // Pure enqueue does not need an SDK state receipt or a dispatch lease.
       // A normal start/settle during an RPC read must not reject a Tab draft,
@@ -3112,7 +3620,12 @@ export class AgentBridge {
     this.assertDispatchLease(lease)
     const desired = this.desiredModes.get(backend.key) ?? 'build'
     if (backend.modePrimed === desired) return
-    await backend.client.prompt(desired === 'plan' ? '/plan start' : '/plan exit')
+    if (backend.capability) {
+      const commands = await this.readCapabilityCommands(backend)
+      this.assertDispatchLease(lease)
+      if (!backend.capability.planCommandPath || !capabilityCommandFrom(commands, 'plan', backend.capability.planCommandPath)) throw new Error('Pion 计划模式命令来源未确认，未发送命令')
+    }
+    await this.capabilityControl(backend, () => backend.client.prompt(desired === 'plan' ? '/plan start' : '/plan exit'))
     this.assertDispatchLease(lease)
     backend.modePrimed = desired
   }
@@ -3151,6 +3664,7 @@ export class AgentBridge {
       await receipt
     } finally {
       pending.delete(receipt)
+      this.scheduleCapabilityApplications()
       const settledGeneration = backend.queueSettledGeneration
       if (lifecycle.token === token && settledGeneration !== undefined
         && (settledGeneration === generation || settledGeneration === generation + 1)) {
@@ -3167,6 +3681,7 @@ export class AgentBridge {
 
   async newSession(): Promise<void> {
     this.assertHistoryAvailable()
+    if (this.getActiveBackend()?.capability?.quarantined) throw new Error('能力应用实际收尾未知，未创建替代会话')
     if (this.newSessionInFlight) return this.newSessionInFlight
     const operation = this.createNewSession()
     this.newSessionInFlight = operation
@@ -3174,6 +3689,7 @@ export class AgentBridge {
       await operation
     } finally {
       if (this.newSessionInFlight === operation) this.newSessionInFlight = null
+      this.scheduleCapabilityApplications()
     }
   }
 
@@ -3357,7 +3873,7 @@ export class AgentBridge {
       }
       // Reject other active backends too: this global gate must not invalidate a live dispatch lease.
       for (const backend of this.backendPool.values()) {
-        if (backend.historyStopFailed && resolve(backend.cwd) === target) {
+        if ((backend.historyStopFailed || backend.capability?.quarantined) && resolve(backend.cwd) === target) {
           throw new Error('旧Agent退出未确认，请重启Pion后再删除')
         }
         if (backend.phase === 'starting' || (backend.busy && !reserved.has(backend))
@@ -3487,7 +4003,7 @@ export class AgentBridge {
         || !request.expectedLeafId || request.expectedLeafId.length > 200))) throw new Error('无效的消息撤销参数')
     const target = resolve(request.sessionPath)
     const backend = this.getActiveBackend()
-    if (!backend || backend.phase !== 'running' || backend.historyStopFailed
+    if (!backend || backend.phase !== 'running' || backend.historyStopFailed || backend.capability?.quarantined
       || this.activeSessionPath !== target || backend.sessionPath !== target) throw new Error('请等待所选会话就绪后再撤销')
     if (this.stopping || this.providerMutationInFlight || this.newSessionInFlight || this.sessionOperationsInFlight > 0
       || this.backendPool.pendingStartCount > 0
@@ -3676,6 +4192,7 @@ export class AgentBridge {
     if (!backend) return
     this.assertSessionNotQuarantined(backend.sessionPath)
     if (backend.historyStopFailed) throw new Error('旧 Agent 退出状态未知，请重启 Pion 后再操作此会话')
+    if (backend.capability?.applyPromise || backend.capability?.quarantined) throw new Error('能力应用仍在收尾或状态未知，未停止或重启后端')
     await this.interruptBackendRuns(
       backend,
       'Agent 后端已停止；本轮及未发送的排队消息未自动重放。'
@@ -3963,8 +4480,9 @@ export class AgentBridge {
     const backend = await this.waitForActiveBackend()
     if (!backend) return [...merged.values()]
     try {
-      const commands = await backend.client.getCommands()
+      const commands = await this.readCapabilityCommands(backend)
       for (const { name, description, source } of commands) {
+        if (name === CAPABILITY_RUNTIME_COMMAND) continue
         if (!merged.has(name)) merged.set(name, { name, description, source })
       }
     } catch {
@@ -4007,16 +4525,26 @@ export class AgentBridge {
       if (!this.backendStillOwned(backend) || backend.client !== client
         || this.dispatchLifecycle(backend).generation !== generation) throw new Error('会话运行状态已改变，请重试')
       if (this.activeKey !== backend.key || state.sessionId !== sessionId) throw new Error('会话已切换，请重试')
+      if (backend.capability?.quarantined || backend.capability?.applyPromise) throw new Error('能力运行时尚未确认可用')
+      if (enabled && this.capabilitySettings) {
+        const preferences = await this.capabilitySettings.get()
+        if (!this.backendStillOwned(backend) || backend.client !== client || this.activeKey !== backend.key
+          || this.dispatchLifecycle(backend).generation !== generation) throw new Error('会话已切换，请重试')
+        if (!capabilityEnabled(preferences, 'tool:pion_subagents', 'subagent')) throw new Error('子代理已在全局能力设置中关闭')
+      }
       if (enabled && (backend.busy || backend.compacting || state.isStreaming || state.isCompacting)) throw new Error('请等待当前执行完成后开启子代理')
       if (enabled && this.desiredModes.get(backend.key) === 'plan') throw new Error('计划模式不启用编码子代理')
-      if (!commands.some((command) => command.name === 'pion-subagents')) throw new Error('当前运行时不支持内置子代理')
-      await client.prompt(enabled ? '/pion-subagents on' : '/pion-subagents off')
+      if (this.capabilitySettings ? !capabilityCommandFrom(commands, 'pion-subagents', '<inline:pion-subagents>')
+        : !commands.some((command) => command.name === 'pion-subagents')) throw new Error('当前运行时不支持已确认来源的内置子代理')
+      await this.capabilityControl(backend, () => client.prompt(enabled ? '/pion-subagents on' : '/pion-subagents off'))
       if (!this.backendStillOwned(backend) || backend.client !== client) return
       backend.subagentsEnabled = enabled
+      if (this.capabilitySettings) await this.readCapabilityCommands(backend).catch(() => undefined)
       if (!enabled) this.clearSubagentPermissions(backend)
       if (this.activeKey === backend.key) await this.pushSessionInfo()
     } finally {
       backend.subagentsModePending = false
+      this.scheduleCapabilityApplications()
     }
   }
 
@@ -4050,10 +4578,11 @@ export class AgentBridge {
     try {
       const commands = await backend.client.getCommands()
       this.assertDispatchLease(lease)
-      if (!commands.some((command) => command.name === 'plan')) {
+      if (backend.capability ? !backend.capability.planCommandPath || !capabilityCommandFrom(commands, 'plan', backend.capability.planCommandPath)
+        : !commands.some((command) => command.name === 'plan')) {
         throw new Error('Pion 计划模式未加载')
       }
-      await backend.client.prompt(mode === 'plan' ? '/plan start' : '/plan exit')
+      await this.capabilityControl(backend, () => backend.client.prompt(mode === 'plan' ? '/plan start' : '/plan exit'))
       this.assertDispatchLease(lease)
       this.desiredModes.set(key, mode)
       backend.modePrimed = mode
@@ -4304,7 +4833,7 @@ export class AgentBridge {
       }
     }
     assertOwner()
-    await client.setModel(provider, modelId)
+    await this.capabilityControl(backend, () => client.setModel(provider, modelId), { command: 'set_model', provider, modelId })
     assertOwner()
     if (this.sessionModelPreferences) {
       const state = await client.getState()
@@ -4322,9 +4851,9 @@ export class AgentBridge {
     const backend = await this.waitForActiveBackend()
     if (!backend) return []
     try {
-      const commands = await backend.client.getCommands()
+      const commands = await this.readCapabilityCommands(backend)
       return commands
-        .filter((command) => command.source === 'skill')
+        .filter((command) => command.source === 'skill' && command.name !== CAPABILITY_RUNTIME_COMMAND)
         .map((command) => ({
           name: command.name.replace(/^skill:/, ''),
           description: command.description,
@@ -4356,7 +4885,7 @@ export class AgentBridge {
   async setThinkingLevel(level: string): Promise<void> {
     const backend = await this.ensureActiveBackend()
     type ThinkingLevelParam = Parameters<RpcClient['setThinkingLevel']>[0]
-    await backend.client.setThinkingLevel(level as ThinkingLevelParam)
+    await this.capabilityControl(backend, () => backend.client.setThinkingLevel(level as ThinkingLevelParam))
     await this.refresh()
   }
 
@@ -4377,7 +4906,9 @@ export class AgentBridge {
     this.assertHistoryAvailable()
     const client = this.client
     if (!client) throw new Error('agent 未启动')
-    await client.compact(customInstructions?.trim() || undefined)
+    const owner = this.getActiveBackend()!
+    await this.capabilityControl(owner, () => client.compact(customInstructions?.trim() || undefined),
+      capabilityBackendIdle(owner) ? { command: 'compact' } : undefined)
     const backend = this.getActiveBackend()
     if (
       backend
@@ -4640,6 +5171,7 @@ export class AgentBridge {
       // writer and must not swallow events or permanently pause message queues.
       backend.sessionExportPending = false
       this.sessionCommandExportInFlight = false
+      this.scheduleCapabilityApplications()
       if (this.backendStillOwned(backend) && backend.queueAutoReady === true) this.dispatchNextLocalFollowUp(backend)
     }
   }
@@ -4663,7 +5195,7 @@ export class AgentBridge {
       if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
       await backend.startPromise
       this.assertHistoryAvailable()
-      await backend.client.setSessionName(normalizedName)
+      await this.capabilityControl(backend, () => backend.client.setSessionName(normalizedName))
       await this.syncBackendSession(backend)
       await this.pushSessionInfo()
       void this.refreshSidebarSessions()
@@ -4679,7 +5211,7 @@ export class AgentBridge {
       if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
       await backend.startPromise
       this.assertHistoryAvailable()
-      await backend.client.setSessionName(normalizedName)
+      await this.capabilityControl(backend, () => backend.client.setSessionName(normalizedName))
       this.sessionManagers.delete(target)
       this.sessionManagerSignatures.delete(target)
     } else {
@@ -4762,9 +5294,10 @@ export class AgentBridge {
     const backend = this.getActiveBackend()
     const revision = this.historyRevision
     const generation = this.sessionSelectionGeneration
+    const scope = backend ? this.captureSessionInfoScope(backend) : undefined
     const info = await this.getSessionInfoSnapshot()
     if (backend !== this.getActiveBackend()
-      || (backend && this.backendPool.get(backend.key) !== backend)
+      || (backend && scope && !this.sessionInfoScopeOwned(backend, scope))
       || revision !== this.historyRevision || generation !== this.sessionSelectionGeneration) return null
     if (info && backend && (info.liveState?.revision !== backend.liveState?.revision
       || info.liveState?.cwd !== backend.cwd || info.liveState?.sessionPath !== backend.sessionPath)) {
@@ -4774,7 +5307,12 @@ export class AgentBridge {
       info.isStreaming = backend.busy
       info.isCompacting = backend.compacting
     }
-    if (info) info.subagentsEnabled = backend?.subagentsEnabled ?? DEFAULT_SUBAGENTS_ENABLED
+    if (info) {
+      const global = this.capabilitySettings?.getSnapshot()
+      info.subagentsEnabled = (backend?.subagentsEnabled ?? DEFAULT_SUBAGENTS_ENABLED)
+        && (!this.capabilitySettings || (!!global && capabilityEnabled(global, 'tool:pion_subagents', 'subagent')))
+        && (!backend?.capability || (backend.capability.noticeClient === backend.client && backend.capability.notice?.subagentsEnabled === true))
+    }
     if (info) info.yolo = this.activeKey ? this.yoloSessions.has(this.activeKey) : false
     return info
   }
@@ -4825,49 +5363,79 @@ export class AgentBridge {
     }
   }
 
+  private captureSessionInfoScope(backend: BackendRecord): BackendSessionInfoScope {
+    return { client: backend.client, cwd: backend.cwd, capability: backend.capability, capabilityEpoch: backend.capability?.epoch }
+  }
+
+  private sessionInfoScopeOwned(backend: BackendRecord, scope: BackendSessionInfoScope): boolean {
+    return !this.stopping && this.backendPool.get(backend.key) === backend && backend.client === scope.client
+      && backend.cwd === scope.cwd && backend.capability === scope.capability && backend.capability?.epoch === scope.capabilityEpoch
+  }
+
   private async toSessionInfo(backend: BackendRecord): Promise<SessionInfo | null> {
     this.sessionInfoQueries ??= new WeakMap()
     this.sessionInfoSnapshots ??= new WeakMap()
+    const scope = this.captureSessionInfoScope(backend)
+    const cachedInfo = (previousEpoch = false): SessionInfo | null => {
+      const cached = this.sessionInfoSnapshots?.get(backend)
+      return cached && cached.revision === this.historyRevision && cached.sessionPath === backend.sessionPath
+        && cached.client === scope.client && cached.cwd === scope.cwd && cached.capability === scope.capability
+        && (previousEpoch || cached.capabilityEpoch === scope.capabilityEpoch)
+        ? this.overlayBackendSessionInfo(backend, cached.info) : null
+    }
+    // The replacement's default model/name is an intermediate state. Do not
+    // query/cache it or read an empty allocated path as persisted history.
+    if (backend.capability?.applyPromise || backend.capability?.quarantined) return cachedInfo(true)
     let query = this.sessionInfoQueries.get(backend)
-    if (!query) {
-      query = this.querySessionInfo(backend)
+    if (!query || !this.sessionInfoScopeOwned(backend, query)) {
+      const previous = query
+      const read = () => this.sessionInfoScopeOwned(backend, scope)
+        && !backend.capability?.applyPromise && !backend.capability?.quarantined ? this.querySessionInfo(backend) : null
+      // Keep the earlier actual RPC in the chain until it settles. A new epoch
+      // needs a fresh read, not the old result or a concurrent replacement RPC.
+      query = { ...scope, promise: previous ? previous.promise.catch(() => null).then(read) : Promise.resolve(read()) }
       this.sessionInfoQueries.set(backend, query)
+      const entry = query
       const release = () => {
-        if (this.sessionInfoQueries?.get(backend) === query) this.sessionInfoQueries?.delete(backend)
+        if (this.sessionInfoQueries?.get(backend) === entry) this.sessionInfoQueries.delete(backend)
       }
       // No timer can release this slot: getState still has its own SDK deadline.
-      void query.then(release, release)
+      void entry.promise.then(release, release)
     }
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), 2_000) })
     let info: SessionInfo | null
     try {
-      info = await Promise.race([query, timeout])
+      info = await Promise.race([query.promise, timeout])
     } catch {
       info = null
     } finally {
       clearTimeout(timer)
     }
+    if (!this.sessionInfoScopeOwned(backend, scope)) return null
+    if (backend.capability?.applyPromise || backend.capability?.quarantined) return cachedInfo(true)
     if (info) return { ...info }
-    if (this.backendPool.get(backend.key) !== backend) return null
-    const cached = this.sessionInfoSnapshots.get(backend)
-    if (cached && cached.revision === this.historyRevision && cached.sessionPath === backend.sessionPath) {
-      return this.overlayBackendSessionInfo(backend, cached.info)
-    }
-    if (!backend.sessionPath) return null
-    return this.overlayBackendSessionInfo(backend, await this.readPersistedSessionInfo(backend.sessionPath))
+    const cached = cachedInfo()
+    if (cached) return cached
+    const path = backend.sessionPath
+    if (!path) return null
+    const persisted = await this.readPersistedSessionInfo(path)
+    return this.sessionInfoScopeOwned(backend, scope) && backend.sessionPath === path
+      && !backend.capability?.applyPromise && !backend.capability?.quarantined
+      ? this.overlayBackendSessionInfo(backend, persisted) : null
   }
 
   private async querySessionInfo(backend: BackendRecord): Promise<SessionInfo | null> {
+    const scope = this.captureSessionInfoScope(backend)
     const revision = this.historyRevision
     const sessionPath = backend.sessionPath
     const lifecycle = this.dispatchLifecycle(backend).generation
     const busy = backend.busy
     const compacting = backend.compacting
-    const state = await backend.client.getState()
-    // Late results may warm this backend's cache, but never publish STATE.
-    // The caller separately fences active selection and history revisions.
-    if (this.backendPool.get(backend.key) !== backend
+    const state = await scope.client.getState()
+    // Late results may warm only their exact client/runtime epoch, never an
+    // application intermediate or an A → B → A replacement at the same path.
+    if (!this.sessionInfoScopeOwned(backend, scope) || backend.capability?.applyPromise || backend.capability?.quarantined
       || revision !== this.historyRevision || sessionPath !== backend.sessionPath) return null
     const model = state.model
     const lifecycleChanged = lifecycle !== this.dispatchLifecycle(backend).generation
@@ -4890,19 +5458,20 @@ export class AgentBridge {
       queuedMessages: this.projectedQueueSnapshot(backend),
       liveState: backend.liveState?.snapshot(backend.cwd, backend.sessionPath)
     }
-    this.sessionInfoSnapshots?.set(backend, { revision, sessionPath, info })
+    this.sessionInfoSnapshots?.set(backend, { ...scope, revision, sessionPath, info })
     return info
   }
 
   private async pushSessionInfo(): Promise<void> {
     const generation = this.sessionSelectionGeneration
     const backend = this.getActiveBackend()
+    const scope = backend ? this.captureSessionInfoScope(backend) : undefined
     const revision = this.historyRevision
     const activeKey = this.activeKey
     const activeSessionPath = this.activeSessionPath
     const info = await this.getSessionInfo()
     if (revision !== this.historyRevision || generation !== this.sessionSelectionGeneration
-      || this.getActiveBackend() !== backend || (backend && this.backendPool.get(backend.key) !== backend)
+      || this.getActiveBackend() !== backend || (backend && scope && !this.sessionInfoScopeOwned(backend, scope))
       || this.activeKey !== activeKey || this.activeSessionPath !== activeSessionPath) return
     this.win?.webContents.send(STATE_CHANNEL, info)
   }
@@ -4924,6 +5493,7 @@ export class AgentBridge {
   private async refresh(): Promise<void> {
     const generation = this.sessionSelectionGeneration
     const backend = this.getActiveBackend()
+    const scope = backend ? this.captureSessionInfoScope(backend) : undefined
     const revision = this.historyRevision
     const activeKey = this.activeKey
     const activeSessionPath = this.activeSessionPath
@@ -4939,7 +5509,7 @@ export class AgentBridge {
       revision !== this.historyRevision ||
       generation !== this.sessionSelectionGeneration ||
       this.getActiveBackend() !== backend ||
-      (backend && this.backendPool.get(backend.key) !== backend) ||
+      (backend && scope && !this.sessionInfoScopeOwned(backend, scope)) ||
       this.activeKey !== activeKey ||
       this.activeSessionPath !== activeSessionPath ||
       this.activeCwd !== activeCwd
