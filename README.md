@@ -36,6 +36,6 @@ npm install
 
 - [开发、构建与安装](docs/development.md)
 - [功能说明与限制](docs/feature-contracts.md)
-- [源码索引](map.md) · [开发约定](AGENTS.md)
+- [开发约定](AGENTS.md)
 
 [MIT License](LICENSE)

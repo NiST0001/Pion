@@ -4,7 +4,6 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 
 ## 文档入口
 
-- [map.md](map.md)：源码与测试定位；先按功能找文件。
 - [README.md](README.md)：使用说明。
 - [docs/development.md](docs/development.md)：开发、构建与打包。
 - [docs/feature-contracts.md](docs/feature-contracts.md)：详细功能约束。**修改相关功能前必须阅读对应章节**，本文件的概要不替代协议细节。
@@ -15,7 +14,7 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 - 修改前检查 git 状态，保留用户已有改动；精确修改，不顺手提交无关文件，不编辑 `node_modules/out/dist/coverage` 等依赖或生成目录。
 - 未经用户明确许可，不运行类型检查、测试、构建、安装或 GUI 验证；可阅读源码、编写回归测试、检查静态 diff。推送、打标签、发布须另获授权；取消或超时不是同意。
 - 行为修复增加回归测试，汇报区分已检查、未执行和实机验证；构建或 mock 通过不代表类型检查、真机、远端服务或收费兼容性通过。
-- 每次修改后复核本文件与 `map.md`；职责、路径或行为约束变化时同步相关文档。新增/移动/删除功能文件更新地图，不把临时版本号、测试数量写成长期约定。
+- 每次修改后复核本文件；职责、路径或行为约束变化时同步相关文档，不把临时版本号、测试数量写成长期约定。
 - 原生计划按目标继续或调整，不因新消息清空；同目标保留任务 ID，完成后的追加先重开旧任务。仅明确替换目标或用户要求重置时 clear；保留未完成工作，不伪造完成。
 
 ## 架构与安全底线

@@ -427,7 +427,7 @@ src/
             └── common/           # 空状态、确认、输入和扩展交互等通用组件
 ```
 
-按功能定位更多源码与测试请参阅根目录 [map.md](../map.md)；旧 components 与主进程 re-export 空壳已移除。
+旧 components 与主进程 re-export 空壳已移除。
 
 - `src/main/ipc/` 只注册通过参数传入的同一服务实例，保留 handler 的参数、返回值、错误及既有主帧/owner 校验；全局设置、验证/工作流、项目列表等其余路由仍由 `src/main/index.ts` 注册。这是职责拆分，不代表全部 IPC 已补齐窗口归属校验，也不改 SDK 子进程入口或 asar 解包边界。
 - `src/renderer/src/app/WorkbenchDialogs.tsx` 通过分组 props 装配操作面板、确认与延迟加载弹窗，不新增 DOM 容器或统一大 Suspense。App 继续拥有控制器、状态与首次挂载门控；各弹窗关闭/重开遵循原生命周期，聊天区权限浮层、终端、滚动宿主和 SVG 背板不移动。
