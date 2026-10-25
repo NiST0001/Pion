@@ -47,7 +47,7 @@
 | src/renderer/src/hooks/useAppInteractionState.ts | 全量pending订阅、exact cwd/path归属、真实request.id响应及请求级RPC槽/错误，推送挡迟到查询，全局认证独立 |
 | src/renderer/src/features/common/SessionInteractionPanel.tsx | 提问/权限共用默认展开可收起卡片，retainContent/inert保草稿与展开状态，不抢焦点 |
 | src/renderer/src/features/common/ExtensionUiModal.tsx、features/operations/ToolPermissionModal.tsx | 仅所属会话交互；自定义回答本地往返保草稿/期限，明确提交才RPC；全局认证保持居中 |
-| src/renderer/src/features/session/PendingInteractionSessions.tsx | 侧栏设置左边请求快跳，按真实cwd/path合并，悬浮只展示缓存，点击普通选择，不回答/授权/清pending |
+| src/renderer/src/features/session/PendingInteractionSessions.tsx | 侧栏设置左边请求快跳，按真实cwd/path合并，点击入口展开/收起缓存列表，悬浮/单纯聚焦不展开，点击会话普通选择，不回答/授权/清pending |
 | src/renderer/src/features/project/Sidebar.tsx、features/session/SessionList.tsx | 快跳接线、待处理蓝点复用未读标记，阅读/运行不清除 |
 | src/renderer/src/hooks/useConversationOverlays.ts | 任务/队列真实顶部独立避让；短停靠区输入与浮层限高，不加聊天滚动余量 |
 | src/renderer/src/styles/extension-ui.css、styles/permissions.css、styles/sidebar.css、styles/refinements/project.css | 提问/权限卡片堆叠、14px间距/短区域滚动、快跳有界列表与待处理蓝点 |
@@ -67,7 +67,7 @@
 
 - `tests/unit/agent-bridge-extension-ui.test.ts`、`ask-user.test.ts`：真实backend权限归属与自定义回答receipt/单字段/非空/长度/支持范围；普通扩展/认证/混合响应拒绝。
 - `tests/renderer/sessionInteractions.test.tsx`、`ExtensionUiModal.test.tsx`、`ToolPermissionModal.test.tsx`：请求归属/草稿/默认展开/切换/请求级RPC，自定义回答本地返回不发RPC。
-- `tests/renderer/PendingInteractionSessions.test.tsx`、`Sidebar.test.tsx`、`SessionList.test.tsx`：快跳合并/悬浮/键盘/普通导航与蓝点，不自动回答授权。
+- `tests/renderer/PendingInteractionSessions.test.tsx`、`Sidebar.test.tsx`、`SessionList.test.tsx`：快跳合并/悬浮与聚焦不展开/点击切换/键盘/普通导航与蓝点，不自动回答授权。
 - `tests/renderer/conversationOverlays.test.tsx`、`SubagentConversation.test.tsx`：任务/队列动态避让、短区域与隐藏inert。
 - `tests/unit/usage-ledger.test.ts`、`usage-ledger-unlimited.test.ts`：去重/lineage/alias/stamp/父删除/覆盖、旧容量取消、后台调度/开关/dirty flush、隐私、坏账本/锁/原子失败及真实close singleflight。
 - `tests/unit/usage-period.test.ts`、`usage-ledger-period.test.ts`：互斥校验/UTC边界/短月/闰年、全历史去重后过滤与完整日期分布、异query共扫描独立投影。

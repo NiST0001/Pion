@@ -81,15 +81,6 @@
   background: var(--bg-elev);
   box-shadow: var(--shadow-pop);
 }
-/* Keep hover continuous while moving from the entry into the floating list. */
-.pending-interaction-popover::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -8px;
-  height: 8px;
-}
 .pending-interaction-list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .pending-interaction-session {
   display: grid;

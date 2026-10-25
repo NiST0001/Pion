@@ -8,6 +8,12 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.87',
+    changes: [
+      '侧栏待处理请求列表改为点击展开、再次点击收起；悬浮或仅获得焦点不再自动弹出，保留键盘操作和会话跳转。'
+    ]
+  },
+  {
     version: '0.1.86',
     changes: [
       '新增全局使用总览与长期本地用量账本，支持年、月账期和日期筛选；可自定每月起始日，后台低频采集可在设置中关闭。',

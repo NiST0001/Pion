@@ -313,7 +313,7 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     await paint()
     const draft = view.container.querySelector<HTMLTextAreaElement>('.composer textarea')!
     fireEvent.change(draft, { target: { value: '跨项目前保留的父草稿' } })
-    fireEvent.mouseEnter(screen.getByRole('button', { name: /待处理请求.*2.*个会话/ }))
+    fireEvent.click(screen.getByRole('button', { name: /待处理请求.*2.*个会话/ }))
     const requests = screen.getByRole('region', { name: '待处理请求会话' })
     expect(within(requests).getAllByRole('button')).toHaveLength(2)
     expect(within(requests).queryByText('全局认证请求')).not.toBeInTheDocument()
@@ -354,7 +354,7 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     fireEvent.click(screen.getByRole('button', { name: /查看子会话 代码检查/ }))
     await paint()
     expect(childScroll(view.container)).toBeInTheDocument()
-    fireEvent.focus(screen.getByRole('button', { name: /待处理请求.*1.*个会话/ }))
+    fireEvent.click(screen.getByRole('button', { name: /待处理请求.*1.*个会话/ }))
     const requests = screen.getByRole('region', { name: '待处理请求会话' })
     expectNoParentBackendAction(f.actions)
     expect(resolveInteraction).not.toHaveBeenCalled()

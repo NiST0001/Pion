@@ -29,7 +29,7 @@ const region = () => screen.getByRole('region', { name: '待处理请求会话' 
 const trigger = (count: number) => screen.getByRole('button', { name: `待处理请求（${count}个会话）` })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
-it('opens on hover without navigation, focus theft, backend reads or responses; merges requests per session', () => {
+it('opens only on activation without navigation, focus theft, backend reads or responses; merges requests per session', () => {
   const backend = {
     resolveExtensionUiRequest: vi.fn(), resolveToolPermission: vi.fn(),
     getPendingExtensionUiRequests: vi.fn(), getPendingToolPermissionRequests: vi.fn()
@@ -42,6 +42,10 @@ it('opens on hover without navigation, focus theft, backend reads or responses; 
   })
   const previousFocus = document.activeElement
   fireEvent.mouseEnter(trigger(1))
+  fireEvent.focus(trigger(1))
+  expect(screen.queryByRole('region')).not.toBeInTheDocument()
+  expect(trigger(1)).toHaveAttribute('aria-expanded', 'false')
+  fireEvent.click(trigger(1))
   expect(within(region()).getAllByRole('button')).toHaveLength(1)
   expect(within(region()).getByText('当前会话')).toBeInTheDocument()
   expect(within(region()).getByText('提问 2')).toBeInTheDocument()
@@ -96,7 +100,7 @@ it('updates and removes resolved targets while keeping an open empty list and vi
     extensionUiRequests: [question('a'), question('b', { sessionPath: '/sessions/b.jsonl' })],
     toolPermissionRequests: [permission('p')]
   })
-  fireEvent.mouseEnter(trigger(2))
+  fireEvent.click(trigger(2))
   rerender(<PendingInteractionSessions {...props} extensionUiRequests={[]} />)
   expect(trigger(1)).toHaveAttribute('aria-expanded', 'true')
   expect(within(region()).queryByText(/提问/)).not.toBeInTheDocument()
@@ -110,11 +114,11 @@ it('updates and removes resolved targets while keeping an open empty list and vi
   expect(region()).toBeInTheDocument()
 })
 
-it('supports focus, ArrowDown, native keyboard activation, Escape, focus exit, outside click and mouse exit', () => {
+it('supports click toggling, ArrowDown, native activation, Escape, focus exit and outside click without hover changes', () => {
   const { container, props } = setup({ extensionUiRequests: [question('q')] })
   const entry = trigger(1)
   act(() => entry.focus())
-  expect(region()).toBeInTheDocument()
+  expect(screen.queryByRole('region')).not.toBeInTheDocument()
   expect(entry).toHaveFocus()
   fireEvent.keyDown(entry, { key: 'ArrowDown' })
   const row = within(region()).getByRole('button')
@@ -132,12 +136,14 @@ it('supports focus, ArrowDown, native keyboard activation, Escape, focus exit, o
   fireEvent.click(entry)
   fireEvent.pointerDown(document.body)
   expect(screen.queryByRole('region')).not.toBeInTheDocument()
-  fireEvent.focus(entry)
+  fireEvent.click(entry)
   fireEvent.blur(entry, { relatedTarget: document.body })
   expect(screen.queryByRole('region')).not.toBeInTheDocument()
-  fireEvent.mouseEnter(entry)
-  fireEvent.mouseLeave(entry, { relatedTarget: region() })
-  expect(region()).toBeInTheDocument()
+  fireEvent.click(entry)
   fireEvent.mouseLeave(container.querySelector('.pending-interaction-jump')!, { relatedTarget: document.body })
+  expect(region()).toBeInTheDocument()
+  fireEvent.click(entry)
+  expect(screen.queryByRole('region')).not.toBeInTheDocument()
+  fireEvent.mouseEnter(entry)
   expect(screen.queryByRole('region')).not.toBeInTheDocument()
 })

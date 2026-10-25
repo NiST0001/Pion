@@ -77,8 +77,6 @@ export function PendingInteractionSessions({
     <div
       className="pending-interaction-jump"
       ref={root}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false)
       }}
@@ -91,8 +89,7 @@ export function PendingInteractionSessions({
         aria-label={`待处理请求（${targets.size}个会话）`}
         aria-expanded={open}
         aria-controls={open ? id : undefined}
-        onFocus={() => setOpen(true)}
-        onClick={() => setOpen(true)}
+        onClick={() => setOpen(value => !value)}
         onKeyDown={(event) => {
           if (event.key !== 'ArrowDown') return
           event.preventDefault()
