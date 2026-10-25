@@ -542,7 +542,7 @@ html.pion-keyboard-focus .composer-attachment-remove:focus-visible {
   min-width: 0;
 }
 
-.composer-project-trigger {
+.composer-project-trigger.pion-select {
   display: inline-flex;
   align-items: center;
   width: 100%;
@@ -550,6 +550,7 @@ html.pion-keyboard-focus .composer-attachment-remove:focus-visible {
   min-height: 27px;
   gap: 5px;
   padding: 4px 8px;
+  border: 0;
   border-radius: 999px;
   background: transparent;
   color: var(--fg-dim);

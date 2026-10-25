@@ -1105,6 +1105,7 @@ export function App(): ReactElement {
               projectSelector={
                 <ProjectPicker
                   projects={state.projects}
+                  branchesByProject={state.branchesByProject}
                   value={state.status.cwd ?? ''}
                   disabled={state.projects.length === 0}
                   onChange={requestProjectMigration}

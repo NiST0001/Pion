@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
-import type { CSSProperties, KeyboardEvent } from 'react'
+import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown } from 'lucide-react'
 
@@ -17,11 +17,12 @@ interface PionSelectProps {
   disabled?: boolean
   ariaLabel: string
   className?: string
+  children?: ReactNode
   id?: string
 }
 
 /** A single-select listbox. Only its trigger participates in the tab order. */
-export function PionSelect({ value, options, onValueChange, disabled = false, ariaLabel, className, id }: PionSelectProps) {
+export function PionSelect({ value, options, onValueChange, disabled = false, ariaLabel, className, children, id }: PionSelectProps) {
   const generatedId = useId()
   const listId = `${generatedId}-listbox`
   const trigger = useRef<HTMLButtonElement>(null)
@@ -210,7 +211,7 @@ export function PionSelect({ value, options, onValueChange, disabled = false, ar
         if (unavailable()) return
         if (open) close(); else show()
       }}>
-      <span className="pion-select-value">{options[selected]?.label ?? value}</span>
+      {children ?? <span className="pion-select-value">{options[selected]?.label ?? value}</span>}
       <ChevronDown size={14} className="pion-select-chevron" aria-hidden="true" />
     </button>
     {open && !disabled && createPortal(<div ref={popup} id={listId} role="listbox" aria-label={ariaLabel}

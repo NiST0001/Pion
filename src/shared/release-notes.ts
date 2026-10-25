@@ -8,6 +8,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.92',
+    changes: [
+      '修复分支会话在输入框项目选择器中显示暂无项目的问题，按实际工作树归属显示“项目_分支”，主工作树仍显示项目名。',
+      '项目选择器复用统一下拉控件，保留当前工作树选中状态、真实路径及显式会话迁移操作。'
+    ]
+  },
+  {
     version: '0.1.91',
     changes: [
       '工具详情展开改为先快速完成已有的末尾跟随，再开始新内容渐显；按实际滚动完成回执放行，避免两种动画同时启动。',
