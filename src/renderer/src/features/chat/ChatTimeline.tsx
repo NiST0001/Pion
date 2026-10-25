@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, RefObject, ReactElement } from 'react'
-import type { RunCheckpointStatus } from '../../../../shared/types'
-import type { FileChange, TimelineItem } from '../../agent/types'
+import type { TimelineItem } from '../../agent/types'
+import { deriveTurnChanges } from '../../agent/timeline'
 import type { WorkingStatus } from '../../agent/workingStatus'
 import { EmptyState } from '../common/EmptyState'
 import { ModifiedFilesCard } from '../review/ModifiedFilesCard'
@@ -30,6 +30,8 @@ export interface ChatTimelineProps {
   timelineLoading: boolean
   /** Undefined retains compatibility with callers that do not track history acceptance. */
   timelineReady?: boolean
+  /** A paged window ending mid-history cannot close its trailing turn. */
+  hasNewerHistory?: boolean
   historySelected?: boolean
   timelineError?: string
   /** Bounded display information, not an invented SDK message/history item. */
@@ -46,14 +48,6 @@ export interface ChatTimelineProps {
   revertDisabledReason?: string
   agentActivity: boolean
   workingStatus: WorkingStatus
-  latestRunChanges: FileChange[]
-  workspaceChanges?: boolean
-  runCheckpoint: RunCheckpointStatus | null
-  rollbackBusy: boolean
-  rollbackError: string
-  onUndo: () => void
-  onReview: () => void
-  onSelectChange: (change: FileChange) => void
 }
 
 // Keep already opened tool cards mounted when the outer group collapses.
@@ -100,6 +94,7 @@ export function ChatTimeline({
   timeline,
   timelineLoading,
   timelineReady,
+  hasNewerHistory = false,
   historySelected = false,
   timelineError,
   notice,
@@ -114,17 +109,11 @@ export function ChatTimeline({
   onRevert,
   revertDisabledReason,
   agentActivity,
-  workingStatus,
-  latestRunChanges,
-  workspaceChanges,
-  runCheckpoint,
-  rollbackBusy,
-  rollbackError,
-  onUndo,
-  onReview,
-  onSelectChange
+  workingStatus
 }: ChatTimelineProps): ReactElement {
   const scope = scopeKey ?? cwd ?? ''
+  const turns = useMemo(() => deriveTurnChanges(timeline), [timeline])
+  const turnsByEnd = new Map(turns.map(turn => [turn.lastItemId, turn]))
   const previousGroups = useRef<{ scope: string; groups: { key: string; ids: Set<string> }[] }>({ scope, groups: [] })
   const [expandedGroups, setExpandedGroups] = useState<{ scope: string; keys: Set<string> }>({ scope, keys: new Set() })
   const groups = useMemo(() => {
@@ -184,6 +173,12 @@ export function ChatTimeline({
       ) : (
         <div className="timeline">
           {timeline.flatMap((item, index) => {
+            const turn = turnsByEnd.get(item.id)
+            const card = !readOnly && turn && turn.changes.length > 0
+              && !(index === timeline.length - 1 && (busy || agentActivity || hasNewerHistory))
+              ? <ModifiedFilesCard key={`changes:${scope}:${turn.userId}`}
+                  changes={turn.changes} cwd={cwd} />
+              : null
             if (item.kind === 'tool') {
               const group = groupByIndex.get(index)!
               const open = expandedGroups.scope === scope && expandedGroups.keys.has(group.key)
@@ -191,9 +186,9 @@ export function ChatTimeline({
               if (groupsByStart.has(index)) nodes.unshift(<ToolActivityHeader key={group.key}
                 summary={summarizeToolActivity(group.items)} open={open} onToggle={() => toggleGroup(group.key)}
                 historical={group.items[0].historical} noReveal={group.items[0].noReveal} />)
-              return nodes
+              return [...nodes, card]
             }
-            return item.kind === 'compaction' ? (
+            const node = item.kind === 'compaction' ? (
               <div key={item.id}
                 ref={item.historical && !item.noReveal ? assignLineRevealDelay : undefined}
                 className={`compaction-marker${item.historical && !item.noReveal ? ` history-reveal ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS}` : ''}`}>
@@ -211,6 +206,7 @@ export function ChatTimeline({
                 revertDisabledReason={revertDisabledReason}
               />
             )
+            return [node, card]
           })}
           {agentActivity && (
             <div className="row row-agent-working">
@@ -220,25 +216,6 @@ export function ChatTimeline({
               </span>
             </div>
           )}
-          {!readOnly && !busy
-            && (workspaceChanges || runCheckpoint?.state !== 'rolled-back')
-            && latestRunChanges.length > 0
-            && (
-              <ModifiedFilesCard
-                changes={latestRunChanges}
-                workspace={workspaceChanges}
-                cwd={cwd}
-                canUndo={Boolean(
-                  runCheckpoint?.state === 'ready'
-                  && runCheckpoint.hasChanges
-                )}
-                undoBusy={rollbackBusy}
-                error={rollbackError}
-                onUndo={onUndo}
-                onReview={onReview}
-                onSelect={onSelectChange}
-              />
-            )}
         </div>
       )}
       </div>

@@ -338,48 +338,73 @@ export function diffStats(diff: string): { additions: number; deletions: number 
   return { additions, deletions }
 }
 
-/** Derive the touched-file list from a timeline (for the changes panel). */
+/** Successful tool records, not a Git net diff; repeated paths share one entry. */
 export function deriveChanges(timeline: TimelineItem[]): FileChange[] {
   const byPath = new Map<string, FileChange>()
+  const seenTools = new Set<string>()
+  const displayDiff = (change: FileChange): string => change.diff ?? (change.content
+    ? change.content.split('\n').map((line, index) => `+${index + 1} ${line}`).join('\n')
+    : '')
   for (const item of timeline) {
     if (item.kind !== 'tool') continue
     const { tool } = item
+    if (tool.status !== 'done' || tool.isError || tool.resultReceived !== true || seenTools.has(tool.id)) continue
+    let change: FileChange
     if (tool.name === 'edit' && tool.path && tool.diff) {
-      const stats = diffStats(tool.diff)
-      const existing = byPath.get(tool.path)
-      byPath.set(tool.path, {
-        path: tool.path,
-        kind: 'edit',
-        diff: existing?.kind === 'edit' && existing.diff
-          ? `${existing.diff}\n  ...\n${tool.diff}`
-          : tool.diff,
-        additions: (existing?.additions ?? 0) + stats.additions,
-        deletions: (existing?.deletions ?? 0) + stats.deletions
-      })
+      change = { path: tool.path, kind: 'edit', diff: tool.diff, ...diffStats(tool.diff) }
     } else if (tool.name === 'write' && tool.path) {
       const content = tool.writeContent ?? ''
-      const lines = content.split('\n').length
-      byPath.set(tool.path, {
+      change = {
         path: tool.path,
         kind: 'write',
         content,
-        additions: lines,
+        additions: content ? content.split('\n').length : 0,
         deletions: 0
-      })
-    }
+      }
+    } else continue
+    seenTools.add(tool.id)
+    const existing = byPath.get(change.path)
+    byPath.set(change.path, existing ? {
+      path: change.path,
+      kind: 'edit',
+      diff: [displayDiff(existing), displayDiff(change)].filter(Boolean).join('\n  ...\n'),
+      additions: existing.additions + change.additions,
+      deletions: existing.deletions + change.deletions
+    } : change)
   }
   return [...byPath.values()]
 }
 
-/** File changes made after the most recent user message in the loaded timeline. */
-export function deriveLatestRunChanges(timeline: TimelineItem[]): FileChange[] {
-  let start = 0
-  for (let index = timeline.length - 1; index >= 0; index--) {
-    if (timeline[index].kind !== 'user') continue
+export interface TurnChanges {
+  userId: number
+  lastItemId: number
+  changes: FileChange[]
+}
+
+/** Loaded user turns in timeline order; an orphaned paged prefix has no owner. */
+export function deriveTurnChanges(timeline: TimelineItem[]): TurnChanges[] {
+  const turns: TurnChanges[] = []
+  let start = -1
+  for (let index = 0; index <= timeline.length; index++) {
+    if (index < timeline.length && timeline[index].kind !== 'user') continue
+    if (start >= 0) {
+      turns.push({
+        userId: timeline[start].id,
+        lastItemId: timeline[index - 1].id,
+        changes: deriveChanges(timeline.slice(start, index))
+      })
+    }
     start = index
-    break
   }
-  return deriveChanges(timeline.slice(start))
+  return turns
+}
+
+/** File changes made after the most recent loaded user message, if any. */
+export function deriveLatestRunChanges(timeline: TimelineItem[]): FileChange[] {
+  for (let index = timeline.length - 1; index >= 0; index--) {
+    if (timeline[index].kind === 'user') return deriveChanges(timeline.slice(index))
+  }
+  return []
 }
 
 // ---------------------------------------------------------------------------

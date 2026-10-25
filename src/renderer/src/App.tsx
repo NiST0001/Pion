@@ -22,9 +22,7 @@ import { useWindowEffects } from './hooks/useWindowEffects'
 import { useDeferredMount } from './hooks/useDeferredMount'
 import { useSessionResourceStage } from './hooks/useSessionResourceStage'
 import { useSessionModes } from './hooks/useSessionModes'
-import { deriveLatestRunChanges } from './agent/timeline'
 import { deriveWorkingStatus } from './agent/workingStatus'
-import type { FileChange } from './agent/types'
 import { DEFAULT_SUBAGENTS_ENABLED } from '../../shared/subagents'
 import { BROWSER_BLANK_URL, isAllowedBrowserUrl } from '../../shared/browser'
 import { BrowserNavigationContext } from './features/browser/BrowserNavigationContext'
@@ -73,8 +71,6 @@ import {
   readHistoryNavMaxVisible,
   saveHistoryNavMaxVisible
 } from './utils/historyNavigatorSettings'
-import { resolvePendingReviewFile, scopeForReviewFile } from './utils/reviewPaths'
-import type { PendingReviewSelection } from './utils/reviewPaths'
 import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPaths } from './agent/sessionFavorites'
 
 const TerminalPanel = lazy(() => import('./features/terminal/TerminalPanel').then((module) => ({ default: module.TerminalPanel })))
@@ -174,8 +170,6 @@ export function App(): ReactElement {
   })
   const [prefill, setPrefill] = useState('')
   const [reviewPath, setReviewPath] = useState<string | null>(null)
-  const [capturedReviewChange, setCapturedReviewChange] = useState<FileChange | null>(null)
-  const [pendingReviewSelection, setPendingReviewSelection] = useState<PendingReviewSelection | null>(null)
   const [reviewScope, setReviewScope] = useState<GitDiffScope>('unstaged')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsNavigation, setSettingsNavigation] = useState<SettingsNavigationRequest>()
@@ -311,22 +305,6 @@ export function App(): ReactElement {
   const reviewCodeEnabled = gitResourcesEnabled
     && reviewCodeKey !== ''
     && readyReviewCodeKey === reviewCodeKey
-  useEffect(() => {
-    const snapshot = gitWorkspace.snapshot
-    if (!pendingReviewSelection || !snapshot) return
-    const file = resolvePendingReviewFile(
-      snapshot.files,
-      pendingReviewSelection,
-      resourceCwd,
-      snapshot.root
-    )
-    if (!file) return
-    setReviewOpen(true)
-    setCapturedReviewChange(null)
-    setReviewPath(file.path)
-    setReviewScope(scopeForReviewFile(file, pendingReviewSelection.preferredScope))
-    setPendingReviewSelection(null)
-  }, [gitWorkspace.snapshot, pendingReviewSelection, resourceCwd])
   const taskHistoryMounted = useDeferredMount(taskHistorySession !== null)
   const capabilitiesMounted = useDeferredMount(capabilitiesOpen)
   const pluginStoreMounted = useDeferredMount(pluginStoreOpen)
@@ -606,10 +584,7 @@ export function App(): ReactElement {
       }
       const previousSelection = selectedSession
       const previousReviewPath = reviewPath
-      const previousCapturedReviewChange = capturedReviewChange
       setReviewPath(null)
-      setCapturedReviewChange(null)
-      setPendingReviewSelection(null)
       setSelectedSession({ cwd, path })
       try {
         // Persisted sessions are global pool entries. switchSession resolves the
@@ -619,19 +594,17 @@ export function App(): ReactElement {
         if (result.cancelled && requestId === sessionSelectionId.current) {
           setSelectedSession(previousSelection)
           setReviewPath(previousReviewPath)
-          setCapturedReviewChange(previousCapturedReviewChange)
           return
         }
       } catch (error) {
         if (requestId === sessionSelectionId.current) {
           setSelectedSession(previousSelection)
           setReviewPath(previousReviewPath)
-          setCapturedReviewChange(previousCapturedReviewChange)
         }
         console.error('[pion] 切换会话失败', error)
       }
     },
-    [actions, capturedReviewChange, reviewPath, selectedSession, selectionRef, state.session?.sessionFile, state.status.cwd, state.status.phase, state.timelineError, state.timelineReady, state.timelineLoading, childSessions.close, viewingChild]
+    [actions, reviewPath, selectedSession, selectionRef, state.session?.sessionFile, state.status.cwd, state.status.phase, state.timelineError, state.timelineReady, state.timelineLoading, childSessions.close, viewingChild]
   )
 
   const handleDeleteSession = useCallback(
@@ -728,17 +701,6 @@ export function App(): ReactElement {
     for (const command of slashCommands.commands) merged.set(command.name, command)
     return [...merged.values()]
   }, [state.commands, slashCommands.commands])
-  const latestRunChanges = useMemo<FileChange[]>(() => {
-    // Use the same workspace snapshot as Review, not a partial tool transcript.
-    if (gitWorkspace.snapshot) return gitWorkspace.snapshot.files.map((file) => ({
-      path: file.path,
-      binary: file.binary,
-      kind: 'edit',
-      additions: file.additions ?? 0,
-      deletions: file.deletions ?? 0
-    }))
-    return deriveLatestRunChanges(state.timeline)
-  }, [gitWorkspace.snapshot, state.timeline])
   const taskSessionKey = state.session?.sessionFile || state.session?.sessionId || state.status.cwd || 'default'
   const hasTaskPanel = state.mode !== 'plan' && hasIncompleteTasks(agentTodos)
   const queuedMessages = state.queuedMessages
@@ -771,47 +733,9 @@ export function App(): ReactElement {
   const handleToggleReview = useCallback(() => {
     setReviewOpen((open) => !open)
     setReviewPath(null)
-    setCapturedReviewChange(null)
-    setPendingReviewSelection(null)
   }, [])
 
-  const openReviewChanges = useCallback((changes: FileChange[], fallbackToFirst: boolean) => {
-    const pending: PendingReviewSelection = {
-      paths: changes.map((change) => change.path).filter((path) => path.trim() !== ''),
-      preferredScope: 'unstaged',
-      fallbackToFirst
-    }
-    // Commit the split pane before resolving Git paths so an unavailable or
-    // delayed snapshot can never make the user action look like a no-op.
-    flushSync(() => setReviewOpen(true))
-    const snapshot = gitWorkspace.snapshot
-    const file = snapshot
-      ? resolvePendingReviewFile(snapshot.files, pending, resourceCwd, snapshot.root)
-      : null
-    if (file) {
-      setCapturedReviewChange(null)
-      setReviewPath(file.path)
-      setReviewScope(scopeForReviewFile(file, pending.preferredScope))
-      setPendingReviewSelection(null)
-      return
-    }
-    setCapturedReviewChange(changes[0] ?? null)
-    setReviewScope(pending.preferredScope)
-    setReviewPath(null)
-    setPendingReviewSelection(pending.paths.length > 0 ? pending : null)
-  }, [gitWorkspace.snapshot, resourceCwd])
-
-  const handleReviewLatestChanges = useCallback(() => {
-    openReviewChanges(latestRunChanges, true)
-  }, [latestRunChanges, openReviewChanges])
-
-  const handleSelectInlineChange = useCallback((change: FileChange) => {
-    openReviewChanges([change], false)
-  }, [openReviewChanges])
-
   const handleSelectReviewPath = useCallback((path: string | null) => {
-    setCapturedReviewChange(null)
-    setPendingReviewSelection(null)
     setReviewPath(path)
   }, [])
 
@@ -819,8 +743,6 @@ export function App(): ReactElement {
     setRollbackError('')
     if (state.runCheckpoint?.state === 'rolled-back') {
       setReviewPath(null)
-      setCapturedReviewChange(null)
-      setPendingReviewSelection(null)
       setRollbackConfirmOpen(false)
     }
   }, [state.runCheckpoint?.id, state.runCheckpoint?.state])
@@ -840,8 +762,6 @@ export function App(): ReactElement {
     try {
       await actions.rollbackRunCheckpoint()
       setReviewPath(null)
-      setCapturedReviewChange(null)
-      setPendingReviewSelection(null)
       await gitWorkspace.refresh()
       setRollbackConfirmOpen(false)
     } catch (error) {
@@ -1054,8 +974,6 @@ export function App(): ReactElement {
                 notice={childSessions.selected?.truncated ? '较早或过长的内容已省略。' : undefined}
                 cwd={childSummary?.cwd} hasSessions canFork={false} onFork={() => {}}
                 agentActivity={childBusy} workingStatus={{ label: childSummary?.status === 'cancelling' ? '停止中' : '运行中' }}
-                latestRunChanges={[]} runCheckpoint={null} rollbackBusy={false} rollbackError=""
-                onUndo={() => {}} onReview={() => {}} onSelectChange={() => {}}
               />}
               <ChatTimeline
                 scopeKey={JSON.stringify([resourceKey, state.historyResetRevision])}
@@ -1066,6 +984,7 @@ export function App(): ReactElement {
                 timeline={state.timeline}
                 timelineLoading={state.timelineLoading}
                 timelineReady={state.timelineReady}
+                hasNewerHistory={actions.hasNewerHistory}
                 historySelected={Boolean(selectedSession?.path)}
                 timelineError={state.timelineError}
                 onReloadHistory={() => { void actions.reloadTimeline() }}
@@ -1081,14 +1000,6 @@ export function App(): ReactElement {
 
                 agentActivity={agentActivity}
                 workingStatus={workingStatus}
-                latestRunChanges={latestRunChanges}
-                workspaceChanges={Boolean(gitWorkspace.snapshot)}
-                runCheckpoint={state.runCheckpoint}
-                rollbackBusy={rollbackBusy}
-                rollbackError={rollbackError}
-                onUndo={() => void handleRollbackRun()}
-                onReview={handleReviewLatestChanges}
-                onSelectChange={handleSelectInlineChange}
               />
             <div className="session-interaction-panels"
               hidden={viewingChild || !hasSessionInteractions}
@@ -1238,7 +1149,7 @@ export function App(): ReactElement {
             diff={reviewCodeEnabled ? gitWorkspace.diff : null}
             conflict={reviewCodeEnabled ? gitWorkspace.conflict : null}
             selectedPath={reviewPath}
-            capturedChange={capturedReviewChange}
+            capturedChange={null}
             scope={reviewScope}
             checkpoint={state.runCheckpoint}
             agentBusy={state.busy}

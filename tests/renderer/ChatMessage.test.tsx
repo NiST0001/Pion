@@ -34,9 +34,7 @@ function revealTimelineProps(timeline: ChatTimelineProps['timeline']): ChatTimel
   return {
     scrollRef: createRef<HTMLDivElement>(), onScroll: vi.fn(), timeline,
     timelineLoading: false, busy: false, starting: false, hasSessions: true,
-    canFork: false, onFork: vi.fn(), agentActivity: false, workingStatus: { label: '' },
-    latestRunChanges: [], runCheckpoint: null, rollbackBusy: false, rollbackError: '',
-    onUndo: vi.fn(), onReview: vi.fn(), onSelectChange: vi.fn()
+    canFork: false, onFork: vi.fn(), agentActivity: false, workingStatus: { label: '' }
   }
 }
 
@@ -356,9 +354,7 @@ describe('ChatMessage', () => {
           liveMessageId: 'fixture-backend:3', messageTimestamp: 1767225600000 }],
       timelineLoading: false, busy: true, starting: false, hasSessions: true,
       canFork: true, onFork: vi.fn(), canRevert: false, onRevert: vi.fn(),
-      agentActivity: true, workingStatus: { label: '运行中' }, latestRunChanges: [],
-      runCheckpoint: null, rollbackBusy: false, rollbackError: '',
-      onUndo: vi.fn(), onReview: vi.fn(), onSelectChange: vi.fn()
+      agentActivity: true, workingStatus: { label: '运行中' }
     }
     const { container } = render(<ChatTimeline {...props} />)
     const rows = container.querySelectorAll('.row-user')
@@ -483,59 +479,77 @@ describe('ChatMessage', () => {
     expect(onRevert).toHaveBeenCalledExactlyOnceWith('user-entry-6')
   })
 
-  it('passes message undo props through the timeline without reusing checkpoint undo', () => {
+  it('passes message undo props through the timeline without offering identity-free file undo', () => {
     const onRevert = vi.fn()
-    const onUndo = vi.fn()
     const props: ChatTimelineProps = {
-      scrollRef: createRef<HTMLDivElement>(),
-      onScroll: vi.fn(),
-      timeline: [persistedUserMessage],
-      timelineLoading: false,
-      busy: false,
-      starting: false,
-      hasSessions: true,
-      canFork: true,
-      onFork: vi.fn(),
-      canRevert: true,
-      onRevert,
-      agentActivity: false,
-      workingStatus: { label: '' },
-      latestRunChanges: [{ path: '/project/file.ts', kind: 'edit', additions: 1, deletions: 0 }],
-      workspaceChanges: true,
-      runCheckpoint: {
-        id: 'checkpoint-1',
-        cwd: '/project',
-        createdAt: 1,
-        state: 'ready',
-        hasChanges: true,
-        changedFileCount: 1
-      },
-      rollbackBusy: false,
-      rollbackError: '',
-      onUndo,
-      onReview: vi.fn(),
-      onSelectChange: vi.fn()
+      ...revealTimelineProps([persistedUserMessage, {
+        kind: 'tool', id: 7, tool: { id: 'write-7', name: 'write', status: 'done', isError: false, resultReceived: true,
+          path: '/project/file.ts', writeContent: 'one' }
+      }]),
+      canFork: true, canRevert: true, onRevert
     }
-    const { getByRole, rerender } = render(<ChatTimeline {...props} />)
-
-    fireEvent.click(getByRole('button', { name: '撤销' }))
+    const view = render(<ChatTimeline {...props} />)
+    const card = view.getByRole('region', { name: '本轮工具记录' })
+    expect(card.querySelectorAll('button')).toHaveLength(2)
+    expect(view.queryByRole('button', { name: '撤销本轮' })).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: '撤销' }))
     expect(onRevert).toHaveBeenCalledExactlyOnceWith('user-entry-6')
-    expect(onUndo).not.toHaveBeenCalled()
-    const checkpointUndo = getByRole('button', { name: '撤销本轮' })
-    expect(checkpointUndo).toBeEnabled()
-    fireEvent.click(checkpointUndo)
-    expect(onUndo).toHaveBeenCalledTimes(1)
-    expect(onRevert).toHaveBeenCalledTimes(1)
 
-    rerender(<ChatTimeline {...props} canRevert={false} revertDisabledReason="正在切换会话" />)
-    const revert = getByRole('button', { name: '撤销' })
+    view.rerender(<ChatTimeline {...props} canRevert={false} revertDisabledReason="正在切换会话" />)
+    const revert = view.getByRole('button', { name: '撤销' })
     expect(revert).toBeDisabled()
     expect(revert).toHaveAttribute('title', '正在切换会话')
     fireEvent.click(revert)
     expect(onRevert).toHaveBeenCalledTimes(1)
-    expect(onUndo).toHaveBeenCalledTimes(1)
-    expect(getByRole('button', { name: '撤销本轮' })).toBe(checkpointUndo)
-    expect(checkpointUndo).toBeEnabled()
+    expect(view.getByRole('region', { name: '本轮工具记录' })).toBe(card)
+    expect(view.getByRole('button', { name: '查看记录' })).toBeEnabled()
+  })
+
+  it('keeps successful file records below their own turns and hides only the active final card', () => {
+    const props = revealTimelineProps([
+      persistedUserMessage,
+      { kind: 'tool', id: 7, tool: { id: 'edit-7', name: 'edit', status: 'done', isError: false, resultReceived: true,
+        path: '/project/first.ts', diff: '+new\n-old' } },
+      { kind: 'assistant', id: 8, text: '第一轮完成', thinking: '', streaming: false },
+      { kind: 'user', id: 9, text: '第二轮请求' },
+      { kind: 'tool', id: 10, tool: { id: 'write-10', name: 'write', status: 'done', isError: false, resultReceived: true,
+        path: '/project/second.ts', writeContent: 'two\nlines' } },
+      { kind: 'tool', id: 11, tool: { id: 'edit-11', name: 'edit', status: 'error', isError: true,
+        path: '/project/failed.ts', diff: '+failed' } },
+      { kind: 'tool', id: 13, tool: { id: 'write-13', name: 'write', status: 'done', isError: false,
+        path: '/project/missing-result.ts', writeContent: 'not confirmed' } },
+      { kind: 'assistant', id: 12, text: '第二轮完成', thinking: '', streaming: false }
+    ])
+    const view = render(<ChatTimeline {...props} cwd="/project" />)
+    const cards = view.getAllByRole('region', { name: '本轮工具记录' })
+    expect(cards).toHaveLength(2)
+    expect(cards[0].previousElementSibling).toHaveTextContent('第一轮完成')
+    expect(cards[0].nextElementSibling).toHaveTextContent('第二轮请求')
+    expect(cards[1].previousElementSibling).toHaveTextContent('第二轮完成')
+    expect(cards[1].nextElementSibling).toBeNull()
+    expect(cards[0]).toHaveTextContent('first.ts')
+    expect(cards[0]).not.toHaveTextContent('second.ts')
+    expect(cards[1]).toHaveTextContent('second.ts')
+    expect(cards[1]).not.toHaveTextContent('first.ts')
+    expect(view.queryByTitle('查看 /project/failed.ts 的本轮记录')).toBeNull()
+    expect(cards[1]).not.toHaveTextContent('missing-result.ts')
+    fireEvent.click(view.getByTitle('查看 /project/first.ts 的本轮记录'))
+    const firstPreview = cards[0].querySelector('.diff-view')!
+    expect([...firstPreview.querySelectorAll('.diff-text')].map(line => line.textContent)).toEqual(['new', 'old'])
+    expect(cards[1].querySelector('.diff-view')).toBeNull()
+    fireEvent.click(view.getByTitle('查看 /project/second.ts 的本轮记录'))
+    expect([...cards[1].querySelectorAll('.diff-text')].map(line => line.textContent)).toEqual(['two', 'lines'])
+    expect(cards[0].querySelector('.diff-view')).toBe(firstPreview)
+    for (const activity of [{ busy: true }, { agentActivity: true }]) {
+      view.rerender(<ChatTimeline {...props} {...activity} cwd="/project" />)
+      expect(view.getAllByRole('region', { name: '本轮工具记录' })).toEqual([cards[0]])
+      expect(cards[0].querySelector('.diff-view')).toBe(firstPreview)
+      expect(view.queryByTitle('查看 /project/second.ts 的本轮记录')).toBeNull()
+    }
+    view.rerender(<ChatTimeline {...props} cwd="/project" />)
+    expect(view.getAllByRole('region', { name: '本轮工具记录' })).toHaveLength(2)
+    view.rerender(<ChatTimeline {...props} cwd="/project" readOnly />)
+    expect(view.queryByRole('region', { name: '本轮工具记录' })).toBeNull()
   })
 
   it('mounts an empty polite announcer separately from the visible error summary and untouched details', () => {

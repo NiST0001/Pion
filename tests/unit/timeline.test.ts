@@ -7,7 +7,9 @@ import {
   assistantErrorText,
   collectToolResults,
   deriveAgentTodos,
+  deriveChanges,
   deriveLatestRunChanges,
+  deriveTurnChanges,
   diffStats,
   entriesToTimeline,
   getViewportHistoryPageSize,
@@ -1391,9 +1393,9 @@ describe('timeline derivation', () => {
   it('derives changes only after the latest user turn', () => {
     const timeline: TimelineItem[] = [
       { kind: 'user', id: 1, text: 'old' },
-      { kind: 'tool', id: 2, tool: { id: 'a', name: 'write', status: 'done', isError: false, path: 'old.ts', writeContent: 'old' } },
+      { kind: 'tool', id: 2, tool: { id: 'a', name: 'write', status: 'done', isError: false, resultReceived: true, path: 'old.ts', writeContent: 'old' } },
       { kind: 'user', id: 3, text: 'new' },
-      { kind: 'tool', id: 4, tool: { id: 'b', name: 'edit', status: 'done', isError: false, path: 'new.ts', diff: '-1 old\n+1 new' } }
+      { kind: 'tool', id: 4, tool: { id: 'b', name: 'edit', status: 'done', isError: false, resultReceived: true, path: 'new.ts', diff: '-1 old\n+1 new' } }
     ]
 
     expect(deriveLatestRunChanges(timeline)).toEqual([
@@ -1401,11 +1403,122 @@ describe('timeline derivation', () => {
     ])
   })
 
+  it('projects each loaded user turn in row order without adopting an orphaned prefix', () => {
+    const prefix: TimelineItem[] = [
+      { kind: 'tool', id: 90, tool: { id: 'orphan', name: 'write', status: 'done', isError: false, resultReceived: true, path: 'orphan.ts', writeContent: 'old' } },
+      { kind: 'assistant', id: 80, text: 'older ending', thinking: '', streaming: false }
+    ]
+    const timeline: TimelineItem[] = [
+      ...prefix,
+      { kind: 'user', id: 70, text: 'first loaded turn' },
+      { kind: 'tool', id: 60, tool: { id: 'first', name: 'write', status: 'done', isError: false, resultReceived: true, path: 'same.ts', writeContent: 'first' } },
+      { kind: 'assistant', id: 50, text: 'done', thinking: '', streaming: false },
+      { kind: 'user', id: 40, text: 'second loaded turn' },
+      { kind: 'tool', id: 30, tool: { id: 'second', name: 'edit', status: 'done', isError: false, resultReceived: true, path: 'same.ts', diff: '-1 first\n+1 second' } },
+      { kind: 'compaction', id: 20, summary: 'summary' },
+      { kind: 'user', id: 10, text: 'no changes yet' }
+    ]
+
+    expect(deriveTurnChanges(timeline)).toEqual([
+      { userId: 70, lastItemId: 50, changes: [
+        { path: 'same.ts', kind: 'write', content: 'first', additions: 1, deletions: 0 }
+      ] },
+      { userId: 40, lastItemId: 20, changes: [
+        { path: 'same.ts', kind: 'edit', diff: '-1 first\n+1 second', additions: 1, deletions: 1 }
+      ] },
+      { userId: 10, lastItemId: 10, changes: [] }
+    ])
+    expect(deriveLatestRunChanges(timeline)).toEqual([])
+    expect(deriveTurnChanges(prefix)).toEqual([])
+    expect(deriveLatestRunChanges(prefix)).toEqual([])
+    expect(deriveTurnChanges([])).toEqual([])
+  })
+
+  it('counts only successful unique tool calls and merges repeated path edits', () => {
+    const edit: ToolItem = { id: 'edit', name: 'edit', status: 'done', isError: false, resultReceived: true,
+      path: 'src/a.ts', diff: '-1 old\n+1 middle' }
+    const write: ToolItem = { id: 'write', name: 'write', status: 'done', isError: false, resultReceived: true,
+      path: 'src/b.ts', writeContent: 'one\ntwo' }
+    const tools: ToolItem[] = [
+      { ...edit, status: 'running' },
+      { ...write, status: 'running' },
+      { ...edit, id: 'failed-edit', status: 'error', isError: true },
+      { ...write, id: 'failed-write', status: 'error', isError: true },
+      { ...write, id: 'error-flag', isError: true },
+      { ...edit, resultReceived: undefined },
+      { ...write, resultReceived: undefined },
+      edit, { ...edit }, write, { ...write },
+      { ...edit, id: 'another-edit', diff: '-1 middle\n+1 final\n+2 extra' }
+    ]
+    const timeline: TimelineItem[] = [
+      { kind: 'user', id: 100, text: 'update' },
+      ...tools.map((tool, index): TimelineItem => ({ kind: 'tool', id: 101 + index, tool }))
+    ]
+    const changes = [
+      { path: 'src/a.ts', kind: 'edit', diff: '-1 old\n+1 middle\n  ...\n-1 middle\n+1 final\n+2 extra', additions: 3, deletions: 2 },
+      { path: 'src/b.ts', kind: 'write', content: 'one\ntwo', additions: 2, deletions: 0 }
+    ]
+
+    expect(deriveChanges(timeline)).toEqual(changes)
+    expect(deriveTurnChanges(timeline)).toEqual([
+      { userId: 100, lastItemId: timeline[timeline.length - 1].id, changes }
+    ])
+    expect(deriveLatestRunChanges(timeline)).toEqual(changes)
+    expect(tools[0].status).toBe('running')
+    expect(edit.diff).toBe('-1 old\n+1 middle')
+  })
+
+  it('waits for real results before counting call-only historical writes and edits', () => {
+    const timeline = entriesToTimeline([
+      { type: 'message', id: 'change-user', parentId: null, timestamp: '2026-01-01T00:00:00Z',
+        message: { role: 'user', content: 'update files' } },
+      { type: 'message', id: 'change-calls', parentId: 'change-user', timestamp: '2026-01-01T00:00:01Z',
+        message: { role: 'assistant', content: [
+          { type: 'toolCall', id: 'historical-write', name: 'write', arguments: { path: 'new.ts', content: 'new' } },
+          { type: 'toolCall', id: 'historical-edit', name: 'edit', arguments: { path: 'old.ts', oldText: 'old', newText: 'updated' } }
+        ] } }
+    ])
+    const calls = timeline.filter((item): item is Extract<TimelineItem, { kind: 'tool' }> => item.kind === 'tool')
+    expect(calls).toHaveLength(2)
+    for (const { tool } of calls) {
+      expect(tool.status).toBe('done')
+      expect(tool.resultReceived).toBeUndefined()
+    }
+    expect(deriveChanges(timeline)).toEqual([])
+
+    const completed = calls.map((item) => ({ ...item, tool: applyToolResult(item.tool, {
+      content: [{ type: 'text', text: 'ok' }],
+      ...(item.tool.name === 'edit' ? { details: { diff: '-1 old\n+1 updated' } } : {})
+    }, false, 'history') }))
+    expect(deriveChanges([...timeline, ...completed])).toEqual([
+      { path: 'new.ts', kind: 'write', content: 'new', additions: 1, deletions: 0 },
+      { path: 'old.ts', kind: 'edit', diff: '-1 old\n+1 updated', additions: 1, deletions: 1 }
+    ])
+  })
+
+  it('retains mixed operations and repeated write snapshots without counting empty writes', () => {
+    const tools: ToolItem[] = [
+      { id: 'first-write', name: 'write', path: 'mixed.ts', writeContent: 'one\ntwo', status: 'done', isError: false, resultReceived: true },
+      { id: 'other-write', name: 'write', path: 'repeated.ts', writeContent: 'first', status: 'done', isError: false, resultReceived: true },
+      { id: 'empty-write', name: 'write', path: 'empty.ts', writeContent: '', status: 'done', isError: false, resultReceived: true },
+      { id: 'mixed-edit', name: 'edit', path: 'mixed.ts', diff: '-1 one\n+1 updated', status: 'done', isError: false, resultReceived: true },
+      { id: 'mixed-write', name: 'write', path: 'mixed.ts', writeContent: 'replacement', status: 'done', isError: false, resultReceived: true },
+      { id: 'mixed-empty', name: 'write', path: 'mixed.ts', writeContent: '', status: 'done', isError: false, resultReceived: true },
+      { id: 'repeated-write', name: 'write', path: 'repeated.ts', writeContent: 'second\nsnapshot', status: 'done', isError: false, resultReceived: true }
+    ]
+    const timeline = tools.map((tool, index): TimelineItem => ({ kind: 'tool', id: index + 1, tool }))
+    expect(deriveChanges(timeline)).toEqual([
+      { path: 'mixed.ts', kind: 'edit', diff: '+1 one\n+2 two\n  ...\n-1 one\n+1 updated\n  ...\n+1 replacement', additions: 4, deletions: 1 },
+      { path: 'repeated.ts', kind: 'edit', diff: '+1 first\n  ...\n+1 second\n+2 snapshot', additions: 3, deletions: 0 },
+      { path: 'empty.ts', kind: 'write', content: '', additions: 0, deletions: 0 }
+    ])
+  })
+
   it('retains every captured edit for the same file in the current turn', () => {
     const timeline: TimelineItem[] = [
       { kind: 'user', id: 1, text: 'update twice' },
-      { kind: 'tool', id: 2, tool: { id: 'a', name: 'edit', status: 'done', isError: false, path: 'src/a.ts', diff: '-1 old\n+1 middle' } },
-      { kind: 'tool', id: 3, tool: { id: 'b', name: 'edit', status: 'done', isError: false, path: 'src/a.ts', diff: '-3 before\n+3 after' } }
+      { kind: 'tool', id: 2, tool: { id: 'a', name: 'edit', status: 'done', isError: false, resultReceived: true, path: 'src/a.ts', diff: '-1 old\n+1 middle' } },
+      { kind: 'tool', id: 3, tool: { id: 'b', name: 'edit', status: 'done', isError: false, resultReceived: true, path: 'src/a.ts', diff: '-3 before\n+3 after' } }
     ]
 
     expect(deriveLatestRunChanges(timeline)).toEqual([

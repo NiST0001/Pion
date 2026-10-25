@@ -415,9 +415,7 @@ function timelineView(h: Harness) {
   const props: ChatTimelineProps = {
     scrollRef: createRef<HTMLDivElement>(), onScroll: () => undefined, timeline: [], timelineLoading: false,
     busy: false, starting: false, cwd, hasSessions: true, canFork: false, onFork: () => undefined,
-    agentActivity: false, workingStatus: { label: '' }, latestRunChanges: [], runCheckpoint: null,
-    rollbackBusy: false, rollbackError: '', onUndo: () => undefined, onReview: () => undefined,
-    onSelectChange: () => undefined
+    agentActivity: false, workingStatus: { label: '' }
   }
   const view = render(<ChatTimeline {...props} />)
   const paint = () => {

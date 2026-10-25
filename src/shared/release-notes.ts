@@ -8,6 +8,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.89',
+    changes: [
+      '改动摘要放在各轮对话下方，仅展示该轮已记录且成功的编辑与写入，不再混入整个 Git 工作区改动。',
+      '文件记录可在卡片内只读展开当时的差异，与 Git 审查独立；不再从轮次卡触发无轮次身份的文件撤销。'
+    ]
+  },
+  {
     version: '0.1.88',
     changes: [
       '面板位置、分栏尺寸及开关状态自动保存，重新打开软件恢复上次布局；点击重置布局才恢复默认。'

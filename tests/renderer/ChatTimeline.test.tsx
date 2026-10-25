@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest'
-import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, within } from '@testing-library/react'
 import { createRef, StrictMode } from 'react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChatTimeline } from '../../src/renderer/src/features/chat/ChatTimeline'
 import type { ChatTimelineProps } from '../../src/renderer/src/features/chat/ChatTimeline'
+import type { TimelineItem } from '../../src/renderer/src/agent/types'
 import { REVIEW_REVEAL_CHUNK_SIZE } from '../../src/renderer/src/features/review/ReviewRevealText'
 import {
   SCREEN_TEXT_REVEAL_MAX_DELAY_MS, SCREEN_TEXT_REVEAL_DURATION_MS, SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS,
@@ -27,14 +28,7 @@ function emptyTimelineProps(): ChatTimelineProps {
     canFork: false,
     onFork: vi.fn(),
     agentActivity: false,
-    workingStatus: { label: '' },
-    latestRunChanges: [],
-    runCheckpoint: null,
-    rollbackBusy: false,
-    rollbackError: '',
-    onUndo: vi.fn(),
-    onReview: vi.fn(),
-    onSelectChange: vi.fn()
+    workingStatus: { label: '' }
   }
 }
 
@@ -345,6 +339,127 @@ describe('ChatTimeline viewport reveal scheduling', () => {
   })
 })
 
+describe('ChatTimeline per-turn changes', () => {
+  afterEach(cleanup)
+
+  it('keeps App timeline bindings and turn cards independent of Git snapshots and review navigation', () => {
+    const app = readFileSync(resolve('src/renderer/src/App.tsx'), 'utf8')
+    const timeline = readFileSync(resolve('src/renderer/src/features/chat/ChatTimeline.tsx'), 'utf8')
+    const bindings = [
+      ...app.matchAll(/<ChatTimeline\b[\s\S]*?\/>/g),
+      ...timeline.matchAll(/<ModifiedFilesCard\b[\s\S]*?\/>/g)
+    ]
+    expect(bindings.length).toBeGreaterThanOrEqual(3)
+    for (const [binding] of bindings) {
+      expect(binding).not.toMatch(/\b(?:latestRunChanges|workspaceChanges|gitSnapshot|runCheckpoint|checkpoint\w*|onReview|onSelectChange|onRevertLatest)\s*=/)
+    }
+    expect(timeline).not.toMatch(/\b(?:GitSnapshot|useGit|window\.pion\.git)\b/)
+  })
+
+  const edit = (id: number, path: string, diff: string): TimelineItem => ({
+    kind: 'tool', id, tool: { id: `edit-${id}`, name: 'edit', path, diff, status: 'done', isError: false, resultReceived: true }
+  })
+  const user = (id: number): TimelineItem => ({ kind: 'user', id, text: `请求${id}` })
+  const answer = (id: number): TimelineItem => ({ kind: 'assistant', id, text: `回复${id}`, thinking: '', streaming: false })
+
+  it('places each card after its own turn and independently previews that turn’s recorded diff for the same path', () => {
+    const props = emptyTimelineProps()
+    const firstDiff = '-1 old\n+1 first'
+    const secondDiff = '-1 first\n-2 middle\n+1 second\n+2 next\n+3 end'
+    props.timeline = [
+      user(1), edit(2, '/project/shared.ts', firstDiff), edit(3, '/project/first.ts', '+a\n+b'), answer(4),
+      user(5), edit(6, '/project/shared.ts', secondDiff), edit(7, '/project/second.ts', '+c'), answer(8)
+    ]
+    const view = render(<ChatTimeline {...props} />)
+    const cards = view.getAllByRole('region', { name: '本轮工具记录' })
+    const replies = view.container.querySelectorAll('.row-assistant')
+    const users = view.container.querySelectorAll('.row-user')
+    expect(cards).toHaveLength(2)
+    expect(cards[0].previousElementSibling).toBe(replies[0])
+    expect(cards[0].nextElementSibling).toBe(users[1])
+    expect(cards[1].previousElementSibling).toBe(replies[1])
+    expect(cards[1].nextElementSibling).toBeNull()
+    expect(cards[0]).toHaveTextContent('first.ts')
+    expect(cards[0]).not.toHaveTextContent('second.ts')
+    expect(cards[1]).toHaveTextContent('second.ts')
+    expect(cards[1]).not.toHaveTextContent('first.ts')
+    for (const [index, card] of cards.entries()) {
+      expect(card).toHaveTextContent('本轮记录 2 个文件')
+      expect(card.querySelector('.modified-files-total .stat-add')).toHaveTextContent(index === 0 ? '+3' : '+4')
+      expect(card.querySelector('.modified-files-total .stat-del')).toHaveTextContent(index === 0 ? '−1' : '−2')
+      expect(card.querySelector('.diff-view')).toBeNull()
+    }
+    fireEvent.click(within(cards[0]).getByTitle('查看 /project/shared.ts 的本轮记录'))
+    const firstPreview = cards[0].querySelector('.diff-view')!
+    expect([...firstPreview.querySelectorAll('.diff-text')].map(line => line.textContent)).toEqual(['old', 'first'])
+    expect(cards[1].querySelector('.diff-view')).toBeNull()
+
+    fireEvent.click(within(cards[1]).getByTitle('查看 /project/shared.ts 的本轮记录'))
+    const secondPreview = cards[1].querySelector('.diff-view')!
+    expect([...secondPreview.querySelectorAll('.diff-text')].map(line => line.textContent))
+      .toEqual(['first', 'middle', 'second', 'next', 'end'])
+    expect(cards[0].querySelector('.diff-view')).toBe(firstPreview)
+    expect([...firstPreview.querySelectorAll('.diff-text')].map(line => line.textContent)).toEqual(['old', 'first'])
+    expect(view.container.querySelector('textarea, input, [contenteditable="true"]')).toBeNull()
+
+    fireEvent.click(within(cards[0]).getByRole('button', { name: '收起记录' }))
+    expect(within(cards[0]).getByRole('button', { name: '查看记录' })).toHaveAttribute('aria-expanded', 'false')
+    expect(cards[1].querySelector('.diff-view')).toBe(secondPreview)
+    fireEvent.click(within(cards[0]).getByRole('button', { name: '查看记录' }))
+    expect([...cards[0].querySelectorAll('.diff-text')].map(line => line.textContent)).toEqual(['old', 'first'])
+    expect(cards[1].querySelector('.diff-view')).toBe(secondPreview)
+    expect(props.onScroll).not.toHaveBeenCalled()
+  })
+
+  it('keeps old cards and message DOM while busy, then inserts and moves the completed latest card without remounting', () => {
+    const props = emptyTimelineProps()
+    const first = [user(1), edit(2, '/project/old.ts', '+old'), answer(3)]
+    const view = render(<ChatTimeline {...props} timeline={first} />)
+    const oldCard = view.getByRole('region', { name: '本轮工具记录' })
+    const oldUser = view.container.querySelector('.bubble-user')
+    const oldReply = view.container.querySelector('.bubble-assistant')
+    const next = [...first, user(4), edit(5, '/project/new.ts', '+new')]
+    for (const activity of [{ busy: true, agentActivity: false }, { busy: false, agentActivity: true }]) {
+      view.rerender(<ChatTimeline {...props} {...activity} timeline={next} />)
+      expect(view.getAllByRole('region', { name: '本轮工具记录' })).toHaveLength(1)
+      expect(view.getByRole('region', { name: '本轮工具记录' })).toBe(oldCard)
+      expect(oldCard).toHaveTextContent('old.ts')
+      expect(oldCard).not.toHaveTextContent('new.ts')
+      expect(view.container.querySelector('.bubble-user')).toBe(oldUser)
+      expect(view.container.querySelector('.bubble-assistant')).toBe(oldReply)
+    }
+    view.rerender(<ChatTimeline {...props} timeline={next} />)
+    const cards = view.getAllByRole('region', { name: '本轮工具记录' })
+    expect(cards).toHaveLength(2)
+    expect(cards[0]).toBe(oldCard)
+    expect(cards[1]).toHaveTextContent('new.ts')
+    expect(cards[1].previousElementSibling).toHaveClass('tool-activity-item')
+    view.rerender(<ChatTimeline {...props} timeline={[...next, answer(6)]} />)
+    view.getAllByRole('region', { name: '本轮工具记录' }).forEach((card, index) => expect(card).toBe(cards[index]))
+    expect(cards[1].previousElementSibling).toBe(view.container.querySelectorAll('.row-assistant')[1])
+    expect(view.container.querySelector('.bubble-user')).toBe(oldUser)
+    expect(view.container.querySelector('.bubble-assistant')).toBe(oldReply)
+    expect(props.onScroll).not.toHaveBeenCalled()
+  })
+
+  it('does not attribute an orphaned page prefix to a later user or expose cards in read-only transcripts', () => {
+    const props = emptyTimelineProps()
+    props.timeline = [edit(1, '/project/orphan.ts', '+orphan'), answer(2), user(3), edit(4, '/project/owned.ts', '+owned')]
+    const view = render(<ChatTimeline {...props} />)
+    const cards = view.getAllByRole('region', { name: '本轮工具记录' })
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toHaveTextContent('owned.ts')
+    expect(cards[0]).not.toHaveTextContent('orphan.ts')
+    expect(view.container.querySelector('.tool-activity-item')?.nextElementSibling).toHaveClass('row-assistant')
+    view.rerender(<ChatTimeline {...props} hasNewerHistory />)
+    expect(view.queryByRole('region', { name: '本轮工具记录' })).not.toBeInTheDocument()
+    view.rerender(<ChatTimeline {...props} readOnly />)
+    expect(view.queryByRole('region', { name: '本轮工具记录' })).not.toBeInTheDocument()
+    expect(view.container.querySelector('.modified-files-card')).toBeNull()
+    expect(view.container.querySelector('.bubble-user')).toHaveTextContent('请求3')
+  })
+})
+
 describe('ChatTimeline empty history state', () => {
   afterEach(cleanup)
 
@@ -357,8 +472,6 @@ describe('ChatTimeline empty history state', () => {
         status: 'done', isError: false, path: 'file.ts', outputText: '工具输出',
         images: [{ type: 'image', mimeType: 'image/png', data: 'AAAA', width: 1, height: 1, partIndex: 0 }] } }
     ]
-    props.latestRunChanges = [{ path: '/project/file.ts', kind: 'edit', additions: 1, deletions: 0 }]
-    props.workspaceChanges = true
     props.canFork = true
     props.canRevert = true
     props.onRevert = vi.fn()
@@ -375,7 +488,7 @@ describe('ChatTimeline empty history state', () => {
     fireEvent.click(toolHeader)
     expect(view.container.querySelector('.tool-body .tool-output')).toHaveTextContent('工具输出')
     expect(view.container.querySelector('img, .tool-result-images, [data-entry-id]')).toBeNull()
-    for (const callback of [props.onFork, props.onRevert, props.onUndo, props.onReview, props.onSelectChange]) {
+    for (const callback of [props.onFork, props.onRevert]) {
       expect(callback).not.toHaveBeenCalled()
     }
 

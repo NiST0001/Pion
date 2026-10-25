@@ -21,8 +21,7 @@ const revealTool = (id: number, mode: 'live' | 'history', noReveal = false): Tim
 const props = (timeline: TimelineItem[]): ChatTimelineProps => ({
   scopeKey: 'session-a', scrollRef: createRef(), onScroll: vi.fn(), timeline, timelineLoading: false,
   busy: false, starting: false, hasSessions: true, canFork: false, onFork: vi.fn(), agentActivity: false,
-  workingStatus: { label: '' }, latestRunChanges: [], runCheckpoint: null, rollbackBusy: false,
-  rollbackError: '', onUndo: vi.fn(), onReview: vi.fn(), onSelectChange: vi.fn()
+  workingStatus: { label: '' }
 })
 // Opt in only for reveal cases: JSDOM's zero rectangles otherwise prevent the
 // managed root from admitting either lines or characters, regardless of gates.
@@ -148,7 +147,7 @@ describe('tool activity timeline integration', () => {
     expect(groups[0]).toHaveAttribute('aria-expanded', 'false')
     expect(view.queryByRole('button', { name: '展开读取工具详情' })).toBeNull()
     expect(view.container.querySelectorAll('.tool-call')).toHaveLength(1)
-    for (const callback of [p.onFork, p.onUndo, p.onReview, p.onSelectChange]) expect(callback).not.toHaveBeenCalled()
+    expect(p.onFork).not.toHaveBeenCalled()
   })
 
   it.each(['live', 'history'] as const)('defers newly mounted %s tool headers until the outer group finishes expanding', async (mode) => {
@@ -229,7 +228,7 @@ describe('tool activity timeline integration', () => {
       expect(head.className).toBe(classes[index])
       expect(Number(head.dataset.lineRevealStart)).toBe(starts[index])
     })
-    for (const callback of [p.onFork, p.onUndo, p.onReview, p.onSelectChange]) expect(callback).not.toHaveBeenCalled()
+    expect(p.onFork).not.toHaveBeenCalled()
   })
 
   it.each([false, true])('keeps passive history prepend/append static and freezes the retained group header (paged noReveal=%s)', async (noReveal) => {
