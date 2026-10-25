@@ -5,6 +5,8 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { AnimatedDisclosure } from '../../src/renderer/src/features/common/AnimatedDisclosure'
 import { DisclosureRevealGate, useDisclosureRevealReady } from '../../src/renderer/src/features/common/DisclosureRevealGate'
+import { DISCLOSURE_REVEAL_READY_EVENT } from '../../src/renderer/src/utils/disclosureScroll'
+import type { DisclosureRevealRequest } from '../../src/renderer/src/utils/disclosureScroll'
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -191,6 +193,62 @@ it('defaults to ready outside a gate and waits 200ms inside a disclosure without
   expect(vi.getTimerCount()).toBe(0)
 })
 
+it('keeps the reveal barrier after layout until all registered scroll work actually settles', async () => {
+  const { container } = render(<DisclosureRevealGate open><RevealReadiness /></DisclosureRevealGate>)
+  const line = screen.getByTestId('reveal readiness')
+  const gate = container.querySelector('.disclosure-reveal-gate')
+  let finishScroll!: () => void
+  const scroll = new Promise<void>((resolve) => { finishScroll = resolve })
+  const request = vi.fn((event: Event) => {
+    expect(event.target).toBe(gate)
+    const { waitUntil } = (event as CustomEvent<DisclosureRevealRequest>).detail
+    waitUntil(scroll)
+    waitUntil(Promise.reject(new Error('another follow was cancelled')))
+  })
+  container.addEventListener(DISCLOSURE_REVEAL_READY_EVENT, request)
+  act(() => vi.advanceTimersByTime(199))
+  expect(request).not.toHaveBeenCalled()
+  act(() => vi.advanceTimersByTime(1))
+  expect(request).toHaveBeenCalledTimes(1)
+  expect(gate).toHaveAttribute('data-text-reveal-open', 'true')
+  expect(gate).toHaveAttribute('data-text-reveal-ready', 'false')
+  expect(line).toHaveAttribute('data-ready', 'false')
+  expect(vi.getTimerCount()).toBe(0)
+  act(() => vi.advanceTimersByTime(1000))
+  expect(line).toHaveAttribute('data-ready', 'false')
+  await act(async () => { finishScroll() })
+  expect(gate).toHaveAttribute('data-text-reveal-ready', 'true')
+  expect(line).toHaveAttribute('data-ready', 'true')
+  expect(screen.getByTestId('reveal readiness')).toBe(line)
+})
+
+it('ignores old scroll completions after closing, reopening or unmounting', async () => {
+  const { container, rerender, unmount } = render(<DisclosureRevealGate open><RevealReadiness /></DisclosureRevealGate>)
+  const completions: Array<() => void> = []
+  container.addEventListener(DISCLOSURE_REVEAL_READY_EVENT, (event) => {
+    const request = (event as CustomEvent<DisclosureRevealRequest>).detail
+    request.waitUntil(new Promise<void>((resolve) => { completions.push(resolve) }))
+  })
+  const line = screen.getByTestId('reveal readiness')
+  act(() => vi.advanceTimersByTime(200))
+  rerender(<DisclosureRevealGate open={false}><RevealReadiness /></DisclosureRevealGate>)
+  rerender(<DisclosureRevealGate open><RevealReadiness /></DisclosureRevealGate>)
+  act(() => vi.advanceTimersByTime(200))
+  expect(completions).toHaveLength(2)
+  await act(async () => { completions[0]() })
+  expect(line).toHaveAttribute('data-ready', 'false')
+  await act(async () => { completions[1]() })
+  expect(line).toHaveAttribute('data-ready', 'true')
+  rerender(<DisclosureRevealGate open={false}><RevealReadiness /></DisclosureRevealGate>)
+  rerender(<DisclosureRevealGate open><RevealReadiness /></DisclosureRevealGate>)
+  act(() => vi.advanceTimersByTime(200))
+  expect(completions).toHaveLength(3)
+  unmount()
+  await act(async () => { completions[2]() })
+  expect(container).toBeEmptyDOMElement()
+  expect(vi.getTimerCount()).toBe(0)
+})
+
 it('holds an already settled nested gate until its later opening parent is ready', () => {
   function Nested({ parentOpen }: { parentOpen: boolean }) {
     return <DisclosureRevealGate open={parentOpen}>
@@ -221,7 +279,9 @@ it('opens reduced-motion gates immediately without timers but still obeys closed
       <DisclosureRevealGate open><RevealReadiness /></DisclosureRevealGate>
     </DisclosureRevealGate>
   }
-  const { rerender } = render(<Nested open />)
+  const { container, rerender } = render(<Nested open />)
+  const request = vi.fn()
+  container.addEventListener(DISCLOSURE_REVEAL_READY_EVENT, request)
   const line = screen.getByTestId('reveal readiness')
   expect(line).toHaveAttribute('data-ready', 'true')
   expect(vi.getTimerCount()).toBe(0)
@@ -230,6 +290,7 @@ it('opens reduced-motion gates immediately without timers but still obeys closed
   rerender(<Nested open />)
   expect(line).toHaveAttribute('data-ready', 'true')
   expect(vi.getTimerCount()).toBe(0)
+  expect(request).not.toHaveBeenCalled()
 })
 
 it('resets readiness on close and cancels stale opening timers across fast reopening and unmount', () => {

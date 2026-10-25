@@ -134,9 +134,95 @@ describe('end-follow animator', () => {
     expect(sameTime.writes[1]).toBeGreaterThan(sameTime.writes[0])
   })
 
-  it('cancel rejects late callbacks without writing or clearing a restarted RAF slot', () => {
+  it('accelerates an active segment without an immediate position or velocity reset', () => {
+    const fast = setup()
+    fast.animator.request()
+    fast.step(32)
+    const before = fast.position
+    const writes = fast.writes.length
+    fast.animator.request(100)
+    expect(fast.position).toBe(before)
+    expect(fast.writes).toHaveLength(writes)
+    // Compare the new initial slope against the previous Hermite derivative.
+    fast.step(0.001)
+    const velocity = 6 * 100 * (32 / 240) * (1 - 32 / 240) / 240
+    expect((fast.position - before) / 0.001).toBeCloseTo(velocity, 3)
+    fast.step(100)
+    expect(fast.position).toBe(200)
+    expect(fast.animator.isAnimating()).toBe(false)
+    expect(fast.pending.size).toBe(0)
+  })
+
+  it('keeps the earliest fast deadline through repeated requests and continuous growth', () => {
     const h = setup()
     h.animator.request()
+    h.step(16)
+    h.animator.request(100)
+    const deadline = h.time + 100
+    for (let i = 1; i <= 4; i++) {
+      h.setTarget(200 + i * 50)
+      h.animator.request(100)
+      h.animator.request()
+      h.step(20)
+      expect(h.animator.isAnimating()).toBe(true)
+      expect(h.position).toBeLessThan(200 + i * 50)
+      expect(h.pending.size).toBe(1)
+    }
+    // Final growth is discovered by the frame, with no request/quiet period.
+    h.setTarget(500)
+    h.step(20)
+    expect(h.time).toBe(deadline)
+    expect(h.position).toBe(500)
+    expect(h.animator.isAnimating()).toBe(false)
+    expect(h.pending.size).toBe(0)
+    const count = h.writes.length
+    h.step(200)
+    expect(h.writes).toHaveLength(count)
+  })
+
+  it('can shorten a fast deadline and completes on the first late frame by real time', () => {
+    const h = setup()
+    h.animator.request(100)
+    h.step(20)
+    h.animator.request(30)
+    h.animator.request(100)
+    h.animator.request()
+    h.setTarget(350)
+    h.step(30)
+    expect(h.position).toBe(350)
+    expect(h.animator.isAnimating()).toBe(false)
+    const delayed = setup()
+    delayed.animator.request(100)
+    delayed.step(200)
+    expect(delayed.position).toBe(200)
+    expect(delayed.animator.isAnimating()).toBe(false)
+  })
+
+  it('finishes an unchanged fast target along its curve and ignores invalid durations', () => {
+    const fast = setup()
+    fast.animator.request(100)
+    fast.step(50)
+    expect(fast.position).toBe(150)
+    fast.step(40)
+    expect(fast.position).toBeCloseTo(197.2)
+    fast.step(10)
+    expect(fast.position).toBe(200)
+    expect(fast.animator.isAnimating()).toBe(false)
+    for (const invalid of [NaN, Infinity, -1, 0]) {
+      const normal = setup()
+      const other = setup()
+      normal.animator.request()
+      other.animator.request(invalid)
+      settle(normal)
+      settle(other)
+      expect(other.writes).toEqual(normal.writes)
+    }
+  })
+
+  it.each([undefined, 100])('cancel rejects late callbacks without writing or clearing a restarted RAF slot (%s)', (duration) => {
+    const h = setup()
+    h.animator.request()
+    h.animator.request(duration)
     const old = [...h.retained.values()][0]
     h.animator.cancel()
     expect(h.cancelled).toEqual([0])
@@ -147,20 +233,21 @@ describe('end-follow animator', () => {
     old(200)
     expect(h.writes).toEqual([])
     expect(h.pending.size).toBe(1)
-    h.step()
+    h.step(100)
     expect(h.writes).toHaveLength(1)
+    expect(h.position).toBeLessThan(200) // Cancel also retires the fast deadline.
     settle(h)
     expect(h.position).toBe(200)
   })
 
-  it('invalid intent prevents both initial requests and pending-frame writes', () => {
+  it.each([undefined, 100])('invalid intent prevents initial requests and pending-frame writes (%s)', (duration) => {
     const h = setup()
     h.setValid(false)
-    h.animator.request()
+    h.animator.request(duration)
     expect(h.pending.size).toBe(0)
     expect(h.writes).toEqual([])
     h.setValid(true)
-    h.animator.request()
+    h.animator.request(duration)
     h.setValid(false)
     h.step()
     expect(h.writes).toEqual([])
@@ -171,10 +258,10 @@ describe('end-follow animator', () => {
     expect(h.position).toBe(200)
   })
 
-  it('reduced motion writes the end immediately without allocating RAF', () => {
+  it.each([undefined, 100])('reduced motion writes the end immediately without allocating RAF (%s)', (duration) => {
     const h = setup()
     h.setReduced(true)
-    h.animator.request()
+    h.animator.request(duration)
     expect(h.position).toBe(200)
     expect(h.retained.size).toBe(0)
     expect(h.animator.isAnimating()).toBe(false)
@@ -184,9 +271,11 @@ describe('end-follow animator', () => {
     expect(h.writes).toEqual([200])
   })
 
-  it.each(['frame', 'request'] as const)('switching to reduced motion finishes via %s', (method) => {
+  it.each([
+    ['frame', undefined], ['request', undefined], ['frame', 100], ['request', 100]
+  ] as const)('switching to reduced motion finishes via %s (%s)', (method, duration) => {
     const h = setup()
-    h.animator.request()
+    h.animator.request(duration)
     h.step()
     h.setTarget(350)
     h.setReduced(true)

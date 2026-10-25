@@ -5,6 +5,7 @@ import type { SessionHistoryIndex } from '../../../shared/types'
 import { armPendingHistoryRevealRows } from '../utils/historyReveal'
 import { consumedInside, useHistoryPaging } from './useHistoryPaging'
 import { createEndFollowAnimator } from '../utils/endFollowAnimator'
+import { DISCLOSURE_REVEAL_READY_EVENT, type DisclosureRevealRequest } from '../utils/disclosureScroll'
 import { createHistoryJumpAnimator } from '../utils/historyJumpAnimator'
 
 const noNewerHistory = () => false
@@ -191,7 +192,7 @@ export function useConversationNavigation({
     })
   }, [updateVisibleHistoryEntry, viewportActive])
 
-  const requestEndFollow = useCallback((element: HTMLElement) => {
+  const requestEndFollow = useCallback((element: HTMLElement, durationMs?: number) => {
     const scope = followScope.current
     let owned = endFollow.current
     if (!owned || owned.element !== element || owned.sessionPath !== scope.sessionPath
@@ -224,8 +225,64 @@ export function useConversationNavigation({
       owned = { element, sessionPath: session, projectCwd: project, reset, controller }
       endFollow.current = owned
     }
-    owned.controller.request()
+    owned.controller.request(durationMs)
   }, [scrollRef, cancelEndFollow, scheduleVisibleHistoryUpdate])
+
+  // A newly opened tool keeps transparent, real geometry until its existing
+  // end-follow has actually finished. One waiter frame serves all nested gates.
+  useLayoutEffect(() => {
+    const element = scrollRef.current
+    if (!viewportActive || !element) return
+    let disposed = false
+    let frame: number | null = null
+    const releases = new Set<{
+      controller: ReturnType<typeof createEndFollowAnimator>; generation: number; resolve: () => void
+    }>()
+    const current = (): boolean => {
+      const scope = followScope.current
+      return !disposed && scope.viewportActive && scrollRef.current === element
+        && scope.sessionPath === sessionPath && scope.projectCwd === projectCwd
+        && scope.historyResetRevision === historyResetRevision
+    }
+    const release = (): void => {
+      for (const waiter of releases) waiter.resolve()
+      releases.clear()
+    }
+    const check = (): void => {
+      frame = null
+      for (const waiter of releases) {
+        if (!current() || waiter.controller.getGeneration() !== waiter.generation || !waiter.controller.isAnimating()) {
+          releases.delete(waiter)
+          waiter.resolve()
+        }
+      }
+      if (releases.size) frame = window.requestAnimationFrame(check)
+    }
+    const waitForFollow = (event: Event): void => {
+      const target = event.target
+      const request = (event as CustomEvent<DisclosureRevealRequest>).detail
+      if (!(target instanceof Element) || target.closest('.chat-scroll') !== element
+        || typeof request?.waitUntil !== 'function' || !current()
+        || !nearBottomRef.current || manualScroll.current || readingHistory.current
+        || pendingJumpNonce.current !== null || followScope.current.hasNewerHistory()
+        || (loadingRef.current && !hasContentRef.current)) return
+      // The disclosure's 180 ms layout has settled. Finish the remaining curve
+      // quickly, without changing normal live-output scrolling or follow intent.
+      requestEndFollow(element, 100)
+      const controller = endFollow.current?.controller
+      if (!controller?.isAnimating()) return
+      const generation = controller.getGeneration()
+      request.waitUntil(new Promise<void>(resolve => { releases.add({ controller, generation, resolve }) }))
+      if (frame === null) frame = window.requestAnimationFrame(check)
+    }
+    element.addEventListener(DISCLOSURE_REVEAL_READY_EVENT, waitForFollow)
+    return () => {
+      disposed = true
+      element.removeEventListener(DISCLOSURE_REVEAL_READY_EVENT, waitForFollow)
+      if (frame !== null) window.cancelAnimationFrame(frame)
+      release()
+    }
+  }, [scrollRef, viewportActive, sessionPath, projectCwd, historyResetRevision, requestEndFollow])
 
   const timelineLength = timeline.length
   const { onScroll: pageOnScroll } = useHistoryPaging({

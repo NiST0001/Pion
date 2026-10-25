@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook } from '@testing-library/react'
+import { act, cleanup, render, renderHook } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { useConversationNavigation } from '../../src/renderer/src/hooks/useConversationNavigation'
 import type { TimelineItem } from '../../src/renderer/src/agent/types'
+import { DisclosureRevealGate } from '../../src/renderer/src/features/common/DisclosureRevealGate'
+import { ReviewRevealText } from '../../src/renderer/src/features/review/ReviewRevealText'
 
 afterEach(() => { cleanup(); document.body.replaceChildren(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
@@ -129,6 +131,67 @@ it('moves through intermediate offsets on growth, retargets continuously and nev
   expect(h.element.scrollTop).toBeLessThan(1696)
   h.settle()
   expect(h.element.scrollTop).toBe(1696)
+  expect(h.props.loadOlder).not.toHaveBeenCalled()
+  expect(h.props.loadNewer).not.toHaveBeenCalled()
+})
+
+it('finishes a fast disclosure scroll before admitting its new character reveal', async () => {
+  vi.useFakeTimers()
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 0, 800, 400))
+  const h = setup()
+  h.element.classList.add('chat-scroll')
+  const view = render(<DisclosureRevealGate open><ReviewRevealText text="new tool output" /></DisclosureRevealGate>, { container: h.element })
+  h.layout(800)
+  h.frame()
+  act(() => vi.advanceTimersByTime(200))
+  const gate = view.container.querySelector('.disclosure-reveal-gate')!
+  expect(gate).toHaveAttribute('data-text-reveal-ready', 'false')
+  expect(view.container.querySelector('[data-screen-reveal-character]')).toBeNull()
+  for (let frame = 0; frame < 6; frame++) h.frame()
+  expect(h.element.scrollTop).toBeLessThan(2400)
+  expect(gate).toHaveAttribute('data-text-reveal-ready', 'false')
+  await act(async () => { h.frame() })
+  expect(h.element.scrollTop).toBe(2400)
+  expect(gate).toHaveAttribute('data-text-reveal-ready', 'true')
+  h.frame()
+  expect(view.container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength('new tool output'.length)
+})
+
+it('retires a cancelled disclosure wait instead of following a restarted ordinary curve', async () => {
+  vi.useFakeTimers()
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 0, 800, 400))
+  const h = setup()
+  h.element.classList.add('chat-scroll')
+  const view = render(<DisclosureRevealGate open><ReviewRevealText text="detail" /></DisclosureRevealGate>, { container: h.element })
+  h.layout(800)
+  act(() => vi.advanceTimersByTime(200))
+  const gate = view.container.querySelector('.disclosure-reveal-gate')!
+  expect(gate).toHaveAttribute('data-text-reveal-ready', 'false')
+  h.scroll(600) // Cancels the fast curve and its own completion epoch.
+  h.scroll(2400) // Explicitly return to the end before the waiter gets a frame.
+  h.append(300) // A different, normal live-output curve starts on the same controller.
+  await act(async () => { h.frame() })
+  expect(h.element.scrollTop).toBeLessThan(2700)
+  expect(gate).toHaveAttribute('data-text-reveal-ready', 'true')
+  for (let frame = 0; frame < 8; frame++) { h.layout(20); h.frame() }
+  expect(gate).toHaveAttribute('data-text-reveal-ready', 'true')
+})
+
+it.each(['already reading', 'interrupting follow'] as const)('does not pull the viewport down when %s during disclosure reveal', async (mode) => {
+  vi.useFakeTimers()
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 0, 800, 400))
+  const h = setup()
+  h.element.classList.add('chat-scroll')
+  if (mode === 'already reading') h.scroll(600)
+  const view = render(<DisclosureRevealGate open><ReviewRevealText text="detail" /></DisclosureRevealGate>, { container: h.element })
+  h.layout(800)
+  act(() => vi.advanceTimersByTime(200))
+  if (mode === 'interrupting follow') h.scroll(600)
+  await act(async () => { h.frame() })
+  h.frame()
+  expect(h.element.scrollTop).toBe(600)
+  expect(view.container.querySelector('.disclosure-reveal-gate')).toHaveAttribute('data-text-reveal-ready', 'true')
+  expect(view.container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(6)
   expect(h.props.loadOlder).not.toHaveBeenCalled()
   expect(h.props.loadNewer).not.toHaveBeenCalled()
 })
