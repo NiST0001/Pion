@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import { beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { createPionRuntime, parseRuntimeArgs } from '../../src/main/agent/runtime-host'
 
 const mocks = vi.hoisted(() => ({ services: vi.fn(), session: vi.fn(), runtime: vi.fn(), settings: vi.fn(), create: vi.fn(), open: vi.fn(), image: vi.fn(), auth: vi.fn() }))
@@ -15,6 +15,9 @@ vi.mock('../../src/main/agent/image-generation', () => ({ createImageGenerationT
 const cwd = resolve('project')
 beforeEach(() => {
   vi.clearAllMocks()
+  // These cases cover the no-preferences Pi activation path. Do not inherit
+  // the running Pion instance's capability file or scan its real resources.
+  vi.stubEnv('PION_CAPABILITY_SETTINGS_FILE', undefined)
   const manager = { getCwd: () => cwd, buildSessionContext: () => ({ messages: [] }) }
   const settings = { getEnabledModels: () => [], getDefaultProvider: () => undefined, getDefaultModel: () => undefined, getDefaultTools: () => undefined, getSettings: () => ({}), applyOverrides: vi.fn() }
   mocks.create.mockReturnValue(manager)
@@ -30,6 +33,7 @@ beforeEach(() => {
   mocks.session.mockResolvedValue({ session: { getActiveToolNames: () => ['read', 'bash', 'edit', 'write'] }, extensionsResult: {} })
   mocks.runtime.mockImplementation(async (factory, target) => factory(target))
 })
+afterEach(() => { vi.unstubAllEnvs() })
 
 it('parses only the private RPC arguments and fails closed on unknown flags', () => {
   expect(parseRuntimeArgs(['--mode', 'rpc', '--no-approve', '--extension', './permissions.ts'], cwd)).toMatchObject({ approved: false, extensions: [resolve(cwd, 'permissions.ts')] })
@@ -48,7 +52,8 @@ it('injects a compiled SDK tool, preserves trust gating, and recreates tools for
     expect.objectContaining({ name: 'codemode', builtin: true, replaceable: true }),
     expect.objectContaining({ name: 'tool-search', builtin: true, replaceable: true }),
     expect.objectContaining({ name: 'mcp', builtin: true, replaceable: true }),
-    expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function)
+    expect.any(Function), expect.objectContaining({ name: 'pion-subagents', factory: expect.any(Function) }),
+    expect.any(Function), expect.any(Function)
   ] } }))
   const [factory, target] = mocks.runtime.mock.calls[0]
   await factory({ ...target, sessionStartEvent: { reason: 'new' } })

@@ -232,6 +232,7 @@ export function CommandDialog({
                         type="button"
                         className="command-dialog-entry"
                         data-command-entry=""
+                        aria-label={entry.detail ? `${entry.label} ${entry.detail}` : entry.label}
                         aria-pressed={entry.selected === true}
                         disabled={busy || loading || entry.disabled || !onSelect}
                         onClick={() => {

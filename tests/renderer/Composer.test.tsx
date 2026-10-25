@@ -514,6 +514,7 @@ describe('Composer native slash commands', () => {
     const menu = screen.getByRole('listbox', { name: '斜杠命令' })
     const rows = screen.getAllByRole('option')
     expect(rows).toHaveLength(DESKTOP_SLASH_COMMANDS.length)
+    expect(rows.length).toBeGreaterThan(12)
     h.ancestor.scrollTop = 400
     vi.spyOn(menu, 'getBoundingClientRect').mockImplementation(() => ({ top: 100, bottom: 300 } as DOMRect))
     for (const [index, row] of rows.entries()) {
@@ -532,10 +533,13 @@ describe('Composer native slash commands', () => {
     expect(rows[0]).toHaveAttribute('aria-selected', 'true')
     expect(menu.scrollTop).toBe(0)
     expect(h.ancestor.scrollTop).toBe(400)
-    fireEvent.click(rows[rows.length - 1])
+    fireEvent.click(screen.getByRole('option', { name: /^\/agents\b/ }))
     expect(h.input).toHaveValue('/agents ')
+    expect(h.onSend).not.toHaveBeenCalled()
+    expect(h.onQueue).not.toHaveBeenCalled()
     fireEvent.keyDown(h.input, { key: 'Enter' })
     expect(h.onSend).toHaveBeenCalledExactlyOnceWith('/agents', [])
+    expect(h.onQueue).not.toHaveBeenCalled()
   })
 
   it('preserves manual menu scrolling across unrelated context updates', () => {
