@@ -81,6 +81,28 @@ it('keeps a continuous conversation base and frosts the floating input and summa
   expect(layout).toContain('padding-bottom: calc(var(--conversation-bottom-clearance, 0px)')
 })
 
+it('shares the dock surface with the terminal and commit tree without extra translucent layers', () => {
+  const css = readFileSync('src/renderer/src/styles/window-effects.css', 'utf8')
+  const [normal, fallback] = css.split('@media (prefers-reduced-transparency')
+  const dock = normal.match(/\.dock-workspace > \[data-dock-panel\] \{([^}]+)\}/)?.[1]
+  expect(dock).toContain('color-mix(in srgb, var(--bg) 84%, transparent)')
+  for (const panel of ['.dock-terminal > .project-terminal', '.dock-git-commit-tree > .git-commit-tree']) {
+    const selector = `html[data-native-surface='true'] ${panel}`
+    const normalRule = normal.slice(normal.indexOf(selector)).split('}')[0]
+    expect(normalRule).toContain('background: transparent')
+    expect(normalRule).not.toContain('backdrop-filter:')
+    expect(normalRule).not.toContain('opacity:')
+    const fallbackRule = fallback.slice(fallback.indexOf(selector)).split('}')[0]
+    expect(fallbackRule).toContain('background: Canvas')
+  }
+  const terminal = readFileSync('src/renderer/src/styles/terminal.css', 'utf8')
+  expect(terminal).toContain('background: var(--bg)')
+  expect(terminal).toContain('.project-terminal .xterm .xterm-viewport { background: transparent; }')
+  const tree = readFileSync('src/renderer/src/styles/git-commit-tree.css', 'utf8')
+  expect(tree).toContain('background: var(--bg)')
+  expect(tree).toContain('@media (forced-colors: active)')
+})
+
 it('positions permission requests above the measured composer without reserving message space', () => {
   // Source contract: actual geometry requires Electron, not jsdom.
   const css = readFileSync('src/renderer/src/styles/permissions.css', 'utf8')

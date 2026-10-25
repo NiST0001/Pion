@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import { flushSync } from 'react-dom'
-import { Settings, Store, PanelLeft, PanelRight, TerminalSquare, Globe, ChartColumn, RotateCcw, PanelsTopLeft } from 'lucide-react'
+import { Settings, Store, PanelLeft, PanelRight, TerminalSquare, Globe, GitBranch, ChartColumn, RotateCcw, PanelsTopLeft } from 'lucide-react'
 import { useAgent } from './hooks/useAgent'
 import { useSlashCommands } from './hooks/useSlashCommands'
 import { DESKTOP_SLASH_COMMAND_NAMES, PREPARATION_SLASH_COMMAND_NAMES } from '../../shared/slash-commands'
@@ -79,6 +79,7 @@ import { orderFavoriteSessions, readFavoriteSessionPaths, saveFavoriteSessionPat
 
 const TerminalPanel = lazy(() => import('./features/terminal/TerminalPanel').then((module) => ({ default: module.TerminalPanel })))
 const BrowserPanel = lazy(() => import('./features/browser/BrowserPanel').then((module) => ({ default: module.BrowserPanel })))
+const GitCommitTree = lazy(() => import('./features/git-commit-tree/GitCommitTree').then((module) => ({ default: module.GitCommitTree })))
 
 const noChildPaging = async (): Promise<void> => {}
 
@@ -205,6 +206,8 @@ export function App(): ReactElement {
   const [terminalCwd, setTerminalCwd] = useState<string>()
   const [browserOpen, setBrowserOpen] = useState(false)
   const [browserMounted, setBrowserMounted] = useState(false)
+  const [gitCommitTreeOpen, setGitCommitTreeOpen] = useState(false)
+  const [gitCommitTreeMounted, setGitCommitTreeMounted] = useState(false)
   const browserNavigationIdRef = useRef(0)
   const [browserNavigation, setBrowserNavigation] = useState<{ id: number; url: string }>()
   const openBrowserUrl = useCallback((url: string) => {
@@ -214,7 +217,7 @@ export function App(): ReactElement {
     setBrowserMounted(true)
     setBrowserOpen(true)
   }, [])
-  const dockVisible = { projects: sidebarOpen, chat: true, review: reviewOpen, terminal: terminalOpen, browser: browserOpen }
+  const dockVisible = { projects: sidebarOpen, chat: true, review: reviewOpen, terminal: terminalOpen, browser: browserOpen, gitCommitTree: gitCommitTreeOpen }
   const dock = useDockLayout(dockVisible)
   const dockHeader = (panel: DockPanel, onClose?: () => void) => (
     <DockHeader panel={panel} targets={DOCK_PANELS.filter((target) => dockVisible[target])}
@@ -893,6 +896,10 @@ export function App(): ReactElement {
           setBrowserMounted(true)
           setBrowserOpen((open) => !open)
         }}><Globe size={13} />浏览器</button>
+        <button type="button" aria-pressed={gitCommitTreeOpen} disabled={!resourceCwd} onClick={() => {
+          setGitCommitTreeMounted(true)
+          setGitCommitTreeOpen((open) => !open)
+        }}><GitBranch size={13} />GitCommitTree</button>
         <button type="button" aria-haspopup="dialog" onClick={() => setOperationsPanel('stats')}><ChartColumn size={13} />使用总览</button>
         <span className="dock-toolbar-spacer" />
         <button type="button" className="dock-reset" aria-label="重置布局" title="恢复默认布局" onClick={dock.reset}><RotateCcw size={13} /></button>
@@ -1259,6 +1266,10 @@ export function App(): ReactElement {
         <div className="dock-browser" {...dock.panelProps('browser')}>
           {dockHeader('browser', () => setBrowserOpen(false))}
           {browserMounted && <Suspense fallback={<div className="side-empty">浏览器加载中…</div>}><BrowserPanel visible={browserOpen} navigation={browserNavigation} /></Suspense>}
+        </div>
+        <div className="dock-git-commit-tree" {...dock.panelProps('gitCommitTree')}>
+          {dockHeader('gitCommitTree', () => setGitCommitTreeOpen(false))}
+          {gitCommitTreeMounted && <Suspense fallback={<div className="side-empty">提交树加载中…</div>}><GitCommitTree cwd={resourceCwd} visible={gitCommitTreeOpen} /></Suspense>}
         </div>
         {dock.dividers.map((divider, index) => <div key={divider.path} className={`dock-divider dock-divider-${divider.axis}`}
           role="separator" aria-label={`调整分栏 ${index + 1}`} {...dock.dividerProps(divider)} />)}

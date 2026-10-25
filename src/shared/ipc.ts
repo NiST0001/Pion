@@ -153,6 +153,7 @@ export const IPC = {
   BranchRename: 'pion:branch-rename',
   BranchDelete: 'pion:branch-delete',
   GitStatus: 'pion:git-status',
+  GitCommitTree: 'pion:git-commit-tree',
   GitDiff: 'pion:git-diff',
   GitStagePaths: 'pion:git-stage-paths',
   GitUnstagePaths: 'pion:git-unstage-paths',

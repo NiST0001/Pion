@@ -24,7 +24,8 @@ export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean 
     setSnapshot(null); setError(''); setClosed(false); setConfirmClose(false); setClosing(false)
     const terminal = new Terminal({ cursorBlink: true, fontSize: 13,
       fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace', scrollback: 3000,
-      allowProposedApi: false, convertEol: false })
+      allowProposedApi: false, convertEol: false, allowTransparency: true,
+      theme: { background: '#00000000' } })
     const fit = new FitAddon()
     terminal.loadAddon(fit)
     terminal.open(host)
@@ -64,7 +65,8 @@ export function TerminalPanel({ cwd, visible }: { cwd: string; visible: boolean 
     observer.observe(host)
     const theme = () => {
       const css = getComputedStyle(document.documentElement)
-      terminal.options.theme = { background: css.getPropertyValue('--bg').trim(), foreground: css.getPropertyValue('--fg').trim(),
+      // Let the shared panel surface own opaque/native-transparent fallbacks.
+      terminal.options.theme = { background: '#00000000', foreground: css.getPropertyValue('--fg').trim(),
         cursor: css.getPropertyValue('--accent-strong').trim(), selectionBackground: css.getPropertyValue('--accent-soft').trim() }
     }
     theme()

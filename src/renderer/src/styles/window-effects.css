@@ -16,6 +16,8 @@ html[data-native-surface='true'] .dock-workspace > [data-dock-panel] {
 }
 html[data-native-surface='true'] .dock-header { background: color-mix(in srgb, var(--bg-elev) 75%, transparent); }
 html[data-native-surface='true'] .dock-review > .review-panel,
+html[data-native-surface='true'] .dock-terminal > .project-terminal,
+html[data-native-surface='true'] .dock-git-commit-tree > .git-commit-tree,
 html[data-native-surface='true'] .review-files,
 html[data-native-surface='true'] .review-detail { background: transparent; }
 
@@ -129,7 +131,7 @@ html[data-native-surface='true'] .plugin-store-body,
 html[data-native-surface='true'] .plugin-store-error,
 html[data-native-surface='true'] .task-history-run { background: transparent; }
 
-/* Code blocks and the terminal retain their solid reading surface. */
+/* Code blocks retain their solid reading surface. */
 .window-effects-note { margin: 8px 0 0; font-size: 11px; line-height: 1.7; color: var(--fg-faint); }
 @media (prefers-reduced-transparency: reduce), (forced-colors: active) {
   html[data-native-surface='true'], html[data-native-surface='true'] body,
@@ -137,7 +139,9 @@ html[data-native-surface='true'] .task-history-run { background: transparent; }
   html[data-native-surface='true'] .app-body.dock-workspace,
   html[data-native-surface='true'] .dock-workspace > [data-dock-panel],
   html[data-native-surface='true'] .titlebar, html[data-native-surface='true'] .dock-toolbar,
-  html[data-native-surface='true'] .dock-header { background: Canvas; }
+  html[data-native-surface='true'] .dock-header,
+  html[data-native-surface='true'] .dock-terminal > .project-terminal,
+  html[data-native-surface='true'] .dock-git-commit-tree > .git-commit-tree { background: Canvas; }
   /* Restore the pre-frost solid surfaces for overlays and dialogs. */
   html[data-native-surface='true'] .sidebar-footer,
   html[data-native-surface='true'] .task-panel-card,

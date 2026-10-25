@@ -1,0 +1,97 @@
+.git-commit-tree {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  color: var(--fg);
+  background: var(--bg);
+  container: git-commit-tree / inline-size;
+  font-size: 12px;
+}
+
+.git-commit-tree-toolbar { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border-soft); }
+.git-commit-tree-heading { min-width: 0; }
+.git-commit-tree-heading h3 { font-size: 12px; font-weight: 600; }
+.git-commit-tree-heading p { overflow: hidden; color: var(--fg-dim); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.git-commit-tree-toolbar .ghost-button { flex-shrink: 0; }
+.git-commit-tree-status { flex-shrink: 0; padding: 5px 10px; color: var(--fg-dim); font-size: 10px; }
+.git-commit-tree-notice, .git-commit-tree-error { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 8px; margin: 0 8px 6px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 11px; }
+.git-commit-tree-notice { color: var(--warn); }
+.git-commit-tree-error { color: var(--danger); }
+.git-commit-tree-error .ghost-button { flex-shrink: 0; }
+.git-commit-tree-content { display: grid; flex: 1; grid-template-columns: minmax(0, 1fr) 182px; grid-template-rows: minmax(0, 1fr) auto; grid-template-areas: 'history refs' 'detail detail'; min-width: 0; min-height: 0; overflow: hidden; }
+.git-commit-tree-history { grid-area: history; min-width: 0; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.git-commit-tree-list { min-width: calc(var(--git-commit-tree-graph-width) + 240px); margin: 0; padding: 0; list-style: none; }
+.git-commit-tree-list > li { height: 48px; }
+.git-commit-tree-row { display: grid; grid-template-columns: var(--git-commit-tree-graph-width) minmax(0, 1fr); align-items: center; width: 100%; height: 48px; padding: 0; color: var(--fg); text-align: left; }
+.git-commit-tree-row:hover { background: var(--bg-hover); }
+.git-commit-tree-row[aria-pressed='true'] { background: var(--selected-bg-strong); }
+.git-commit-tree-graph { display: block; overflow: visible; pointer-events: none; }
+.git-commit-tree-graph path { fill: none; stroke-width: 1.7; }
+.git-commit-tree-node { stroke: var(--bg); stroke-width: 1.5; }
+.git-commit-tree-head-ring { fill: var(--bg); stroke: var(--accent-strong); stroke-width: 1.5; }
+.git-commit-tree-row-content { display: flex; flex-direction: column; justify-content: center; gap: 3px; min-width: 0; height: 48px; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--border-soft); }
+.git-commit-tree-title-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.git-commit-tree-subject { overflow: hidden; min-width: 30px; text-overflow: ellipsis; white-space: nowrap; }
+.git-commit-tree-row-refs { display: flex; flex-shrink: 0; align-items: center; gap: 4px; max-width: 52%; overflow: hidden; }
+.git-commit-tree-badge { display: inline-flex; flex-shrink: 0; align-items: center; gap: 3px; max-width: 200px; overflow: hidden; padding: 0 5px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); color: var(--fg-dim); font-size: 9px; line-height: 17px; text-overflow: ellipsis; white-space: nowrap; }
+.git-commit-tree-ref-branch { --git-commit-tree-ref-color: var(--ok); }
+.git-commit-tree-ref-remote { --git-commit-tree-ref-color: var(--cyan); }
+.git-commit-tree-ref-tag { --git-commit-tree-ref-color: var(--purple); }
+.git-commit-tree-badge[class*='git-commit-tree-ref-'] { color: var(--git-commit-tree-ref-color); background: color-mix(in srgb, var(--git-commit-tree-ref-color) 8%, transparent); }
+.git-commit-tree-head { color: var(--accent-strong); font-weight: 600; white-space: nowrap; }
+.git-commit-tree-badge.git-commit-tree-head { background: var(--accent-soft); }
+.git-commit-tree-meta { display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--fg-dim); font-size: 10px; line-height: 15px; }
+.git-commit-tree-meta code { flex-shrink: 0; color: var(--fg-dim); }
+.git-commit-tree-author { overflow: hidden; max-width: 170px; text-overflow: ellipsis; white-space: nowrap; }
+.git-commit-tree-meta time { flex-shrink: 0; margin-left: auto; font-size: 9px; }
+.git-commit-tree code { font-family: var(--mono); font-size: 10px; }
+.git-commit-tree-pagination { display: flex; flex-direction: column; align-items: center; gap: 7px; padding: 14px 10px 18px; color: var(--fg-dim); font-size: 10px; text-align: center; }
+.git-commit-tree-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 28px 12px; color: var(--fg-dim); font-size: 11px; text-align: center; }
+.git-commit-tree-refs { grid-area: refs; min-width: 0; min-height: 0; overflow: auto; border-left: 1px solid var(--border-soft); padding: 8px; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.git-commit-tree-refs h4, .git-commit-tree-detail h4 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; color: var(--fg-dim); font-size: 11px; font-weight: 500; }
+.git-commit-tree-refs h4 > span { margin-left: auto; color: var(--fg-faint); font-size: 10px; }
+.git-commit-tree-refs details + details { margin-top: 7px; }
+.git-commit-tree-refs summary { padding: 3px 0; color: var(--fg-dim); font-size: 10px; cursor: pointer; }
+.git-commit-tree-refs summary > span { margin-left: 7px; color: var(--fg-faint); }
+.git-commit-tree-refs ul, .git-commit-tree-detail ul { margin: 0; padding: 0; list-style: none; }
+.git-commit-tree-ref { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 5px; width: 100%; min-width: 0; padding: 4px 5px; border-radius: var(--radius-sm); color: var(--fg-dim); font-size: 10px; text-align: left; }
+.git-commit-tree-ref:hover:not(:disabled) { background: var(--bg-hover); }
+.git-commit-tree-ref:disabled { cursor: default; }
+.git-commit-tree-ref-name { overflow: hidden; flex: 1; min-width: 40px; color: var(--git-commit-tree-ref-color); text-overflow: ellipsis; white-space: nowrap; }
+.git-commit-tree-ref > code { color: var(--fg-dim); font-size: 9px; }
+.git-commit-tree-ref .git-commit-tree-head, .git-commit-tree-ref small { font-size: 9px; }
+.git-commit-tree-ref small { color: var(--fg-faint); }
+.git-commit-tree-ref-empty { padding: 4px; color: var(--fg-faint); font-size: 10px; }
+.git-commit-tree-detail { grid-area: detail; min-width: 0; max-height: min(220px, 34vh); overflow: auto; border-top: 1px solid var(--border-soft); padding: 8px 10px; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.git-commit-tree-detail > p { margin: 0; color: var(--fg-faint); font-size: 10px; }
+.git-commit-tree-detail dl { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 3px 10px; margin: 0; font-size: 11px; }
+.git-commit-tree-detail dt { color: var(--fg-dim); }
+.git-commit-tree-detail dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+html.pion-keyboard-focus .git-commit-tree :is(button, summary):focus-visible { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
+
+@container git-commit-tree (max-width: 560px) {
+  .git-commit-tree-content { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto auto; grid-template-areas: 'history' 'refs' 'detail'; }
+  .git-commit-tree-refs { max-height: 100px; border-left: none; border-top: 1px solid var(--border-soft); padding: 5px 8px; }
+  .git-commit-tree-refs h4 { margin-bottom: 2px; }
+  .git-commit-tree-refs details { display: inline-block; width: 32%; padding-right: 5px; vertical-align: top; }
+  .git-commit-tree-refs details + details { margin-top: 0; }
+  .git-commit-tree-row-refs { max-width: 40%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .git-commit-tree *, .git-commit-tree *::before, .git-commit-tree *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+@media (forced-colors: active) {
+  .git-commit-tree { color: CanvasText; background: Canvas; }
+  .git-commit-tree-graph path { stroke: CanvasText; }
+  .git-commit-tree-node { fill: CanvasText; stroke: Canvas; }
+  .git-commit-tree-head-ring { fill: Canvas; stroke: Highlight; }
+  .git-commit-tree-row[aria-pressed='true'] { outline: 1px solid Highlight; outline-offset: -1px; }
+  .git-commit-tree-badge, .git-commit-tree .git-commit-tree-badge[class*='git-commit-tree-ref-'], .git-commit-tree-badge.git-commit-tree-head, .git-commit-tree-ref-name, .git-commit-tree-head, .git-commit-tree-notice, .git-commit-tree-error { color: CanvasText; background: Canvas; border-color: CanvasText; }
+  .git-commit-tree-ref:disabled { color: GrayText; }
+  html.pion-keyboard-focus .git-commit-tree :is(button, summary):focus-visible { outline-color: Highlight; }
+}

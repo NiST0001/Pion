@@ -2,13 +2,31 @@ import type { IpcMain } from 'electron'
 import type { GitService } from '../git-service'
 import { IPC } from '../../shared/ipc'
 import type { GitDiffScope, GitSelectionRequest } from '../../shared/types'
+import type { GitCommitTreeCursor } from '../../shared/git-commit-tree'
 
 interface GitIpcDependencies {
   ipcMain: Pick<IpcMain, 'handle'>
   git: GitService
+  getMainWindowId: () => number | undefined
 }
 
-export function registerGitIpc({ ipcMain, git }: GitIpcDependencies): void {
+export function registerGitIpc({ ipcMain, git, getMainWindowId }: GitIpcDependencies): void {
+  ipcMain.handle(IPC.GitCommitTree, (event, cwd: string, cursor?: GitCommitTreeCursor) => {
+    const owner = getMainWindowId()
+    const sender = event.sender
+    const frame = event.senderFrame
+    const assertCurrent = (): void => {
+      if (owner === undefined || getMainWindowId() !== owner || sender.id !== owner
+        || sender.isDestroyed() || !frame || event.senderFrame !== frame || sender.mainFrame !== frame) {
+        throw new Error('只允许所属主窗口读取 Git 提交树')
+      }
+    }
+    assertCurrent()
+    return git.getCommitTree(cwd, cursor).then((page) => {
+      assertCurrent()
+      return page
+    })
+  })
   ipcMain.handle(IPC.GitStatus, (_event, cwd: string) => git.getStatus(cwd))
   ipcMain.handle(IPC.GitDiff, (_event, cwd: string, path: string, scope: GitDiffScope) =>
     git.getDiff(cwd, path, scope)

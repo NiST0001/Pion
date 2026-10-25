@@ -4,6 +4,8 @@ import { constants as fsConstants, createReadStream } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import type { BrowserWindow } from 'electron'
 import { IPC_EVENTS } from '../shared/ipc'
+import type { GitCommitTreeCursor, GitCommitTreePage } from '../shared/git-commit-tree'
+import { getGitCommitTree } from './git/commit-tree'
 import type {
   GitCommitResult,
   GitConflictContent,
@@ -43,6 +45,10 @@ export class GitService {
 
   unbind(win: BrowserWindow): void {
     if (this.win === win) this.win = null
+  }
+
+  getCommitTree(cwd: string, cursor?: GitCommitTreeCursor): Promise<GitCommitTreePage> {
+    return getGitCommitTree(cwd, cursor)
   }
 
   async getStatus(cwd: string): Promise<GitWorkspaceSnapshot> {

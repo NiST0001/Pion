@@ -36,6 +36,7 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 - 生图仅复用所属 Codex OAuth，无 API-key/付费回退；非法参数前置拒绝，失败不自动重试、换型号、降设置或改路径。只写显式新项目 PNG、不覆盖输入；参考原文件含 metadata 上传，严格有界校验与 no-replace 发布，保留恢复路径。请求型号/尺寸/质量不冒称实际值。
 - 实时、缓存、分页按真实身份归并，保 React key/DOM；不按文本/位置猜重复消息，不造 SDK 时间戳/entry ID。未落盘输出不被旧历史覆盖，空 final 权威，裁剪不冒充权威缩短，历史失败不伪装空会话。
 - 自动队列按消息所属 agent_settled 正面凭证及全部 prompt/steer/abort 实际 RPC、检查点/完成监听器收口逐项 FIFO，不因正常、工具错误、权限超时、模型失败或中止建立长期暂停；原生任务 pending 不阻塞队列。逻辑 stop/idle/handled/超时不等于实际结束，未知 pending 继续占槽，旧 owner/generation 不得唤醒新队列，不重发已调用项或授予权限，执行前独立检查 deny。单项发送后须等所属本轮真实收口才自动下一项，不整批派发；状态读取/调用前本地准备失败保留未发项并显示错误，不忙循环，可在可靠后续收口或手动新输入后重试。旧 queuePauses 不恢复；保留真实运行恢复与历史撤销，SDK RPC 收口不冒称 provider 底层请求或收费已停止。
+- GitCommitTree 只读本地可达历史，按修订分页，不 fetch/启动 Agent，隐藏保留视图且拒迟到。
 - 撤销仅回到消息前并保留旧分支/草稿/图片，不回滚文件；写历史前确认旧进程实际退出。worktree 删除须真实目录/Git登记/合并/clean（含 ignored）和生命周期复查，仅非 force remove/branch -d，保历史，报告部分成功，不自动强删。
 - 区分累计费用与上下文占用、Git 工作区改动与本轮工具记录、有限统计窗口与整个会话。压缩后未知占用显示待更新，不造 0%；终态消息/压缩事件优先，不重复错误或用量。
 

@@ -7,3 +7,5 @@
 .terminal-error { padding: 5px 8px; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
 .terminal-host { flex: 1; min-width: 0; min-height: 0; overflow: hidden; padding: 4px 8px; }
 .terminal-host .xterm { height: 100%; }
+/* Older xterm viewports have a black CSS fill; the panel owns the surface. */
+.project-terminal .xterm .xterm-viewport { background: transparent; }

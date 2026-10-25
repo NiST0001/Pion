@@ -18,6 +18,7 @@
 @import './styles/review-layout.css';
 @import './styles/permissions.css';
 @import './styles/git-review.css';
+@import './styles/git-commit-tree.css';
 @import './styles/modified-files.css';
 @import './styles/task-panel.css';
 @import './styles/run-metrics.css';

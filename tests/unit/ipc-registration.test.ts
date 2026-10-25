@@ -656,9 +656,43 @@ const gitRoutes: RouteCase<GitService>[] = [
 describe('Git IPC registration', () => {
   it('registers exactly the GitService routes without calling the service', () => {
     const h = collectIpc()
-    registerGitIpc({ ipcMain: h.ipcMain, git: {} as GitService })
-    expect([...h.handlers.keys()].sort()).toEqual([...new Set(gitRoutes.map(([channel]) => channel))].sort())
+    registerGitIpc({ ipcMain: h.ipcMain, git: {} as GitService, getMainWindowId: () => 41 })
+    expect([...h.handlers.keys()].sort()).toEqual([...new Set([IPC.GitCommitTree, ...gitRoutes.map(([channel]) => channel)])].sort())
     expect(h.listeners.size).toBe(0)
+  })
+
+  it('forwards commit graph reads only for the current main-window frame', async () => {
+    const h = collectIpc()
+    const value = { root: cwd, revision: 'revision' }
+    const getCommitTree = vi.fn().mockResolvedValue(value)
+    registerGitIpc({ ipcMain: h.ipcMain, git: { getCommitTree } as unknown as GitService, getMainWindowId: () => 41 })
+    for (const event of [mainEvent(42), mainEvent(41, true)]) {
+      expect(() => h.invoke(IPC.GitCommitTree, event, cwd)).toThrow('只允许所属主窗口')
+    }
+    expect(getCommitTree).not.toHaveBeenCalled()
+    const cursor = { revision: 'a'.repeat(64), offset: 200 }
+    await expect(h.invoke(IPC.GitCommitTree, mainEvent(), cwd, cursor)).resolves.toBe(value)
+    expect(getCommitTree).toHaveBeenCalledExactlyOnceWith(cwd, cursor)
+    const failure = new Error('graph read failed')
+    getCommitTree.mockRejectedValueOnce(failure)
+    await expect(h.invoke(IPC.GitCommitTree, mainEvent(), cwd)).rejects.toBe(failure)
+  })
+
+  it.each(['owner', 'frame', 'destroyed'] as const)('rejects a commit graph result after its %s changes', async (change) => {
+    const h = collectIpc()
+    let owner: number | undefined = 41
+    let destroyed = false
+    let finish!: (value: unknown) => void
+    const getCommitTree = vi.fn(() => new Promise((resolve) => { finish = resolve }))
+    registerGitIpc({ ipcMain: h.ipcMain, git: { getCommitTree } as unknown as GitService, getMainWindowId: () => owner })
+    const event = mainEvent()
+    event.sender.isDestroyed = () => destroyed
+    const pending = h.invoke(IPC.GitCommitTree, event, cwd)
+    if (change === 'owner') owner = undefined
+    if (change === 'frame') Object.defineProperty(event.sender, 'mainFrame', { value: {} })
+    if (change === 'destroyed') destroyed = true
+    finish({ root: cwd })
+    await expect(pending).rejects.toThrow('只允许所属主窗口')
   })
 
   it.each(gitRoutes)('%s forwards to %s with its receiver, arguments, result and errors', async (channel, method, args, forwarded) => {
@@ -666,7 +700,7 @@ describe('Git IPC registration', () => {
     const result = Promise.resolve({ snapshotId: 'next-snapshot' })
     const stub = vi.fn().mockReturnValue(result)
     const git = { [method]: stub }
-    registerGitIpc({ ipcMain: h.ipcMain, git: git as unknown as GitService })
+    registerGitIpc({ ipcMain: h.ipcMain, git: git as unknown as GitService, getMainWindowId: () => 41 })
     expect(h.invoke(channel, mainEvent(), ...args)).toBe(result)
     expect(stub).toHaveBeenCalledExactlyOnceWith(...(forwarded ?? args))
     expect(stub.mock.contexts[0]).toBe(git)
@@ -845,7 +879,7 @@ describe('window IPC registration', () => {
 it('composes the domain registrars without duplicate channels', () => {
   const h = collectIpc()
   registerAgentIpc({ ipcMain: h.ipcMain, bridge: {} as AgentBridge, projects: { touchCanonical: vi.fn() }, pushProjects: vi.fn() })
-  registerGitIpc({ ipcMain: h.ipcMain, git: {} as GitService })
+  registerGitIpc({ ipcMain: h.ipcMain, git: {} as GitService, getMainWindowId: () => 41 })
   registerWindowIpc({
     ipcMain: h.ipcMain, windowFromWebContents: vi.fn(),
     windowEffects: {} as WindowEffectsService, terminals: {} as TerminalService
@@ -869,7 +903,7 @@ it('composes the domain registrars without duplicate channels', () => {
     IPC.AgentRevertMessage, IPC.AgentMcpStatus, IPC.BranchDelete, IPC.AgentEditQueued,
     IPC.AgentSubagentSessions, IPC.AgentSubagentSession, IPC.AgentSetModelProviderEnabled, IPC.AgentSubagentModels,
     IPC.GetCapabilitySettings, IPC.UpdateCapabilitySettings,
-    ...gitRoutes.map(([channel]) => channel), ...effectRoutes.map(([channel]) => channel),
+    IPC.GitCommitTree, ...gitRoutes.map(([channel]) => channel), ...effectRoutes.map(([channel]) => channel),
     ...terminalRoutes.map(([channel]) => channel), IPC.WindowState
   ])
   expect(usageLedger.getOverview).not.toHaveBeenCalled()

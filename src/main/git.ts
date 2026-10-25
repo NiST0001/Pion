@@ -16,6 +16,7 @@ const execFileAsync = promisify(execFile)
 interface RunGitOptions {
   env?: NodeJS.ProcessEnv
   timeout?: number
+  input?: string
   /** Keep exact stdout bytes represented as UTF-8 text (needed for NUL-delimited paths). */
   trim?: boolean
 }
@@ -25,12 +26,25 @@ export async function runGit(
   args: string[],
   options: RunGitOptions = {}
 ): Promise<string> {
-  const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], {
+  const pending = execFileAsync('git', ['-C', cwd, ...args], {
     encoding: 'utf8',
     maxBuffer: 4 * 1024 * 1024,
     env: options.env,
     timeout: options.timeout
   })
+  let inputError: Error | undefined
+  if (options.input !== undefined) {
+    const stdin = pending.child.stdin
+    if (stdin) {
+      stdin.on('error', (error: Error) => { inputError = error })
+      stdin.end(options.input)
+    } else {
+      inputError = new Error('无法向 Git 传递提交范围')
+    }
+  }
+  // An input failure must not release callers before the actual command settles.
+  const { stdout } = await pending
+  if (inputError) throw inputError
   const output = String(stdout)
   return options.trim === false ? output : output.trim()
 }

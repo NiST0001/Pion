@@ -4,6 +4,7 @@
  * the existing `shared/types` import path used by the application.
  */
 import type { BranchDeleteRequest, BranchDeleteResult } from './branches'
+import type { GitCommitTreeCursor, GitCommitTreePage } from './git-commit-tree'
 import type { SubagentSessionList, SubagentSessionSnapshot } from './subagent-sessions'
 import type { SubagentSettings } from './subagents'
 import type { CapabilitySettingsSnapshot, CapabilitySettingsUpdate } from './capability-settings'
@@ -162,6 +163,8 @@ export interface PionApi {
 
   // Git workspace -----------------------------------------------------------
   getGitStatus(cwd: string): Promise<GitWorkspaceSnapshot>
+  /** Local refs and reachable commits only; never fetches or starts an Agent. */
+  getGitCommitTree(cwd: string, cursor?: GitCommitTreeCursor): Promise<GitCommitTreePage>
   getGitDiff(cwd: string, path: string, scope: GitDiffScope): Promise<GitFileDiff>
   stageGitPaths(cwd: string, snapshotId: string, paths: string[]): Promise<GitWorkspaceSnapshot>
   unstageGitPaths(cwd: string, snapshotId: string, paths: string[]): Promise<GitWorkspaceSnapshot>

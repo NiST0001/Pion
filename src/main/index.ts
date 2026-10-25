@@ -366,7 +366,7 @@ function registerIpc(): void {
       verification.assertWorktreeDeletionIdle(cwd)
     }
   })
-  registerGitIpc({ ipcMain, git })
+  registerGitIpc({ ipcMain, git, getMainWindowId: () => mainWindowId })
 
   // automatic verification --------------------------------------------------
   ipcMain.handle(IPC.VerificationDiscover, (_event, cwd: string, force?: boolean) =>

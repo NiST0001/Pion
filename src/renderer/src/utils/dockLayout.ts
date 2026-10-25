@@ -1,7 +1,7 @@
-export const DOCK_PANELS = ['projects', 'chat', 'review', 'terminal', 'browser'] as const
+export const DOCK_PANELS = ['projects', 'chat', 'review', 'terminal', 'browser', 'gitCommitTree'] as const
 const LEGACY_PANELS = ['projects', 'chat', 'review', 'terminal'] as const
 export type DockPanel = typeof DOCK_PANELS[number]
-export const DOCK_LABELS: Record<DockPanel, string> = { projects: '项目', chat: '会话', review: '审查', terminal: '终端', browser: '浏览器' }
+export const DOCK_LABELS: Record<DockPanel, string> = { projects: '项目', chat: '会话', review: '审查', terminal: '终端', browser: '浏览器', gitCommitTree: 'GitCommitTree' }
 export const DOCK_EDGES = ['left', 'right', 'top', 'bottom', 'center'] as const
 export type DockEdge = typeof DOCK_EDGES[number]
 export const DOCK_EDGE_LABELS: Record<DockEdge, string> = { left: '左侧', right: '右侧', top: '上方', bottom: '下方', center: '交换位置' }
@@ -16,15 +16,15 @@ const LEGACY_KEY = 'pion:dock-layout-v1'
 const leaf = (panel: DockPanel): DockNode => ({ type: 'panel', panel })
 const split = (axis: 'x' | 'y', ratio: number, first: DockNode, second: DockNode): DockNode => ({ type: 'split', axis, ratio, first, second })
 const clampRatio = (value: number) => Math.max(0.08, Math.min(0.92, value))
-/** Add the browser inside the chat leaf so hiding it preserves every old split. */
-function insertBrowser(node: DockNode): DockNode {
-  if (node.type === 'panel') return node.panel === 'chat' ? split('x', 0.6, node, leaf('browser')) : node
-  return { ...node, first: insertBrowser(node.first), second: insertBrowser(node.second) }
+/** Add optional panels inside the chat leaf so hiding them preserves every old split. */
+function insertChatPanel(node: DockNode, panel: 'browser' | 'gitCommitTree'): DockNode {
+  if (node.type === 'panel') return node.panel === 'chat' ? split(panel === 'browser' ? 'x' : 'y', 0.6, node, leaf(panel)) : node
+  return { ...node, first: insertChatPanel(node.first, panel), second: insertChatPanel(node.second, panel) }
 }
 
 export function defaultDockLayout(): DockLayout {
   return { version: 2, root: split('x', 0.2, leaf('projects'),
-    split('x', 0.68, split('y', 0.7, split('x', 0.6, leaf('chat'), leaf('browser')), leaf('terminal')), leaf('review'))) }
+    split('x', 0.68, split('y', 0.7, split('x', 0.6, split('y', 0.6, leaf('chat'), leaf('gitCommitTree')), leaf('browser')), leaf('terminal')), leaf('review'))) }
 }
 
 export function normalizeDockLayout(value: unknown): DockLayout {
@@ -34,7 +34,7 @@ export function normalizeDockLayout(value: unknown): DockLayout {
   if (input.version === 2) {
     const seen = new Set<DockPanel>()
     const parse = (raw: unknown, depth: number): DockNode | null => {
-      // A full binary tree with five unique leaves has at most four split levels.
+      // A full binary tree with six unique leaves has at most five split levels.
       if (!raw || typeof raw !== 'object' || depth > DOCK_PANELS.length - 1) return null
       const node = raw as Record<string, unknown>
       if (node.type === 'panel' && DOCK_PANELS.includes(node.panel as DockPanel) && !seen.has(node.panel as DockPanel)) {
@@ -46,9 +46,11 @@ export function normalizeDockLayout(value: unknown): DockLayout {
       const second = parse(node.second, depth + 1)
       return first && second ? split(node.axis as 'x' | 'y', clampRatio(node.ratio), first, second) : null
     }
-    const root = parse(input.root, 0)
+    let root = parse(input.root, 0)
     if (!root || !LEGACY_PANELS.every((panel) => seen.has(panel))) return fallback
-    return { version: 2, root: seen.has('browser') ? root : insertBrowser(root) }
+    if (!seen.has('browser')) root = insertChatPanel(root, 'browser')
+    if (!seen.has('gitCommitTree')) root = insertChatPanel(root, 'gitCommitTree')
+    return { version: 2, root }
   }
   // Migrate the old four-slot cache without silently losing the user's order.
   if (input.version !== undefined && input.version !== 1) return fallback
@@ -62,8 +64,8 @@ export function normalizeDockLayout(value: unknown): DockLayout {
   }
   const left = Math.min(0.4, size('left', 240) / 1280)
   const right = Math.min(0.4, size('right', 420) / 1280)
-  return { version: 2, root: insertBrowser(split('y', clampRatio(1 - Math.min(0.7, size('bottom', 260) / 800)),
-    split('x', left, at('left'), split('x', clampRatio(1 - right / (1 - left)), at('center'), at('right'))), at('bottom'))) }
+  return { version: 2, root: insertChatPanel(insertChatPanel(split('y', clampRatio(1 - Math.min(0.7, size('bottom', 260) / 800)),
+    split('x', left, at('left'), split('x', clampRatio(1 - right / (1 - left)), at('center'), at('right'))), at('bottom')), 'browser'), 'gitCommitTree') }
 }
 
 export function readDockLayout(): DockLayout {

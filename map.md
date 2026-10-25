@@ -8,7 +8,7 @@
 | --- | --- |
 | src/main/index.ts | 服务实例、Electron 窗口与应用生命周期、IPC 注册装配及尚未拆出的全局设置/验证/工作流/项目列表等路由、系统通知 |
 | src/main/ipc/agent.ts | editQueuedMessage按真实runId/cwd/会话取回原图片与文字，保owner/主帧校验；Agent 生命周期/会话/历史/模型、权限与扩展 UI、项目信任及分支路由；显式接入同一 bridge，保留启动项目更新、子代理/消息撤销及只读 MCP 状态的主帧/owner 校验，异步会话操作通过 bridge 预留撤销互斥门控 |
-| src/main/ipc/git.ts | Git 工作区路由注册，透传快照 ID、差异 scope、选择与冲突内容，不新建 GitService |
+| src/main/ipc/git.ts | Git 工作区及只读提交树分页路由注册，透传快照 ID、差异 scope、选择与冲突内容，不新建 GitService |
 | src/main/ipc/computer-use.ts | 手动本地窗口观察的 typed IPC，逐路由主窗口/活主帧及异步 scope/frame fence；状态去 owner/receipt，显式 capture 仅返回独立有界 PNG 缩略图，不返回原图或创建服务 |
 | src/main/ipc/window.ts | 窗口控制、原生外观及终端路由，注入窗口查找与所属服务，保留主帧检查及 owner ID 转发 |
 | src/preload/index.ts | 暴露 window.pion 的类型化桥接，含使用总览无路径year/month/date/startDay查询与后台采集开关 |
@@ -30,6 +30,7 @@
 | src/shared/release-notes.ts | 关于页内置发布日志，按版本倒序维护 |
 | src/shared/terminal.ts | PTY 终端快照与增量输出契约 |
 | src/shared/branches.ts | 显式分支/工作树删除身份与非原子操作的部分成功契约 |
+| src/shared/git-commit-tree.ts | 只读提交/父关系、分支/远程/标签、仓库修订与分页游标契约 |
 | src/shared/browser.ts | 内嵌浏览器专用非持久 partition、空白页、URL 长度/协议/凭据准入及地址栏规范化 |
 | src/shared/computer-use.ts | ComputerUse 纯身份/许可/能力/frame/预算/状态校验与复制；动作及模型图 schema 不代表已接入输入或模型工具，标识不认证 peer |
 | src/shared/window-effects.ts | 原生外观后端、启用/生效状态、重启需求与 revision 契约 |
@@ -121,7 +122,8 @@
 | src/main/app-settings.ts | 桌面应用设置与会话模型偏好 |
 | src/main/run-store.ts | 运行记录、指标与恢复持久化；统计查询先排除队列；独立 SDK usage 归入匹配已派发运行，receipt 与保守重播下界持久化，不影响上下文占用 |
 | src/main/checkpoints.ts | Git 检查点与回滚 |
-| src/main/git-service.ts、git.ts、git/ | Git 工作区服务、命令与解析；numstat.ts 解析分层变更行数 |
+| src/main/git-service.ts、git.ts、git/ | Git 工作区服务、命令与解析；runGit 支持提交树固定 tips 的 stdin；numstat.ts 解析分层变更行数 |
+| src/main/git/commit-tree.ts | 本地可达提交拓扑分页、提交型标签剥离、stdin 固定 tips、显式禁 lazy-fetch、HEAD/refs/浅边界修订复查；只读不启动 Agent |
 | src/main/git/branch-delete.ts | NUL 登记解析、无副作用 preflight 捕获真实目录/提交身份、clean/主 HEAD 合并校验及非 force 删除与部分成功 |
 | src/main/verification.ts | 验证计划和自动验证 |
 | src/main/workflow-manager.ts、workflow/ | 多 Agent 工作流编排与契约 |
@@ -168,7 +170,7 @@
 | src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让，权限请求及会话提问面板复用底部余量定位在输入框上方；全局认证仍居中，不测量展开详情、不重挂载消息或草稿 |
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
 | src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
-| src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1/旧四面板 v2 缓存迁移；浏览器隐藏时保留原几何；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
+| src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1/旧四、五面板 v2 缓存迁移；浏览器/GitCommitTree 隐藏时保留原几何及分隔路径；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
 | src/renderer/src/hooks/useRunTelemetry.ts、useRunRecovery.ts | 运行统计与恢复；统计排除未派发队列，执行中优先，按实际派发/启动时间排序，保留有界 revision 防止迟到快照复活已退回队列的记录 |
 | src/renderer/src/hooks/useSessionResourceStage.ts | 会话首次就绪后按阶段启动次级资源；同会话历史加载不中断阶段和实时订阅 |
 | src/renderer/src/utils/sessionPanelPreferences.ts | 任务/队列面板共用折叠偏好读写，兼容各自已有键名、会话编码和不同默认值；只接受 JSON boolean，编码/存储异常不阻断 UI |
@@ -202,7 +204,8 @@
 - `capabilities/`：技能工具列表、MCP 只读状态与插件商店；`McpStatusPage.tsx` 查看当前后端的状态/登记工具数/曝光，只读缓存刷新、可见时订阅与轮询；关闭/隐藏清理，选择 generation 与 scope 拒迟到结果，实际 IPC 跨卸载单槽、独立单调过期防止挂起读取或重复缓存保留旧连接；旧插件/禁用/未知不推测可用性。`SkillsToolsModal.tsx` 将 Pion 内置任务/提问/子代理/生图与插件工具区分展示；生图卡片说明 size/quality 请求、≤5 个 PNG/JPEG 参考图编辑及另存新路径、原文件/metadata 上传、read + network + write、服务兼容性/精确尺寸未保证、mask 不支持、实验型号/实际版本未知、Codex 登录和账号额度及计划模式不可用。
 - `chrome/`：窗口标题栏等外壳组件；`TitleBar.tsx` 使用原始完整 cwd（不缩写上级目录或 home），保留会话名、窄窗口布局与完整路径提示；`tests/renderer/TitleBar.test.tsx` 覆盖 Unix/home/Windows/UNC 路径及无目录回退。`DockHeader.tsx` 提供简洁拖动标题、带目标/方向图标的自定义布局菜单和隐藏按钮。
 - `computer-use/ComputerUsePanel.tsx`、`ComputerUseSettings.tsx`：安全设置内显式打开的实验性本地窗口观察，复用设置焦点门；默认无 IPC/OS 捕获，单次勾选许可、显式捕获/预览/停止，忙时 Stop 可用，切页/关闭撤销本页批准 scope；当前无模型外发、SDK 留存或键鼠控制。`styles/computer-use.css` 保主题、独立滚动、forced-colors/reduced-motion。
-- `terminal/TerminalPanel.tsx`：按需加载的 xterm.js 终端，保持 PTY 连接、可见尺寸适配、主题同步及结束确认。
+- `git-commit-tree/GitCommitTree.tsx`、`useGitCommitTree.ts`、`commitGraph.ts`：按需打开的只读 SVG 提交 DAG、分支/远程/标签与提交详情、拓扑翻页；跨页 lane 稳定，隐藏/停靠保留 DOM 与阅读，真实读取槽及 cwd/API/generation 迟到门，既有 GitSnapshot 通知仅标记过期；`styles/git-commit-tree.css` 保主题/独立滚动/高对比与键盘门。
+- `terminal/TerminalPanel.tsx`：按需加载的 xterm.js 终端，保持 PTY 连接、可见尺寸适配、主题同步及结束确认；透明绘制透出父面板统一底色，外观/隐藏切换不重开 PTY，`TerminalPanel.test.tsx` 以 mock 覆盖此生命周期。
 - `browser/BrowserPanel.tsx`：首开 lazy 后保持挂载的 webview 面板，地址栏/前进后退/刷新停止、标题/加载与安全错误提示，IME 及导航请求失效保护；初始空白不自动联网，隐藏不重置页面，无 Pion guest preload；显式链接请求等待 guest ready，只消费最新请求，新点击同 URL 可再导航，不在重渲染/重开时重放。
 - `browser/BrowserNavigationContext.ts`：仅宿主 renderer 的链接导航 Context；普通 Markdown HTTP(S) 链接阻止默认开窗，经 App 打开同一 BrowserPanel，非法链接/无 Provider 不退回外部窗口，只读子会话不可导航，不新增 IPC 或 guest API。
 - `common/PionSelect.tsx`、`styles/pion-select.css`：主题一致的自绘 combobox/listbox，分组、禁用、键盘/typeahead/IME，body portal 视口翻转及仅菜单滚动；菜单 Escape 不关闭设置，触发器保持焦点，保留 fieldset 禁用及 forced-colors/减少动效，设置中不使用系统原生 select。`tests/renderer/PionSelect.test.tsx` 覆盖交互、定位、作用域清理及样式契约。
@@ -225,10 +228,10 @@
 - `styles/refinements/project.css`：会话运行整周圆角光环与独立柔和光晕同步呼吸（减少动态效果静态可见、强制色关闭光晕并使用系统 Highlight 轮廓，不旋转/扫描文字）、未读标记和项目列表细节。
 - `styles/capability-settings.css`：复用设置卡片/胶囊开关的能力分组、批量动作、状态与不可用提示，主题变量/共享圆角及键盘/forced-colors 门。
 - `styles/commands.css`：原生命令弹窗、独立结果滚动与纯文字信息，主题/forced-colors/减少动效；`styles/refinements.css` 的斜杠菜单独立滚动，不截断命令目录。
-- `styles/dock.css`、`styles/terminal.css`：模块化工作区、拖动反馈、分隔条及终端面板。
+- `styles/dock.css`、`styles/terminal.css`：模块化工作区、拖动反馈、分隔条及终端面板；终端清除旧 xterm viewport 黑底，统一由父面板提供背景。
 - `styles/subagent-sessions.css`：子会话列表使用可收缩名称列与 max-content 单行状态列，面板缩窄仅省略标题；`SessionList.test.tsx` 登记样式约束回归，不把 JSDOM 断言当实机几何验证。
 - `styles/browser.css`：浏览器地址栏/工具条、主题/高对比度回退，拖动与 resize 期间临时隐藏 guest、保留实例。
-- `styles/window-effects.css`：连续工作区底色与局部磨砂；悬浮输入框/统计条、侧栏底部设置/插件商店栏、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景；session-list-menu与pion-select-popup（含子代理模型portal）沿native-surface开关用58%主题背景同源局部过滤，关闭/减少透明度/高对比回退不透明，不改文字opacity与选择行为，windowEffects.test.tsx登记CSS契约。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
+- `styles/window-effects.css`：连续工作区底色与局部磨砂；GitCommitTree/终端清除内部实底以复用 dock 半透明层，统一关闭效果/减少透明度/强制色回退，terminal.css 清旧 xterm viewport 黑底；悬浮输入框/统计条、侧栏底部设置/插件商店栏、任务/排队卡片和弹窗用独立 SVG 背板，可滚动叶子浮层在自身边框盒过滤背景；session-list-menu与pion-select-popup（含子代理模型portal）沿native-surface开关用58%主题背景同源局部过滤，关闭/减少透明度/高对比回退不透明，不改文字opacity与选择行为，windowEffects.test.tsx登记CSS契约。原生浮层使用几何入场/纱罩背景色动画，避免 opacity 动画保留状态阻断采样；SVG 定义在 App.tsx，不模糊整个工作区或增强桌面模糊，保留减少透明度/高对比度回退。
 - `styles/task-panel.css`、`styles/run-metrics.css`：任务/排队悬浮层的网格让位动画、顶部统计同宽下拉浮层与不缩放的轻量按压反馈。
 - `styles/motion.css`：通用动效、详情网格高度过渡、工具箭头旋转及减少动态效果适配。
 - `utils/screenTextReveal.tsx`、`utils/historyReveal.ts`：文字渐入调度与历史行启用；静态前缀保留为文本节点，扫描跳过已启用字符的重复几何测量。
@@ -303,8 +306,10 @@
   - `SettingsModal.test.tsx`：提供商设置与内置主题即时切换（含“信号橙”）；页面拆分后会话草稿、自动重试、压缩/导出状态和日志跨页保持，父更新不替换聚焦输入，主题失败提示/迟到失败隔离，以及信任与工具策略回调、忙碌和错误透传。
   - `ToolPermissionModal.test.tsx`：仅单次能力（包括无风险 codemode）不显示会话/项目长期允许，普通可记住请求仍可选择；风险标记与记住标记不一致时界面保守隐藏长期按钮。
   - `WorkbenchDialogs.test.tsx`：首次按需 lazy 加载、关闭/重开及兄弟弹窗切换时的组件身份、草稿与独立挂起隔离，受控确认、操作页/修复回调透传，以及真实设置弹窗原有打开重置和在途操作保留；下游 mocks 在用例内注册并清理。
-  - `windowEffects.test.tsx`：毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条、权限请求避让输入框与实底回退的源码契约（不替代 GPU 真机验证）。
-  - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1/四面板 v2 迁移及浏览器隐藏时旧几何保留、五面板移动/持久化、拖动预览与菜单操作时不重挂载内容。
+  - `TerminalPanel.test.tsx`：mock xterm/IPC 的透明绘制与主题同步、外观/隐藏切换不重建终端或重开 PTY，不启动真实进程。
+  - `GitCommitTree.test.tsx`：纯 DAG 跨页 lane、refs/HEAD/详情、隐藏及失败保 DOM/阅读、过期刷新与真实 pending、跨项目/API 迟到隔离；仅模拟 IPC。
+  - `windowEffects.test.tsx`：GitCommitTree/终端复用 dock 底色和不透明回退、旧 viewport 透明契约；毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条、权限请求避让输入框与实底回退的源码契约（不替代 GPU 真机验证）。
+  - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1/四与五面板 v2 迁移及新增面板隐藏时旧几何/分隔路径保留、移动/持久化、拖动预览与菜单操作时不重挂载内容。
   - `MarkdownLinks.test.tsx`：普通网页链接左键/键盘/中键的内置导航、默认开窗阻止、无 Provider/非法 URL/只读失败关闭；`SubagentConversation.test.tsx` 补真实 App Context 与 lazy BrowserPanel 连接及同 guest 隐藏/再导航契约。
   - `BrowserPanel.test.tsx`：链接请求等待 ready/最新胜出/消费一次/同 URL 新请求与失败不重试；DOM-only webview methods/events 模拟，显式导航、前进后退/刷新停止、隐藏保留实例、IME/草稿、危险 URL/安全失败及旧请求失效；不启动真实 Electron guest。
 - `src/renderer/src/agent/branchListRevision.ts`：按 preload API/cwd 隔离的有界查询 token，bootstrap 与分支变更共享门，防迟到列表复活已删项。
@@ -333,6 +338,8 @@
 - `tests/unit/native-extensions.test.ts`：模拟原生 builtin/replaceable 注册、旧插件替换、禁用/noExtensions、信任决策与 Pi 原生默认激活/显式设置不覆写；能力扫描仅注册、不连接；脚本模型预算、主机期限/父中止、方法 receiver 与原 usage 保留；codemode/MCP/resource 图片 fail-closed 投影及文字/详情边界，不验证真实服务器或 API。
 - `tests/unit/ask-user.test.ts`、`runtime-host.test.ts`：内置提问选择/自定义回答、取消/无 UI/中止、回答长度上限，以及 SDK 工具注入、启动参数、跨项目隔离与每个 backend 的 Codex OAuth 延迟解析/独立捕获；`plan-mode.test.ts` 覆盖 SDK 提问工具的计划模式白名单、生图隐藏/执行拦截及显式工具子集/空集/分支恢复。
 - `tests/unit/git-service.test.ts`：NUL 分隔的普通/重命名/复制路径、XY 标志和对象形状、畸形记录不吞下一条；隔离临时仓库验证两种 diff scope、未跟踪分流、重命名元数据及暂存/撤销选择等操作。
+- `tests/unit/git-commit-tree.test.ts`：模拟 Git/浅边界文件，覆盖只读拓扑分页、标签剥离、空仓库、修订变化/错误及大量 tips stdin；不查询真实仓库。
+- `tests/unit/git-commit-tree-bridge.test.ts`：模拟子进程 stdin 错误等实际命令收口、preload 精确转发 cwd/cursor；不启动 Git/Electron。
 - `tests/unit/git-numstat.test.ts`：Git 行数统计、重命名和特殊文件名。
 - `tests/unit/review-file-tree.test.ts`：审查树目录优先排序、嵌套计数、原文件元数据与统计保留，以及既有父目录路径处理。
 - `tests/unit/projects.test.ts`：模拟主项目/worktree 登记、历史只读分组、名称与排序保留、缺失目录/非 Git 回退、显式移除元数据及异步变更/窗口推送竞态；依赖使用局部 `vi.doMock` 并清理，回归保护默认 `node:child_process` 导入不泄露测试 mock。

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
 import type { SubagentSessionList, SubagentSessionSnapshot } from '../shared/subagent-sessions'
 import type { BranchDeleteResult } from '../shared/branches'
+import type { GitCommitTreePage } from '../shared/git-commit-tree'
 import type { McpStatusSnapshot, McpStatusTarget } from '../shared/mcp'
 import type { PiChangelog, SessionCommandInfo } from '../shared/slash-command-protocol'
 import type { UsageOverview, UsageOverviewQuery } from '../shared/usage-overview'
@@ -253,6 +254,7 @@ const api: PionApi = {
   renameBranch: (cwd, oldName, newName) =>
     ipcRenderer.invoke(IPC.BranchRename, cwd, oldName, newName) as Promise<BranchInfo>,
   getGitStatus: (cwd) => ipcRenderer.invoke(IPC.GitStatus, cwd) as Promise<GitWorkspaceSnapshot>,
+  getGitCommitTree: (cwd, cursor) => ipcRenderer.invoke(IPC.GitCommitTree, cwd, cursor) as Promise<GitCommitTreePage>,
   getGitDiff: (cwd, path, scope: GitDiffScope) =>
     ipcRenderer.invoke(IPC.GitDiff, cwd, path, scope) as Promise<GitFileDiff>,
   stageGitPaths: (cwd, snapshotId, paths) =>
