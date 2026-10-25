@@ -5,6 +5,7 @@ import { GIT_COMMIT_TREE_PAGE_SIZE } from '../../../../shared/git-commit-tree'
 import type { GitCommitTreeCommit, GitCommitTreeRef } from '../../../../shared/git-commit-tree'
 import { COMMIT_ROW_HEIGHT, commitLaneX, layoutCommitGraph } from './commitGraph'
 import { useGitCommitTree } from './useGitCommitTree'
+import { DOCK_LABELS } from '../../utils/dockLayout'
 
 const EMPTY_COMMITS: GitCommitTreeCommit[] = []
 const LANE_COLORS = ['var(--cyan)', 'var(--purple)', 'var(--ok)', 'var(--accent-strong)', 'var(--warn)', 'var(--danger)']
@@ -77,10 +78,10 @@ export function GitCommitTree({ cwd, visible }: { cwd?: string; visible: boolean
   const graphStyle = { '--git-commit-tree-graph-width': `${Math.max(60, graph.width)}px` } as CSSProperties
 
   return (
-    <section className="git-commit-tree" aria-label="GitCommitTree" aria-hidden={!visible} inert={!visible}>
+    <section className="git-commit-tree" aria-label={DOCK_LABELS.gitCommitTree} aria-hidden={!visible} inert={!visible}>
       <header className="git-commit-tree-toolbar">
         <div className="git-commit-tree-heading">
-          <h3>GitCommitTree</h3>
+          <h3>{DOCK_LABELS.gitCommitTree}</h3>
           <p title={cwd}>{!cwd ? '项目提交与分支' : data?.head
             ? data.currentBranch ? `当前分支 · ${data.currentBranch}` : `游离 HEAD · ${data.head.slice(0, 8)}`
             : '只读提交历史'}</p>

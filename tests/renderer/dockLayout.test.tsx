@@ -84,7 +84,7 @@ it('migrates v1 positions and rejects malformed, duplicate or non-finite trees',
 it('keeps default four/five-panel geometry and adds GitCommitTree beneath chat', () => {
   const layout = defaultDockLayout()
   expect(DOCK_LABELS.browser).toBe('浏览器')
-  expect(DOCK_LABELS.gitCommitTree).toBe('GitCommitTree')
+  expect(DOCK_LABELS.gitCommitTree).toBe('提交图')
   expect(DOCK_PANELS.at(-1)).toBe('gitCommitTree')
   expect(DOCK_STORAGE_KEY).toBe('pion:dock-layout-v2')
   expect(measureDockLayout(layout, visible)).toEqual(measureDockLayout(oldDefault, visible))
@@ -239,7 +239,7 @@ it('moves six panels through the custom menu without remounting content, and per
   fireEvent.click(screen.getByRole('button', { name: '放到审查右侧' }))
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   expect(screen.getByTestId('terminal-content')).toBe(terminal)
-  fireEvent.click(screen.getByRole('button', { name: 'GitCommitTree布局' }))
+  fireEvent.click(screen.getByRole('button', { name: '提交图布局' }))
   fireEvent.click(screen.getByRole('button', { name: '放到浏览器下方' }))
   expect(screen.getByTestId('commit-tree-content')).toBe(commitTree)
   DOCK_PANELS.forEach((panel, index) => expect(container.querySelector(`[data-dock-panel="${panel}"]`)).toBe(nodes[index]))

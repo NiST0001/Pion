@@ -1,7 +1,7 @@
 export const DOCK_PANELS = ['projects', 'chat', 'review', 'terminal', 'browser', 'gitCommitTree'] as const
 const LEGACY_PANELS = ['projects', 'chat', 'review', 'terminal'] as const
 export type DockPanel = typeof DOCK_PANELS[number]
-export const DOCK_LABELS: Record<DockPanel, string> = { projects: '项目', chat: '会话', review: '审查', terminal: '终端', browser: '浏览器', gitCommitTree: 'GitCommitTree' }
+export const DOCK_LABELS: Record<DockPanel, string> = { projects: '项目', chat: '会话', review: '审查', terminal: '终端', browser: '浏览器', gitCommitTree: '提交图' }
 export const DOCK_EDGES = ['left', 'right', 'top', 'bottom', 'center'] as const
 export type DockEdge = typeof DOCK_EDGES[number]
 export const DOCK_EDGE_LABELS: Record<DockEdge, string> = { left: '左侧', right: '右侧', top: '上方', bottom: '下方', center: '交换位置' }

@@ -82,6 +82,8 @@ describe('GitCommitTree', () => {
   it('loads only when visible with a cwd, shows refs/details, and preserves rows/selection through paging, hiding and failed refresh', async () => {
     const { api, listeners } = fakeApi()
     const { rerender, container } = render(<GitCommitTree visible />)
+    expect(screen.getByRole('region', { name: '提交图' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '提交图' })).toBeInTheDocument()
     expect(api.getGitCommitTree).not.toHaveBeenCalled()
     rerender(<GitCommitTree cwd="/repo/a" visible={false} />)
     expect(api.onGitSnapshot).not.toHaveBeenCalled()

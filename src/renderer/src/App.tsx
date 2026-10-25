@@ -826,7 +826,7 @@ export function App(): ReactElement {
         <button type="button" aria-pressed={gitCommitTreeOpen} disabled={!resourceCwd} onClick={() => {
           setGitCommitTreeMounted(true)
           setGitCommitTreeOpen((open) => !open)
-        }}><GitBranch size={13} />GitCommitTree</button>
+        }}><GitBranch size={13} />{DOCK_LABELS.gitCommitTree}</button>
         <button type="button" aria-haspopup="dialog" onClick={() => setOperationsPanel('stats')}><ChartColumn size={13} />使用总览</button>
         <span className="dock-toolbar-spacer" />
         <button type="button" className="dock-reset" aria-label="重置布局" title="恢复默认布局" onClick={() => { dock.reset(); resetPanelVisibility() }}><RotateCcw size={13} /></button>
@@ -1187,7 +1187,7 @@ export function App(): ReactElement {
         </div>
         <div className="dock-git-commit-tree" {...dock.panelProps('gitCommitTree')}>
           {dockHeader('gitCommitTree', () => setGitCommitTreeOpen(false))}
-          {gitCommitTreeMounted && <Suspense fallback={<div className="side-empty">提交树加载中…</div>}><GitCommitTree cwd={resourceCwd} visible={gitCommitTreeOpen} /></Suspense>}
+          {gitCommitTreeMounted && <Suspense fallback={<div className="side-empty">提交图加载中…</div>}><GitCommitTree cwd={resourceCwd} visible={gitCommitTreeOpen} /></Suspense>}
         </div>
         {dock.dividers.map((divider, index) => <div key={divider.path} className={`dock-divider dock-divider-${divider.axis}`}
           role="separator" aria-label={`调整分栏 ${index + 1}`} {...dock.dividerProps(divider)} />)}
