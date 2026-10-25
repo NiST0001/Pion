@@ -97,7 +97,7 @@ export async function readCapabilityPreferences(path?: string): Promise<Capabili
   } catch (error) {
     if (error instanceof CapabilitySettingsError) throw error
     // Neither JSON syntax errors nor filesystem diagnostics may echo file contents.
-    invalid('能力开关设置读取或解析失败')
+    return invalid('能力开关设置读取或解析失败')
   } finally {
     try { await file.close() } catch { invalid('能力开关设置读取收尾失败') }
   }

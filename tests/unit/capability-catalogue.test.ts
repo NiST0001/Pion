@@ -37,7 +37,7 @@ async function runtimeNotice(preferences: CapabilityPreferences, items: Capabili
   const { createCapabilityPolicy } = await import('../../src/main/agent/capability-policy')
   const { readCapabilityRuntimeNotice } = await import('../../src/main/agent/capability-state')
   const policy = createCapabilityPolicy({ preferences, cwd, runtimeId: `fixture-${preferences.revision}`,
-    loadout: { allowed: () => true, initialize: () => undefined } as Parameters<typeof createCapabilityPolicy>[0]['loadout'],
+    loadout: { allowed: () => true, initialize: () => undefined, capture: () => undefined, declarations: () => undefined },
     items: items.map((item) => ({ ...item, enabled: capabilityEnabled(preferences, item.id, item.kind, item.enabled) })),
     notices: [], getSessionPath: () => undefined, getSubagentsEnabled: () => false, getMcpItems: () => [] })
   let selected: ReturnType<typeof loadSkills> = { skills: [], diagnostics: [] }
