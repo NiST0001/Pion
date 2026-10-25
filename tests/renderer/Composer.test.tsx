@@ -145,7 +145,7 @@ describe('Composer input references and local slash commands', () => {
     expect(screen.queryByRole('listbox', { name: '参考文件' })).not.toBeInTheDocument()
   })
 
-  it('labels images with their order so the model can reference them', async () => {
+  it('sends image payloads without appending redundant labels to the message', async () => {
     const onSend = vi.fn()
     render(
       <Composer
@@ -180,9 +180,8 @@ describe('Composer input references and local slash commands', () => {
     await waitFor(() => {
       const [text, images] = onSend.mock.calls[0]
       expect(images).toHaveLength(2)
-      expect(text).toContain('[图像 1: first.png]')
-      expect(text).toContain('[图像 2: second.png]')
-      expect(text.indexOf('图像 1')).toBeLessThan(text.indexOf('图像 2'))
+      expect(text).toBe('对比这两张图')
+      expect(images.every((image: ImageContent) => image.type === 'image' && image.data)).toBe(true)
     })
   })
 
@@ -696,14 +695,43 @@ describe('Composer controlled draft restoration', () => {
     expect(h.availability).toHaveBeenLastCalledWith(true)
   })
 
-  it('labels subsequently added images with their actual position without relabeling restored images', async () => {
+  it('previews without editing the draft, then double-clicks a real image reference before queueing', () => {
+    const h = setup({ referenceScopeKey: 'session-a' })
+    h.update({ restoreDraft: { id: 'preview-then-reference', text: '看一下', images: [firstImage, secondImage] } })
+    const thumbnail = screen.getByRole('button', { name: '预览图像 2' })
+    // Keyboard activation previews immediately; mouse timing is covered by ComposerAttachments.
+    fireEvent.click(thumbnail, { detail: 0 })
+    expect(screen.getByRole('dialog')).toHaveTextContent('图像 2')
+    expect(h.input).toHaveValue('看一下')
+    expect(h.onSend).not.toHaveBeenCalled()
+    expect(h.onQueue).not.toHaveBeenCalled()
+    h.update({ referenceScopeKey: 'session-b' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(h.input).toHaveValue('看一下')
+    expect(screen.getByRole('button', { name: '预览图像 2' })).toBe(thumbnail)
+    h.update({ referenceScopeKey: 'session-a' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(thumbnail, { detail: 0 })
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(thumbnail, { detail: 1 })
+    fireEvent.click(thumbnail, { detail: 2 })
+    fireEvent.doubleClick(thumbnail, { detail: 2 })
+    expect(h.input).toHaveValue('看一下 @"图像 2" ')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.keyDown(h.input, { key: 'Tab' })
+    expect(h.onQueue).toHaveBeenCalledExactlyOnceWith('看一下 @"图像 2"', [firstImage, secondImage])
+    expect(h.onSend).not.toHaveBeenCalled()
+  })
+
+  it('keeps restored and newly pasted image order without adding text to image-only messages', async () => {
     clipboard(vi.fn().mockResolvedValue(secondImage))
     const h = setup()
     h.update({ restoreDraft: { id: 'append-image', text: '', images: [firstImage] } })
     fireEvent.paste(h.input, { clipboardData: { items: [], getData: () => '' } })
     expect(await screen.findByAltText('待发送图像 2')).toBeInTheDocument()
     fireEvent.keyDown(h.input, { key: 'Enter' })
-    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('[图像 2: 剪贴板图像]', [firstImage, secondImage])
+    expect(h.onSend).toHaveBeenCalledExactlyOnceWith('', [firstImage, secondImage])
   })
 
   it('distinguishes duplicate files and clipboard images, and renumbers only inserted tokens after removal', async () => {
@@ -726,15 +754,13 @@ describe('Composer controlled draft restoration', () => {
     expect(h.input).toHaveValue('补充 图像 1 是正文 @"图像 1"；看 @"图像 2" ')
     fireEvent.paste(h.input, { clipboardData: { items: [], getData: () => '' } })
     expect(await screen.findByText('2 张图像待发送')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '引用图像 2' }))
+    fireEvent.doubleClick(screen.getByRole('button', { name: '预览图像 2' }))
     expect(h.input).toHaveValue('补充 图像 1 是正文 @"图像 1"；看 @"图像 2" @"图像 2" ')
     fireEvent.keyDown(h.input, { key: 'Enter' })
     const [text, images] = h.onSend.mock.calls[0]
     expect(images).toHaveLength(2)
     expect(images[1]).toEqual(firstImage)
-    expect(text).toContain('[图像 1: same.png]')
-    expect(text).toContain('[图像 2: 剪贴板图像]')
-    expect(text).not.toContain('[图像 3:')
+    expect(text).toBe('补充 图像 1 是正文 @"图像 1"；看 @"图像 2" @"图像 2"')
   })
 
   it('offers restored duplicate images by number and removes only their newly inserted references', () => {
@@ -775,7 +801,7 @@ describe('Composer controlled draft restoration', () => {
   it('never turns remaining repeated user tokens into controlled bindings after a user change', () => {
     const h = setup()
     h.update({ restoreDraft: { id: 'repeated-token', text: '', images: [firstImage, secondImage] } })
-    fireEvent.click(screen.getByRole('button', { name: '引用图像 1' }))
+    fireEvent.doubleClick(screen.getByRole('button', { name: '预览图像 1' }))
     const token = '@"图像 1"'
     fireEvent.change(h.input, { target: { value: `${token} ${token}` } })
     fireEvent.change(h.input, { target: { value: token } })
@@ -810,8 +836,8 @@ describe('Composer controlled draft restoration', () => {
     const h = setup()
     const original = '原文 @"图像 1" '
     h.update({ restoreDraft: { id: 'programmatic-spans', text: original, images: [firstImage, secondImage] } })
-    fireEvent.click(screen.getByRole('button', { name: '引用图像 1' }))
-    fireEvent.click(screen.getByRole('button', { name: '引用图像 2' }))
+    fireEvent.doubleClick(screen.getByRole('button', { name: '预览图像 1' }))
+    fireEvent.doubleClick(screen.getByRole('button', { name: '预览图像 2' }))
     expect(h.input).toHaveValue(`${original}@"图像 1" @"图像 2" `)
     fireEvent.click(screen.getByRole('button', { name: '移除第 1 张图像' }))
     fireEvent.click(screen.getByRole('button', { name: '确认移除' }))

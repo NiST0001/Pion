@@ -19,6 +19,8 @@ interface ComposerProps {
   prefill: string
   /** One-shot, non-destructive restoration; ids must be unique for this Composer. */
   restoreDraft?: { id: string; text: string; images: ImageContent[]; valid?: () => boolean }
+  /** Retires attachment previews on selection changes without discarding the draft. */
+  referenceScopeKey?: string
   /** True only for exactly empty text (whitespace is a draft), no attachments or reads. */
   onDraftAvailabilityChange?: (available: boolean) => void
   onRestoreDraftConsumed?: (id: string, restored: boolean) => void
@@ -54,6 +56,7 @@ export function Composer({
   sendDisabled,
   prefill,
   restoreDraft,
+  referenceScopeKey,
   onDraftAvailabilityChange,
   onRestoreDraftConsumed,
   history,
@@ -494,6 +497,7 @@ export function Composer({
               reading={readingReferences}
               error={referenceError}
               disabled={disabled}
+              scopeKey={referenceScopeKey}
               onRemove={removeReference}
               onInsertToken={insertReferenceToken}
             />

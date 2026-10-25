@@ -354,6 +354,8 @@ describe('ChatTimeline per-turn changes', () => {
       expect(binding).not.toMatch(/\b(?:latestRunChanges|workspaceChanges|gitSnapshot|runCheckpoint|checkpoint\w*|onReview|onSelectChange|onRevertLatest)\s*=/)
     }
     expect(timeline).not.toMatch(/\b(?:GitSnapshot|useGit|window\.pion\.git)\b/)
+    // A function object is always truthy and would hide the final turn forever.
+    expect(app).toMatch(/hasNewerHistory=\{actions\.hasNewerHistory\(\)\}/)
   })
 
   const edit = (id: number, path: string, diff: string): TimelineItem => ({
@@ -409,6 +411,26 @@ describe('ChatTimeline per-turn changes', () => {
     expect([...cards[0].querySelectorAll('.diff-text')].map(line => line.textContent)).toEqual(['old', 'first'])
     expect(cards[1].querySelector('.diff-view')).toBe(secondPreview)
     expect(props.onScroll).not.toHaveBeenCalled()
+  })
+
+  it('shows the final turn on settlement without a new message or timeline replacement', () => {
+    const props = { ...emptyTimelineProps(), timeline: [user(1), edit(2, '/project/done.ts', '+1 done'), answer(3)] }
+    const view = render(<ChatTimeline {...props} busy agentActivity hasNewerHistory={false} />)
+    const userRow = view.container.querySelector('.row-user')
+    const reply = view.container.querySelector('.row-assistant')
+    expect(view.queryByRole('region', { name: '本轮工具记录' })).not.toBeInTheDocument()
+    // A final message alone does not bypass compaction or other active work.
+    view.rerender(<ChatTimeline {...props} agentActivity hasNewerHistory={false} />)
+    expect(view.queryByRole('region', { name: '本轮工具记录' })).not.toBeInTheDocument()
+    view.rerender(<ChatTimeline {...props} hasNewerHistory={false} />)
+    const card = view.getByRole('region', { name: '本轮工具记录' })
+    expect(card).toHaveTextContent('done.ts')
+    expect(card.previousElementSibling).toBe(reply)
+    expect(view.container.querySelectorAll('.row-user')).toHaveLength(1)
+    expect(view.container.querySelector('.row-user')).toBe(userRow)
+    expect(view.container.querySelector('.row-assistant')).toBe(reply)
+    view.rerender(<ChatTimeline {...props} hasNewerHistory />)
+    expect(view.queryByRole('region', { name: '本轮工具记录' })).not.toBeInTheDocument()
   })
 
   it('keeps old cards and message DOM while busy, then inserts and moves the completed latest card without remounting', () => {

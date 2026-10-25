@@ -984,7 +984,7 @@ export function App(): ReactElement {
                 timeline={state.timeline}
                 timelineLoading={state.timelineLoading}
                 timelineReady={state.timelineReady}
-                hasNewerHistory={actions.hasNewerHistory}
+                hasNewerHistory={actions.hasNewerHistory()}
                 historySelected={Boolean(selectedSession?.path)}
                 timelineError={state.timelineError}
                 onReloadHistory={() => { void actions.reloadTimeline() }}
@@ -1087,6 +1087,7 @@ export function App(): ReactElement {
               sendDisabled={state.status.phase === 'starting' || state.status.phase === 'error' || projectTrust?.decision === 'ask'}
               prefill={prefill}
               restoreDraft={messageRevert.restoreDraft ?? queueEditor.restoreDraft}
+              referenceScopeKey={JSON.stringify([resourceKey, state.historyResetRevision])}
               onDraftAvailabilityChange={onDraftAvailabilityChange}
               onRestoreDraftConsumed={onRestoreDraftConsumed}
               history={messageHistory}

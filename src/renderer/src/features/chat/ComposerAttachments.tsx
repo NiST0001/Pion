@@ -1,8 +1,19 @@
-import type { ReactElement } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { MouseEvent, ReactElement } from 'react'
 import { FileText, ImagePlus, Loader2, X } from 'lucide-react'
 import type { ImageContent } from '../../../../shared/types'
 import { attachmentReferenceToken, referenceToken } from './composerReferences'
 import type { ReferenceAttachment } from './composerReferences'
+import { ReferencePreviewDialog } from './ReferencePreviewDialog'
+
+// Numbering may change without replacing the underlying attachment.
+function sameAttachment(left: ReferenceAttachment, right: ReferenceAttachment): boolean {
+  return left.id === right.id && left.kind === right.kind && left.name === right.name
+    && left.mimeType === right.mimeType && left.size === right.size
+    && (left.kind === 'image'
+      ? right.kind === 'image' && left.image.data === right.image.data && left.image.mimeType === right.image.mimeType
+      : right.kind === 'text' && left.content === right.content)
+}
 
 export function ComposerAttachments({
   references,
@@ -10,6 +21,7 @@ export function ComposerAttachments({
   reading,
   error,
   disabled,
+  scopeKey = '',
   onInsertToken,
   onRemove
 }: {
@@ -18,9 +30,71 @@ export function ComposerAttachments({
   reading: boolean
   error: string
   disabled: boolean
+  scopeKey?: string
   onInsertToken: (id: string) => void
   onRemove: (id: string) => void
 }): ReactElement {
+  // A fresh owner on every scope transition also retires A → B → A callbacks.
+  const owner = useMemo(() => ({ scopeKey }), [scopeKey])
+  type OwnedReference = { reference: ReferenceAttachment; owner: typeof owner }
+  const [preview, setPreview] = useState<OwnedReference | null>(null)
+  const current = useRef({ references, disabled, onInsertToken, owner })
+  const pending = useRef<(OwnedReference & { timer: ReturnType<typeof setTimeout> }) | null>(null)
+  const restorePreviewFocus = useRef(true)
+  const cancelPreview = (): void => {
+    if (pending.current) clearTimeout(pending.current.timer)
+    pending.current = null
+  }
+  const findCurrent = (candidate: OwnedReference): ReferenceAttachment | undefined =>
+    current.current.disabled || current.current.owner !== candidate.owner ? undefined
+      : current.current.references.find((item) => sameAttachment(item, candidate.reference))
+  const openPreview = (candidate: OwnedReference): void => {
+    const attachment = findCurrent(candidate)
+    // A confirmation opened during the delay owns focus; never cover it.
+    if (attachment && !document.querySelector('[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]')) {
+      restorePreviewFocus.current = true
+      setPreview({ ...candidate, reference: attachment })
+    }
+  }
+
+  useLayoutEffect(() => {
+    current.current = { references, disabled, onInsertToken, owner }
+    if (pending.current && !findCurrent(pending.current)) cancelPreview()
+    if (preview && !findCurrent(preview)) setPreview(null)
+  }, [references, disabled, onInsertToken, owner, preview])
+  useLayoutEffect(() => () => cancelPreview(), [])
+
+  const previewClick = (event: MouseEvent<HTMLButtonElement>, reference: ReferenceAttachment): void => {
+    cancelPreview()
+    const candidate = { reference, owner }
+    if (!findCurrent(candidate) || event.detail > 1) return
+    if (event.detail === 0) {
+      openPreview(candidate)
+      return
+    }
+    // Application-defined 500 ms split, not the user's native double-click setting.
+    pending.current = {
+      ...candidate,
+      timer: setTimeout(() => {
+        pending.current = null
+        openPreview(candidate)
+      }, 500)
+    }
+  }
+  const pressReference = (event: MouseEvent<HTMLButtonElement>): void => {
+    // Cancel on the second press, even if it is held across the preview deadline.
+    if (event.detail >= 2) cancelPreview()
+  }
+  const insertReference = (reference: ReferenceAttachment): void => {
+    cancelPreview()
+    if (!findCurrent({ reference, owner })) return
+    restorePreviewFocus.current = false
+    setPreview(null)
+    current.current.onInsertToken(reference.id)
+  }
+  const visiblePreview = preview && preview.owner === owner && !disabled
+    && references.find((item) => sameAttachment(item, preview.reference))
+
   return (
     <div
       className="composer-attachments"
@@ -40,10 +114,12 @@ export function ComposerAttachments({
                   className="composer-reference-trigger"
                   style={{ width: '100%', height: '100%', padding: 0, borderRadius: 'inherit' }}
                   disabled={disabled}
-                  title={`插入 ${attachmentReferenceToken(reference)} · ${reference.name}`}
-                  aria-label={`引用图像 ${reference.imageNumber}`}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => onInsertToken(reference.id)}
+                  title={`单击预览 · 双击插入 ${attachmentReferenceToken(reference)} · ${reference.name}`}
+                  aria-label={`预览图像 ${reference.imageNumber}`}
+                  onPointerDown={pressReference}
+                  onMouseDown={(event) => { event.preventDefault(); pressReference(event) }}
+                  onClick={(event) => previewClick(event, reference)}
+                  onDoubleClick={() => insertReference(reference)}
                 >
                   <img
                     src={`data:${reference.image.mimeType};base64,${reference.image.data}`}
@@ -54,8 +130,20 @@ export function ComposerAttachments({
               </>
             ) : (
               <>
-                <FileText size={16} aria-hidden="true" />
-                <span>{referenceToken(reference.name)}</span>
+                <button
+                  type="button"
+                  className="composer-reference-trigger composer-attachment-text-trigger"
+                  disabled={disabled}
+                  title={`单击预览 · 双击插入 ${attachmentReferenceToken(reference)}`}
+                  aria-label={`预览参考 ${reference.name}`}
+                  onPointerDown={pressReference}
+                  onMouseDown={(event) => { event.preventDefault(); pressReference(event) }}
+                  onClick={(event) => previewClick(event, reference)}
+                  onDoubleClick={() => insertReference(reference)}
+                >
+                  <FileText size={16} aria-hidden="true" />
+                  <span>{referenceToken(reference.name)}</span>
+                </button>
               </>
             )}
             <button
@@ -65,7 +153,12 @@ export function ComposerAttachments({
               aria-label={reference.kind === 'image'
                 ? `移除第 ${reference.imageNumber} 张图像`
                 : `移除参考 ${reference.name}`}
-              onClick={() => onRemove(reference.id)}
+              disabled={disabled}
+              onClick={() => {
+                if (pending.current?.reference.id === reference.id) cancelPreview()
+                if (preview?.reference.id === reference.id) setPreview(null)
+                onRemove(reference.id)
+              }}
             >
               <X size={11} />
             </button>
@@ -91,6 +184,13 @@ export function ComposerAttachments({
         )}
       </div>
       {error && <span className="composer-attachment-error">{error}</span>}
+      {visiblePreview && (
+        <ReferencePreviewDialog
+          reference={visiblePreview}
+          onClose={() => setPreview(null)}
+          restoreFocus={restorePreviewFocus}
+        />
+      )}
     </div>
   )
 }

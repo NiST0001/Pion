@@ -138,17 +138,10 @@ export function useComposerReferences({
     setReferenceError('')
   }, [replaceReferences, resetReferenceTokens])
 
-  const buildMessage = useCallback((text: string): string => {
-    let imageIndex = 0
-    const parts = referencesRef.current.flatMap((reference) => {
-      if (reference.kind === 'text') return [buildReferenceMessage('', [reference])]
-      imageIndex += 1
-      // Undo restores bare image blocks, not new file references. Do not invent
-      // labels, and retain the actual image order if more files are added later.
-      return reference.restored ? [] : [`[图像 ${imageIndex}: ${reference.name}]`]
-    })
-    return [text, ...parts].filter(Boolean).join('\n\n')
-  }, [])
+  const buildMessage = useCallback(
+    (text: string): string => buildReferenceMessage(text, referencesRef.current),
+    []
+  )
 
   const pendingImages = useMemo(
     () => pendingReferences.flatMap((reference) => reference.kind === 'image' ? [reference.image] : []),

@@ -364,23 +364,97 @@ body {
   width: auto;
   max-width: min(260px, 42vw);
   gap: 6px;
-  padding: 0 28px 0 9px;
+  padding: 0;
   overflow: hidden;
   color: var(--fg-dim);
 }
 
-.composer-attachment-file > svg {
+.composer-attachment-file > .composer-attachment-text-trigger {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  height: 100%;
+  padding: 0 28px 0 9px;
+  border: 0;
+  border-radius: inherit;
+  cursor: zoom-in;
+}
+
+.composer-attachment-text-trigger > svg {
   flex: 0 0 auto;
   color: var(--accent-strong);
 }
 
-.composer-attachment-file > span {
+.composer-attachment-text-trigger > span {
   min-width: 0;
   overflow: hidden;
   font-family: var(--mono);
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.reference-preview-dialog {
+  grid-template-columns: minmax(0, 1fr);
+  width: min(960px, calc(100vw - 32px));
+  max-height: calc(100dvh - 40px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.reference-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reference-preview-head h2 {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.reference-preview-head .confirm-dialog-actions {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.reference-preview-content {
+  min-height: 0;
+  max-height: calc(100dvh - 120px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.reference-preview-content img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: calc(100dvh - 140px);
+  margin: auto;
+  object-fit: contain;
+}
+
+.reference-preview-content pre {
+  margin: 0;
+  padding: 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (forced-colors: active) {
+  .reference-preview-content {
+    background: Canvas;
+    color: CanvasText;
+  }
 }
 
 .composer-attachment-remove {
