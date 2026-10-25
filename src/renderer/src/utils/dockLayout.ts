@@ -12,6 +12,26 @@ export interface DockLayout { version: 2; root: DockNode }
 export interface DockRect { x: number; y: number; width: number; height: number }
 export interface DockDivider { path: string; axis: 'x' | 'y'; ratio: number; rect: DockRect }
 export const DOCK_STORAGE_KEY = 'pion:dock-layout-v2'
+export const DOCK_VISIBILITY_STORAGE_KEY = 'pion:dock-visibility-v1'
+
+export function defaultDockVisibility(): Record<DockPanel, boolean> {
+  return { projects: true, chat: true, review: true, terminal: false, browser: false, gitCommitTree: false }
+}
+
+export function readDockVisibility(): Record<DockPanel, boolean> {
+  const visibility = defaultDockVisibility()
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(DOCK_VISIBILITY_STORAGE_KEY) ?? 'null')
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const panel of DOCK_PANELS) {
+        const flag = (value as Record<string, unknown>)[panel]
+        if (panel !== 'chat' && typeof flag === 'boolean') visibility[panel] = flag
+      }
+    }
+  } catch { /* keep defaults without replacing unreadable storage */ }
+  return visibility
+}
+
 const LEGACY_KEY = 'pion:dock-layout-v1'
 const leaf = (panel: DockPanel): DockNode => ({ type: 'panel', panel })
 const split = (axis: 'x' | 'y', ratio: number, first: DockNode, second: DockNode): DockNode => ({ type: 'split', axis, ratio, first, second })

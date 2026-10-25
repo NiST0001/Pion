@@ -169,8 +169,8 @@
 | src/renderer/src/hooks/useConversationNavigation.ts | 输出增长仅在既有末尾跟随意图下平滑追尾；工具/summary/role-button操作保既有末尾跟随或历史阅读，真正滚动输入仍暂停，展开键不误触分页；同会话STATE替换及单纯回调身份变化不以即时定位覆盖动画，浮层重定位核对真实clearance变化；用户手势/项目会话切换/跳转/隐藏即取消，分页补偿、首次恢复及浮层clearance保持即时；用户滚动优先、加载空白占位、按保留行位移补偿向前分页（含只迁移未新增行）、用户返回真实末尾才恢复跟随；历史参考点避让浮层，显式跳转释放占位并锁定目标；活动标记按参考点所在轮次识别；真实会话末尾选最后已挂载用户轮次，包含无持久 ID 的实时行；仅以所属索引与挂载行均唯一的实际 SDK 消息时钟作显示桥接，歧义清除旧标记、不补造撤销 ID；加载占位/分页末尾除外；历史替换/布局/索引变化只读重算；撤销独立 revision 重置旧阅读范围/手势及分页延续，不改变普通替换行为 |
 | src/renderer/src/hooks/useConversationOverlays.ts | 观测悬浮统计条与输入区域实际高度，更新首尾滚动余量和历史导航避让，权限请求及会话提问面板复用底部余量定位在输入框上方；全局认证仍居中，不测量展开详情、不重挂载消息或草稿 |
 | src/renderer/src/hooks/useHistoryPaging.ts | 独立的历史分页调度：滚动/边界输入触发、视口填充、双向请求去重、嵌套滚动保护与窗口切换隔离；不写滚动位置或跟随状态 |
-| src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态与项目/审查面板显隐 |
-| src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1/旧四、五面板 v2 缓存迁移；浏览器/GitCommitTree 隐藏时保留原几何及分隔路径；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
+| src/renderer/src/hooks/usePanelLayout.ts | 窗口最大化状态，项目/审查/终端/浏览器/提交树显隐自动保存与启动恢复，显式重置；不在初始恢复时覆写默认值 |
+| src/renderer/src/hooks/useDockLayout.ts、utils/dockLayout.ts | 嵌套横/纵分栏树、四边停靠/中央交换、矩形投影、落点预览、分隔比例与 v1/旧四、五面板 v2 缓存迁移；浏览器/GitCommitTree 隐藏时保留原几何及分隔路径；分栏树与显隐分开持久化，恢复不初始写回、变更后自动保存；保持面板为固定兄弟节点，utils 路径相对于 renderer/src |
 | src/renderer/src/hooks/useRunTelemetry.ts、useRunRecovery.ts | 运行统计与恢复；统计排除未派发队列，执行中优先，按实际派发/启动时间排序，保留有界 revision 防止迟到快照复活已退回队列的记录 |
 | src/renderer/src/hooks/useSessionResourceStage.ts | 会话首次就绪后按阶段启动次级资源；同会话历史加载不中断阶段和实时订阅 |
 | src/renderer/src/utils/sessionPanelPreferences.ts | 任务/队列面板共用折叠偏好读写，兼容各自已有键名、会话编码和不同默认值；只接受 JSON boolean，编码/存储异常不阻断 UI |
@@ -309,6 +309,7 @@
   - `TerminalPanel.test.tsx`：mock xterm/IPC 的透明绘制与主题同步、外观/隐藏切换不重建终端或重开 PTY，不启动真实进程。
   - `GitCommitTree.test.tsx`：纯 DAG 跨页 lane、refs/HEAD/详情、隐藏及失败保 DOM/阅读、过期刷新与真实 pending、跨项目/API 迟到隔离；仅模拟 IPC。
   - `windowEffects.test.tsx`：GitCommitTree/终端复用 dock 底色和不透明回退、旧 viewport 透明契约；毛玻璃开关简洁文案及必要状态提示、原生效果实时状态不被旧快照覆盖、Linux 重启提示、透明 CSS 门控，以及局部滤镜、无 opacity 动画保留、滚动叶子浮层、连续会话底色、悬浮输入框/统计条、权限请求避让输入框与实底回退的源码契约（不替代 GPU 真机验证）。
+  - `panelLayoutPersistence.test.tsx`：面板开关/移动/比例跨重挂载恢复、旧缓存不初始覆写、异常读取、显式重置、固定DOM及App恢复懒宿主/首次终端cwd接线；模拟本地存储，不替代实机重启验证。
   - `dockLayout.test.tsx`：嵌套分栏、面板不重复/不重叠、隐藏折叠、比例调整、v1/四与五面板 v2 迁移及新增面板隐藏时旧几何/分隔路径保留、移动/持久化、拖动预览与菜单操作时不重挂载内容。
   - `MarkdownLinks.test.tsx`：普通网页链接左键/键盘/中键的内置导航、默认开窗阻止、无 Provider/非法 URL/只读失败关闭；`SubagentConversation.test.tsx` 补真实 App Context 与 lazy BrowserPanel 连接及同 guest 隐藏/再导航契约。
   - `BrowserPanel.test.tsx`：链接请求等待 ready/最新胜出/消费一次/同 URL 新请求与失败不重试；DOM-only webview methods/events 模拟，显式导航、前进后退/刷新停止、隐藏保留实例、IME/草稿、危险 URL/安全失败及旧请求失效；不启动真实 Electron guest。

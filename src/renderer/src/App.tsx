@@ -200,14 +200,21 @@ export function App(): ReactElement {
     sidebarOpen,
     setSidebarOpen,
     reviewOpen,
-    setReviewOpen
+    setReviewOpen,
+    terminalOpen,
+    setTerminalOpen,
+    browserOpen,
+    setBrowserOpen,
+    gitCommitTreeOpen,
+    setGitCommitTreeOpen,
+    resetPanelVisibility
   } = usePanelLayout(hasBridge)
-  const [terminalOpen, setTerminalOpen] = useState(false)
   const [terminalCwd, setTerminalCwd] = useState<string>()
-  const [browserOpen, setBrowserOpen] = useState(false)
-  const [browserMounted, setBrowserMounted] = useState(false)
-  const [gitCommitTreeOpen, setGitCommitTreeOpen] = useState(false)
-  const [gitCommitTreeMounted, setGitCommitTreeMounted] = useState(false)
+  const [browserMounted, setBrowserMounted] = useState(browserOpen)
+  const [gitCommitTreeMounted, setGitCommitTreeMounted] = useState(gitCommitTreeOpen)
+  useEffect(() => {
+    if (terminalOpen && !terminalCwd && resourceCwd) setTerminalCwd(resourceCwd)
+  }, [terminalOpen, terminalCwd, resourceCwd])
   const browserNavigationIdRef = useRef(0)
   const [browserNavigation, setBrowserNavigation] = useState<{ id: number; url: string }>()
   const openBrowserUrl = useCallback((url: string) => {
@@ -902,7 +909,7 @@ export function App(): ReactElement {
         }}><GitBranch size={13} />GitCommitTree</button>
         <button type="button" aria-haspopup="dialog" onClick={() => setOperationsPanel('stats')}><ChartColumn size={13} />使用总览</button>
         <span className="dock-toolbar-spacer" />
-        <button type="button" className="dock-reset" aria-label="重置布局" title="恢复默认布局" onClick={dock.reset}><RotateCcw size={13} /></button>
+        <button type="button" className="dock-reset" aria-label="重置布局" title="恢复默认布局" onClick={() => { dock.reset(); resetPanelVisibility() }}><RotateCcw size={13} /></button>
       </div>
       <div className="app-body dock-workspace" ref={dock.rootRef} data-dock-active={Boolean(dock.dragged) || undefined}
         onDragOver={dock.clearDrop} onDragLeave={(event) => {

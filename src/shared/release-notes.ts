@@ -8,6 +8,12 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.88',
+    changes: [
+      '面板位置、分栏尺寸及开关状态自动保存，重新打开软件恢复上次布局；点击重置布局才恢复默认。'
+    ]
+  },
+  {
     version: '0.1.87',
     changes: [
       '侧栏待处理请求列表改为点击展开、再次点击收起；悬浮或仅获得焦点不再自动弹出，保留键盘操作和会话跳转。'

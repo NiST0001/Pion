@@ -11,6 +11,7 @@ export function dockRectStyle(rect: DockRect): CSSProperties {
 
 export function useDockLayout(visible: Record<DockPanel, boolean>) {
   const [layout, setLayout] = useState(readDockLayout)
+  const committedLayout = useRef(layout)
   const [dragged, setDragged] = useState<DockPanel | null>(null)
   const [drop, setDrop] = useState<{ panel: DockPanel; edge: DockEdge } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -18,7 +19,11 @@ export function useDockLayout(visible: Record<DockPanel, boolean>) {
   const geometry = measureDockLayout(layout, visible)
   const endResize = () => { resizeRef.current = null; document.body.classList.remove('pion-resizing-panels') }
   useEffect(() => {
-    try { localStorage.setItem(DOCK_STORAGE_KEY, JSON.stringify(layout)) } catch { /* best effort */ }
+    if (layout === committedLayout.current) return
+    try {
+      localStorage.setItem(DOCK_STORAGE_KEY, JSON.stringify(layout))
+      committedLayout.current = layout
+    } catch { /* best effort */ }
   }, [layout])
   useEffect(() => {
     const move = (event: PointerEvent) => {

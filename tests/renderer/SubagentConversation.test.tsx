@@ -141,7 +141,9 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     vi.doMock('../../src/renderer/src/hooks/useWorkflows', () => ({ useWorkflows: () => ({ workflows: [] }) }))
     vi.doMock('../../src/renderer/src/hooks/useGitWorkspace', () => ({ useGitWorkspace: () => ({ snapshot: null }) }))
     vi.doMock('../../src/renderer/src/hooks/usePanelLayout', () => ({ usePanelLayout: () => ({
-      maximized: false, sidebarOpen: true, reviewOpen: false, setSidebarOpen: vi.fn(), setReviewOpen: vi.fn()
+      maximized: false, sidebarOpen: true, reviewOpen: false, setSidebarOpen: vi.fn(), setReviewOpen: vi.fn(),
+      terminalOpen: false, setTerminalOpen: vi.fn(), browserOpen: false, setBrowserOpen: vi.fn(),
+      gitCommitTreeOpen: false, setGitCommitTreeOpen: vi.fn(), resetPanelVisibility: vi.fn()
     }) }))
     vi.doMock('../../src/renderer/src/hooks/useDockLayout', () => ({ useDockLayout: () => ({
       rootRef: { current: null }, panelProps: () => ({}), dragProps: () => ({}), dividers: [],
