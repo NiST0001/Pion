@@ -30,9 +30,9 @@ function markerFixture() {
     pending.forEach((callback) => callback(time))
   })
   const finish = () => { for (let index = 0; frames.size && index < 50; index++) flush() }
-  let resize = () => {}
+  let resize = (_entries?: ResizeObserverEntry[]) => {}
   vi.stubGlobal('ResizeObserver', class {
-    constructor(callback: () => void) { resize = callback }
+    constructor(callback: (entries?: ResizeObserverEntry[]) => void) { resize = callback }
     observe() {}
     disconnect() {}
   })
@@ -54,6 +54,11 @@ function markerFixture() {
   content.className = 'timeline'
   element.append(content)
   const positions = [400, 800]
+  let contentWidth = 600
+  Object.defineProperties(content, {
+    offsetHeight: { configurable: true, get: () => positions[1] + 100 },
+    offsetWidth: { get: () => contentWidth }
+  })
   const rows = positions.map((_, index) => {
     const row = document.createElement('div')
     row.className = 'row-user'
@@ -72,7 +77,10 @@ function markerFixture() {
   element.scrollTop = 500
   act(() => hook.result.current.handleTimelineScroll())
   flush()
-  return { ...hook, options, element, rows, positions, frames, flush, finish, resize: () => act(() => resize()) }
+  return { ...hook, options, element, rows, positions, frames, flush, finish,
+    width: (value: number) => { contentWidth = value },
+    resize: (entries?: ResizeObserverEntry[]) => act(() => resize(entries))
+  }
 }
 
 describe('conversation navigation', () => {
@@ -489,6 +497,32 @@ describe('conversation navigation', () => {
     expect(f.element.scrollTop).toBe(500)
     f.rerender({ ...f.options, timeline: [...f.options.timeline] })
     expect(f.element.scrollTop).toBe(500) // marker refresh did not restore follow intent
+    expect(f.options.loadOlder).not.toHaveBeenCalled()
+    expect(f.options.loadNewer).not.toHaveBeenCalled()
+  })
+
+  it('refreshes width/fractional layout versions at the same rounded height, but ignores repeated boxes', () => {
+    const f = markerFixture()
+    const content = f.element.querySelector<HTMLElement>('.timeline')!
+    Object.defineProperty(content, 'offsetHeight', { value: 900 })
+    const box = (width: number) => [{ target: content, contentRect: { x: 0, y: 0, width, height: 900 } } as ResizeObserverEntry]
+    f.resize(box(600)) // first delivery also reconciles the initial layout
+    expect(f.frames.size).toBe(1)
+    f.flush()
+    f.positions[1] = 640
+    f.width(599)
+    f.resize(box(599.5))
+    expect(f.frames.size).toBe(1)
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-1')
+    f.positions[1] = 800
+    f.resize(box(599.25)) // offsetWidth/offsetHeight are unchanged
+    expect(f.frames.size).toBe(1)
+    f.flush()
+    expect(f.result.current.visibleHistoryEntryId).toBe('entry-0')
+    f.resize(box(599.25))
+    expect(f.frames.size).toBe(0)
+    expect(f.element.scrollTop).toBe(500)
     expect(f.options.loadOlder).not.toHaveBeenCalled()
     expect(f.options.loadNewer).not.toHaveBeenCalled()
   })

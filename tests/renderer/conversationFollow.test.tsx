@@ -28,8 +28,10 @@ function setup() {
   })
   const element = document.createElement('div')
   document.body.append(element)
+  const readClientHeight = vi.fn(() => 400)
+  const readScrollHeight = vi.fn(() => height)
   Object.defineProperties(element, {
-    clientHeight: { value: 400 }, scrollHeight: { get: () => height },
+    clientHeight: { get: readClientHeight }, scrollHeight: { get: readScrollHeight },
     scrollTop: { get: () => top, set: (value: number) => { top = Math.max(0, Math.min(height - 400, value)) } }
   })
   let timeline: TimelineItem[] = [{ kind: 'assistant', id: 1, text: 'initial', thinking: '', streaming: true }]
@@ -48,7 +50,7 @@ function setup() {
     timeline = [...timeline, { kind: 'assistant', id: timeline.length + 1, text: 'new output', thinking: '', streaming: true }]
     hook.rerender({ ...props, timeline, timelineMutation: 'append' })
   }
-  return { ...hook, props, element, scroll, append, frame, settle,
+  return { ...hook, props, element, scroll, append, frame, settle, readClientHeight, readScrollHeight,
     pendingFrame: () => [...frames.values()],
     layout: (size: number) => { height += size; act(() => resize()) }
   }
@@ -129,6 +131,25 @@ it('moves through intermediate offsets on growth, retargets continuously and nev
   expect(h.element.scrollTop).toBe(1696)
   expect(h.props.loadOlder).not.toHaveBeenCalled()
   expect(h.props.loadNewer).not.toHaveBeenCalled()
+})
+
+it('does not enqueue marker/follow work or re-read target geometry for duplicate resize deliveries', () => {
+  const h = setup()
+  h.layout(300)
+  h.settle()
+  expect(h.element.scrollTop).toBe(1900)
+  const style = vi.spyOn(globalThis, 'getComputedStyle')
+  h.readClientHeight.mockClear()
+  h.readScrollHeight.mockClear()
+  const requestFrame = vi.mocked(window.requestAnimationFrame)
+  requestFrame.mockClear()
+  for (let delivery = 0; delivery < 3; delivery++) h.layout(0)
+  // One read batch per delivery; no extra animator target or marker chain.
+  expect(style).toHaveBeenCalledTimes(3)
+  expect(h.readClientHeight).toHaveBeenCalledTimes(3)
+  expect(h.readScrollHeight).toHaveBeenCalledTimes(3)
+  expect(requestFrame).not.toHaveBeenCalled()
+  expect(h.pendingFrame()).toHaveLength(0)
 })
 
 it('continues growth across same-session replacements and callback identity refreshes without an immediate pin', () => {

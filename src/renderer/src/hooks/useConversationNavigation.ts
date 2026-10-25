@@ -387,21 +387,59 @@ export function useConversationNavigation({
   useEffect(() => {
     const element = scrollRef.current
     if (!viewportActive || !element || typeof ResizeObserver !== 'function') return
-    let previousClientHeight = element.clientHeight
-    let previousPaddingTop = parseFloat(getComputedStyle(element).paddingTop) || 0
-    let previousPaddingBottom = parseFloat(getComputedStyle(element).paddingBottom) || 0
     const content = element.querySelector<HTMLElement>('.timeline')
-    const observer = new ResizeObserver(() => {
+    const measure = () => {
+      const style = getComputedStyle(element)
+      return {
+        contentHeight: content?.offsetHeight ?? 0,
+        contentWidth: content?.offsetWidth ?? 0,
+        clientHeight: element.clientHeight,
+        clientWidth: element.clientWidth,
+        scrollHeight: element.scrollHeight,
+        paddingTop: parseFloat(style.paddingTop) || 0,
+        paddingBottom: parseFloat(style.paddingBottom) || 0,
+        anchorTop: style.getPropertyValue('--conversation-top-clearance'),
+        anchorBottom: style.getPropertyValue('--conversation-bottom-clearance')
+      }
+    }
+    let previous = measure()
+    let firstDelivery = true
+    const boxes = new Map<Element, DOMRectReadOnly>()
+    const observer = new ResizeObserver((entries = []) => {
+      // Read the whole geometry batch before reclaiming min-height or moving
+      // scrollTop. A reservation write must not split style/viewport reads.
+      const next = measure()
+      let boxChanged = false
+      for (const entry of entries) {
+        const box = entry.contentRect
+        const before = boxes.get(entry.target)
+        if (before && (box.x !== before.x || box.y !== before.y || box.width !== before.width || box.height !== before.height)) boxChanged = true
+        boxes.set(entry.target, box)
+      }
+      // Include widths, clearances and fractional observer boxes: an unchanged
+      // rounded content height alone does not prove the same row layout.
+      const geometryChanged = (Object.keys(next) as (keyof typeof next)[]).some((key) => next[key] !== previous[key])
+      const contentChanged = next.contentHeight !== observedContentHeight.current
+      const initialDelivery = firstDelivery
+      firstDelivery = false
+      // Layout can finish between the layout-effect snapshot and this effect's
+      // initial measurement. Reconcile that first delivery even if RO agrees.
+      if (!initialDelivery && !geometryChanged && !boxChanged && !contentChanged) return
+      const viewportChanged = next.clientHeight !== previous.clientHeight
+        || next.paddingTop !== previous.paddingTop || next.paddingBottom !== previous.paddingBottom
+      const topDisplacement = next.paddingTop - previous.paddingTop
+      const clientHeightChanged = next.clientHeight !== previous.clientHeight
+      previous = next
       scheduleVisibleHistoryUpdate()
-      const nextContentHeight = content?.offsetHeight ?? 0
-      const shrink = observedContentHeight.current - nextContentHeight
-      observedContentHeight.current = nextContentHeight
+      const shrink = observedContentHeight.current - next.contentHeight
+      observedContentHeight.current = next.contentHeight
+      if (viewportChanged || shrink > 0) cancelEndFollow()
       if (shrink > 0 && !loadingRef.current && content && reservedHeight.current > 0) {
         // A collapsed tool/thinking/detail must not leave its expanded height
         // pinned by manual reading. Remove only the lost content extent so a
         // genuine loading placeholder is not discarded wholesale.
         const remaining = Math.max(0, reservedHeight.current - shrink)
-        reservedHeight.current = remaining <= nextContentHeight ? 0 : remaining
+        reservedHeight.current = remaining <= next.contentHeight ? 0 : remaining
         if (scrollSurfaceRef.current) {
           scrollSurfaceRef.current.style.minHeight = reservedHeight.current > 0 ? `${reservedHeight.current}px` : ''
         }
@@ -409,31 +447,21 @@ export function useConversationNavigation({
         // permission to resume live following.
         lastScrollTop.current = element.scrollTop
       }
-      const nextClientHeight = element.clientHeight
-      const style = getComputedStyle(element)
-      const nextPaddingTop = parseFloat(style.paddingTop) || 0
-      const nextPaddingBottom = parseFloat(style.paddingBottom) || 0
-      const viewportChanged = nextClientHeight !== previousClientHeight || nextPaddingTop !== previousPaddingTop || nextPaddingBottom !== previousPaddingBottom
-      previousPaddingBottom = nextPaddingBottom
-      if (viewportChanged || shrink > 0) cancelEndFollow()
-      const topDisplacement = nextPaddingTop - previousPaddingTop
-      previousPaddingTop = nextPaddingTop
       if (topDisplacement !== 0 && element.scrollTop > 0 && pendingJumpNonce.current === null) {
         element.scrollTop += topDisplacement
         lastScrollTop.current = element.scrollTop
       }
       // Observe both viewport and content: image/Markdown layout may finish
       // after the parent render. Geometry must not change the user's intent.
-      if (nextClientHeight !== previousClientHeight) {
-        previousClientHeight = nextClientHeight
-        scrollSurfaceRef.current?.style.setProperty('--chat-viewport-height', `${nextClientHeight}px`)
+      if (clientHeightChanged) {
+        scrollSurfaceRef.current?.style.setProperty('--chat-viewport-height', `${next.clientHeight}px`)
       }
       if (loadingRef.current && !hasContentRef.current) return
       if (pendingJumpNonce.current === null && nearBottomRef.current && !readingHistory.current && !hasNewerHistory()) {
         if (viewportChanged || shrink > 0 || loadingRef.current) {
           element.scrollTop = element.scrollHeight
           lastScrollTop.current = element.scrollTop
-        } else requestEndFollow(element)
+        } else if (initialDelivery || geometryChanged || contentChanged) requestEndFollow(element)
         nearBottomRef.current = true
       }
     })

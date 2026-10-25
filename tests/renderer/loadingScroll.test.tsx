@@ -29,10 +29,10 @@ function setup(loading: boolean, content = 0) {
     timeline.prepend(row)
   }
   if (content > 0) addRow()
-  Object.defineProperty(timeline, 'offsetHeight', { get: () => height })
+  Object.defineProperty(timeline, 'offsetHeight', { configurable: true, get: () => height })
   const totalHeight = () => Math.max(400, height, parseFloat(surface.style.minHeight) || 0)
   Object.defineProperties(element, {
-    clientHeight: { value: 400 }, scrollHeight: { get: totalHeight },
+    clientHeight: { configurable: true, get: () => 400 }, scrollHeight: { get: totalHeight },
     scrollTop: {
       get: () => { top = Math.max(0, Math.min(top, totalHeight() - 400)); return top },
       set: (value: number) => { top = Math.max(0, Math.min(value, totalHeight() - 400)) }
@@ -47,7 +47,7 @@ function setup(loading: boolean, content = 0) {
   const hook = renderHook((props) => useConversationNavigation(props), { initialProps: options })
   hook.result.current.scrollSurfaceRef.current = surface
   hook.rerender({ ...options, busy: true })
-  return { ...hook, options, element, surface,
+  return { ...hook, options, element, surface, timeline,
     content: (value: number) => { height = value; if (value > 0 && !timeline.firstElementChild) addRow() },
     prepend: (value: number) => {
       height += value
@@ -89,6 +89,89 @@ it('reclaims collapsed detail height even when the outer surface remains pinned'
     act(() => resize())
     expect(h.element.scrollTop).toBe(600)
   }
+})
+
+it.each(['growth', 'shrink'] as const)('reconciles late %s already included in the first resize measurement', (change) => {
+  let resize = () => {}
+  let lateLayout = false
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: () => void) { resize = callback }
+    observe() {}
+    disconnect() { lateLayout = true }
+  })
+  const h = setup(false, 4000)
+  if (change === 'shrink') {
+    h.element.dispatchEvent(new WheelEvent('wheel', { deltaY: -200 }))
+    h.element.scrollTop = 3000
+    act(() => h.result.current.handleTimelineScroll())
+    expect(h.surface.style.minHeight).toBe('4000px')
+  }
+  const style = getComputedStyle.bind(window)
+  vi.spyOn(globalThis, 'getComputedStyle').mockImplementation((element, pseudo) => {
+    // Passive cleanup precedes the replacement RO effect, but follows the
+    // layout effects. Its initial measure therefore already sees late layout.
+    if (lateLayout) { lateLayout = false; h.content(change === 'growth' ? 4400 : 1000) }
+    return style(element, pseudo)
+  })
+  const options = { ...h.options, hasNewerHistory: () => false }
+  h.rerender(options)
+  expect(h.timeline.offsetHeight).toBe(change === 'growth' ? 4400 : 1000)
+  expect(h.element.scrollTop).toBe(change === 'growth' ? 3600 : 3000)
+  act(() => resize())
+  expect(h.element.scrollTop).toBe(change === 'growth' ? 4000 : 600)
+  expect(h.surface.style.minHeight).toBe('')
+  if (change === 'shrink') {
+    // A later layout snapshot can differ even when the next RO geometry
+    // equals its previous delivery (the reservation masks scrollHeight).
+    h.content(4000)
+    h.rerender({ ...options, busy: true })
+    h.content(1000)
+    act(() => resize())
+    expect(h.surface.style.minHeight).toBe('')
+    expect(h.element.scrollTop).toBe(600)
+    act(() => h.result.current.handleTimelineScroll())
+    h.content(1400)
+    act(() => resize())
+    expect(h.element.scrollTop).toBe(600)
+  }
+})
+
+it('reads shrink/clearance geometry before reclaiming reserved height without pulling a reader to the end', () => {
+  let resize = () => {}
+  vi.stubGlobal('ResizeObserver', class {
+    constructor(callback: () => void) { resize = callback }
+    observe() {}
+    disconnect() {}
+  })
+  const h = setup(false, 1000)
+  h.content(4000)
+  act(() => resize())
+  h.element.dispatchEvent(new WheelEvent('wheel', { deltaY: -200 }))
+  h.element.scrollTop = 1500
+  act(() => h.result.current.handleTimelineScroll())
+  expect(h.surface.style.minHeight).toBe('4000px')
+  const phases: string[] = []
+  const style = getComputedStyle.bind(window)
+  vi.spyOn(globalThis, 'getComputedStyle').mockImplementation((element, pseudo) => {
+    phases.push('style')
+    return style(element, pseudo)
+  })
+  vi.spyOn(h.timeline, 'offsetHeight', 'get').mockImplementation(() => { phases.push('content'); return 2500 })
+  vi.spyOn(h.element, 'clientHeight', 'get').mockImplementation(() => { phases.push('viewport'); return 400 })
+  const minHeight = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'minHeight')!.set!
+  vi.spyOn(h.surface.style, 'minHeight', 'set').mockImplementation(function (this: CSSStyleDeclaration, value: string) {
+    phases.push('write')
+    minHeight.call(this, value)
+  })
+  h.content(2500)
+  h.element.style.paddingTop = '38px'
+  act(() => resize())
+  expect(phases).toEqual(['style', 'content', 'viewport', 'write'])
+  expect(h.surface.style.minHeight).toBe('')
+  expect(h.element.scrollTop).toBe(1538)
+  act(() => { h.result.current.handleTimelineScroll(); resize() })
+  expect(h.element.scrollTop).toBe(1538)
+  expect(h.options.loadNewer).not.toHaveBeenCalled()
 })
 
 it('preserves unrelated loading blank space when a detail later shrinks', () => {

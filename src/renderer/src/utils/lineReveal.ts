@@ -10,12 +10,17 @@ const OWNER_SELECTOR = '[data-line-reveal-owner="true"]'
 const LINE_SELECTOR = `.${SCREEN_TEXT_REVEAL_LINE_CLASS}`
 const OPENING_GATE_SELECTOR = '[data-text-reveal-open="true"][data-text-reveal-ready="false"]'
 
-function isBlocked(element: HTMLElement, openingGate = false): boolean {
+type LayoutReads = {
+  style: (element: HTMLElement) => CSSStyleDeclaration
+  rect: (element: HTMLElement) => DOMRect
+}
+
+function isBlocked(element: HTMLElement, reads: LayoutReads, openingGate = false): boolean {
   if (element.closest('[hidden], [aria-hidden="true"]')) return true
   for (let ancestor: HTMLElement | null = element; ancestor; ancestor = ancestor.parentElement) {
     if (ancestor.dataset.textRevealReady === 'false'
       && (!openingGate || ancestor.dataset.textRevealOpen !== 'true')) return true
-    const style = getComputedStyle(ancestor)
+    const style = reads.style(ancestor)
     if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return true
     if (ancestor.tagName !== 'DETAILS' || ancestor.hasAttribute('open')) continue
     const summary = [...ancestor.children].find(child => child.tagName === 'SUMMARY')
@@ -24,15 +29,15 @@ function isBlocked(element: HTMLElement, openingGate = false): boolean {
   return false
 }
 
-function textIntersectsViewport(element: HTMLElement, rect: DOMRect, bounds: DOMRect): boolean {
+function textIntersectsViewport(element: HTMLElement, rect: DOMRect, bounds: DOMRect, reads: LayoutReads): boolean {
   let top = Math.max(bounds.top, 0), bottom = Math.min(bounds.bottom, window.innerHeight)
   let left = Math.max(bounds.left, 0), right = Math.min(bounds.right, window.innerWidth)
   for (let parent = element.parentElement; parent; parent = parent.parentElement) {
-    const style = getComputedStyle(parent)
+    const style = reads.style(parent)
     const clipX = /^(auto|scroll|hidden|clip)$/.test(style.overflowX || style.overflow)
     const clipY = /^(auto|scroll|hidden|clip)$/.test(style.overflowY || style.overflow)
     if (!clipX && !clipY) continue
-    const parentRect = parent.getBoundingClientRect()
+    const parentRect = reads.rect(parent)
     if (clipX) { left = Math.max(left, parentRect.left); right = Math.min(right, parentRect.right) }
     if (clipY) { top = Math.max(top, parentRect.top); bottom = Math.min(bottom, parentRect.bottom) }
   }
@@ -71,15 +76,39 @@ export function watchLineReveals(container: HTMLElement): () => void {
   }
 
   const scan = (): void => {
-    if (!container.isConnected || isBlocked(container)) return
-    const bounds = container.getBoundingClientRect()
+    if (!container.isConnected) return
+    const owns = (element: HTMLElement): boolean => {
+      const owner = element.closest(OWNER_SELECTOR)
+      return !owner || owner === container
+    }
+    const lines = [...container.querySelectorAll<HTMLElement>(LINE_SELECTOR)].filter(owns)
+    const pending = lines.filter(element => element.dataset.lineRevealReady !== 'true')
+    // Character cleanup and smooth-follow scrolls need no text geometry once
+    // every row is admitted. Keep the observers alive: later rows still wake us
+    // and recover both retained line starts and future text barriers from DOM.
+    if (!pending.length) { observeSizes(new Set([container])); return }
+    const styles = new Map<HTMLElement, CSSStyleDeclaration>()
+    const rects = new Map<HTMLElement, DOMRect>()
+    const reads: LayoutReads = {
+      style: element => {
+        let value = styles.get(element)
+        if (!value) { value = getComputedStyle(element); styles.set(element, value) }
+        return value
+      },
+      rect: element => {
+        let value = rects.get(element)
+        if (!value) { value = element.getBoundingClientRect(); rects.set(element, value) }
+        return value
+      }
+    }
+    if (isBlocked(container, reads)) return
+    const scanTime = performance.now()
+    const bounds = reads.rect(container)
     const sizeTargets = new Set<Element>([container, ...container.children])
     if (bounds.width <= 0 || bounds.height <= 0) { observeSizes(sizeTargets); return }
     const windowTop = bounds.top - bounds.height
     const items = [...container.querySelectorAll<HTMLElement>(`${LINE_SELECTOR}, ${OPENING_GATE_SELECTOR}, [data-text-reveal-pending="true"], [data-text-reveal-start]`)]
-      .filter(element => !element.closest(OWNER_SELECTOR) || element.closest(OWNER_SELECTOR) === container)
-    const lines = items.filter(element => element.classList.contains(SCREEN_TEXT_REVEAL_LINE_CLASS))
-    const pending = lines.filter(element => element.dataset.lineRevealReady !== 'true')
+      .filter(owns)
     const pendingContainers = pending.filter(element => element.dataset.lineRevealContainer === 'true')
     const measured = new Map<HTMLElement, MeasuredLine>()
     const visibleText = new Set<HTMLElement>()
@@ -90,8 +119,13 @@ export function watchLineReveals(container: HTMLElement): () => void {
       const isLine = element.classList.contains(SCREEN_TEXT_REVEAL_LINE_CLASS)
       if (isLine && element.dataset.lineRevealReady === 'true' && !pendingContainers.some(parent => parent.contains(element))) continue
       const openingGate = element.matches(OPENING_GATE_SELECTOR)
-      if (isBlocked(element, openingGate)) continue
-      const rect = element.getBoundingClientRect()
+      const textStart = Number(element.dataset.textRevealStart)
+      // A committed text start in the past cannot delay any new row. Pending
+      // commits and future starts still require their actual visible geometry.
+      if (!isLine && !openingGate && element.dataset.textRevealPending !== 'true'
+        && !(Number.isFinite(textStart) && textStart > scanTime)) continue
+      if (isBlocked(element, reads, openingGate)) continue
+      const rect = reads.rect(element)
       if (rect.width <= 0 || rect.height <= 0) {
         // A zero-sized line is not static text. Observe its real size so a later
         // font/image/layout completion can release it without polling.
@@ -100,7 +134,7 @@ export function watchLineReveals(container: HTMLElement): () => void {
       }
       if (rect.top > bounds.bottom) continue
       if (!isLine) {
-        if (textIntersectsViewport(element, rect, bounds)) {
+        if (textIntersectsViewport(element, rect, bounds, reads)) {
           if (openingGate) openingGates.add(element)
           else visibleText.add(element)
         }

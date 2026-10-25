@@ -463,6 +463,31 @@ it.each([['history', 180], ['live', 360]] as const)('shares one DOM-ordered %s c
   expect(frames.size).toBe(0)
 })
 
+it('measures future barriers but skips past/static headers when admitting newly visible text', () => {
+  const observer = observeReveals()
+  const future = performance.now() + 1000
+  const { container } = render(<div className="chat-scroll">
+    <section data-part="past" className="screen-text-reveal-line" data-line-reveal-ready="true"
+      data-line-reveal-start={performance.now() - 100}>already started</section>
+    <section data-part="static" className="screen-text-reveal-line screen-text-reveal-static">completed</section>
+    <section data-part="future" className="screen-text-reveal-line" data-line-reveal-ready="true"
+      data-line-reveal-start={future}>queued header</section>
+    <pre><ReviewRevealText text="new detail" /></pre>
+  </div>)
+  const past = vi.spyOn(container.querySelector<HTMLElement>('[data-part="past"]')!, 'getBoundingClientRect')
+  const completed = vi.spyOn(container.querySelector<HTMLElement>('[data-part="static"]')!, 'getBoundingClientRect')
+  const queued = vi.spyOn(container.querySelector<HTMLElement>('[data-part="future"]')!, 'getBoundingClientRect')
+  observer.reveal(observer.targets[0])
+  advanceFrame()
+  expect(past).not.toHaveBeenCalled()
+  expect(completed).not.toHaveBeenCalled()
+  expect(queued).toHaveBeenCalledTimes(1)
+  const characters = [...container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+  expect(characters.map(node => node.textContent).join('')).toBe('new detail')
+  expect(parseFloat(characters[0].style.getPropertyValue('--screen-text-reveal-delay'))).toBeGreaterThanOrEqual(1000)
+  expect(container.querySelector('pre > span')).toHaveAttribute('data-text-reveal-start', String(future))
+})
+
 it('does not inherit future character delays when a new scope reuses the same root', () => {
   const observer = observeReveals()
   const view = (scope: 'A' | 'B', start: number) => <div className="chat-scroll" data-line-reveal-scope={scope}>

@@ -32,6 +32,18 @@ function clip(bounds: Bounds, other: Bounds, x = true, y = true): Bounds {
   }
 }
 
+/** Past line clocks cannot delay a new batch; ancestors may still be pending. */
+function hasPendingLineClock(element: HTMLElement, time: number): boolean {
+  for (let line: HTMLElement | null = element; line; line = line.parentElement) {
+    if (!line.classList.contains(SCREEN_TEXT_REVEAL_LINE_CLASS)
+      || line.classList.contains(SCREEN_TEXT_REVEAL_STATIC_CLASS)) continue
+    const start = line.dataset.lineRevealStart
+    if (line.dataset.lineRevealReady !== 'true' || start === undefined
+      || !Number.isFinite(Number(start)) || Number(start) > time) return true
+  }
+  return false
+}
+
 /** IO is only a wakeup: every wake admits current visible chunks in DOM order. */
 export function subscribeTextRevealOrder(element: HTMLElement): Subscription {
   const root = revealRoot(element)
@@ -97,6 +109,9 @@ function createGroup(root: Element): Group {
     // Headers/compaction rows can be siblings rather than ancestors. They must
     // join the same ordering barrier, or a detail can appear before its header.
     for (const element of root.querySelectorAll<HTMLElement>(`.${SCREEN_TEXT_REVEAL_LINE_CLASS}, ${OPENING_GATE_SELECTOR}`)) {
+      // Smooth-follow scrolls must not measure every completed header again.
+      // Keep actual pending/future ancestor clocks and opening gates as barriers.
+      if (!element.matches(OPENING_GATE_SELECTOR) && !hasPendingLineClock(element, currentTime)) continue
       pending.push({ element })
     }
     pending.sort((a, b) => {

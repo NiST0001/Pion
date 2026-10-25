@@ -114,6 +114,66 @@ describe('viewport-owned line reveal order', () => {
     elements.forEach(element => expect(element.getBoundingClientRect).toHaveBeenCalledTimes(1))
   })
 
+  it('skips old text geometry on character cleanup and scroll with no pending rows, then wakes for a new future tail', async () => {
+    const container = root()
+    const parent = line(container)
+    const text = document.createElement('span')
+    text.dataset.textRevealStart = '250'
+    text.textContent = '已准入'
+    text.getBoundingClientRect = vi.fn(() => rect(120))
+    parent.append(text)
+    watch(container)
+    await flush()
+    expect(start(parent)).toBe(100)
+    vi.mocked(text.getBoundingClientRect).mockClear()
+    vi.mocked(container.getBoundingClientRect).mockClear()
+    const styles = vi.spyOn(globalThis, 'getComputedStyle')
+    text.dataset.textRevealStart = '600'
+    text.replaceChildren(document.createTextNode('回收字符节点'))
+    container.dispatchEvent(new Event('scroll'))
+    await flush()
+    expect(text.getBoundingClientRect).not.toHaveBeenCalled()
+    expect(container.getBoundingClientRect).not.toHaveBeenCalled()
+    expect(styles).not.toHaveBeenCalled()
+
+    const later = line(container, 'live', 160)
+    await flush()
+    expect(text.getBoundingClientRect).toHaveBeenCalledTimes(1)
+    expect(start(later)).toBe(600)
+    expect(container.firstElementChild).toBe(parent)
+    expect(parent.firstElementChild).toBe(text)
+  })
+
+  it('does not remeasure committed past text while rows wait below the viewport, but preserves a new pending commit', async () => {
+    const container = root()
+    const parent = line(container)
+    const text = document.createElement('span')
+    text.dataset.textRevealStart = '100'
+    text.textContent = '已开始的正文'
+    text.getBoundingClientRect = vi.fn(() => rect(120))
+    parent.append(text)
+    const later = line(container, 'live', 220)
+    const styles = vi.spyOn(globalThis, 'getComputedStyle')
+    watch(container)
+    await flush()
+    text.replaceChildren(document.createTextNode('回收后正文'))
+    container.dispatchEvent(new Event('scroll'))
+    await flush()
+    expect(text.getBoundingClientRect).not.toHaveBeenCalled()
+    expect(styles).not.toHaveBeenCalledWith(text)
+    expect(later).not.toHaveAttribute('data-line-reveal-ready')
+
+    text.dataset.textRevealPending = 'true'
+    later.getBoundingClientRect = vi.fn(() => rect(160))
+    await flush()
+    expect(text.getBoundingClientRect).toHaveBeenCalled()
+    expect(later).not.toHaveAttribute('data-line-reveal-ready')
+    delete text.dataset.textRevealPending
+    text.dataset.textRevealStart = '300'
+    await flush()
+    expect(start(later)).toBe(300)
+  })
+
   it('admits a parent but holds later lines until its visible pending text commits its actual start', async () => {
     const container = root()
     const parent = line(container, 'history', 120)
@@ -159,12 +219,19 @@ describe('viewport-owned line reveal order', () => {
     text.textContent = '在根视口内，但被嵌套容器裁掉'
     text.getBoundingClientRect = vi.fn(() => rect(160, 20))
     inner.append(text)
+    const otherText = text.cloneNode(true) as HTMLElement
+    otherText.getBoundingClientRect = vi.fn(() => rect(160, 20))
+    inner.append(otherText)
     const later = line(container, 'live', 180)
+    const styles = vi.spyOn(globalThis, 'getComputedStyle')
     watch(container)
     await flush()
     expect(text.getBoundingClientRect).toHaveBeenCalled()
-    expect(inner.getBoundingClientRect).toHaveBeenCalled()
-    expect(outer.getBoundingClientRect).toHaveBeenCalled()
+    expect(otherText.getBoundingClientRect).toHaveBeenCalledTimes(1)
+    expect(inner.getBoundingClientRect).toHaveBeenCalledTimes(1)
+    expect(outer.getBoundingClientRect).toHaveBeenCalledTimes(1)
+    expect(styles.mock.calls.filter(([element]) => element === inner)).toHaveLength(1)
+    expect(styles.mock.calls.filter(([element]) => element === outer)).toHaveLength(1)
     expect(text).toHaveAttribute('data-text-reveal-pending', 'true')
     expect(text).not.toHaveAttribute('data-text-reveal-start')
     expect(start(parent)).toBe(100)
