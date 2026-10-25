@@ -70,7 +70,10 @@ test('boots the Electron shell with an immediately editable composer', async ({}
     await expect(page.locator('.sidebar')).toBeVisible()
     const sidebarFooter = page.locator('.sidebar-footer')
     await expect(sidebarFooter).toHaveCSS('position', 'absolute')
-    await expect(sidebarFooter.getByRole('button')).toHaveCount(2)
+    await expect(sidebarFooter.getByRole('button')).toHaveCount(3)
+    await expect(sidebarFooter.getByRole('button', { name: '待处理请求（0个会话）', exact: true })).toBeVisible()
+    await expect(sidebarFooter.getByRole('button', { name: '设置', exact: true })).toBeVisible()
+    await expect(sidebarFooter.getByRole('button', { name: '插件商店', exact: true })).toBeVisible()
     // The floating controls must leave enough scrollable tail space for the
     // last session rather than covering it with an unreserved overlay.
     expect(await page.locator('.sidebar').evaluate((sidebar) => {
