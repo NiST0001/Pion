@@ -28,7 +28,6 @@ const mockModules = [
   '../../src/renderer/src/hooks/useWindowEffects',
   '../../src/renderer/src/hooks/useSessionResourceStage',
   '../../src/renderer/src/hooks/useRunTelemetry',
-  '../../src/renderer/src/hooks/useRunRecovery',
   '../../src/renderer/src/hooks/useVerification',
   '../../src/renderer/src/hooks/useWorkflows',
   '../../src/renderer/src/hooks/useGitWorkspace',
@@ -42,8 +41,7 @@ const mockModules = [
   '../../src/renderer/src/features/chrome/DockHeader',
   '../../src/renderer/src/features/operations/ToolPermissionModal',
   '../../src/renderer/src/features/operations/RunMetricsStrip',
-  '../../src/renderer/src/features/session/HistoryNavigator',
-  '../../src/renderer/src/features/operations/RunRecoveryBanner'
+  '../../src/renderer/src/features/session/HistoryNavigator'
 ] as const
 
 const cwd = '/project'
@@ -136,7 +134,6 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     vi.doMock('../../src/renderer/src/hooks/useWindowEffects', () => ({ useWindowEffects: vi.fn() }))
     vi.doMock('../../src/renderer/src/hooks/useSessionResourceStage', () => ({ useSessionResourceStage: () => 0 }))
     vi.doMock('../../src/renderer/src/hooks/useRunTelemetry', () => ({ useRunTelemetry: () => ({ runs: [], activeRun: null, latestRun: null }) }))
-    vi.doMock('../../src/renderer/src/hooks/useRunRecovery', () => ({ useRunRecovery: () => ({ candidates: [] }) }))
     vi.doMock('../../src/renderer/src/hooks/useVerification', () => ({ useVerification: () => ({}) }))
     vi.doMock('../../src/renderer/src/hooks/useWorkflows', () => ({ useWorkflows: () => ({ workflows: [] }) }))
     vi.doMock('../../src/renderer/src/hooks/useGitWorkspace', () => ({ useGitWorkspace: () => ({ snapshot: null }) }))
@@ -176,7 +173,6 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     vi.doMock('../../src/renderer/src/features/session/HistoryNavigator', () => ({
       HistoryNavigator: () => <nav data-testid="parent-history">父历史导航</nav>
     }))
-    vi.doMock('../../src/renderer/src/features/operations/RunRecoveryBanner', () => ({ RunRecoveryBanner: () => null }))
     ;({ App } = await import('../../src/renderer/src/App'))
     // The real App imports the complete renderer graph; concurrent suites can
     // exceed the default 30s transform hook limit. Keep this bounded and local;

@@ -409,7 +409,6 @@ src/
         │   ├── usePanelLayout.ts    # 窗口状态与显隐
         │   ├── useDockLayout.ts     # 嵌套分栏几何、落点预览与尺寸
         │   ├── useGitWorkspace.ts
-        │   ├── useRunRecovery.ts
         │   ├── useRunTelemetry.ts
         │   ├── useVerification.ts
         │   └── useWorkflows.ts

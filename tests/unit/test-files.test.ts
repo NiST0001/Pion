@@ -37,7 +37,7 @@ describe('isolated coverage discovery', () => {
     }
     expect(files).toContain('tests/renderer/AnimatedDisclosure.test.tsx')
     expect(files).toContain('tests/renderer/ReviewRevealText.test.tsx')
-    expect(files).toContain('tests/renderer/reviewSelection.test.ts')
+    expect(files).toContain('tests/renderer/historyNavigatorSettings.test.ts')
     expect(coverage.test?.coverage?.thresholds).toEqual({ statements: 15, branches: 12, functions: 10, lines: 17 })
   })
 })
