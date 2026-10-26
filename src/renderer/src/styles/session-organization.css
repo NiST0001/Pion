@@ -1,0 +1,61 @@
+.session-folder-tree { min-width: 0; }
+.session-folder-create,
+.session-folder-toggle,
+.session-folder-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.session-folder-create { margin: 2px 0 5px; padding: 3px 7px; }
+.session-folder-heading { display: flex; align-items: center; min-width: 0; gap: 2px; }
+.session-folder-toggle { flex: 1; min-width: 0; padding: 3px 4px; text-align: left; }
+.session-folder-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-folder-toggle svg { flex-shrink: 0; }
+.session-folder-toggle .expanded { transform: rotate(90deg); }
+.session-folder-actions { display: flex; flex-shrink: 0; }
+.session-folder-actions button { justify-content: center; width: 23px; padding: 3px; }
+.session-folder-content { margin-left: 10px; padding-left: 3px; border-left: 1px solid var(--border); }
+.session-folder-content[hidden] { display: none; }
+.session-folder-create:hover:not(:disabled),
+.session-folder-toggle:hover:not(:disabled),
+.session-folder-actions button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.session-folder-tree button:disabled { cursor: default; opacity: 0.5; }
+.session-folder-tree button:focus-visible { outline: none; }
+html.pion-keyboard-focus .session-folder-tree button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.session-organization-error { color: var(--danger); font-size: 11px; padding: 5px 7px; overflow-wrap: anywhere; }
+.archived-sessions-toolbar { display: flex; align-items: center; gap: 10px; }
+.archived-sessions-toolbar .sidebar-search { flex: 1; min-width: 0; }
+.archived-sessions-toolbar > span { color: var(--fg-faint); font-size: 11px; white-space: nowrap; }
+.archived-sessions-toolbar > button,
+.archived-session-restore { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 6px 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-dim); font: inherit; font-size: 11px; cursor: pointer; }
+.archived-sessions-hint { color: var(--fg-faint); font-size: 11px; }
+.archived-session { display: flex; align-items: center; min-width: 0; gap: 8px; border-bottom: 1px solid var(--border-soft); border-radius: var(--radius-sm); }
+.archived-session.active { background: var(--selected-bg); }
+.archived-session-open { flex: 1; display: grid; gap: 5px; min-width: 0; padding: 10px 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.archived-session-title { display: flex; align-items: center; min-width: 0; gap: 6px; }
+.archived-session-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.archived-session small { color: var(--fg-faint); font-size: 10px; overflow-wrap: anywhere; }
+.archived-session-title small { flex: none; color: var(--accent-strong); }
+.archived-session-restore { flex: none; }
+.archived-sessions-panel button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.archived-sessions-panel button:disabled { opacity: 0.5; cursor: default; }
+.archived-sessions-panel button:focus-visible { outline: none; }
+html.pion-keyboard-focus .archived-sessions-panel button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) {
+  .session-folder-tree * { animation: none; transition: none; }
+}
+@media (forced-colors: active) {
+  .session-folder-content, .archived-session { border-color: CanvasText; }
+  .archived-session-open, .archived-session-restore { color: CanvasText; }
+  html.pion-keyboard-focus .archived-sessions-panel button:focus-visible { outline-color: Highlight; }
+  .session-organization-error { color: CanvasText; }
+  html.pion-keyboard-focus .session-folder-tree button:focus-visible { outline-color: Highlight; }
+}

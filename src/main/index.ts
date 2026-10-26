@@ -21,6 +21,8 @@ import { WindowEffectsService } from './window-effects'
 import { assertSubagentSettingsOwner, SubagentSettingsStore } from './subagent-settings'
 import { CapabilitySettingsStore } from './capability-settings'
 import { QuestionSettingsStore } from './question-settings'
+import { SessionOrganizationStore } from './session-organization'
+import { registerSessionOrganizationIpc } from './ipc/session-organization'
 import { assertThemeSettingsOwner, ThemeSettingsStore } from './theme-settings'
 import { ProviderVisibilityStore } from './provider-visibility'
 import { registerAgentIpc } from './ipc/agent'
@@ -53,6 +55,7 @@ const terminals = new TerminalService()
 const appSettings = new AppSettings()
 const subagentSettings = new SubagentSettingsStore()
 const questionSettings = new QuestionSettingsStore()
+const sessionOrganization = new SessionOrganizationStore()
 const themeSettings = new ThemeSettingsStore()
 let mainWindowId: number | undefined
 // Host-only manual workflow ledger. These tokens never claim SDK/run/tool identity.
@@ -358,6 +361,7 @@ function registerIpc(): void {
     getMainWindowId: () => mainWindowId,
     reserveMutation: (operation) => bridge.withSessionOperation(operation)
   })
+  registerSessionOrganizationIpc({ ipcMain, store: sessionOrganization, getMainWindowId: () => mainWindowId })
   registerUsageIpc({ ipcMain, ledger: usageLedger, appSettings, getMainWindowId: () => mainWindowId })
   registerAgentIpc({ ipcMain, bridge, projects, pushProjects, getMainWindowId: () => mainWindowId,
     assertWorktreeDeletionIdle: (cwd) => {
@@ -488,6 +492,7 @@ app.on('before-quit', (event) => {
         if (state.actualPending) return // Never force-exit an unknown helper lease.
         await windowShutdown
         await bridge.stop()
+        await sessionOrganization.shutdown()
         try { await usageLedger.flush() } catch (error) {
           // Data collection failures do not trap quit. Unknown physical closes do.
           if (error instanceof UsageLedgerError && error.closeUnknown) throw error

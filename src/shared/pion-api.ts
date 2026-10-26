@@ -9,6 +9,7 @@ import type { SubagentSessionList, SubagentSessionSnapshot } from './subagent-se
 import type { SubagentSettings } from './subagents'
 import type { CapabilitySettingsSnapshot, CapabilitySettingsUpdate } from './capability-settings'
 import type { QuestionSettings } from './question-settings'
+import type { SessionOrganization, SessionOrganizationChange } from './session-organization'
 import type { UsageOverview, UsageOverviewQuery } from './usage-overview'
 import type { ThemeId } from './theme'
 import type { McpStatusSnapshot, McpStatusTarget } from './mcp'
@@ -92,6 +93,8 @@ export interface ComputerUseLocalApi {
 }
 
 export interface PionApi {
+  getSessionOrganization(): Promise<SessionOrganization>
+  updateSessionOrganization(change: SessionOrganizationChange): Promise<SessionOrganization>
   /** Backfill and read the durable local usage ledger; never starts an Agent. */
   getUsageOverview(query?: UsageOverviewQuery): Promise<UsageOverview>
   getUsageBackgroundCollection(): Promise<boolean>

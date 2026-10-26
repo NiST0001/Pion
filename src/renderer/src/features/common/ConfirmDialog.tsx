@@ -30,6 +30,7 @@ export function ConfirmDialog({
   const dialogRef = useRef<HTMLElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
   const busyRef = useRef(busy)
+  const composingRef = useRef(false)
   const onCancelRef = useRef(onCancel)
 
   useEffect(() => {
@@ -39,6 +40,7 @@ export function ConfirmDialog({
 
   useEffect(() => {
     if (!open) return
+    composingRef.current = false
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const frame = requestAnimationFrame(() => cancelRef.current?.focus())
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -48,7 +50,7 @@ export function ConfirmDialog({
         containModalTab(event, dialog)
         return
       }
-      if (event.key !== 'Escape' || busyRef.current) return
+      if (event.key !== 'Escape' || busyRef.current || event.isComposing || event.keyCode === 229 || composingRef.current) return
       event.preventDefault()
       event.stopImmediatePropagation()
       onCancelRef.current()
@@ -79,6 +81,11 @@ export function ConfirmDialog({
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
         aria-describedby="confirm-dialog-message"
+        onCompositionStartCapture={() => { composingRef.current = true }}
+        onCompositionEndCapture={() => { composingRef.current = false }}
+        onKeyDownCapture={(event) => {
+          if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229 || composingRef.current)) event.preventDefault()
+        }}
       >
         <div className="confirm-dialog-icon" aria-hidden="true"><AlertTriangle size={17} /></div>
         <div className="confirm-dialog-copy">

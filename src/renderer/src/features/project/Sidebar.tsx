@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
-import type { ReactElement } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ComponentProps, ReactElement } from 'react'
 import {
+  Archive,
   ChevronDown,
   ChevronRight,
   Folder,
@@ -21,12 +22,21 @@ import type {
 } from '../../../../shared/types'
 import type { SubagentSessionSummary } from '../../../../shared/subagent-sessions'
 import { SessionItems, sessionMatchesQuery } from '../session/SessionList'
+import { SessionFolderTree } from '../session/SessionFolderTree'
+import { sessionPlacementKey, type SessionOrganization, type SessionOrganizationChange } from '../../../../shared/session-organization'
+
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { TextInputDialog } from '../common/TextInputDialog'
 import { ConfirmDialog } from '../common/ConfirmDialog'
 import { SortableSidebarGroup } from './SortableSidebarGroup'
 import { SessionListControls } from './SessionListControls'
 import { getSessionListView, type SessionListFilter, type SessionListSort } from '../../agent/sessionListView'
+
+interface SessionOrganizationProps {
+  organization?: SessionOrganization
+  organizationDisabled?: boolean
+  onOrganizationChange?: (change: SessionOrganizationChange) => Promise<void>
+}
 
 // ---------------------------------------------------------------------------
 // Section shell
@@ -69,12 +79,18 @@ export function SidebarToolbar({
   searchQuery,
   onSearch,
   onNewSession,
-  onOpenCapabilities
+  onOpenCapabilities,
+  onOpenArchive,
+  archiveCount = 0,
+  archiveAttention = false
 }: {
   searchQuery: string
   onSearch: (value: string) => void
   onNewSession: () => void
   onOpenCapabilities: () => void
+  onOpenArchive?: () => void
+  archiveCount?: number
+  archiveAttention?: boolean
 }): ReactElement {
   return (
     <div className="sidebar-toolbar">
@@ -98,6 +114,14 @@ export function SidebarToolbar({
           <span>技能与工具</span>
           <ChevronRight size={13} className="sidebar-tools-arrow" />
         </button>
+        <button type="button" className="sidebar-tools-button" aria-label="归档会话"
+          title="打开归档会话" disabled={!onOpenArchive} onClick={onOpenArchive}>
+          <Archive size={14} />
+          <span>归档</span>
+          {archiveCount > 0 && <span className="side-count">{archiveCount}</span>}
+          {archiveAttention && <span className="side-session-unread-indicator attention" aria-label="等待回答或权限确认" />}
+          <ChevronRight size={13} className="sidebar-tools-arrow" />
+        </button>
       </div>
 
       <label className="sidebar-search">
@@ -119,6 +143,8 @@ export function SidebarToolbar({
 // ---------------------------------------------------------------------------
 
 export function FavoriteSessions({
+  onArchive,
+  organizationDisabled,
   sessions,
   searchQuery,
   activePath,
@@ -136,6 +162,8 @@ export function FavoriteSessions({
   getForkMessages,
   onFork
 }: {
+  onArchive?: (session: SessionMeta) => Promise<void>
+  organizationDisabled?: boolean
   sessions: SessionMeta[]
   searchQuery: string
   activePath?: string
@@ -166,6 +194,11 @@ export function FavoriteSessions({
       ) : (
         <SessionItems
           sessions={visibleSessions}
+          organizationDisabled={organizationDisabled}
+          onArchive={onArchive ? (path) => {
+            const session = findSession(path)
+            return session ? onArchive(session) : Promise.reject(new Error('会话已变化，请重新选择。'))
+          } : undefined}
           activePath={activePath}
           runningSessionPaths={runningSessionPaths}
           unreadSessionPaths={unreadSessionPaths}
@@ -216,6 +249,9 @@ interface ProjectBranchView {
 }
 
 export function ProjectList({
+  organization,
+  organizationDisabled,
+  onOrganizationChange,
   subagentSessions,
   selectedSubagent,
   onViewSubagent,
@@ -277,7 +313,9 @@ export function ProjectList({
   onFork: (cwd: string, path: string, entryId: string) => Promise<string>
   favoritePaths: ReadonlySet<string>
   onToggleFavorite: (path: string) => void
-}): ReactElement {
+} & SessionOrganizationProps): ReactElement {
+  const archived = useMemo(() => new Set(organization?.sessions.filter((entry) => entry.archived)
+    .map((entry) => sessionPlacementKey(entry.cwd, entry.path))), [organization?.sessions])
   const [filter, setFilter] = useState<SessionListFilter>('all')
   const [sort, setSort] = useState<SessionListSort>('manual')
   const normalizedQuery = searchQuery.trim().toLocaleLowerCase()
@@ -291,9 +329,10 @@ export function ProjectList({
       }]
       const branchViews: ProjectBranchView[] = branches.map((branch) => {
         const allSessions = sessionsByProject[branch.cwd] ?? []
+        const unarchived = allSessions.filter((session) => !archived.has(sessionPlacementKey(branch.cwd, session.path)))
         const matches = normalizedQuery
-          ? allSessions.filter((session) => sessionMatchesQuery(session, normalizedQuery))
-          : allSessions
+          ? unarchived.filter((session) => sessionMatchesQuery(session, normalizedQuery))
+          : unarchived
         const sessions = getSessionListView(matches, runningSessionPaths, filter, sort)
         return { branch, sessions, allSessions, manualOrder: sort === 'manual' }
       })
@@ -321,6 +360,9 @@ export function ProjectList({
         allKeys={projects.map((project) => project.cwd)} getKey={({ project }) => project.cwd}>
       {({ project, branches }) => (
         <ProjectFolder
+          organization={organization}
+          organizationDisabled={organizationDisabled}
+          onOrganizationChange={onOrganizationChange}
           selectedSubagent={selectedSubagent}
           subagentSessions={subagentSessions}
           onViewSubagent={onViewSubagent}
@@ -359,6 +401,9 @@ export function ProjectList({
 }
 
 function ProjectBranch({
+  organization,
+  organizationDisabled,
+  onOrganizationChange,
   subagentSessions,
   selectedSubagent,
   onViewSubagent,
@@ -366,6 +411,7 @@ function ProjectBranch({
   sessions,
   allSessions,
   manualOrder = true,
+  searchActive = false,
   activePath,
   runningSessionPaths,
   unreadSessionPaths,
@@ -392,6 +438,7 @@ function ProjectBranch({
   sessions: SessionMeta[]
   allSessions: SessionMeta[]
   manualOrder?: boolean
+  searchActive?: boolean
   activePath?: string
   runningSessionPaths: ReadonlySet<string>
   unreadSessionPaths?: ReadonlySet<string>
@@ -410,8 +457,9 @@ function ProjectBranch({
   onFork: (cwd: string, path: string, entryId: string) => Promise<string>
   favoritePaths: ReadonlySet<string>
   onToggleFavorite: (path: string) => void
-}): ReactElement {
+} & SessionOrganizationProps): ReactElement {
   const [open, setOpen] = useState(true)
+  const expanded = open || searchActive
   const [renameOpen, setRenameOpen] = useState(false)
   const [renameBusy, setRenameBusy] = useState(false)
   const [renameError, setRenameError] = useState('')
@@ -488,6 +536,19 @@ function ProjectBranch({
     })
     onReorder(branch.cwd, orderedAll.map((session) => session.path))
   }
+  const itemProps: ComponentProps<typeof SessionItems> = {
+    selectedSubagent, subagentSessions, onViewSubagent, sessions, activePath,
+    runningSessionPaths, unreadSessionPaths, attentionSessionPaths, previewDensity,
+    favoritePaths, onToggleFavorite,
+    onSelect: (path) => onSelectSession(branch.cwd, path),
+    onReorder: !manualOrder || sessions.some((session) => session.optimistic) ? undefined : handleReorder,
+    onDelete: (path) => onDelete(branch.cwd, path),
+    onCopy: (path) => onCopy(branch.cwd, path),
+    onRename: (path, name) => onRename(branch.cwd, path, name),
+    onOpenTaskHistory,
+    getForkMessages: (path) => getForkMessages(branch.cwd, path),
+    onFork: (path, entryId) => onFork(branch.cwd, path, entryId)
+  }
 
   return (
     <div className="project-branch">
@@ -500,8 +561,8 @@ function ProjectBranch({
         <button
           type="button"
           className="project-branch-toggle"
-          aria-expanded={open}
-          aria-label={open ? `收起 ${branch.name} 分支` : `展开 ${branch.name} 分支`}
+          aria-expanded={expanded}
+          aria-label={expanded ? `收起 ${branch.name} 分支` : `展开 ${branch.name} 分支`}
           onClick={() => setOpen((value) => !value)}
         >
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -582,33 +643,15 @@ function ProjectBranch({
           setDeleteError('')
         }}
       />
-      {open && (
+      {expanded && (
         <div className="project-branch-sessions">
-          {sessions.length === 0 ? (
+          {organization && onOrganizationChange ? (
+            <SessionFolderTree cwd={branch.cwd} organization={organization}
+              organizationDisabled={organizationDisabled} onOrganizationChange={onOrganizationChange}
+              searchActive={searchActive} itemProps={itemProps} />
+          ) : sessions.length === 0 ? (
             <div className="project-folder-empty">暂无会话</div>
-          ) : (
-            <SessionItems
-              selectedSubagent={selectedSubagent}
-              subagentSessions={subagentSessions}
-              onViewSubagent={onViewSubagent}
-              sessions={sessions}
-              activePath={activePath}
-              runningSessionPaths={runningSessionPaths}
-              unreadSessionPaths={unreadSessionPaths}
-              attentionSessionPaths={attentionSessionPaths}
-              previewDensity={previewDensity}
-              favoritePaths={favoritePaths}
-              onToggleFavorite={onToggleFavorite}
-              onSelect={(path) => onSelectSession(branch.cwd, path)}
-              onReorder={!manualOrder || sessions.some((session) => session.optimistic) ? undefined : handleReorder}
-              onDelete={(path) => onDelete(branch.cwd, path)}
-              onCopy={(path) => onCopy(branch.cwd, path)}
-              onRename={(path, name) => onRename(branch.cwd, path, name)}
-              onOpenTaskHistory={onOpenTaskHistory}
-              getForkMessages={(path) => getForkMessages(branch.cwd, path)}
-              onFork={(path, entryId) => onFork(branch.cwd, path, entryId)}
-            />
-          )}
+          ) : <SessionItems {...itemProps} />}
         </div>
       )}
     </div>
@@ -616,6 +659,9 @@ function ProjectBranch({
 }
 
 function ProjectFolder({
+  organization,
+  organizationDisabled,
+  onOrganizationChange,
   subagentSessions,
   selectedSubagent,
   onViewSubagent,
@@ -675,7 +721,7 @@ function ProjectFolder({
   onFork: (cwd: string, path: string, entryId: string) => Promise<string>
   favoritePaths: ReadonlySet<string>
   onToggleFavorite: (path: string) => void
-}): ReactElement {
+} & SessionOrganizationProps): ReactElement {
   const [open, setOpen] = useState(true)
   const expanded = open || searchActive
   const active = branches.some(({ branch }) => branch.cwd === activeCwd)
@@ -736,6 +782,9 @@ function ProjectFolder({
             allKeys={branches.map(({ branch }) => branch.cwd)} getKey={({ branch }) => branch.cwd}>
           {({ branch, sessions, allSessions, manualOrder }) => (
             <ProjectBranch
+              organization={organization}
+              organizationDisabled={organizationDisabled}
+              onOrganizationChange={onOrganizationChange}
               selectedSubagent={selectedSubagent}
               subagentSessions={subagentSessions}
               onViewSubagent={onViewSubagent}
@@ -744,6 +793,7 @@ function ProjectFolder({
               sessions={sessions}
               allSessions={allSessions}
               manualOrder={manualOrder}
+              searchActive={searchActive}
               activePath={activePath}
               runningSessionPaths={runningSessionPaths}
               unreadSessionPaths={unreadSessionPaths}

@@ -52,6 +52,12 @@ npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 
   从源码编译需要 Python 和平台 C++ 工具链（Linux build-essential / Windows Visual Studio Build Tools）。
   `electron-builder.yml` 已解包 node_modules，供 node-pty 原生模块及辅助程序在安装包中运行。
 
+## 会话文件夹与归档
+
+会话列表在各工作树下支持嵌套虚拟文件夹；会话右键提供“移到文件夹”和“归档会话”。“技能与工具”下方的“归档”打开统一面板，支持搜索、打开与恢复。删除文件夹时，直属会话和子文件夹提升到父级；恢复归档保留原文件夹归属和收藏状态，后台任务继续运行。
+
+组织元数据保存在 `userData/pion-session-organization.json`。`SessionOrganizationStore` 在单实例中串行读改写，以暂存文件同步后 rename 发布递增 revision；renderer 经 typed IPC 读取与局部更新，主进程核验所属活主帧，目录/会话归属使用 exact cwd 与真实 session path。查询与分类仅访问组织元数据，SDK 历史、后端、队列和权限继续使用既有生命周期。错误保留原数据和快照，初读失败提供重试；API owner 与 revision 拒绝迟到结果，真实保存持槽到 Promise 收口，退出关闭新准入并等待在途读写。名称缓存只供列表展示，显式打开仍走正常会话选择流程。
+
 ## 历史跳转动画
 
 跳转条高亮采用持续挂载的显示层，在同一可见历史窗口内平滑滑向真实活动 entry；正文使用独立单 RAF 数值定位，逐帧实测目标行和滚动范围，与末尾跟随互斥。新跳转、手势、真实会话/项目/reset 变化、隐藏或卸载取消旧动画，程序化滚动不触发分页或恢复跟随。减少动态效果即时。跨页须先等真实目标加载；旧窗口替换可能移除原内容，不估计全量历史高度或承诺跨页保持整个旧视觉窗口。首次恢复和分页锚点补偿仍即时。

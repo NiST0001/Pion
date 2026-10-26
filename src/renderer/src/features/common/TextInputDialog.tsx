@@ -37,6 +37,7 @@ export function TextInputDialog({
   const dialogRef = useRef<HTMLFormElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const busyRef = useRef(busy)
+  const composingRef = useRef(false)
   const onCancelRef = useRef(onCancel)
   const titleId = useId()
   const messageId = useId()
@@ -49,6 +50,7 @@ export function TextInputDialog({
 
   useEffect(() => {
     if (!open) return
+    composingRef.current = false
     setValue(initialValue)
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const frame = requestAnimationFrame(() => {
@@ -62,7 +64,7 @@ export function TextInputDialog({
         containModalTab(event, dialog)
         return
       }
-      if (event.key !== 'Escape' || busyRef.current) return
+      if (event.key !== 'Escape' || busyRef.current || event.isComposing || event.keyCode === 229 || composingRef.current) return
       event.preventDefault()
       event.stopImmediatePropagation()
       onCancelRef.current()
@@ -80,7 +82,7 @@ export function TextInputDialog({
   const trimmed = value.replace(/[\r\n]+/g, ' ').trim()
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault()
-    if (!trimmed || busy) return
+    if (!trimmed || busy || composingRef.current) return
     onConfirm(trimmed)
   }
 
@@ -101,6 +103,11 @@ export function TextInputDialog({
         aria-labelledby={titleId}
         aria-describedby={message ? messageId : undefined}
         onSubmit={submit}
+        onCompositionStartCapture={() => { composingRef.current = true }}
+        onCompositionEndCapture={() => { composingRef.current = false }}
+        onKeyDownCapture={(event) => {
+          if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229 || composingRef.current)) event.preventDefault()
+        }}
       >
         <div className="confirm-dialog-icon" aria-hidden="true"><PencilLine size={17} /></div>
         <div className="confirm-dialog-copy">

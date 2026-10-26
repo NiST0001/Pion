@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { BarChart3, ShieldCheck, Users, X } from 'lucide-react'
+import { Archive, BarChart3, ShieldCheck, Users, X } from 'lucide-react'
 import { containModalTab, isTopmostModalDialog } from '../../utils/dialogFocus'
 
 export type OperationsPanelKind = 'verification' | 'agents' | 'stats'
@@ -13,7 +13,7 @@ export function OperationsModal({
   children,
   onClose
 }: {
-  kind: OperationsPanelKind
+  kind: OperationsPanelKind | 'archive'
   children: ReactNode
   onClose(): void
 }): ReactElement {
@@ -22,8 +22,8 @@ export function OperationsModal({
   const titleId = useId()
   const onCloseRef = useRef(onClose)
   const composingRef = useRef(false)
-  const title = kind === 'stats' ? '使用总览' : kind === 'verification' ? '项目自动验证' : '隔离多 Agent'
-  const command = kind === 'stats' ? '/stats' : kind === 'verification' ? '/verify' : '/agents'
+  const title = kind === 'archive' ? '归档会话' : kind === 'stats' ? '使用总览' : kind === 'verification' ? '项目自动验证' : '隔离多 Agent'
+  const command = kind === 'archive' ? undefined : kind === 'stats' ? '/stats' : kind === 'verification' ? '/verify' : '/agents'
 
   useLayoutEffect(() => { onCloseRef.current = onClose }, [onClose])
 
@@ -44,10 +44,9 @@ export function OperationsModal({
         event.stopImmediatePropagation()
         return
       }
-      if (event.key !== 'Escape' && (kind !== 'stats' || event.key !== 'Enter')) return
-      // Stats has only buttons/read-only regions. Keep the existing panels' text
-      // editing and PionSelect key handlers intact; only stats needs this capture gate.
-      // Consume before closing restores Composer focus. IME completion is not an action.
+      if (event.key !== 'Escape' && ((kind !== 'stats' && kind !== 'archive') || event.key !== 'Enter')) return
+      // Read-only/search panels consume Enter before it reaches Composer;
+      // native button activation still works. Editing panels keep their own handlers.
       event.stopImmediatePropagation()
       if (event.isComposing || event.keyCode === 229 || composingRef.current || (kind === 'stats' && event.repeat)) {
         if (kind === 'stats') event.preventDefault()
@@ -59,7 +58,7 @@ export function OperationsModal({
       if (event.repeat) return
       onCloseRef.current()
     }
-    const captureKeys = kind === 'stats'
+    const captureKeys = kind === 'stats' || kind === 'archive'
     window.addEventListener('keydown', onKeyDown, captureKeys)
     return () => {
       composingRef.current = false
@@ -99,11 +98,11 @@ export function OperationsModal({
       >
         <header className="operations-modal-head">
           <span className="operations-modal-icon">
-            {kind === 'stats' ? <BarChart3 size={15} /> : kind === 'verification' ? <ShieldCheck size={15} /> : <Users size={15} />}
+            {kind === 'archive' ? <Archive size={15} /> : kind === 'stats' ? <BarChart3 size={15} /> : kind === 'verification' ? <ShieldCheck size={15} /> : <Users size={15} />}
           </span>
           <div>
             <h2 id={titleId}>{title}</h2>
-            <span>输入 <code>{command}</code> 可随时重新打开</span>
+            {command && <span>输入 <code>{command}</code> 可随时重新打开</span>}
           </div>
           <button ref={closeRef} type="button" aria-label={`关闭${title}`} onClick={close}>
             <X size={15} />

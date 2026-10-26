@@ -2,8 +2,10 @@ import { Fragment, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactElement } from 'react'
 import {
+  Archive,
   ChevronRight,
   Copy,
+  FolderInput,
   GitBranch,
   GripVertical,
   History,
@@ -17,6 +19,7 @@ import type { SubagentSessionSummary } from '../../../../shared/subagent-session
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { ConfirmDialog } from '../common/ConfirmDialog'
 import { TextInputDialog } from '../common/TextInputDialog'
+import { PionSelect } from '../common/PionSelect'
 
 const subagentStatusLabel: Record<SubagentSessionSummary['status'], string> = {
   starting: '准备中', running: '运行中', cancelling: '停止中', completed: '已完成', failed: '失败', aborted: '已停止'
@@ -50,6 +53,11 @@ interface SessionItemActions {
   attentionSessionPaths?: ReadonlySet<string>
   onSelect: (path: string) => void
   onReorder?: (sessions: SessionMeta[]) => void
+  onArchive?: (path: string) => Promise<void>
+  folderOptions?: Array<{ value: string; label: string }>
+  sessionFolderIds?: ReadonlyMap<string, string | undefined>
+  onMoveToFolder?: (path: string, folderId: string | null) => Promise<void>
+  organizationDisabled?: boolean
   onDelete: (path: string) => Promise<void>
   onCopy: (path: string) => Promise<void>
   onRename: (path: string, name: string) => Promise<void>
@@ -79,7 +87,12 @@ export function SessionItems({
   getForkMessages,
   onFork,
   favoritePaths,
-  onToggleFavorite
+  onToggleFavorite,
+  onArchive,
+  folderOptions,
+  sessionFolderIds,
+  onMoveToFolder,
+  organizationDisabled
 }: { sessions: SessionMeta[]; previewDensity: SessionPreviewDensity } & SessionItemActions): ReactElement {
   const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(null)
   const [draggedPath, setDraggedPath] = useState<string | null>(null)
@@ -246,10 +259,11 @@ export function SessionItems({
       })}
       {contextMenu && createPortal(
         <SessionContextMenu
+          key={contextMenu.session.path}
           session={contextMenu.session}
           x={contextMenu.x}
           y={contextMenu.y}
-          onClose={() => setContextMenu(null)}
+          onClose={() => setContextMenu((current) => current === contextMenu ? null : current)}
           onDelete={onDelete}
           onCopy={onCopy}
           onRename={onRename}
@@ -258,6 +272,11 @@ export function SessionItems({
           onFork={onFork}
           favorite={favoritePaths.has(contextMenu.session.path)}
           onToggleFavorite={onToggleFavorite}
+          onArchive={onArchive}
+          folderOptions={folderOptions}
+          folderId={sessionFolderIds?.get(contextMenu.session.path)}
+          onMoveToFolder={onMoveToFolder}
+          organizationDisabled={organizationDisabled}
         />,
         document.body
       )}
@@ -283,7 +302,12 @@ function SessionContextMenu({
   getForkMessages,
   onFork,
   favorite,
-  onToggleFavorite
+  onToggleFavorite,
+  onArchive,
+  folderOptions,
+  folderId,
+  onMoveToFolder,
+  organizationDisabled = false
 }: SessionContextMenuState & {
   onClose: () => void
   onDelete: (path: string) => Promise<void>
@@ -294,6 +318,11 @@ function SessionContextMenu({
   onFork: (path: string, entryId: string) => Promise<string>
   favorite: boolean
   onToggleFavorite: (path: string) => void
+  onArchive?: (path: string) => Promise<void>
+  folderOptions?: Array<{ value: string; label: string }>
+  folderId?: string
+  onMoveToFolder?: (path: string, folderId: string | null) => Promise<void>
+  organizationDisabled?: boolean
 }): ReactElement {
   const menuRef = useRef<HTMLDivElement>(null)
   const [branchOpen, setBranchOpen] = useState(false)
@@ -301,16 +330,18 @@ function SessionContextMenu({
   const [loadingForks, setLoadingForks] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [renameOpen, setRenameOpen] = useState(false)
+  const [moveOpen, setMoveOpen] = useState(false)
+  const actionPending = useRef(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent): void => {
-      if (confirmDelete || renameOpen) return
+      if (confirmDelete || renameOpen || moveOpen) return
       if (!menuRef.current?.contains(event.target as Node)) onClose()
     }
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (confirmDelete || renameOpen) return
+      if (confirmDelete || renameOpen || moveOpen) return
       if (event.key === 'Escape') onClose()
     }
     const handleResize = (): void => onClose()
@@ -322,17 +353,22 @@ function SessionContextMenu({
       document.removeEventListener('keydown', handleKeyDown)
       window.removeEventListener('resize', handleResize)
     }
-  }, [confirmDelete, onClose, renameOpen])
+  }, [confirmDelete, onClose, renameOpen, moveOpen])
 
   const runAction = async (action: () => Promise<unknown>): Promise<void> => {
+    if (actionPending.current) return
+    actionPending.current = true
     setBusy(true)
     setError('')
     try {
       await action()
+      setBusy(false)
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setBusy(false)
+    } finally {
+      actionPending.current = false
     }
   }
 
@@ -454,7 +490,32 @@ function SessionContextMenu({
         <Trash2 size={14} />
         <span>删除会话</span>
       </button>
-      {error && !confirmDelete && !renameOpen && <div className="context-menu-error">{error}</div>}
+      {onMoveToFolder && folderOptions && (
+        <button type="button" className="context-menu-item" disabled={busy || organizationDisabled}
+          onClick={() => { setError(''); setMoveOpen(true) }}>
+          <FolderInput size={14} /><span>移到文件夹</span>
+        </button>
+      )}
+      {onArchive && (
+        <button type="button" className="context-menu-item" disabled={busy || organizationDisabled}
+          onClick={() => { if (!organizationDisabled) void runAction(() => onArchive(session.path)) }}>
+          <Archive size={14} /><span>归档会话</span>
+        </button>
+      )}
+      {error && !confirmDelete && !renameOpen && !moveOpen && <div className="context-menu-error" role="alert">{error}</div>}
+      <SessionFolderMoveDialog
+        open={moveOpen}
+        title="移动会话"
+        options={folderOptions ?? []}
+        initialValue={folderId ?? ''}
+        busy={busy}
+        disabled={organizationDisabled || !onMoveToFolder}
+        error={error}
+        onConfirm={(value) => {
+          if (!organizationDisabled && onMoveToFolder) void runAction(() => onMoveToFolder(session.path, value || null))
+        }}
+        onCancel={() => { if (!busy) { setMoveOpen(false); setError('') } }}
+      />
       <TextInputDialog
         open={renameOpen}
         title="重命名会话"
@@ -487,5 +548,42 @@ function SessionContextMenu({
         }}
       />
     </div>
+  )
+}
+
+/** Shared folder picker for session and directory moves. Commits only on confirmation. */
+export function SessionFolderMoveDialog({
+  open, title, options, initialValue, busy = false, disabled = false, error, onConfirm, onCancel
+}: {
+  open: boolean
+  title: string
+  options: Array<{ value: string; label: string }>
+  initialValue: string
+  busy?: boolean
+  disabled?: boolean
+  error?: string
+  onConfirm: (value: string) => void
+  onCancel: () => void
+}): ReactElement {
+  const [value, setValue] = useState(initialValue)
+  useEffect(() => { if (open) setValue(initialValue) }, [open, initialValue])
+  const valid = options.some((option) => option.value === value)
+  return (
+    <ConfirmDialog
+      open={open}
+      title={title}
+      tone="accent"
+      message="选择目标文件夹。"
+      detail={<>
+        <PionSelect value={value} options={options} ariaLabel="目标文件夹"
+          disabled={busy || disabled} onValueChange={setValue} />
+        {error && <div role="alert" className="session-organization-error">{error}</div>}
+        {!valid && <div role="alert">请选择有效的目标文件夹。</div>}
+      </>}
+      confirmLabel="确认移动"
+      busy={busy || disabled}
+      onConfirm={() => { if (!busy && !disabled && valid) onConfirm(value) }}
+      onCancel={onCancel}
+    />
   )
 }

@@ -6,6 +6,23 @@ import { describe, expect, it, vi } from 'vitest'
 import { ConfirmDialog } from '../../src/renderer/src/features/common/ConfirmDialog'
 
 describe('ConfirmDialog', () => {
+  it('keeps folder selection open while Escape belongs to IME composition', () => {
+    const onCancel = vi.fn()
+    render(<ConfirmDialog open title="移动文件夹" message="选择目标" confirmLabel="移动"
+      onConfirm={vi.fn()} onCancel={onCancel} />)
+    const dialog = screen.getByRole('alertdialog')
+    fireEvent.compositionStart(dialog)
+    expect(fireEvent.keyDown(dialog, { key: 'Enter' })).toBe(false)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onCancel).not.toHaveBeenCalled()
+    fireEvent.compositionEnd(dialog)
+    fireEvent.keyDown(window, { key: 'Escape', isComposing: true })
+    fireEvent.keyDown(window, { key: 'Escape', keyCode: 229 })
+    expect(onCancel).not.toHaveBeenCalled()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalledOnce()
+  })
+
   it('renders in a portal and confirms explicitly', async () => {
     const onConfirm = vi.fn()
     const user = userEvent.setup()

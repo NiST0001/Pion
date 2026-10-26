@@ -56,6 +56,8 @@ export const IPC = {
   WorkflowCleanup: 'pion:workflow-cleanup',
 
   // session management
+  SessionOrganizationGet: 'pion:session-organization-get',
+  SessionOrganizationUpdate: 'pion:session-organization-update',
   AgentState: 'pion:agent-state',
   AgentSessionCommandInfo: 'pion:agent-session-command-info',
   AgentCopyLastAssistantText: 'pion:agent-copy-last-assistant-text',

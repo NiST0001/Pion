@@ -64,6 +64,8 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const api: PionApi = {
+  getSessionOrganization: () => ipcRenderer.invoke(IPC.SessionOrganizationGet),
+  updateSessionOrganization: (change) => ipcRenderer.invoke(IPC.SessionOrganizationUpdate, change),
   getUsageOverview: (query?: UsageOverviewQuery) => (query === undefined
     ? ipcRenderer.invoke(IPC.UsageOverview)
     : ipcRenderer.invoke(IPC.UsageOverview, query)) as Promise<UsageOverview>,

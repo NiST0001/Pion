@@ -22,6 +22,8 @@ import { useWindowEffects } from './hooks/useWindowEffects'
 import { useDeferredMount } from './hooks/useDeferredMount'
 import { useSessionResourceStage } from './hooks/useSessionResourceStage'
 import { useSessionModes } from './hooks/useSessionModes'
+import { useSessionOrganization } from './hooks/useSessionOrganization'
+import { sessionPlacementKey } from '../../shared/session-organization'
 import { deriveWorkingStatus } from './agent/workingStatus'
 import { DEFAULT_SUBAGENTS_ENABLED } from '../../shared/subagents'
 import { BROWSER_BLANK_URL, isAllowedBrowserUrl } from '../../shared/browser'
@@ -43,6 +45,7 @@ import {
 } from './utils/metricsSettings'
 import { TaskPanel } from './features/session/TaskPanel'
 import { PendingInteractionSessions } from './features/session/PendingInteractionSessions'
+import { ArchivedSessionsPanel } from './features/session/ArchivedSessionsPanel'
 import { QueuedMessagesCard } from './features/session/QueuedMessagesCard'
 import { ComposerSupportPanels } from './features/session/ComposerSupportPanels'
 import { ChatTimeline } from './features/chat/ChatTimeline'
@@ -81,6 +84,9 @@ const noChildPaging = async (): Promise<void> => {}
 
 export function App(): ReactElement {
   const { state, actions, selectionRef, hasBridge } = useAgent()
+  const sessionOrganization = useSessionOrganization(window.pion)
+  const [archiveOpen, setArchiveOpen] = useState(false)
+  const closeArchive = useCallback(() => setArchiveOpen(false), [])
   const childSessions = useSubagentSessions(window.pion, hasBridge)
   const viewingChild = Boolean(childSessions.selectedTarget)
   const childSummary = childSessions.selected ?? childSessions.sessions.find((item) =>
@@ -350,10 +356,22 @@ export function App(): ReactElement {
   const favoritePathSet = useMemo(() => new Set(favoriteSessionPaths), [favoriteSessionPaths])
   const runningSessionPathSet = useMemo(() => new Set(state.runningSessionPaths), [state.runningSessionPaths])
   const unreadSessionPathSet = useMemo(() => new Set(state.unreadSessionPaths), [state.unreadSessionPaths])
+  const archivedSessions = useMemo(() => sessionOrganization.organization.sessions.filter((entry) => entry.archived), [sessionOrganization.organization.sessions])
+  const archivedKeys = useMemo(() => new Set(archivedSessions.map((entry) => sessionPlacementKey(entry.cwd, entry.path))), [archivedSessions])
+  const archiveAttention = archivedSessions.some((entry) => attentionSessionPathSet.has(entry.path))
+  const organizationDisabled = !sessionOrganization.ready || sessionOrganization.saving
   const favoriteSessions = useMemo(() => {
-    const sessions = Object.values(state.sessionsByProject).flat()
+    const sessions = Object.entries(state.sessionsByProject).flatMap(([cwd, entries]) => entries
+      .filter((session) => !archivedKeys.has(sessionPlacementKey(cwd, session.path))))
     return orderFavoriteSessions(sessions, favoriteSessionPaths)
-  }, [favoriteSessionPaths, state.sessionsByProject])
+  }, [favoriteSessionPaths, state.sessionsByProject, archivedKeys])
+  const archiveFavorite = useCallback(async (session: SessionMeta): Promise<void> => {
+    const owners = Object.entries(state.sessionsByProject).filter(([cwd, entries]) =>
+      (!session.projectCwd || session.projectCwd === cwd) && entries.some((entry) => entry.path === session.path))
+    if (owners.length !== 1 || session.optimistic) throw new Error('会话所属工作树尚未确认，请重新选择。')
+    await sessionOrganization.update({ type: 'setSession', cwd: owners[0][0], path: session.path,
+      archived: true, title: session.name || session.preview || '未命名会话' })
+  }, [sessionOrganization.update, state.sessionsByProject])
 
   const messageRevert = useMessageRevert({
     scope: `${resourceCwd ?? ''}\u0000${selectedSession?.path ?? selectionRef.current.ownerPath ?? resourceSessionPath ?? ''}`,
@@ -563,14 +581,14 @@ export function App(): ReactElement {
   const closeSettings = useCallback(() => setSettingsOpen(false), [])
 
   const handleSelectSession = useCallback(
-    async (cwd: string, path: string) => {
+    async (cwd: string, path: string): Promise<boolean> => {
       // Selecting the already active parent is a view change, not an SDK switch.
       const requestId = ++sessionSelectionId.current
       const wasViewingChild = viewingChild
       childSessions.close()
       if (wasViewingChild && cwd === state.status.cwd && path === state.session?.sessionFile) {
         setSelectedSession(null)
-        return
+        return true
       }
       if (
         cwd === state.status.cwd &&
@@ -580,7 +598,7 @@ export function App(): ReactElement {
         (state.status.phase === 'running' || state.status.phase === 'starting')
       ) {
         setSelectedSession(null)
-        return
+        return true
       }
       const previousSelection = selectedSession
       const previousReviewPath = reviewPath
@@ -591,17 +609,21 @@ export function App(): ReactElement {
         // session's cwd and activates its retained backend; starting the project
         // first would blank the timeline and create a throwaway logical session.
         const result = await actions.switchSession(path, cwd)
-        if (result.cancelled && requestId === sessionSelectionId.current) {
-          setSelectedSession(previousSelection)
-          setReviewPath(previousReviewPath)
-          return
+        if (result.cancelled) {
+          if (requestId === sessionSelectionId.current) {
+            setSelectedSession(previousSelection)
+            setReviewPath(previousReviewPath)
+          }
+          return false
         }
+        return requestId === sessionSelectionId.current
       } catch (error) {
         if (requestId === sessionSelectionId.current) {
           setSelectedSession(previousSelection)
           setReviewPath(previousReviewPath)
         }
         console.error('[pion] 切换会话失败', error)
+        return false
       }
     },
     [actions, reviewPath, selectedSession, selectionRef, state.session?.sessionFile, state.status.cwd, state.status.phase, state.timelineError, state.timelineReady, state.timelineLoading, childSessions.close, viewingChild]
@@ -844,8 +866,18 @@ export function App(): ReactElement {
               onSearch={setSessionQuery}
               onNewSession={() => void handleNewSession()}
               onOpenCapabilities={() => setCapabilitiesOpen(true)}
+              onOpenArchive={() => setArchiveOpen(true)}
+              archiveCount={archivedSessions.length}
+              archiveAttention={archiveAttention}
             />
+            {hasBridge && sessionOrganization.error && <div className="session-organization-error" role="alert">
+              <span>{sessionOrganization.error}</span>
+              <button type="button" disabled={sessionOrganization.loading || sessionOrganization.saving}
+                onClick={() => void sessionOrganization.refresh()}>重试读取</button>
+            </div>}
             <FavoriteSessions
+              onArchive={archiveFavorite}
+              organizationDisabled={organizationDisabled}
               sessions={favoriteSessions}
               searchQuery={sessionQuery}
               previewDensity={sessionPreviewDensity}
@@ -864,6 +896,9 @@ export function App(): ReactElement {
               onFork={(session, entryId) => handleForkSession(session.projectCwd ?? state.status.cwd ?? '', session.path, entryId)}
             />
             <ProjectList
+              organization={sessionOrganization.organization}
+              organizationDisabled={organizationDisabled}
+              onOrganizationChange={sessionOrganization.update}
               projects={state.projects}
               sessionsByProject={state.sessionsByProject}
               branchesByProject={state.branchesByProject}
@@ -1198,6 +1233,24 @@ export function App(): ReactElement {
         </div>}
       </div>
 
+      {archiveOpen && <ArchivedSessionsPanel
+        organization={sessionOrganization.organization}
+        sessionsByProject={state.sessionsByProject}
+        ready={sessionOrganization.ready}
+        loading={sessionOrganization.loading}
+        saving={sessionOrganization.saving}
+        error={sessionOrganization.error}
+        activePath={activePath}
+        runningSessionPaths={runningSessionPathSet}
+        unreadSessionPaths={unreadSessionPathSet}
+        attentionSessionPaths={attentionSessionPathSet}
+        onRefresh={sessionOrganization.refresh}
+        onSelect={async (cwd, path) => {
+          if (!await handleSelectSession(cwd, path)) throw new Error('会话打开失败或已取消，请重试。')
+        }}
+        onRestore={(cwd, path) => sessionOrganization.update({ type: 'setSession', cwd, path, archived: false })}
+        onClose={closeArchive}
+      />}
       <WorkbenchDialogs
         operations={{
           kind: operationsPanel,
