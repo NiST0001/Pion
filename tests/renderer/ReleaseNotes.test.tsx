@@ -32,12 +32,12 @@ it('keeps bundled versions unique and in descending numeric order', () => {
   expect(versions).toEqual(newestFirst)
 })
 
-it('prepares 0.1.95 notes while preserving existing entries and omitting local install-only versions', () => {
+it('prepares 0.1.96 notes while preserving existing entries and omitting local install-only versions', () => {
   const versions = RELEASE_NOTES.map((release) => release.version)
   const historyStart = versions.indexOf('0.1.82')
   expect(historyStart).toBeGreaterThanOrEqual(0)
   expect(versions.slice(0, historyStart)).toEqual([
-    '0.1.95', '0.1.94', '0.1.93', '0.1.92', '0.1.91', '0.1.90', '0.1.89',
+    '0.1.96', '0.1.95', '0.1.94', '0.1.93', '0.1.92', '0.1.91', '0.1.90', '0.1.89',
     '0.1.88', '0.1.87', '0.1.86', '0.1.85', '0.1.84', '0.1.83'
   ])
   expect(versions.slice(historyStart, historyStart + 16)).toEqual([

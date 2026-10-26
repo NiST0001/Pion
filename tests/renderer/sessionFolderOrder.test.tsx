@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ComponentProps } from 'react'
-import type { SessionOrganization } from '../../src/shared/session-organization'
+import { applySessionOrganizationChange, type SessionOrganization } from '../../src/shared/session-organization'
 import type { SessionMeta } from '../../src/shared/types'
 import { SessionFolderTree } from '../../src/renderer/src/features/session/SessionFolderTree'
 
@@ -97,10 +97,10 @@ describe('session folder sibling ordering', () => {
     expect(order(view.container)).toEqual(['a', 'b', 'c'])
     await drop(target, dataTransfer)
     expect(change).toHaveBeenCalledTimes(1)
-    const org = current.organization, rootIds = ['b', 'c', 'a'], roots = new Set(rootIds)
-    let index = 0
-    view.rerender(wrap({ ...org, revision: 2, folders: org.folders.map((folder) => roots.has(folder.id)
-      ? org.folders.find((entry) => entry.id === rootIds[index++])! : folder) }))
+    const rootIds = ['b', 'c', 'a']
+    const saved = applySessionOrganizationChange(current.organization, { type: 'reorderFolders', cwd, ids: rootIds })
+    expect(saved.folders.map((folder) => folder.id)).toEqual(['b', 'a1', 'c', 'foreign', 'a2', 'a', 'a3'])
+    view.rerender(wrap(saved))
     expect(order(view.container)).toEqual(rootIds)
     expect(heading(view.container, 'a')).toBe(source)
     expect(source.querySelector('.session-folder-toggle')).toBe(toggle)
