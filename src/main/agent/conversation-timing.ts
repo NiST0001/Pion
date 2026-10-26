@@ -121,7 +121,8 @@ export function createConversationTiming(runtimeId: string): { extension: Extens
         if ((event.type === 'message_start' || event.type === 'message_end') && event.message.role === 'user') {
           const inputId = inputIds.get(event.message)
           if (inputId) {
-            listener({ ...event, message: { ...event.message, _pionTurnInputId: inputId } } as typeof event)
+            const message = { ...event.message, _pionTurnInputId: inputId }
+            listener({ ...event, message })
             return
           }
         }

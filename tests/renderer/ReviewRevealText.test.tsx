@@ -474,14 +474,16 @@ it('measures future barriers but skips past/static headers when admitting newly 
       data-line-reveal-start={future}>queued header</section>
     <pre><ReviewRevealText text="new detail" /></pre>
   </div>)
-  const past = vi.spyOn(container.querySelector<HTMLElement>('[data-part="past"]')!, 'getBoundingClientRect')
-  const completed = vi.spyOn(container.querySelector<HTMLElement>('[data-part="static"]')!, 'getBoundingClientRect')
-  const queued = vi.spyOn(container.querySelector<HTMLElement>('[data-part="future"]')!, 'getBoundingClientRect')
+  const past = container.querySelector<HTMLElement>('[data-part="past"]')!
+  const completed = container.querySelector<HTMLElement>('[data-part="static"]')!
+  const queued = container.querySelector<HTMLElement>('[data-part="future"]')!
+  const reads = vi.mocked(HTMLElement.prototype.getBoundingClientRect)
+  reads.mockClear()
   observer.reveal(observer.targets[0])
   advanceFrame()
-  expect(past).not.toHaveBeenCalled()
-  expect(completed).not.toHaveBeenCalled()
-  expect(queued).toHaveBeenCalledTimes(1)
+  expect(reads.mock.contexts.filter(node => node === past)).toHaveLength(0)
+  expect(reads.mock.contexts.filter(node => node === completed)).toHaveLength(0)
+  expect(reads.mock.contexts.filter(node => node === queued)).toHaveLength(1)
   const characters = [...container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
   expect(characters.map(node => node.textContent).join('')).toBe('new detail')
   expect(parseFloat(characters[0].style.getPropertyValue('--screen-text-reveal-delay'))).toBeGreaterThanOrEqual(1000)

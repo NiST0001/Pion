@@ -505,7 +505,8 @@ describe('conversation navigation', () => {
     const f = markerFixture()
     const content = f.element.querySelector<HTMLElement>('.timeline')!
     Object.defineProperty(content, 'offsetHeight', { value: 900 })
-    const box = (width: number) => [{ target: content, contentRect: { x: 0, y: 0, width, height: 900 } } as ResizeObserverEntry]
+    const box = (width: number): ResizeObserverEntry[] => [{ target: content,
+      contentRect: new DOMRect(0, 0, width, 900), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }]
     f.resize(box(600)) // first delivery also reconciles the initial layout
     expect(f.frames.size).toBe(1)
     f.flush()

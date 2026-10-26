@@ -26,6 +26,7 @@ function setup() {
   vi.stubGlobal('ResizeObserver', class {
     constructor(callback: () => void) { resize = callback }
     observe() {}
+    unobserve() {}
     disconnect() {}
   })
   const element = document.createElement('div')

@@ -55,7 +55,7 @@ it('places one folder action beside each branch’s new-session action and creat
   const callbacks = props(), view = render(<ProjectList {...callbacks} />)
   expect(screen.queryByRole('group', { name: '会话根目录' })).not.toBeInTheDocument()
   expect(screen.queryByText('根目录', { exact: true })).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: '新建文件夹', exact: true })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '新建文件夹' })).not.toBeInTheDocument()
   expect(view.container.querySelectorAll('.project-branch-new-folder')).toHaveLength(2)
   expect(row(view.container, root.path).closest('[data-folder-id]')).toBeNull()
   for (const [name, branchCwd] of [['main', cwd], ['feature', featureCwd]]) {

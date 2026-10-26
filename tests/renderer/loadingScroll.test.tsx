@@ -158,7 +158,14 @@ it('reads shrink/clearance geometry before reclaiming reserved height without pu
   })
   vi.spyOn(h.timeline, 'offsetHeight', 'get').mockImplementation(() => { phases.push('content'); return 2500 })
   vi.spyOn(h.element, 'clientHeight', 'get').mockImplementation(() => { phases.push('viewport'); return 400 })
-  const minHeight = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, 'minHeight')!.set!
+  let owner: object | null = h.surface.style
+  let descriptor: PropertyDescriptor | undefined
+  while (owner && !descriptor) {
+    descriptor = Object.getOwnPropertyDescriptor(owner, 'minHeight')
+    owner = Object.getPrototypeOf(owner)
+  }
+  if (!descriptor || typeof descriptor.set !== 'function') throw new Error('Expected a minHeight setter')
+  const minHeight = descriptor.set
   vi.spyOn(h.surface.style, 'minHeight', 'set').mockImplementation(function (this: CSSStyleDeclaration, value: string) {
     phases.push('write')
     minHeight.call(this, value)

@@ -91,12 +91,14 @@ function setup(phase: AgentState['status']['phase'] = 'running') {
   owner.value = { state, actions, selectionRef: { current: { generation: 1, ownerPath: parentPath } }, hasBridge: true }
   let listener: ((list: SubagentSessionList) => void) | undefined
   const apiMocks = {
+    getSessionOrganization: vi.fn<PionApi['getSessionOrganization']>(async () => ({ version: 1, revision: 0, folders: [], sessions: [] })),
+    updateSessionOrganization: vi.fn<PionApi['updateSessionOrganization']>(async () => { throw new Error('Unexpected organization mutation') }),
     listSubagentSessions: vi.fn(async (): Promise<SubagentSessionList> => ({ revision: 1, sessions: [summary] })),
     getSubagentSession: vi.fn(async (): Promise<SubagentSessionSnapshot | null> => snapshot),
     onSubagentSessions: vi.fn((callback: (list: SubagentSessionList) => void) => { listener = callback; return vi.fn() })
   }
   // Every window.pion method is an in-memory mock, including accidental calls
-  // outside the expected three observer methods. No real preload is retained.
+  // outside the observer methods and organization initialization. No real preload is retained.
   const fallback = new Map<PropertyKey, ReturnType<typeof vi.fn>>()
   const api = new Proxy(apiMocks, { get(target, key) {
     if (key in target) return target[key as keyof typeof target]
@@ -137,11 +139,19 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     vi.doMock('../../src/renderer/src/hooks/useVerification', () => ({ useVerification: () => ({}) }))
     vi.doMock('../../src/renderer/src/hooks/useWorkflows', () => ({ useWorkflows: () => ({ workflows: [] }) }))
     vi.doMock('../../src/renderer/src/hooks/useGitWorkspace', () => ({ useGitWorkspace: () => ({ snapshot: null }) }))
-    vi.doMock('../../src/renderer/src/hooks/usePanelLayout', () => ({ usePanelLayout: () => ({
-      maximized: false, sidebarOpen: true, reviewOpen: false, setSidebarOpen: vi.fn(), setReviewOpen: vi.fn(),
-      terminalOpen: false, setTerminalOpen: vi.fn(), browserOpen: false, setBrowserOpen: vi.fn(),
-      gitCommitTreeOpen: false, setGitCommitTreeOpen: vi.fn(), resetPanelVisibility: vi.fn()
-    }) }))
+    vi.doMock('../../src/renderer/src/hooks/usePanelLayout', async () => {
+      const { useState } = await import('react')
+      return { usePanelLayout: () => {
+        // Per-mount state, without reading persisted layout or window IPC.
+        // A no-op setter would mount the guest but keep its panel hidden.
+        const [browserOpen, setBrowserOpen] = useState(false)
+        return {
+          maximized: false, sidebarOpen: true, reviewOpen: false, setSidebarOpen: vi.fn(), setReviewOpen: vi.fn(),
+          terminalOpen: false, setTerminalOpen: vi.fn(), browserOpen, setBrowserOpen,
+          gitCommitTreeOpen: false, setGitCommitTreeOpen: vi.fn(), resetPanelVisibility: vi.fn()
+        }
+      } }
+    })
     vi.doMock('../../src/renderer/src/hooks/useDockLayout', () => ({ useDockLayout: () => ({
       rootRef: { current: null }, panelProps: () => ({}), dragProps: () => ({}), dividers: [],
       movePanel: vi.fn(), reset: vi.fn(), clearDrop: vi.fn()
@@ -242,6 +252,8 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     expect(f.apiMocks.getSubagentSession).toHaveBeenCalledWith('child', 'backend')
     expectNoParentBackendAction(f.actions)
     expect(f.fallback.size).toBe(0)
+    expect(f.apiMocks.getSessionOrganization).toHaveBeenCalledTimes(1)
+    expect(f.apiMocks.updateSessionOrganization).not.toHaveBeenCalled()
   })
 
   it('keeps pending questions in their own sessions, preserves drafts, and projects the shared blue markers', async () => {
@@ -380,6 +392,7 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     const view = render(<App />)
     await paint()
     expect(view.container.querySelector('webview')).toBeNull()
+    expect(screen.getByRole('button', { name: '浏览器' })).toHaveAttribute('aria-pressed', 'false')
     const openWindow = vi.spyOn(window, 'open').mockImplementation(() => null)
     fireEvent.click(screen.getByRole('link', { name: '查看构建流程' }))
     await paint()
@@ -388,15 +401,21 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     const loadURL = vi.fn(async () => {})
     Object.assign(guest, { loadURL, getURL: () => 'about:blank', getTitle: () => '', canGoBack: () => false, canGoForward: () => false })
     expect(screen.getByRole('button', { name: '浏览器' })).toHaveAttribute('aria-pressed', 'true')
+    expect(guest.closest('.browser-panel')).toHaveAttribute('aria-hidden', 'false')
     expect(loadURL).not.toHaveBeenCalled()
     fireEvent(guest, new Event('dom-ready'))
     await paint()
     expect(loadURL).toHaveBeenCalledExactlyOnceWith(first)
     fireEvent.click(screen.getByRole('button', { name: '浏览器' }))
     await paint()
+    expect(screen.getByRole('button', { name: '浏览器' })).toHaveAttribute('aria-pressed', 'false')
+    expect(guest.closest('.browser-panel')).toHaveAttribute('aria-hidden', 'true')
     expect(view.container.querySelector('webview')).toBe(guest)
+    expect(loadURL).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('link', { name: '查看发布页面' }))
     await paint()
+    expect(screen.getByRole('button', { name: '浏览器' })).toHaveAttribute('aria-pressed', 'true')
+    expect(guest.closest('.browser-panel')).toHaveAttribute('aria-hidden', 'false')
     expect(view.container.querySelector('webview')).toBe(guest)
     expect(loadURL).toHaveBeenCalledTimes(2)
     expect(loadURL).toHaveBeenLastCalledWith(second)
@@ -475,6 +494,8 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
     expect(child.querySelector('.tool-body')).toBe(toolBody)
     expectNoParentBackendAction(f.actions)
     expect(f.fallback.size).toBe(0)
+    expect(f.apiMocks.getSessionOrganization).toHaveBeenCalledTimes(1)
+    expect(f.apiMocks.updateSessionOrganization).not.toHaveBeenCalled()
   })
 
   it('binds manual-reading input after opening and reopening the conditional child viewport', async () => {
@@ -598,6 +619,8 @@ describe('App readonly subagent conversation in the ordinary chat surface', () =
       expect(input).toHaveValue('保留父草稿')
       expectNoParentBackendAction(f.actions)
       expect(f.fallback.size).toBe(0)
+      expect(f.apiMocks.getSessionOrganization).toHaveBeenCalledTimes(1)
+      expect(f.apiMocks.updateSessionOrganization).not.toHaveBeenCalled()
     } finally { styles.remove() }
   })
 

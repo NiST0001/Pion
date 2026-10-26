@@ -407,6 +407,21 @@ describe('native navigation and existing application controllers', () => {
     expect(h.result.current.dialog).toBeNull()
   })
 
+  it('keeps resume choices after a cancelled selection and closes after a successful retry', async () => {
+    const h = harness()
+    h.callbacks.onSelectSession.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    await execute(h, '/resume')
+    await act(async () => { h.result.current.dialog?.onSelect?.('/sessions/resume.jsonl') })
+    expect(h.result.current.dialog?.title).toBe('恢复会话')
+    expect(h.result.current.dialog?.busy).toBe(false)
+    expect(h.result.current.dialog?.entries?.map(entry => entry.id)).toContain('/sessions/resume.jsonl')
+    await act(async () => { h.result.current.dialog?.onSelect?.('/sessions/resume.jsonl') })
+    expect(h.callbacks.onSelectSession).toHaveBeenCalledTimes(2)
+    expect(h.result.current.dialog).toBeNull()
+    expect(h.api.switchSession).not.toHaveBeenCalled()
+    expectNoSendOrQueue(h)
+  })
+
   it.each([
     ['/verify', 'verification'], ['/agents', 'agents'], ['/stats', 'stats']
   ] as const)('opens the existing operations panel for %s', async (text, kind) => {

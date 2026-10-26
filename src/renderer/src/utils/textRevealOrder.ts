@@ -132,7 +132,7 @@ function createGroup(root: Element): Group {
         if (ancestor.dataset.textRevealReady === 'false'
           && (!openingGate || ancestor.dataset.textRevealOpen !== 'true')) { hidden = true; break }
         if (ancestor.tagName === 'DETAILS' && !ancestor.hasAttribute('open')) {
-          const summary = [...ancestor.children].find(child => child.tagName === 'SUMMARY')
+          const summary: Element | undefined = [...ancestor.children].find(child => child.tagName === 'SUMMARY')
           if (!summary?.contains(node)) { hidden = true; break }
         }
         const style = styleFor(ancestor)

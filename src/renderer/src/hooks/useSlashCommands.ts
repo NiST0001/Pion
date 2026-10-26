@@ -36,7 +36,7 @@ interface UseSlashCommandsOptions {
   onOpenSettings: (request: Omit<SettingsNavigationRequest, 'id'>) => void
   onNewSession: () => Promise<void>
   onCloneSession: () => Promise<void>
-  onSelectSession: (cwd: string, path: string) => Promise<void>
+  onSelectSession: (cwd: string, path: string) => Promise<void | boolean>
   onOpenOperations: (kind: 'verification' | 'agents' | 'stats') => void
   onModeChange: (mode: AgentMode) => void
   onRequestYolo: (enabled: boolean) => void
@@ -156,14 +156,15 @@ export function useSlashCommands(options: UseSlashCommandsOptions) {
         throw new Error('请等待当前运行及收尾完成，并处理排队消息')
       }
     }
-    const run = (operation: () => Promise<void>, busy = false): void => {
+    const run = (operation: () => Promise<void>, busy = false, preserveChoices = false): void => {
       if (actualPending.current.has(name) || (busy && actualMutations.current.size > 0)) {
         fail(new Error('该命令的实际操作尚未收口，请等待；不会重复调用'))
         return
       }
       actualPending.current.add(name)
       if (busy) actualMutations.current.add(name)
-      show({ title: `/${name}`, loading: true, busy })
+      if (preserveChoices) update({ loading: true, busy })
+      else show({ title: `/${name}`, loading: true, busy })
       // The slot survives dialog close, selection changes, and all late results.
       void Promise.resolve().then(() => {
         if (!owned()) throw new Error('所选会话已变化，未执行命令')
@@ -174,9 +175,9 @@ export function useSlashCommands(options: UseSlashCommandsOptions) {
         update({ loading: false, busy: false })
       })
     }
-    const select = (operation: () => Promise<void>): void => {
+    const select = (operation: () => Promise<void>, preserveChoices = false): void => {
       if (!current() || actualPending.current.has(name)) return
-      run(operation, true)
+      run(operation, true, preserveChoices)
     }
     try {
       if (actualPending.current.has(name)) throw new Error('该命令的实际操作尚未收口，请等待；不会重复调用')
@@ -249,7 +250,7 @@ export function useSlashCommands(options: UseSlashCommandsOptions) {
               detail: `${session.path}\n${session.preview}`, selected: session.path === state.session?.sessionFile
             })), onSelect: (path) => {
               if (!current() || !sessions.some((session) => session.path === path && !session.optimistic)) return
-              select(async () => { await captured.onSelectSession(cwd, path); if (current()) close() })
+              select(async () => { if (await captured.onSelectSession(cwd, path) !== false && current()) close() }, true)
             } })
         })
       } else if (name === 'session') {

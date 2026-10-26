@@ -133,7 +133,7 @@ describe('session folder drag interaction', () => {
     expect(target(view.container, 'root')).toBe(view.container.querySelector('.session-folder-tree'))
     expect(screen.queryByRole('group', { name: '会话根目录' })).not.toBeInTheDocument()
     expect(screen.queryByText('根目录', { exact: true })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '新建文件夹', exact: true })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '新建文件夹' })).not.toBeInTheDocument()
     for (const [path, id] of [[root.path, 'root'], [nested.path, 'child']]) {
       const dataTransfer = start(row(view.container, path))
       hover(target(view.container, id), dataTransfer)

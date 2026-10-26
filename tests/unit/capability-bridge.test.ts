@@ -151,6 +151,25 @@ describe('capability Bridge read and source receipts', () => {
     expect(h.bridge.ensureActiveBackend).not.toHaveBeenCalled()
   })
 
+  it.each(['global', 'project'])('reads and saves %s settings without a backend or implicit startup', async (scope) => {
+    const h = await harness()
+    h.pool.delete(h.backend.key)
+    const cwd = scope === 'global' ? undefined : h.cwd
+    const current = await h.bridge.getCapabilitySettings(cwd)
+    expect(current.application.state).toBe('no-backend')
+    const saved = await h.bridge.updateCapabilitySettings({ cwd, expectedRevision: current.revision,
+      catalogueRevision: current.catalogueRevision, change: { type: 'preset', preset: 'minimal' } })
+    expect(saved.revision).toBe(current.revision + 1)
+    expect(saved.application.state).toBe('no-backend')
+    expect(saved.items.find((item: CapabilityItem) => item.id === 'tool:pion_subagents')?.enabled).toBe(false)
+    expect(h.bridge.ensureActiveBackend).not.toHaveBeenCalled()
+    expect(h.client.getCommands).not.toHaveBeenCalled()
+    expect(h.client.getState).not.toHaveBeenCalled()
+    expect(h.client.switchSession).not.toHaveBeenCalled()
+    expect(h.client.newSession).not.toHaveBeenCalled()
+    expect(h.client.prompt).not.toHaveBeenCalled()
+  })
+
   it('rechecks the desired/catalogue revisions and refuses unknown slots before saving', async () => {
     const h = await harness()
     h.backend.busy = true
@@ -430,9 +449,14 @@ describe('capability Bridge true-idle application', () => {
   it('retains the real apply promise and isolates replacement failure instead of claiming applied or retrying', async () => {
     const h = await harness(true)
     const replacement = deferred<{ cancelled: boolean }>()
-    h.client.switchSession.mockReturnValueOnce(replacement.promise)
+    const replacing = deferred<void>()
+    h.client.switchSession.mockImplementationOnce(() => {
+      replacing.resolve()
+      return replacement.promise
+    })
     await h.save()
-    await gap()
+    // The reserved applyPromise can still be awaiting real FS preparation.
+    await replacing.promise
     expect(h.backend.capability?.applyPromise).toBeDefined()
     await expect(h.bridge.newSession()).rejects.toThrow('应用')
     expect(h.client.prompt).not.toHaveBeenCalled()

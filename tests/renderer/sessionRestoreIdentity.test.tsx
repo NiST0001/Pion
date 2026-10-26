@@ -425,7 +425,9 @@ function timelineView(h: Harness) {
   }
   paint()
   const targetNodes = () => [...view.container.querySelectorAll<HTMLElement>('.row-user, .row-assistant')]
-    .filter((row) => row.textContent === prompt || row.textContent === answer)
+    .filter((row) => row.classList.contains('row-user')
+      ? row.querySelector('.bubble-user > .bubble-content')?.textContent === prompt
+      : row.querySelector('[data-live-output="assistant-text"]')?.textContent === answer)
   const expectCount = (turns: number) => {
     expect(view.container.querySelectorAll('.row-user').length).toBe(
       h.result.current.state.timeline.filter((row) => row.kind === 'user').length)

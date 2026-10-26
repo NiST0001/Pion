@@ -3,7 +3,9 @@ import type { AgentSession, AgentSessionEvent, ExtensionAPI, ExtensionContext, S
 import { createConversationTiming } from '../../src/main/agent/conversation-timing'
 import { PION_TURN_TIMING_TYPE, parseTurnTiming, turnTimingFromEntry } from '../../src/shared/conversation-timing'
 
-const user = (timestamp: unknown = 1000) => ({ role: 'user' as const, content: 'same text', timestamp })
+function user(timestamp?: number): { role: 'user'; content: string; timestamp: number }
+function user(timestamp: unknown): { role: 'user'; content: string; timestamp: unknown }
+function user(timestamp: unknown = 1000) { return { role: 'user' as const, content: 'same text', timestamp } }
 const assistant = (stopReason = 'stop') => ({ role: 'assistant', stopReason, timestamp: 1234 })
 const custom = (data: unknown) => ({ type: 'custom', customType: PION_TURN_TIMING_TYPE, data })
 const record = { version: 1, userEntryId: 'sdk-user', inputId: 'runtime:1', startedAt: 1000, finishedAt: 5000, durationMs: 4000, outcome: 'completed' }
@@ -259,6 +261,7 @@ describe('SDK settled timing receipts', () => {
     h.session.dispose = () => {
       expect(manager.appendMessage).toBe(outer)
       manager.appendMessage = inner
+      h.session.dispose = innerDispose
       innerDispose.call(h.session)
     }
     await h.start(message)

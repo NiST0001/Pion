@@ -660,7 +660,7 @@ export class AgentBridge {
     }
     let runtimeNotice = backend?.capability?.noticeClient === backendClient ? backend?.capability?.notice : undefined
     let unavailable = false
-    if (backend?.cwd === cwd && backend.phase === 'running' && !backend.historyMutation && !backend.historyStopFailed) {
+    if (backend && backend.cwd === cwd && backend.phase === 'running' && !backend.historyMutation && !backend.historyStopFailed) {
       try {
         await this.readCapabilityCommands(backend)
         runtimeNotice = backend.capability?.noticeClient === backendClient ? backend.capability?.notice : undefined

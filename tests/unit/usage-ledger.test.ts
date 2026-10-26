@@ -535,13 +535,13 @@ describe('durable local usage ledger', () => {
     const clock = backgroundClock()
     const timeout = vi.mocked(globalThis.setTimeout).getMockImplementation()!
     let held = false
-    vi.mocked(globalThis.setTimeout).mockImplementation(((callback: () => void, delay: number, ...args: unknown[]) => {
+    vi.mocked(globalThis.setTimeout).mockImplementation((callback, delay) => {
       if (delay === 20 && firstClosed && !held) {
         held = true
-        return timeout(() => { started.resolve(); void release.promise.then(callback) }, delay, ...args)
+        return timeout(() => { started.resolve(); void release.promise.then(callback) }, delay)
       }
-      return timeout(callback, delay, ...args)
-    }) as typeof setTimeout)
+      return timeout(callback, delay)
+    })
     f.ledger.setBackgroundCollectionEnabled(true)
     f.ledger.scheduleSession(first)
     f.ledger.scheduleSession(second)

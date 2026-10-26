@@ -33,7 +33,9 @@ it('revalidates the new API shell/cursor while an old deletion still holds its a
     deleteSession: vi.fn(() => deletion.promise), getState: vi.fn(async () => current),
     getEntriesPage: vi.fn(async (_before?: number, _limit?: number, path?: string) => page(path ?? C)),
     getAvailableModels: vi.fn(async () => []), getThinkingLevels: vi.fn(async () => ['off']),
-    getCommands: vi.fn(async () => [])
+    getCommands: vi.fn(async () => []),
+    onEvent: vi.fn((_listener: Parameters<PionApi['onEvent']>[0]) => vi.fn(() => {})),
+    getHistoryIndex: vi.fn(async (_sessionPath: string) => null)
   }
   window.pion = oldApi as unknown as PionApi
   const view = renderHook(() => useAgent())

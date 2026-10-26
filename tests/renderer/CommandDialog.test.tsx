@@ -463,6 +463,7 @@ describe('CommandDialog selection, loading and actual pending ownership', () => 
       { id: 'blocked', label: 'Blocked', disabled: true },
       { id: 'provider/model:exact id', label: 'Enabled' }
     ] })
+    expect(screen.getByRole('button', { name: 'Enabled' })).toHaveAttribute('aria-label', 'Enabled')
     fireEvent.click(screen.getByRole('button', { name: 'Blocked' }))
     expect(props.onSelect).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Enabled' }))
