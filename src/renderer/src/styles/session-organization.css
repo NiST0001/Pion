@@ -17,7 +17,12 @@
   cursor: pointer;
 }
 .session-folder-heading { display: flex; align-items: center; min-width: 0; gap: 2px; }
+.session-folder-heading.is-dragging { opacity: 0.45; }
+.session-folder-heading.is-drop-target { outline: 1px dashed var(--accent-strong); outline-offset: -1px; }
+.session-folder-heading .session-folder-drag { margin-top: 0; }
+.session-folder-heading:hover .session-folder-drag { color: var(--accent-strong); opacity: 1; }
 .session-folder-toggle { flex: 1; min-width: 0; padding: 3px 4px; text-align: left; }
+.session-folder-toggle[draggable='true'] { cursor: grab; }
 .session-folder-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-folder-toggle svg { flex-shrink: 0; }
 .session-folder-toggle .expanded { transform: rotate(90deg); }
@@ -54,7 +59,8 @@ html.pion-keyboard-focus .archived-sessions-panel button:focus-visible { outline
   .session-folder-tree * { animation: none; transition: none; }
 }
 @media (forced-colors: active) {
-  .session-folder-drop-target { outline: 1px solid Highlight; outline-offset: -1px; }
+  .session-folder-drop-target, .session-folder-heading.is-drop-target { outline: 1px solid Highlight; outline-offset: -1px; }
+  .session-folder-heading .session-folder-drag { color: CanvasText; }
   .session-folder-content, .archived-session { border-color: CanvasText; }
   .archived-session-open, .archived-session-restore { color: CanvasText; }
   html.pion-keyboard-focus .archived-sessions-panel button:focus-visible { outline-color: Highlight; }

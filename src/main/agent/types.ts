@@ -14,6 +14,7 @@ import type { RunOperation } from '../../shared/operations'
 import type { LiveSessionProjection } from './live-session-state'
 import type { McpStatusSnapshot } from '../../shared/mcp'
 import type { BackendCapabilityState } from './capability-state'
+import type { NotificationSessionContext, SessionCompletionNotice } from '../system-notifications'
 
 export interface PushedTree {
   tree: TreeNodeLite[]
@@ -88,6 +89,8 @@ export interface BackendSessionInfoQuery extends BackendSessionInfoScope {
   promise: Promise<SessionInfo | null>
 }
 export interface BackendSessionInfoSnapshot extends BackendSessionInfoScope {
+  /** Display-only fence: a name read begun before a rename stays unknown to notifications. */
+  notificationNameEpoch?: object
   revision: number
   sessionPath?: string
   info: SessionInfo
@@ -176,7 +179,7 @@ export interface BackendRecord {
   startPromise: Promise<void>
 }
 
-export type SessionCompletedListener = (info: { cwd: string; sessionPath?: string }) => void
-export type ToolPermissionRequestedListener = (request: ToolPermissionRequest) => void
+export type SessionCompletedListener = (info: SessionCompletionNotice) => void
+export type ToolPermissionRequestedListener = (request: ToolPermissionRequest, context?: NotificationSessionContext) => void
 export type RunCompletedListener = (run: RunOperation) => void | Promise<void>
 

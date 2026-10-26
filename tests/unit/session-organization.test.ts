@@ -75,6 +75,68 @@ describe('session organization graph', () => {
     expect(state.folders[1]).toEqual({ id: 'child', cwd: '/project', name: 'renamed', collapsed: true })
   })
 
+  it('reorders complete sibling groups in their original slots without changing ownership or input', () => {
+    const state: SessionOrganization = {
+      version: 1, revision: 7,
+      folders: [
+        { id: 'a', cwd: '/project', name: 'A', collapsed: false },
+        { id: 'other', cwd: '/other', name: 'Other' },
+        { id: 'child-a', cwd: '/project', name: 'Child A', parentId: 'a', collapsed: true },
+        { id: 'grandchild', cwd: '/project', name: 'Grandchild', parentId: 'child-a' },
+        { id: 'child-b', cwd: '/project', name: 'Child B', parentId: 'a' },
+        { id: 'b', cwd: '/project', name: 'B', collapsed: true },
+        { id: 'other-child', cwd: '/other', name: 'Other child', parentId: 'other' }
+      ],
+      sessions: [{ cwd: '/project', path: 'opaque', folderId: 'child-a', archived: true, title: 'Kept' }]
+    }
+    const before = structuredClone(state)
+    const root = apply(state, { type: 'reorderFolders', cwd: '/project', ids: ['b', 'a'] })
+    expect(root.folders).toEqual([state.folders[5], ...state.folders.slice(1, 5), state.folders[0], state.folders[6]])
+    const child = apply(root, { type: 'reorderFolders', cwd: '/project', parentId: 'a', ids: ['child-b', 'child-a'] })
+    expect(child.folders).toEqual([root.folders[0], root.folders[1], root.folders[4], root.folders[3], root.folders[2], ...root.folders.slice(5)])
+    expect(child.sessions).toEqual(state.sessions)
+    expect(child.revision).toBe(9)
+    expect(child.version).toBe(1)
+    expect(state).toEqual(before)
+  })
+
+  it('rejects incomplete, foreign, duplicate and stale sibling orders and invalid parents', () => {
+    let state = apply(empty(), create('a'))
+    state = apply(state, create('b'))
+    state = apply(state, create('child', 'a'))
+    state = apply(state, create('other', undefined, '/other'))
+    for (const ids of [[], ['a'], ['a', 'b', 'unknown'], ['a', 'unknown'], ['a', 'other'], ['a', 'child'], ['a', 'a']]) {
+      expect(() => apply(state, { type: 'reorderFolders', cwd: '/project', ids })).toThrow()
+    }
+    for (const parentId of ['missing', 'other']) {
+      expect(() => apply(state, { type: 'reorderFolders', cwd: '/project', parentId, ids: [] })).toThrow()
+    }
+    expect(() => apply(state, { type: 'reorderFolders', cwd: '/project', parentId: 'a', ids: ['b'] })).toThrow()
+    const newer = apply(state, create('new'))
+    expect(() => apply(newer, { type: 'reorderFolders', cwd: '/project', ids: ['b', 'a'] })).toThrow()
+    expect(newer.folders.map((entry) => entry.id)).toEqual(['a', 'b', 'child', 'other', 'new'])
+  })
+
+  it('validates reorder fields and dense string descriptors without invoking accessors', () => {
+    const valid = { type: 'reorderFolders', cwd: '/project', ids: ['a', 'b'] }
+    expect(validateSessionOrganizationChange(valid)).toEqual(valid)
+    const parsed = validateSessionOrganizationChange(valid)
+    valid.ids.reverse()
+    expect(parsed).toEqual({ type: 'reorderFolders', cwd: '/project', ids: ['a', 'b'] })
+    const getter = vi.fn(() => 'a')
+    const accessorIds = Object.defineProperty(['a'], '0', { enumerable: true, get: getter })
+    for (const change of [
+      { ...valid, extra: true }, { ...valid, id: 'a' }, { ...valid, cwd: undefined },
+      { ...valid, parentId: undefined }, { ...valid, parentId: null },
+      { ...valid, ids: undefined }, { ...valid, ids: 'a' }, { ...valid, ids: Array(1) },
+      { ...valid, ids: ['a', 'a'] }, { ...valid, ids: [''] }, { ...valid, ids: ['a\0'] },
+      { ...valid, ids: [1] }, { ...valid, ids: Object.assign(['a'], { extra: true }) },
+      { ...valid, ids: accessorIds },
+      Object.defineProperty({ ...valid }, 'ids', { enumerable: true, get: getter })
+    ]) expect(() => validateSessionOrganizationChange(change)).toThrow()
+    expect(getter).not.toHaveBeenCalled()
+  })
+
   it('rejects malformed primitive fields, unknown fields, accessors and exotic objects', () => {
     const changes = [null, [], 'setSession', Object.create({ type: 'deleteFolder', id: 'x' }),
       { type: 'deleteFolder', id: 'x', extra: true }, { type: 'deleteFolder', id: 1 },
@@ -137,6 +199,28 @@ describe('session organization persistence', () => {
     snapshots[2].folders[0].name = 'caller mutation'
     expect((await store.get()).folders[0].name).toBe('root')
     expect(JSON.parse(await readFile(path, 'utf8')).sessions[0].path).toBe('/external/opaque')
+  })
+
+  it('persists sibling order through reload and retains saved data after stale or failed publication', async () => {
+    const { root, path, store } = await fixture()
+    await store.update(create('a'))
+    await store.update(create('child', 'a'))
+    await store.update(create('b'))
+    const saved = await store.update({ type: 'reorderFolders', cwd: '/project', ids: ['b', 'a'] })
+    expect((await new SessionOrganizationStore(() => path).get()).folders.map((entry) => entry.id)).toEqual(['b', 'child', 'a'])
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(saved)
+    let checks = 0
+    await expect(store.update({ type: 'reorderFolders', cwd: '/project', ids: ['a', 'b'] }, () => {
+      if (++checks === 4) throw new Error('stale owner')
+    })).rejects.toThrow('stale owner')
+    expect(await store.get()).toEqual(saved)
+    expect(await readdir(root)).toEqual(['pion-session-organization.json'])
+    const creation = store.update(create('new'))
+    const stale = store.update({ type: 'reorderFolders', cwd: '/project', ids: ['a', 'b'] })
+    const current = await creation
+    await expect(stale).rejects.toThrow()
+    expect(await new SessionOrganizationStore(() => path).get()).toEqual(current)
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(current)
   })
 
   it('preserves corrupted bytes and propagates non-ENOENT failures on get and update', async () => {

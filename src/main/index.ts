@@ -1,9 +1,11 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, Notification } from 'electron'
-import { basename, dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { homedir, release } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { AgentBridge } from './agent/agent-bridge'
 import { AppSettings } from './app-settings'
+import { formatSessionCompletionNotification, formatToolPermissionNotification,
+  type NotificationSessionContext, type SessionCompletionNotice } from './system-notifications'
 import { RunStore } from './run-store'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
 import { UsageLedger } from './usage-ledger'
@@ -187,14 +189,10 @@ function focusMainWindow(): void {
   win.focus()
 }
 
-function showSessionCompletionNotification({ cwd }: { cwd: string; sessionPath?: string }): void {
+function showSessionCompletionNotification(info: SessionCompletionNotice): void {
   if (!completionNotificationsEnabled || !Notification.isSupported()) return
-  const projectName = basename(cwd) || '当前项目'
   try {
-    const notification = new Notification({
-      title: 'Pion · 输出完成',
-      body: `${projectName} 会话输出已完成`
-    })
+    const notification = new Notification(formatSessionCompletionNotification(info))
     notification.on('click', focusMainWindow)
     notification.show()
   } catch (error) {
@@ -202,15 +200,10 @@ function showSessionCompletionNotification({ cwd }: { cwd: string; sessionPath?:
   }
 }
 
-function showToolPermissionNotification(request: ToolPermissionRequest): void {
+function showToolPermissionNotification(request: ToolPermissionRequest, context?: NotificationSessionContext): void {
   if (!Notification.isSupported()) return
-  const projectName = basename(request.cwd) || '当前项目'
-  const summary = request.summary.trim() || `${request.toolName} 请求执行操作`
   try {
-    const notification = new Notification({
-      title: 'Pion · 需要批准',
-      body: `${projectName}：${summary.slice(0, 180)}`
-    })
+    const notification = new Notification(formatToolPermissionNotification(request, context))
     notification.on('click', focusMainWindow)
     notification.show()
   } catch (error) {

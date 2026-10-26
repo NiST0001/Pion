@@ -121,8 +121,12 @@ describe('renderer-local session drag receipt', () => {
 
   it('copies source and returned data to preserve the starting identity', () => {
     const transfer = makeTransfer()
-    const input = { ...data }
+    const input = { ...data, extra: 'omit' }
     beginSessionDrag(transfer, input, owner, () => true)
+    expect(transfer.setData).toHaveBeenCalledExactlyOnceWith(
+      SESSION_DRAG_MIME,
+      JSON.stringify({ version: 1, ...data }),
+    )
     input.cwd = '/other'
     input.path = '/sessions/other.jsonl'
     const hovered = getSessionDrag(transfer, data.cwd, 'over')!

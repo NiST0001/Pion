@@ -105,6 +105,8 @@ import { stopForHistory } from './stop-for-history'
 import { prepareWorktreeBranchDeletion } from '../git/branch-delete'
 import type { BranchDeleteRequest, BranchDeleteResult } from '../../shared/branches'
 import { applyBackendEvent } from './backend-events'
+import { SessionNotificationTurn } from './session-notification'
+import type { NotificationSessionContext, SessionCompletionNotice } from '../system-notifications'
 import { LiveSessionProjection } from './live-session-state'
 import { SubagentSessionStore } from './subagent-session-store'
 import { SUBAGENT_SESSION_WIDGET_KEY, SUBAGENT_SESSION_ADMISSION_TITLE } from '../../shared/subagent-sessions'
@@ -313,6 +315,8 @@ export class AgentBridge {
   /** UI deadlines stop waiting, not the underlying RPC; retain its slot until settlement. */
   private sessionInfoQueries?: WeakMap<BackendRecord, BackendSessionInfoQuery>
   private sessionInfoSnapshots?: WeakMap<BackendRecord, BackendSessionInfoSnapshot>
+  private notificationTurns?: WeakMap<BackendRecord, SessionNotificationTurn>
+  private notificationNameEpochs?: WeakMap<BackendRecord, { pending: boolean }>
 
   private dispatchLifecycle(backend: BackendRecord): { generation: number; token?: symbol } {
     this.dispatchLifecycles ??= new WeakMap()
@@ -1126,10 +1130,48 @@ export class AgentBridge {
     return () => this.toolPermissionRequestedListeners.delete(listener)
   }
 
+  private notificationSessionContext(backend: BackendRecord): NotificationSessionContext | undefined {
+    const cached = this.sessionInfoSnapshots?.get(backend)
+    if (!cached || !this.sessionInfoScopeOwned(backend, cached) || cached.revision !== this.historyRevision
+      || cached.sessionPath !== backend.sessionPath || cached.info.sessionFile !== backend.sessionPath
+      || backend.capability?.applyPromise || backend.capability?.quarantined || !cached.info.sessionId) return undefined
+    const nameEpoch = this.notificationNameEpochs?.get(backend)
+    return { sessionId: cached.info.sessionId,
+      ...(cached.notificationNameEpoch === nameEpoch && !nameEpoch?.pending && cached.info.sessionName
+        ? { sessionName: cached.info.sessionName } : {}) }
+  }
+
+  private invalidateNotificationName(backend: BackendRecord, pending = false): void {
+    ;(this.notificationNameEpochs ??= new WeakMap()).set(backend, { pending })
+  }
+
+  private sessionCompletionNotice(backend: BackendRecord): SessionCompletionNotice {
+    const context = this.notificationSessionContext(backend)
+    const notice: SessionCompletionNotice = { cwd: backend.cwd, sessionPath: backend.sessionPath, ...context }
+    const run = backend.activeRunId ? this.runStore.get(backend.activeRunId) : undefined
+    if (!run || run.id !== backend.activeRunId || !backend.usageBackendId || run.usageBackendId !== backend.usageBackendId
+      || !['dispatching', 'running', 'ending'].includes(run.state)
+      || run.cwd !== backend.cwd || run.sessionPath !== backend.sessionPath
+      || (context?.sessionId && run.sessionId !== context.sessionId)) return notice
+    notice.sessionId ??= run.sessionId
+    notice.summary = this.notificationTurns?.get(backend)?.summary(backend)
+    const now = Date.now()
+    if (typeof run.agentStartedAt === 'number' && Number.isFinite(run.agentStartedAt) && run.agentStartedAt > 0) {
+      if (now >= run.agentStartedAt) notice.durationMs = now - run.agentStartedAt
+      // Run telemetry retains at most 80 tools; a full window is not a total.
+      if (run.tools.length < 80) notice.toolCount = run.tools.length
+    }
+    return notice
+  }
+
   private notifyToolPermissionRequested(request: ToolPermissionRequest): void {
+    const pending = this.pendingRequests.getToolPermission(request.id)
+    const backend = pending?.scope?.backend
+    const context = pending?.request === request && backend && pending.backendKey === backend.key
+      && this.pendingScopeOwned(pending.scope, backend) ? this.notificationSessionContext(backend) : undefined
     for (const listener of this.toolPermissionRequestedListeners) {
       try {
-        listener(request)
+        listener(request, context)
       } catch (error) {
         console.error('[pion] tool permission notification listener failed:', error)
       }
@@ -3052,6 +3094,16 @@ export class AgentBridge {
       }
       const liveState = backend.liveState ??= new LiveSessionProjection()
       liveState.record(event)
+      // Observe only admitted root events, after all private/nested consumers.
+      this.notificationTurns ??= new WeakMap()
+      let notificationTurn = this.notificationTurns.get(backend)
+      if (type === 'agent_start' && (!notificationTurn || notificationTurn.settled || !notificationTurn.owned(backend))) {
+        notificationTurn = new SessionNotificationTurn(backend)
+        this.notificationTurns.set(backend, notificationTurn)
+      }
+      if (notificationTurn?.owned(backend)) notificationTurn.record(event)
+      else this.notificationTurns.delete(backend)
+      if (type === 'session_info_changed') this.invalidateNotificationName(backend)
       if (type === 'agent_start' || type === 'agent_settled'
         || type === 'compaction_start' || type === 'compaction_end') {
         this.dispatchLifecycle(backend).generation += 1
@@ -3092,9 +3144,10 @@ export class AgentBridge {
         sessionCompleted = false
       }
       if (sessionCompleted) {
+        const notice = this.sessionCompletionNotice(backend)
         for (const listener of this.sessionCompletedListeners) {
           try {
-            listener({ cwd: backend.cwd, sessionPath: backend.sessionPath })
+            listener(notice)
           } catch (error) {
             console.error('[pion] session completion listener failed:', error)
           }
@@ -5308,7 +5361,12 @@ export class AgentBridge {
       if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
       await backend.startPromise
       this.assertHistoryAvailable()
-      await this.capabilityControl(backend, () => backend.client.setSessionName(normalizedName))
+      this.invalidateNotificationName(backend, true)
+      try {
+        await this.capabilityControl(backend, () => backend.client.setSessionName(normalizedName))
+      } finally {
+        this.invalidateNotificationName(backend)
+      }
       await this.syncBackendSession(backend)
       await this.pushSessionInfo()
       void this.refreshSidebarSessions()
@@ -5324,7 +5382,12 @@ export class AgentBridge {
       if (backend.historyStopFailed) throw new Error('无法确认旧 Agent 已退出，请重启 Pion 后再使用此会话')
       await backend.startPromise
       this.assertHistoryAvailable()
-      await this.capabilityControl(backend, () => backend.client.setSessionName(normalizedName))
+      this.invalidateNotificationName(backend, true)
+      try {
+        await this.capabilityControl(backend, () => backend.client.setSessionName(normalizedName))
+      } finally {
+        this.invalidateNotificationName(backend)
+      }
       this.sessionManagers.delete(target)
       this.sessionManagerSignatures.delete(target)
     } else {
@@ -5540,6 +5603,7 @@ export class AgentBridge {
 
   private async querySessionInfo(backend: BackendRecord): Promise<SessionInfo | null> {
     const scope = this.captureSessionInfoScope(backend)
+    const notificationNameEpoch = this.notificationNameEpochs?.get(backend)
     const revision = this.historyRevision
     const sessionPath = backend.sessionPath
     const lifecycle = this.dispatchLifecycle(backend).generation
@@ -5571,7 +5635,7 @@ export class AgentBridge {
       queuedMessages: this.projectedQueueSnapshot(backend),
       liveState: backend.liveState?.snapshot(backend.cwd, backend.sessionPath)
     }
-    this.sessionInfoSnapshots?.set(backend, { ...scope, revision, sessionPath, info })
+    this.sessionInfoSnapshots?.set(backend, { ...scope, revision, sessionPath, info, notificationNameEpoch })
     return info
   }
 

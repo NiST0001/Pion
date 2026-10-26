@@ -251,7 +251,7 @@ export function SessionPage({
         <div className="setting-row" data-setting="completion-notifications">
           <div>
             <div className="setting-label">会话完成通知</div>
-            <div className="setting-desc">agent 输出完成后发送系统通知</div>
+            <div className="setting-desc">输出完成后通知所属项目、会话、耗时及回复摘要；摘要可能在锁屏显示。</div>
           </div>
           <Toggle
             on={completionNotificationsEnabled}

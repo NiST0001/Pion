@@ -28,7 +28,7 @@ it('only lets the owning live main frame access organization metadata', async ()
     if (mode === 'detached') f.frame.detached = true
     if (mode === 'missing') f.owner(undefined)
     await expect(f.invoke(IPC.SessionOrganizationGet)).rejects.toThrow()
-    await expect(f.invoke(IPC.SessionOrganizationUpdate, { type: 'deleteFolder', id: 'a' })).rejects.toThrow()
+    await expect(f.invoke(IPC.SessionOrganizationUpdate, { type: 'reorderFolders', cwd: '/project', ids: ['b', 'a'] })).rejects.toThrow()
     expect(f.store.get).not.toHaveBeenCalled()
     expect(f.store.update).not.toHaveBeenCalled()
   }
@@ -42,7 +42,7 @@ it('validates argument counts and forwards the update publication guard', async 
   expect(f.store.get).not.toHaveBeenCalled()
   expect(f.store.update).not.toHaveBeenCalled()
   await expect(f.invoke(IPC.SessionOrganizationGet)).resolves.toEqual(snapshot())
-  const change = { type: 'deleteFolder', id: 'a' }
+  const change = { type: 'reorderFolders', cwd: '/project', parentId: 'parent', ids: ['b', 'a'] }
   await expect(f.invoke(IPC.SessionOrganizationUpdate, change)).resolves.toEqual(snapshot())
   expect(f.store.update).toHaveBeenCalledWith(change, expect.any(Function))
   expect(f.sender.listenerCount('did-start-navigation')).toBe(0)

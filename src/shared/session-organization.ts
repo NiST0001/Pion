@@ -26,6 +26,7 @@ export type SessionOrganizationChange =
   | { type: 'createFolder'; id: string; cwd: string; name: string; parentId?: string }
   | { type: 'renameFolder'; id: string; name: string }
   | { type: 'moveFolder'; id: string; parentId?: string }
+  | { type: 'reorderFolders'; cwd: string; parentId?: string; ids: string[] }
   | { type: 'deleteFolder'; id: string }
   | { type: 'setFolderCollapsed'; id: string; collapsed: boolean }
   | { type: 'setSession'; cwd: string; path: string; folderId?: string | null; archived?: boolean; title?: string }
@@ -126,7 +127,7 @@ export function validateSessionOrganization(value: unknown): SessionOrganization
 }
 
 export function validateSessionOrganizationChange(value: unknown): SessionOrganizationChange {
-  const raw = fields(value, ['type', 'id', 'cwd', 'name', 'parentId', 'collapsed', 'path', 'folderId', 'archived', 'title'])
+  const raw = fields(value, ['type', 'id', 'cwd', 'name', 'parentId', 'collapsed', 'path', 'folderId', 'archived', 'title', 'ids'])
   switch (raw.type) {
     case 'createFolder': {
       fields(value, ['type', 'id', 'cwd', 'name', 'parentId'])
@@ -138,6 +139,12 @@ export function validateSessionOrganizationChange(value: unknown): SessionOrgani
     case 'moveFolder':
       fields(value, ['type', 'id', 'parentId'])
       return { type: raw.type, id: text(raw.id), ...('parentId' in raw ? { parentId: text(raw.parentId) } : {}) }
+    case 'reorderFolders': {
+      fields(value, ['type', 'cwd', 'parentId', 'ids'])
+      const ids = items(raw.ids, (item) => text(item))
+      if (new Set(ids).size !== ids.length) return invalid()
+      return { type: raw.type, cwd: text(raw.cwd), ...('parentId' in raw ? { parentId: text(raw.parentId) } : {}), ids }
+    }
     case 'deleteFolder':
       fields(value, ['type', 'id'])
       return { type: raw.type, id: text(raw.id) }
@@ -174,6 +181,13 @@ export function applySessionOrganizationChange(value: SessionOrganization, input
   } else if (change.type === 'createFolder') {
     if (result.folders.some((entry) => entry.id === change.id)) return invalid()
     result.folders.push({ id: change.id, cwd: change.cwd, name: change.name, ...('parentId' in change ? { parentId: change.parentId } : {}) })
+  } else if (change.type === 'reorderFolders') {
+    if (change.parentId !== undefined && !result.folders.some((entry) => entry.id === change.parentId && entry.cwd === change.cwd)) return invalid()
+    const siblings = result.folders.filter((entry) => entry.cwd === change.cwd && entry.parentId === change.parentId)
+    const byId = new Map(siblings.map((entry) => [entry.id, entry]))
+    if (change.ids.length !== siblings.length || change.ids.some((id) => !byId.has(id))) return invalid()
+    let index = 0
+    result.folders = result.folders.map((entry) => byId.has(entry.id) ? byId.get(change.ids[index++])! : entry)
   } else {
     const entry = result.folders.find((item) => item.id === change.id)
     if (!entry) return invalid()

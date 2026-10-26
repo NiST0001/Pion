@@ -319,7 +319,7 @@ describe('AgentBridge extension UI requests', () => {
     expect(listener).toHaveBeenCalledWith(expect.objectContaining({
       toolName: 'write',
       summary: '需要修改项目文件'
-    }))
+    }), undefined)
     off()
   })
 
