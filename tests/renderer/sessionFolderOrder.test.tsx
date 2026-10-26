@@ -88,6 +88,7 @@ describe('session folder sibling ordering', () => {
     expect(order(view.container)).toEqual(['a', 'b', 'c'])
     for (const element of view.container.querySelectorAll('.session-folder-toggle')) expect(element).not.toHaveAttribute('draggable', 'true')
     expect(heading(view.container, 'b').querySelector('.lucide-grip-vertical')).toBe(grip)
+    expect(bubbling).not.toHaveBeenCalled()
     const blocked = start(heading(view.container, 'b'))
     expect(blocked.types).not.toContain(MIME)
     await drop(target, blocked)
@@ -107,7 +108,8 @@ describe('session folder sibling ordering', () => {
     expect(source.parentElement!.querySelector('.session-folder-content')).toBe(content)
     expect(view.container.querySelector('[data-session-path]')).toBe(row)
     expect(row!.closest('[data-folder-id]')).toHaveAttribute('data-folder-id', 'a1')
-    expect(bubbling).not.toHaveBeenCalled()
+    // A blocked source has no folder MIME; leave unrelated drops to ancestor handlers.
+    expect(bubbling).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: 'drop', dataTransfer: blocked }))
     expect(initial.itemProps.onSelect).not.toHaveBeenCalled()
   })
 
