@@ -17,6 +17,7 @@ import {
 } from '../../utils/screenTextReveal'
 import { ReviewRevealText } from '../review/ReviewRevealText'
 import { Markdown } from './Markdown'
+import { MessageTime } from './ConversationTime'
 
 interface ChatMessageProps {
   readOnly?: boolean
@@ -171,6 +172,12 @@ export const ChatMessage = memo(function ChatMessage({
             </div>
           )}
         </div>
+        {messageTimestamp !== undefined && (
+          <div className={`message-time-line${revealSuppressed || readOnly ? '' : ` ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${item.historical ? SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS : SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS}`}`}
+            ref={revealSuppressed || readOnly ? undefined : assignLineRevealDelay}>
+            <MessageTime timestamp={messageTimestamp} />
+          </div>
+        )}
       </div>
     )
   }

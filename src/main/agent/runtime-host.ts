@@ -6,6 +6,7 @@ import {
   type CreateAgentSessionRuntimeFactory, type AgentSession, type ModelRuntime
 } from '@earendil-works/pi-coding-agent'
 import { createAskUserTool } from './ask-user'
+import { createConversationTiming } from './conversation-timing'
 import { createPionNativeExtensions, createPionNativeLoadoutBoundary, createPionNativeMcpCloseBarrier } from './native-extensions'
 import { readCapabilityPreferences } from '../capability-settings'
 import { readCapabilityResources } from '../capability-catalogue'
@@ -64,6 +65,7 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
     let models: ModelRuntime
     let capabilityPolicy: ReturnType<typeof createCapabilityPolicy> | undefined
     const runtimeId = randomUUID()
+    const timing = createConversationTiming(runtimeId)
     // SDK replacement fences every old display callback before creating the
     // next runtime. Capture the real RPC command context only at tool execute.
     const subagentPublisher = createSubagentSessionPublisher({
@@ -108,7 +110,7 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
           loadConfig: () => mcp.config,
           registrations: (entries) => applyCapabilityMcpRegistrations(entries, preferences, cwd), closeBarrier: nativeClose
         } : undefined), loadout.capture, { name: 'pion-subagents', factory: subagents.extension }, loadout.declarations, mcpStatus.extension,
-          ...(capabilityPolicy ? [capabilityPolicy.extension] : [])]
+          ...(capabilityPolicy ? [capabilityPolicy.extension] : []), { name: 'pion-conversation-timing', factory: timing.extension }]
       }
     })
     // Only the resource loader keeps the read-only resource-list facade. Model,
@@ -143,6 +145,7 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
     if (!capabilityPolicy) loadout.initialize(created.session.getActiveToolNames())
     parent = created.session
     models = services.modelRuntime
+    timing.attach(parent)
     return { ...created, services, diagnostics: [...services.diagnostics, ...scope.diagnostics] }
   }
   return createAgentSessionRuntime(createRuntime, { cwd: root, agentDir, sessionManager })

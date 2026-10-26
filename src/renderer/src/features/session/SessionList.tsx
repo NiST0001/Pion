@@ -20,6 +20,7 @@ import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { ConfirmDialog } from '../common/ConfirmDialog'
 import { TextInputDialog } from '../common/TextInputDialog'
 import { PionSelect } from '../common/PionSelect'
+import { beginSessionDrag, endSessionDrag, getSessionDrag, SESSION_DRAG_MIME } from '../../utils/sessionDrag'
 
 const subagentStatusLabel: Record<SubagentSessionSummary['status'], string> = {
   starting: '准备中', running: '运行中', cancelling: '停止中', completed: '已完成', failed: '失败', aborted: '已停止'
@@ -53,6 +54,11 @@ interface SessionItemActions {
   attentionSessionPaths?: ReadonlySet<string>
   onSelect: (path: string) => void
   onReorder?: (sessions: SessionMeta[]) => void
+  reorderDisabled?: boolean
+  allowFolderDrag?: boolean
+  folderDragCwd?: string
+  folderDragScope?: object
+  pendingDeletePaths?: ReadonlySet<string>
   onArchive?: (path: string) => Promise<void>
   folderOptions?: Array<{ value: string; label: string }>
   sessionFolderIds?: ReadonlyMap<string, string | undefined>
@@ -80,6 +86,11 @@ export function SessionItems({
   previewDensity,
   onSelect,
   onReorder,
+  reorderDisabled = false,
+  allowFolderDrag = false,
+  folderDragCwd,
+  folderDragScope,
+  pendingDeletePaths,
   onDelete,
   onCopy,
   onRename,
@@ -97,12 +108,61 @@ export function SessionItems({
   const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(null)
   const [draggedPath, setDraggedPath] = useState<string | null>(null)
   const [dragOverPath, setDragOverPath] = useState<string | null>(null)
+  const deleting = useRef(new Set<string>())
+  const [localDeleting, setLocalDeleting] = useState<ReadonlySet<string>>(new Set())
+  const [deleteError, setDeleteError] = useState<{ owner: object; path: string; message: string } | null>(null)
+  const apiOwner = useRef({ api: window.pion })
+  if (apiOwner.current.api !== window.pion) apiOwner.current = { api: window.pion }
+  const owner = apiOwner.current
+  const mounted = useRef(false)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  const dragOptions = { onReorder, reorderDisabled, pendingDeletePaths, organizationDisabled, allowFolderDrag, folderDragCwd, folderDragScope, sessions }
+  const gates = useRef(dragOptions)
+  gates.current = dragOptions
+  const isDeleting = (path: string): boolean => deleting.current.has(path) || Boolean(gates.current.pendingDeletePaths?.has(path))
+  useEffect(() => () => endSessionDrag(owner), [owner])
+  const folderSourceCurrent = (path: string, id: string, cwd: string): boolean => {
+    const current = gates.current
+    const session = current.sessions.find((entry) => entry.path === path && entry.id === id)
+    return mounted.current && apiOwner.current === owner && window.pion === owner.api && current.allowFolderDrag && !current.organizationDisabled
+      && !current.reorderDisabled && !isDeleting(path) && Boolean(session && !session.optimistic
+        && (!session.projectCwd || session.projectCwd === cwd) && (current.folderDragCwd ?? session.projectCwd) === cwd)
+  }
+
+  const requestDelete = async (path: string): Promise<void> => {
+    if (isDeleting(path)) return
+    deleting.current.add(path)
+    setLocalDeleting(new Set(deleting.current))
+    setDeleteError(null)
+    setContextMenu(null)
+    try {
+      await onDelete(path)
+    } catch (error) {
+      // The App owns shared pending/errors across favorites and project rows.
+      if (!pendingDeletePaths && mounted.current && apiOwner.current === owner) {
+        setDeleteError({ owner, path, message: error instanceof Error ? error.message : String(error) })
+      }
+    } finally {
+      deleting.current.delete(path)
+      if (mounted.current) setLocalDeleting(new Set(deleting.current))
+    }
+  }
 
   useEffect(() => {
-    if (contextMenu && !sessions.some((session) => session.path === contextMenu.session.path)) {
-      setContextMenu(null)
+    if (contextMenu && (!sessions.some((session) => session.path === contextMenu.session.path)
+      || pendingDeletePaths?.has(contextMenu.session.path) || localDeleting.has(contextMenu.session.path))) {
+      setContextMenu((current) => current === contextMenu ? null : current)
     }
-  }, [sessions, contextMenu])
+  }, [sessions, contextMenu, localDeleting, pendingDeletePaths])
+
+  useEffect(() => {
+    if (draggedPath && !sessions.some((session) => session.path === draggedPath)) {
+      setDraggedPath((current) => current === draggedPath ? null : current)
+    }
+    if (dragOverPath && !sessions.some((session) => session.path === dragOverPath)) {
+      setDragOverPath((current) => current === dragOverPath ? null : current)
+    }
+  }, [sessions, draggedPath, dragOverPath])
 
   const openContextMenu = (event: React.MouseEvent<HTMLDivElement>, session: SessionMeta): void => {
     event.preventDefault()
@@ -122,15 +182,30 @@ export function SessionItems({
   }
 
   const handleDragStart = (event: React.DragEvent<HTMLDivElement>, session: SessionMeta): void => {
-    setDraggedPath(session.path)
+    const cwd = gates.current.folderDragCwd ?? session.projectCwd
+    if (gates.current.allowFolderDrag) {
+      const dragScope = gates.current.folderDragScope
+      if (!cwd || !beginSessionDrag(event.dataTransfer, { cwd, path: session.path }, owner,
+        () => gates.current.folderDragScope === dragScope && folderSourceCurrent(session.path, session.id, cwd))) {
+        event.preventDefault()
+        return
+      }
+    }
+    event.stopPropagation()
     event.dataTransfer.effectAllowed = 'move'
     event.dataTransfer.setData('text/plain', session.path)
+    setDraggedPath(session.path)
   }
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>, targetPath: string): void => {
     event.preventDefault()
-    const sourcePath = event.dataTransfer.getData('text/plain') || draggedPath
-    if (!sourcePath || sourcePath === targetPath) {
+    event.stopPropagation()
+    const typed = event.dataTransfer.types?.includes(SESSION_DRAG_MIME)
+    const cwd = gates.current.folderDragCwd ?? sessions.find((session) => session.path === targetPath)?.projectCwd
+    const receipt = typed && cwd ? getSessionDrag(event.dataTransfer, cwd, 'drop') : null
+    const sourcePath = typed ? receipt?.path : event.dataTransfer.getData('text/plain') || draggedPath
+    if (!gates.current.onReorder || gates.current.reorderDisabled || !sourcePath || sourcePath === targetPath
+      || isDeleting(sourcePath) || isDeleting(targetPath)) {
       clearDragState()
       return
     }
@@ -143,7 +218,7 @@ export function SessionItems({
     const reordered = [...sessions]
     const [moved] = reordered.splice(fromIndex, 1)
     reordered.splice(toIndex, 0, moved)
-    onReorder?.(reordered)
+    gates.current.onReorder?.(reordered)
     clearDragState()
   }
 
@@ -151,20 +226,38 @@ export function SessionItems({
     <>
       {sessions.map((session) => {
         const attention = attentionSessionPaths?.has(session.path)
+        const deletingSession = localDeleting.has(session.path) || Boolean(pendingDeletePaths?.has(session.path))
+        const folderDraggable = allowFolderDrag && Boolean(folderDragCwd ?? session.projectCwd)
+        const dragCapable = Boolean(onReorder || folderDraggable)
         const children = subagentSessions?.filter((child) => child.parentSessionPath === session.path && child.cwd === session.projectCwd) ?? []
         return (
         <Fragment key={session.path}>
         <div
           data-session-path={session.path}
-          className={`side-item side-session side-session-${previewDensity}${onReorder && !session.optimistic ? ' reorderable' : ''}${!selectedSubagent && session.path === activePath ? ' active' : ''}${runningSessionPaths.has(session.path) || session.optimistic ? ' running' : ''}${unreadSessionPaths?.has(session.path) ? ' unread' : ''}${session.optimistic ? ' optimistic' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
+          className={`side-item side-session side-session-${previewDensity}${dragCapable && !session.optimistic ? ' reorderable' : ''}${!selectedSubagent && session.path === activePath ? ' active' : ''}${runningSessionPaths.has(session.path) || session.optimistic ? ' running' : ''}${unreadSessionPaths?.has(session.path) ? ' unread' : ''}${session.optimistic ? ' optimistic' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath ? ' drag-over' : ''}`}
           aria-current={!selectedSubagent && session.path === activePath ? 'true' : undefined}
-          aria-busy={runningSessionPaths.has(session.path) || session.optimistic}
-          draggable={Boolean(onReorder && !session.optimistic)}
+          aria-busy={deletingSession || runningSessionPaths.has(session.path) || session.optimistic}
+          aria-disabled={deletingSession || undefined}
+          draggable={Boolean(dragCapable && !reorderDisabled && (!folderDraggable || !organizationDisabled) && !session.optimistic && !deletingSession)}
           onDragStart={(event) => {
-            if (onReorder && !session.optimistic) handleDragStart(event, session)
+            if ((!gates.current.onReorder && !gates.current.allowFolderDrag) || gates.current.reorderDisabled
+              || (gates.current.allowFolderDrag && gates.current.organizationDisabled) || session.optimistic || isDeleting(session.path)) {
+              event.preventDefault()
+              return
+            }
+            handleDragStart(event, session)
           }}
           onDragOver={(event) => {
-            if (!onReorder || session.optimistic) return
+            if (!gates.current.onReorder || gates.current.reorderDisabled || session.optimistic || isDeleting(session.path)) return
+            if (event.dataTransfer.types?.includes(SESSION_DRAG_MIME)) {
+              const cwd = gates.current.folderDragCwd ?? session.projectCwd
+              const source = cwd ? getSessionDrag(event.dataTransfer, cwd, 'over') : null
+              if (!source || !gates.current.sessions.some((entry) => entry.path === source.path)) {
+                event.dataTransfer.dropEffect = 'none'
+                setDragOverPath(null)
+                return
+              }
+            }
             event.preventDefault()
             event.dataTransfer.dropEffect = 'move'
             if (session.path !== draggedPath) setDragOverPath(session.path)
@@ -175,20 +268,20 @@ export function SessionItems({
           onDrop={(event) => {
             if (!session.optimistic) handleDrop(event, session.path)
           }}
-          onDragEnd={clearDragState}
+          onDragEnd={() => { endSessionDrag(owner); clearDragState() }}
           onClick={() => {
             setContextMenu(null)
-            if (!session.optimistic) onSelect(session.path)
+            if (!session.optimistic && !isDeleting(session.path)) onSelect(session.path)
           }}
           onContextMenu={(event) => {
-            if (!session.optimistic) openContextMenu(event, session)
+            if (!session.optimistic && !isDeleting(session.path)) openContextMenu(event, session)
           }}
-          title={session.optimistic
+          title={deletingSession ? '正在删除会话…' : session.optimistic
             ? '正在保存新会话…'
-            : `${attention ? '待处理：等待回答或权限确认\n' : ''}${unreadSessionPaths?.has(session.path) ? '未读：有新的运行结果\n' : ''}${session.path}\n${onReorder ? '拖拽调整顺序 · ' : ''}点击星标收藏 · 右键查看更多操作`}
+            : `${attention ? '待处理：等待回答或权限确认\n' : ''}${unreadSessionPaths?.has(session.path) ? '未读：有新的运行结果\n' : ''}${session.path}\n${folderDraggable ? (onReorder ? '拖拽排序或移入文件夹/根目录 · ' : '拖拽到文件夹或根目录 · ') : onReorder ? '拖拽调整顺序 · ' : ''}点击星标收藏 · 右键查看更多操作`}
         >
           <div className="side-session-content">
-            {onReorder && !session.optimistic && <GripVertical size={13} className="side-session-drag" aria-hidden="true" />}
+            {dragCapable && !session.optimistic && <GripVertical size={13} className="side-session-drag" aria-hidden="true" />}
             <div className="side-session-main">
               <div className="side-session-title-row">
                 {(attention || unreadSessionPaths?.has(session.path)) && (
@@ -219,15 +312,17 @@ export function SessionItems({
               <button
                 type="button"
                 className={`side-session-favorite${favoritePaths.has(session.path) ? ' active' : ''}`}
-                aria-label={favoritePaths.has(session.path) ? '取消收藏会话' : '收藏会话'}
+                disabled={deletingSession}
+                aria-label={deletingSession ? '正在删除会话' : favoritePaths.has(session.path) ? '取消收藏会话' : '收藏会话'}
                 aria-pressed={favoritePaths.has(session.path)}
                 title={favoritePaths.has(session.path) ? '取消收藏' : '收藏会话'}
                 onClick={(event) => {
                   event.stopPropagation()
-                  onToggleFavorite(session.path)
+                  if (!isDeleting(session.path)) onToggleFavorite(session.path)
                 }}
               >
-                <Star size={13} fill={favoritePaths.has(session.path) ? 'currentColor' : 'none'} />
+                {deletingSession ? <Loader2 size={13} className="spin" aria-hidden="true" />
+                  : <Star size={13} fill={favoritePaths.has(session.path) ? 'currentColor' : 'none'} />}
               </button>
             )}
           </div>
@@ -257,14 +352,18 @@ export function SessionItems({
         </Fragment>
         )
       })}
-      {contextMenu && createPortal(
+      {deleteError?.owner === owner && <div role="alert" className="context-menu-error">
+        <span>{deleteError.message}</span>
+        <button type="button" onClick={() => setDeleteError(null)}>关闭</button>
+      </div>}
+      {contextMenu && !isDeleting(contextMenu.session.path) && createPortal(
         <SessionContextMenu
           key={contextMenu.session.path}
           session={contextMenu.session}
           x={contextMenu.x}
           y={contextMenu.y}
           onClose={() => setContextMenu((current) => current === contextMenu ? null : current)}
-          onDelete={onDelete}
+          onDelete={requestDelete}
           onCopy={onCopy}
           onRename={onRename}
           onOpenTaskHistory={onOpenTaskHistory}
@@ -540,7 +639,12 @@ function SessionContextMenu({
         detail={error || '此操作不可撤销，会话文件及其历史任务入口将被移除。'}
         confirmLabel="确认删除"
         busy={busy}
-        onConfirm={() => void runAction(() => onDelete(session.path))}
+        onConfirm={() => {
+          if (actionPending.current) return
+          actionPending.current = true
+          onClose()
+          void onDelete(session.path).finally(() => { actionPending.current = false }).catch(() => undefined)
+        }}
         onCancel={() => {
           if (busy) return
           setConfirmDelete(false)

@@ -132,6 +132,7 @@ import {
   sessionBranch,
   sessionMode,
   sessionTasks,
+  sessionTurnTimings,
   toTreeNodeLite,
   toWireEntry,
   toolCallIds
@@ -4423,9 +4424,11 @@ export class AgentBridge {
 
   async getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null> {
     const result = await this.getActiveEntries()
-    return result
-      ? { entries: result.entries.map(toWireEntry), leafId: result.leafId }
-      : null
+    if (!result) return null
+    let branch: SessionEntry[] = []
+    try { branch = sessionBranch(result.entries, result.leafId) } catch { /* Legacy full-tree reads retain unknown timing when ancestry is incomplete. */ }
+    const timings = sessionTurnTimings(branch)
+    return { entries: result.entries.map(entry => toWireEntry(entry, timings.get(entry.id))), leafId: result.leafId }
   }
 
   async getHistoryIndex(sessionPath?: string): Promise<SessionHistoryIndex | null> {
@@ -4518,6 +4521,7 @@ export class AgentBridge {
     const result = await this.getActiveEntries(sessionPath)
     if (!result) return null
     result.entries = sessionBranch(result.entries, result.leafId)
+    const timings = sessionTurnTimings(result.entries)
 
     const total = result.entries.length
     const end = typeof before === 'number' && Number.isFinite(before)
@@ -4554,8 +4558,8 @@ export class AgentBridge {
     const toolResults = filterToolResults(result.entries, toolCallIds(entries))
 
     return {
-      entries: entries.map(toWireEntry),
-      toolResults: toolResults.map(toWireEntry),
+      entries: entries.map(entry => toWireEntry(entry, timings.get(entry.id))),
+      toolResults: toolResults.map(entry => toWireEntry(entry)),
       start,
       end,
       total,

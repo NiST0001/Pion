@@ -65,6 +65,14 @@ export function useAgent() {
         && (current.state.liveSessionBackendId ?? current.state.session?.liveState?.backendId) === backendId
     }
   }, [api, selectionRef])
+  const reloadTimelineAfterDelete = useCallback(() => reloadTimeline(undefined, false, true), [reloadTimeline])
+  const captureDeletionSelection = useCallback(() => {
+    const selected = { ...selectionRef.current }
+    return () => modelScope.current.api === api
+      && selectionRef.current.generation === selected.generation
+      && selectionRef.current.ownerPath === selected.ownerPath
+      && selectionRef.current.cwd === selected.cwd
+  }, [api, selectionRef])
   const invalidateSelection = useCallback(() => {
     ++modelRefreshId.current
     invalidateHistorySelection()
@@ -170,6 +178,21 @@ export function useAgent() {
     void refreshModels().catch(() => undefined)
   }, [api, refreshModels, modelRefreshScope, state.session?.sessionId, state.status.phase, state.timelineLoading])
   useEffect(() => () => { ++modelRefreshId.current }, [])
+  const previousHistoryApi = useRef(api)
+  useEffect(() => {
+    if (previousHistoryApi.current === api) return
+    previousHistoryApi.current = api
+    const current = modelScope.current.state
+    const hadHistory = Boolean(timelineOwnerPath.current || current.timelineReady || current.timelineLoading)
+    ++timelineLoadId.current
+    ++historyIndexLoadId.current
+    historyIndexInFlight.current = null
+    historyCursor.current = null
+    dispatch({ type: 'timelineLoading', loading: false })
+    // Retire the old shell/cursor, then revalidate through the new owner.
+    // An old deletion still awaits its original raw reads independently.
+    if (api && hadHistory) void reloadTimeline(timelineOwnerPath.current).catch(() => undefined)
+  }, [api, historyCursor, historyIndexInFlight, historyIndexLoadId, reloadTimeline, timelineLoadId, timelineOwnerPath])
 
   // Window focus/visibility changes must not reload the history window: doing
   // so replaces the user's reading position with the newest page. Agent IPC
@@ -214,7 +237,9 @@ export function useAgent() {
     timelineOwnerPath,
     historyCursor,
     clearTimeline,
-    reloadTimeline
+    reloadTimeline,
+    reloadTimelineAfterDelete,
+    captureSelection: captureDeletionSelection
   })
   const {
     addProject,

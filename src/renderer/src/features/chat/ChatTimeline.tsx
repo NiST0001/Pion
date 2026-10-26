@@ -7,11 +7,12 @@ import { EmptyState } from '../common/EmptyState'
 import { ModifiedFilesCard } from '../review/ModifiedFilesCard'
 import { ReviewRevealText } from '../review/ReviewRevealText'
 import { ChatMessage } from './ChatMessage'
+import { TurnTime } from './ConversationTime'
 import { ToolCallItem } from './ToolCallItem'
 import { ToolActivityHeader } from './ToolActivityHeader'
 import { DisclosureRevealGate } from '../common/DisclosureRevealGate'
 import { groupToolActivity, summarizeToolActivity, type ToolTimelineItem } from '../../agent/toolActivityGroups'
-import { assignLineRevealDelay, SCREEN_TEXT_REVEAL_LINE_CLASS, SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS } from '../../utils/screenTextReveal'
+import { assignLineRevealDelay, SCREEN_TEXT_REVEAL_LINE_CLASS, SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS, SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS } from '../../utils/screenTextReveal'
 import { watchLineReveals } from '../../utils/lineReveal'
 
 export interface ChatTimelineProps {
@@ -114,6 +115,7 @@ export function ChatTimeline({
   const scope = scopeKey ?? cwd ?? ''
   const turns = useMemo(() => deriveTurnChanges(timeline), [timeline])
   const turnsByEnd = new Map(turns.map(turn => [turn.lastItemId, turn]))
+  const usersById = new Map(timeline.flatMap(item => item.kind === 'user' ? [[item.id, item] as const] : []))
   const previousGroups = useRef<{ scope: string; groups: { key: string; ids: Set<string> }[] }>({ scope, groups: [] })
   const [expandedGroups, setExpandedGroups] = useState<{ scope: string; keys: Set<string> }>({ scope, keys: new Set() })
   const groups = useMemo(() => {
@@ -174,6 +176,15 @@ export function ChatTimeline({
         <div className="timeline">
           {timeline.flatMap((item, index) => {
             const turn = turnsByEnd.get(item.id)
+            const user = turn && usersById.get(turn.userId)
+            const time = !readOnly && user?.turnTiming && !(index === timeline.length - 1 && hasNewerHistory)
+              ? <div key={`time:${scope}:${user.id}`}
+                  ref={user.noReveal ? undefined : assignLineRevealDelay}
+                  className={`turn-time-row${user.noReveal ? '' : ` ${SCREEN_TEXT_REVEAL_LINE_CLASS} ${user.historical ? SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS : SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS}`}`}>
+                  <TurnTime finishedAt={user.turnTiming.finishedAt} durationMs={user.turnTiming.durationMs}
+                    label={user.turnTiming.outcome === 'completed' ? '完成时间' : '结束时间'} />
+                </div>
+              : null
             const card = !readOnly && turn && turn.changes.length > 0
               && !(index === timeline.length - 1 && (busy || agentActivity || hasNewerHistory))
               ? <ModifiedFilesCard key={`changes:${scope}:${turn.userId}`}
@@ -186,7 +197,7 @@ export function ChatTimeline({
               if (groupsByStart.has(index)) nodes.unshift(<ToolActivityHeader key={group.key}
                 summary={summarizeToolActivity(group.items)} open={open} onToggle={() => toggleGroup(group.key)}
                 historical={group.items[0].historical} noReveal={group.items[0].noReveal} />)
-              return [...nodes, card]
+              return [...nodes, card, time]
             }
             const node = item.kind === 'compaction' ? (
               <div key={item.id}
@@ -206,7 +217,7 @@ export function ChatTimeline({
                 revertDisabledReason={revertDisabledReason}
               />
             )
-            return [node, card]
+            return [node, card, time]
           })}
           {agentActivity && (
             <div className="row row-agent-working">

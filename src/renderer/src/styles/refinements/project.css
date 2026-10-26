@@ -389,6 +389,7 @@
 }
 
 .side-session:hover .side-session-favorite,
+.side-session[aria-disabled='true'] .side-session-favorite,
 html.pion-keyboard-focus .side-session-favorite:focus-visible,
 .side-session-favorite.active {
   opacity: 1;

@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useRef } from 'react'
 import type { Dispatch, MutableRefObject } from 'react'
 import type { ForkMessageOption, PionApi } from '../../../../shared/types'
 import type { Action } from '../../agent/types'
@@ -12,7 +12,9 @@ interface UseAgentSessionActionsOptions {
   timelineOwnerPath: MutableRefObject<string | undefined>
   historyCursor: MutableRefObject<HistoryCursor | null>
   reloadTimeline: (sessionPath?: string) => Promise<void>
+  reloadTimelineAfterDelete?: () => Promise<void>
   clearTimeline: (sessionPath?: string) => void
+  captureSelection: () => () => boolean
 }
 
 export function useAgentSessionActions({
@@ -22,34 +24,47 @@ export function useAgentSessionActions({
   timelineOwnerPath,
   historyCursor,
   clearTimeline,
-  reloadTimeline
+  reloadTimeline,
+  reloadTimelineAfterDelete,
+  captureSelection
 }: UseAgentSessionActionsOptions) {
+  const apiOwner = useRef({ api })
+  if (apiOwner.current.api !== api) apiOwner.current = { api }
+  const owner = apiOwner.current
+
   const reorderSessions = useCallback((cwd: string, paths: string[]): void => {
     saveSessionOrder(cwd, paths)
     dispatch({ type: 'reorderSessions', cwd, paths })
   }, [dispatch])
 
   const refreshProjectSessions = useCallback(async (cwd: string): Promise<void> => {
-    if (!api) return
+    if (!api || apiOwner.current !== owner) return
     const sessions = await api.listSessions(cwd)
+    if (apiOwner.current !== owner) return
     dispatch({ type: 'projectSessionsUpdate', cwd, sessions })
-  }, [api, dispatch])
+  }, [api, dispatch, owner])
 
   const deleteSession = useCallback(
     async (sessionPath: string): Promise<void> => {
-      if (!api) return
+      if (!api || apiOwner.current !== owner) return
+      const isSelected = captureSelection()
+      const selectedOwner = timelineOwnerPath.current
+      const result = await api.deleteSession(sessionPath)
+      if (apiOwner.current !== owner) return
+      // Failed removals keep their history intact. A successful old removal
+      // may evict its own cache, while only its original selection may reset UI.
       timelineCache.current.delete(sessionPath)
+      if (!isSelected() || timelineOwnerPath.current !== selectedOwner) return
       if (timelineOwnerPath.current === sessionPath) {
         timelineOwnerPath.current = undefined
         historyCursor.current = null
       }
-      const result = await api.deleteSession(sessionPath)
       if (result.activeSessionChanged) {
         clearTimeline()
-        await reloadTimeline()
+        await (reloadTimelineAfterDelete ?? reloadTimeline)()
       }
     },
-    [api, clearTimeline, historyCursor, reloadTimeline, timelineCache, timelineOwnerPath]
+    [api, captureSelection, clearTimeline, historyCursor, owner, reloadTimeline, reloadTimelineAfterDelete, timelineCache, timelineOwnerPath]
   )
 
   const copySession = useCallback(

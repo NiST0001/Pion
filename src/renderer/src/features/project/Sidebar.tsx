@@ -33,6 +33,7 @@ import { SessionListControls } from './SessionListControls'
 import { getSessionListView, type SessionListFilter, type SessionListSort } from '../../agent/sessionListView'
 
 interface SessionOrganizationProps {
+  pendingDeletePaths?: ReadonlySet<string>
   organization?: SessionOrganization
   organizationDisabled?: boolean
   onOrganizationChange?: (change: SessionOrganizationChange) => Promise<void>
@@ -66,7 +67,7 @@ function Section({
         </button>
         {action}
       </div>
-      {open && <div className="side-section-body">{children}</div>}
+      <div className="side-section-body" hidden={!open} inert={!open}>{children}</div>
     </section>
   )
 }
@@ -143,6 +144,7 @@ export function SidebarToolbar({
 // ---------------------------------------------------------------------------
 
 export function FavoriteSessions({
+  pendingDeletePaths,
   onArchive,
   organizationDisabled,
   sessions,
@@ -162,6 +164,7 @@ export function FavoriteSessions({
   getForkMessages,
   onFork
 }: {
+  pendingDeletePaths?: ReadonlySet<string>
   onArchive?: (session: SessionMeta) => Promise<void>
   organizationDisabled?: boolean
   sessions: SessionMeta[]
@@ -194,6 +197,8 @@ export function FavoriteSessions({
       ) : (
         <SessionItems
           sessions={visibleSessions}
+          allowFolderDrag
+          pendingDeletePaths={pendingDeletePaths}
           organizationDisabled={organizationDisabled}
           onArchive={onArchive ? (path) => {
             const session = findSession(path)
@@ -249,6 +254,7 @@ interface ProjectBranchView {
 }
 
 export function ProjectList({
+  pendingDeletePaths,
   organization,
   organizationDisabled,
   onOrganizationChange,
@@ -360,6 +366,7 @@ export function ProjectList({
         allKeys={projects.map((project) => project.cwd)} getKey={({ project }) => project.cwd}>
       {({ project, branches }) => (
         <ProjectFolder
+          pendingDeletePaths={pendingDeletePaths}
           organization={organization}
           organizationDisabled={organizationDisabled}
           onOrganizationChange={onOrganizationChange}
@@ -401,6 +408,7 @@ export function ProjectList({
 }
 
 function ProjectBranch({
+  pendingDeletePaths,
   organization,
   organizationDisabled,
   onOrganizationChange,
@@ -537,7 +545,7 @@ function ProjectBranch({
     onReorder(branch.cwd, orderedAll.map((session) => session.path))
   }
   const itemProps: ComponentProps<typeof SessionItems> = {
-    selectedSubagent, subagentSessions, onViewSubagent, sessions, activePath,
+    selectedSubagent, subagentSessions, onViewSubagent, sessions, activePath, pendingDeletePaths,
     runningSessionPaths, unreadSessionPaths, attentionSessionPaths, previewDensity,
     favoritePaths, onToggleFavorite,
     onSelect: (path) => onSelectSession(branch.cwd, path),
@@ -643,8 +651,7 @@ function ProjectBranch({
           setDeleteError('')
         }}
       />
-      {expanded && (
-        <div className="project-branch-sessions">
+      <div className="project-branch-sessions" hidden={!expanded} inert={!expanded}>
           {organization && onOrganizationChange ? (
             <SessionFolderTree cwd={branch.cwd} organization={organization}
               organizationDisabled={organizationDisabled} onOrganizationChange={onOrganizationChange}
@@ -652,13 +659,13 @@ function ProjectBranch({
           ) : sessions.length === 0 ? (
             <div className="project-folder-empty">暂无会话</div>
           ) : <SessionItems {...itemProps} />}
-        </div>
-      )}
+      </div>
     </div>
   )
 }
 
 function ProjectFolder({
+  pendingDeletePaths,
   organization,
   organizationDisabled,
   onOrganizationChange,
@@ -776,12 +783,12 @@ function ProjectFolder({
           </button>
         )}
       </div>
-      {expanded && (
-        <div className="project-folder-branches">
+      <div className="project-folder-branches" hidden={!expanded} inert={!expanded}>
           <SortableSidebarGroup scope={`branches:${project.cwd}`} kind="branch" items={branches}
             allKeys={branches.map(({ branch }) => branch.cwd)} getKey={({ branch }) => branch.cwd}>
           {({ branch, sessions, allSessions, manualOrder }) => (
             <ProjectBranch
+              pendingDeletePaths={pendingDeletePaths}
               organization={organization}
               organizationDisabled={organizationDisabled}
               onOrganizationChange={onOrganizationChange}
@@ -815,8 +822,7 @@ function ProjectFolder({
             />
           )}
           </SortableSidebarGroup>
-        </div>
-      )}
+      </div>
     </div>
   )
 }

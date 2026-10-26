@@ -26,7 +26,13 @@ function setup(getEntriesPage = vi.fn().mockResolvedValue(page()), extra: Partia
     const sessions = useAgentSessionActions({ api, dispatch,
       timelineCache: history.timelineCache, timelineOwnerPath: history.timelineOwnerPath,
       historyCursor: history.historyCursor, clearTimeline: history.clearTimeline,
-      reloadTimeline: history.reloadTimeline })
+      reloadTimeline: history.reloadTimeline,
+      captureSelection: () => {
+        const selected = { ...history.selectionRef.current }
+        return () => history.selectionRef.current.generation === selected.generation
+          && history.selectionRef.current.ownerPath === selected.ownerPath
+          && history.selectionRef.current.cwd === selected.cwd
+      } })
     return { state, dispatch, history, sessions }
   })
   return { ...hook, getEntriesPage }

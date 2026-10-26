@@ -12,10 +12,15 @@
   border-right: 1px solid var(--border-soft);
 }
 
+.side-section-body[hidden],
+.project-folder-branches[hidden],
+.project-branch-sessions[hidden] { display: none; }
+
 .sidebar-scroll {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+  scrollbar-gutter: stable;
   padding: 10px 0 16px;
 }
 

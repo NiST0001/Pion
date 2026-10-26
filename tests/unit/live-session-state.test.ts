@@ -476,3 +476,215 @@ describe('bounded backend live projection', () => {
     expect(new LiveSessionProjection().backendId).not.toBe(new LiveSessionProjection().backendId)
   })
 })
+
+const timing = { startedAt: 10, finishedAt: 30, durationMs: 20, outcome: 'completed' }
+const timedUser = (inputId: string, role = 'user') => ({ role, timestamp: 10, content: 'same', _pionTurnInputId: inputId })
+const timingReceipt = (inputId: string, userEntryId = 'disk-user', patch: Record<string, unknown> = {}) => ({
+  type: 'entry_appended', entry: { type: 'custom', id: `receipt-${inputId}`, customType: 'pion-turn-timing',
+    data: { version: 1, inputId, userEntryId, ...timing, ...patch } }
+})
+
+describe('root user timing receipt projection', () => {
+  it('preserves a full run across internal starts and restores its settled receipt until the next complete run', () => {
+    const state = new LiveSessionProjection()
+    state.record({ type: 'message_start', message: timedUser('before-first-start') })
+    state.record({ type: 'agent_start' })
+    expect(state.snapshot('/project').events).toEqual([])
+    const user = timedUser('continued')
+    state.record({ type: 'message_start', message: user })
+    state.record({ type: 'message_end', message: user })
+    start(state, 11); delta(state, 'retry draft')
+    state.record({ type: 'message_end', message: { role: 'assistant', timestamp: 11, content: 'failed attempt', stopReason: 'error' } })
+    state.record({ type: 'tool_execution_start', toolCallId: 'tool', toolName: 'read', args: { path: 'file' } })
+    state.record({ type: 'tool_execution_end', toolCallId: 'tool', isError: true, result: { content: 'tool failure' } })
+    const beforeContinuation = state.snapshot('/project').events
+    state.record({ type: 'agent_end' })
+    state.record({ type: 'agent_start' })
+    expect(state.snapshot('/project').events).toEqual(beforeContinuation)
+    start(state, 20); delta(state, 'continued answer')
+    state.record({ type: 'message_end', message: { role: 'assistant', timestamp: 20, content: 'continued answer', stopReason: 'stop' } })
+    state.record({ type: 'agent_end' })
+    state.record({ type: 'agent_settled' })
+    const receipt = timingReceipt('continued')
+    state.record(receipt)
+    const recovered = state.snapshot('/project', '/session')
+    expect(recovered.events.slice(0, 2).map(messageOf)).toEqual([
+      expect.objectContaining({ role: 'user', _pionTurnTiming: timing }),
+      expect.objectContaining({ role: 'user', _pionTurnTiming: timing })
+    ])
+    expect(JSON.stringify(recovered)).toContain('failed attempt')
+    expect(JSON.stringify(recovered)).toContain('tool failure')
+    expect(JSON.stringify(recovered)).toContain('continued answer')
+    expect(JSON.stringify(recovered)).not.toContain('retry draft')
+    state.record({ type: 'agent_start' })
+    expect(state.snapshot('/project').events).toEqual([])
+    state.record({ type: 'message_start', message: timedUser('next') })
+    state.record(receipt)
+    expect(state.annotateEvent(receipt)).toBe(receipt)
+    expect(messageOf(state.snapshot('/project').events[0])._pionTurnTiming).toBeUndefined()
+    state.record(timingReceipt('next', 'next-user'))
+    expect(messageOf(state.snapshot('/project').events[0])._pionTurnTiming).toEqual(timing)
+    expect(messageOf(recovered.events[0])._pionTurnTiming).toEqual(timing)
+  })
+
+  it('retires clock and user-entry conflicts before or after an accepted receipt, including replay of that receipt object', () => {
+    for (const acceptedFirst of [false, true]) for (const patch of [
+      { startedAt: 11, durationMs: 19 }, { userEntryId: 'conflicting-user' }
+    ]) {
+      const state = new LiveSessionProjection(), user = timedUser('source')
+      const startEvent = { type: 'message_start', message: user }
+      const endEvent = { type: 'message_end', message: user }
+      state.record(startEvent)
+      state.record(endEvent)
+      const appended = { type: 'entry_appended', entry: { type: 'message', id: 'disk-user', message: user } }
+      state.record(appended)
+      const receipt = timingReceipt('source')
+      if (acceptedFirst) {
+        state.record(receipt)
+        expect(messageOf(state.snapshot('/project').events[0])._pionTurnTiming).toEqual(timing)
+      }
+      const conflict = timingReceipt('source', 'disk-user', patch)
+      state.record(conflict)
+      const rejectedEntry = { _pionLiveMessageId: `${state.backendId}:1`, _pionTurnTimingRejected: true }
+      const annotated = state.annotateEvent(conflict)
+      expect(annotated).not.toBe(conflict)
+      expect(annotated.entry).toEqual({ ...conflict.entry, ...rejectedEntry })
+      expect(annotated.entry).not.toHaveProperty('message')
+      expect(conflict.entry).not.toHaveProperty('_pionTurnTimingRejected')
+      state.record(receipt)
+      expect(state.annotateEvent(receipt).entry).toEqual({ ...receipt.entry, ...rejectedEntry })
+      const snapshot = state.snapshot('/project')
+      expect(snapshot.events.map((event) => event.type)).toEqual(['message_start', 'message_end', 'entry_appended'])
+      for (const event of snapshot.events.slice(0, 2)) expect(messageOf(event)).toMatchObject({
+        _pionLiveMessageId: `${state.backendId}:1`, _pionLiveEntryId: 'disk-user', _pionTurnTiming: null
+      })
+      expect(state.annotateEvent(startEvent).message).toMatchObject({ _pionTurnTiming: null })
+      expect(state.annotateEvent(endEvent).message).toMatchObject({ _pionTurnTiming: null })
+      expect(state.annotateEvent(appended).entry.message).toMatchObject({ _pionTurnTiming: null })
+      expect(user).not.toHaveProperty('_pionTurnTiming')
+      expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeLessThan(LIVE_MAX_BYTES)
+    }
+  })
+
+  it('retires every row sharing a duplicate input id and withdraws any previously accepted timing', () => {
+    const state = new LiveSessionProjection(), receipt = timingReceipt('duplicate')
+    state.record({ type: 'message_start', message: timedUser('duplicate') })
+    state.record(receipt)
+    expect(messageOf(state.snapshot('/project').events[0])._pionTurnTiming).toEqual(timing)
+    const previouslyDisplayed = state.snapshot('/project')
+    const duplicateStart = { type: 'message_start', message: timedUser('duplicate') }
+    state.record(duplicateStart)
+    state.record({ type: 'message_start', message: timedUser('duplicate') })
+    state.record(receipt)
+    const ambiguous = timingReceipt('duplicate', 'other-user')
+    state.record(ambiguous)
+    // A prior genuine unique binding may withdraw its own row; a new ambiguous receipt stays untouched.
+    expect(state.annotateEvent(receipt).entry).toMatchObject({
+      _pionLiveMessageId: `${state.backendId}:1`, _pionTurnTimingRejected: true
+    })
+    expect(state.annotateEvent(ambiguous)).toBe(ambiguous)
+    expect(state.annotateEvent(duplicateStart).message).toMatchObject({
+      _pionLiveMessageId: `${state.backendId}:2`, _pionTurnTiming: null
+    })
+    const snapshot = state.snapshot('/project')
+    expect(snapshot.events).toHaveLength(3)
+    expect(snapshot.events.map((event) => messageOf(event)._pionTurnTiming)).toEqual([null, null, null])
+    expect(snapshot.events.map((event) => messageOf(event)._pionLiveMessageId)).toEqual([
+      `${state.backendId}:1`, `${state.backendId}:2`, `${state.backendId}:3`
+    ])
+    expect(messageOf(snapshot.events[0])._pionLiveEntryId).toBe('disk-user')
+    expect(messageOf(previouslyDisplayed.events[0])._pionTurnTiming).toEqual(timing)
+    expect(snapshot.events.every((event) => event.type === 'message_start')).toBe(true)
+  })
+
+  it('uses the real input receipt to backfill only its user start/end and annotates custom entries without a message', () => {
+    const state = new LiveSessionProjection()
+    const first = timedUser('first'), second = timedUser('second')
+    state.record({ type: 'message_start', message: first })
+    state.record({ type: 'message_start', message: second })
+    state.record({ type: 'message_end', message: { ...first } })
+    state.record({ type: 'message_end', message: { ...second } })
+    const receipt = timingReceipt('second', 'real-user', { privateField: 'omit' })
+    state.record(receipt)
+    const events = state.snapshot('/project').events
+    expect(events.map((event) => event.type)).toEqual(['message_start', 'message_end', 'message_start', 'message_end'])
+    expect(events.slice(0, 2).map(messageOf).every((message) => message._pionTurnTiming === undefined)).toBe(true)
+    for (const event of events.slice(2)) expect(messageOf(event)).toMatchObject({
+      _pionLiveMessageId: `${state.backendId}:2`, _pionLiveEntryId: 'real-user', _pionTurnTiming: timing
+    })
+    const annotated = state.annotateEvent(receipt)
+    expect(annotated.entry).toMatchObject({ type: 'custom', _pionLiveMessageId: `${state.backendId}:2` })
+    expect(annotated.entry).not.toHaveProperty('message')
+    expect(receipt.entry).not.toHaveProperty('_pionLiveMessageId')
+    expect(second).not.toHaveProperty('_pionTurnTiming')
+    expect(JSON.stringify(events)).not.toContain('privateField')
+    expect(state.annotateEvent({ type: 'unrelated' })).toEqual({ type: 'unrelated' })
+  })
+
+  it('rejects empty, oversized and reused live source ids, including already retired sources', () => {
+    for (const source of ['', 'x'.repeat(513), 'duplicate', 'retired']) {
+      const state = new LiveSessionProjection()
+      state.record({ type: 'message_start', message: timedUser(source) })
+      if (source === 'retired') state.record({ type: 'agent_start' })
+      if (source === 'duplicate' || source === 'retired') state.record({ type: 'message_start', message: timedUser(source) })
+      const receipt = timingReceipt(source)
+      state.record(receipt)
+      if (source === 'retired') expect(state.annotateEvent(receipt).entry).toEqual({ ...receipt.entry,
+        _pionLiveMessageId: `${state.backendId}:2`, _pionTurnTimingRejected: true })
+      else expect(state.annotateEvent(receipt)).toBe(receipt)
+      const expected = source === 'duplicate' || source === 'retired' ? null : undefined
+      for (const event of state.snapshot('/project').events) expect(messageOf(event)._pionTurnTiming).toBe(expected)
+    }
+  })
+
+  it('rejects entry-owner and clock conflicts, ignores nested receipts and non-user sources', () => {
+    const state = new LiveSessionProjection()
+    state.record({ type: 'message_start', message: timedUser('first') })
+    state.record(timingReceipt('first'))
+    state.record({ type: 'agent_start' })
+    state.record({ type: 'message_start', message: timedUser('next') })
+    state.record(timingReceipt('next')) // disk-user still belongs to the previous live row.
+    state.record(timingReceipt('next', 'other-user', { startedAt: 11, durationMs: 19 }))
+    state.record(timingReceipt('next', 'other-user')) // The rejected source stays retired after a valid identity arrives.
+    state.record({ ...timingReceipt('next', 'other-user'), parentToolCallId: 'parent' })
+    state.record({ type: 'message_start', parentToolCallId: 'parent', message: timedUser('nested') })
+    state.record(timingReceipt('nested', 'nested-user'))
+    state.record({ type: 'message_start', message: timedUser('assistant', 'assistant') })
+    state.record(timingReceipt('assistant', 'other-user'))
+    const events = state.snapshot('/project').events
+    expect(events.map((event) => messageOf(event)._pionTurnTiming)).toEqual([null, undefined])
+    const external = timingReceipt('external', 'other-user')
+    state.record(external)
+    expect(state.annotateEvent(external)).toBe(external)
+    const nested = { ...timingReceipt('next', 'other-user'), parentToolCallId: 'parent' }
+    state.record(nested)
+    expect(state.annotateEvent(nested)).toBe(nested)
+  })
+
+  it('leaves conflicting receipts retired and retains the existing row/byte budget across internal starts', () => {
+    const state = new LiveSessionProjection()
+    state.record({ type: 'agent_start' })
+    state.record({ type: 'message_start', message: timedUser('conflict') })
+    state.record(timingReceipt('conflict'))
+    state.record(timingReceipt('conflict', 'disk-user', { finishedAt: 31, durationMs: 21 }))
+    expect(messageOf(state.snapshot('/project').events[0])._pionTurnTiming).toBeNull()
+    for (let index = 0; index < LIVE_MAX_ROWS + 10; index++) {
+      state.record({ type: 'message_start', message: timedUser(`bounded-${index}`) })
+      state.record(timingReceipt(`bounded-${index}`, `user-${index}`))
+    }
+    state.record({ type: 'agent_end' })
+    state.record({ type: 'agent_start' })
+    state.record({ type: 'agent_settled' })
+    const trimmedReceipt = timingReceipt('bounded-0', 'user-0')
+    state.record(trimmedReceipt)
+    expect(state.annotateEvent(trimmedReceipt)).toBe(trimmedReceipt)
+    const snapshot = state.snapshot('/project')
+    expect(snapshot.events).toHaveLength(LIVE_MAX_ROWS)
+    expect(snapshot.events.every((event) => event.type === 'message_start')).toBe(true)
+    expect(snapshot.truncated).toBe(true)
+    expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeLessThan(LIVE_MAX_BYTES)
+    state.record({ type: 'message_start', message: timedUser('bounded-0') })
+    state.record(timingReceipt('bounded-0', 'reused-after-trim'))
+    expect(messageOf(state.snapshot('/project').events.at(-1))._pionTurnTiming).toBeNull()
+  })
+})

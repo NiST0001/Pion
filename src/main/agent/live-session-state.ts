@@ -3,6 +3,7 @@ import type { LiveSessionState, WireEventInput, WireMessage } from '../../shared
 import { collectToolImages } from '../../shared/tool-images'
 import { generatedImageModelInfo, generatedImageSettingsInfo } from '../../shared/image-generation'
 import { plannedSubagentBatch, projectSubagentBatchResult, type SubagentBatch } from '../../shared/subagent-batches'
+import { PION_TURN_TIMING_TYPE, parseTurnTiming, turnTimingFromEntry, type TurnTiming } from '../../shared/conversation-timing'
 
 export const LIVE_MAX_ROWS = 256
 export const LIVE_MAX_BYTES = 4 * 1024 * 1024
@@ -23,6 +24,10 @@ type Row = {
   id?: string
   liveMessageId?: string
   entryId?: string
+  timingInputId?: string
+  timingStartedAt?: number
+  timingRejected?: boolean
+  timing?: TurnTiming
   fingerprint?: string
   ended?: boolean
   timestamp?: unknown
@@ -39,6 +44,8 @@ type Row = {
 const object = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' ? value as Record<string, unknown> : {}
 const encodedBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value) ?? '')
+const timingInputId = (value: unknown): string | undefined => typeof value === 'string'
+  && value.trim().length > 0 && value.length <= 512 && !value.includes('\0') ? value : undefined
 const safeTimestamp = (value: unknown): number | string | undefined =>
   typeof value === 'number' && Number.isFinite(value) ? value
     : typeof value === 'string' && value.length <= 128 ? value : undefined
@@ -75,11 +82,12 @@ export class LiveSessionProjection {
   private rows: Row[] = []
   private bytes = 0
   private truncated = false
+  private runActive = false
   private assistant?: Row
   private user?: Row
   private rowSequence = 0
   private entryOwners = new Map<string, string>()
-  private previousProofs: { role: string; timestamp?: unknown; fingerprint?: string }[] = []
+  private previousProofs: { role: string; timestamp?: unknown; fingerprint?: string; timingInputId?: string }[] = []
   private messageRows = new WeakMap<object, string>()
   private eventRows = new WeakMap<object, string>()
 
@@ -91,8 +99,19 @@ export class LiveSessionProjection {
     const row = this.rows.find((candidate) => candidate.liveMessageId === id)
     if (!row?.liveMessageId) return input
     const annotate = (message: unknown) => ({ ...object(message), _pionLiveMessageId: row.liveMessageId,
-      ...(row.entryId ? { _pionLiveEntryId: row.entryId } : {}) })
-    if (event.type === 'entry_appended') return { ...event, entry: { ...object(event.entry), message: annotate(object(event.entry).message) } } as T
+      ...(row.entryId ? { _pionLiveEntryId: row.entryId } : {}),
+      ...(row.timingRejected ? { _pionTurnTiming: null } : row.timing ? { _pionTurnTiming: row.timing } : {}) })
+    if (event.type === 'entry_appended') {
+      const entry = object(event.entry)
+      if (entry.type === 'custom' && entry.customType === PION_TURN_TIMING_TYPE) {
+        if (row.timingRejected) return { ...event, entry: { ...entry, _pionLiveMessageId: row.liveMessageId,
+          _pionTurnTimingRejected: true } } as T
+        if (!row.timing) return input
+        return { ...event, entry: { ...entry, _pionLiveMessageId: row.liveMessageId } } as T
+      }
+      if (entry.type !== 'message') return input
+      return { ...event, entry: { ...entry, message: annotate(entry.message) } } as T
+    }
     if (event.type === 'message_start' || event.type === 'message_end') return { ...event, message: annotate(event.message) } as T
     return { ...event, _pionLiveMessageId: row.liveMessageId } as T
   }
@@ -133,9 +152,17 @@ export class LiveSessionProjection {
     if (typeof event.parentToolCallId === 'string' && event.parentToolCallId) return
     // Even ignored root lifecycle events advance: an awaited state must not rewind newer events.
     this.revision++
+    if (event.type === 'agent_settled') {
+      this.runActive = false
+      return
+    }
     if (event.type === 'agent_start') {
+      // Retry/compaction/before-settle continuation may start again without a
+      // new user message. Only final SDK settlement opens the next run boundary.
+      if (this.runActive) return
+      this.runActive = true
       this.previousProofs = [...this.previousProofs, ...this.rows.filter((row) => row.liveMessageId)
-        .map(({ role, timestamp, fingerprint }) => ({ role, timestamp, fingerprint }))].slice(-64)
+        .map(({ role, timestamp, fingerprint, timingInputId }) => ({ role, timestamp, fingerprint, timingInputId }))].slice(-64)
       this.rows = []; this.bytes = 0; this.assistant = undefined; this.user = undefined; this.truncated = false
       this.messageRows = new WeakMap(); this.eventRows = new WeakMap()
       return
@@ -151,7 +178,15 @@ export class LiveSessionProjection {
         : this.message(message, VALUE_BYTES)
       if (timestamp !== undefined) safe.timestamp = timestamp
       safe._pionLiveMessageId = liveMessageId
-      const row: Row = { role: String(message.role), liveMessageId, fingerprint: contentFingerprint(message), timestamp, events: [{ type: 'message_start', message: safe }], text: '', thinking: '', textBytes: 0, bytes: ROW_OVERHEAD + encodedBytes([{ type: 'message_start', message: safe }]), streaming: message.role === 'assistant' }
+      const source = message.role === 'user' ? timingInputId(message._pionTurnInputId) : undefined
+      const collisions = source ? this.rows.filter((row) => row.timingInputId === source) : []
+      const retired = source !== undefined && this.previousProofs.some((proof) => proof.timingInputId === source)
+      for (const collision of collisions) this.rejectTiming(collision)
+      if (retired || collisions.length > 0) safe._pionTurnTiming = null
+      const row: Row = { role: String(message.role), liveMessageId, fingerprint: contentFingerprint(message), timestamp,
+        ...(source ? { timingInputId: source, timingStartedAt: typeof message.timestamp === 'number' ? message.timestamp : undefined,
+          timingRejected: retired || collisions.length > 0 } : {}),
+        events: [{ type: 'message_start', message: safe }], text: '', thinking: '', textBytes: 0, bytes: ROW_OVERHEAD + encodedBytes([{ type: 'message_start', message: safe }]), streaming: message.role === 'assistant' }
       if (row.streaming) this.assistant = row
       else this.user = row
       this.bind(event, message, row)
@@ -186,7 +221,11 @@ export class LiveSessionProjection {
     if (event.type === 'message_end') {
       const message = object(event.message)
       if (message.role === 'assistant' || message.role === 'user') {
-        const row = this.knownRow(message) ?? (message.role === 'assistant' ? this.assistant : this.user)
+        const source = message.role === 'user' ? timingInputId(message._pionTurnInputId) : undefined
+        const matches = source ? this.rows.filter((row) => row.role === 'user' && row.timingInputId === source && !row.timingRejected) : []
+        const row = message.role === 'user' && message._pionTurnInputId !== undefined
+          ? matches.length === 1 ? matches[0] : undefined
+          : this.knownRow(message) ?? (message.role === 'assistant' ? this.assistant : this.user)
         if (!row || row.role !== message.role || row.ended || !this.rows.includes(row)) return
         this.bind(event, message, row)
         row.ended = true
@@ -202,6 +241,8 @@ export class LiveSessionProjection {
         }
         safe._pionLiveMessageId = row.liveMessageId
         if (row.entryId) safe._pionLiveEntryId = row.entryId
+        if (row.timingRejected) safe._pionTurnTiming = null
+        else if (row.timing) safe._pionTurnTiming = row.timing
         // The final message (including empty text/thinking) replaces all provisional deltas.
         this.bytes -= row.bytes
         row.text = ''; row.thinking = ''; row.textBytes = 0; row.streaming = false
@@ -250,6 +291,34 @@ export class LiveSessionProjection {
     }
     if (event.type === 'entry_appended') {
       const entry = object(event.entry); const message = object(entry.message)
+      if (entry.type === 'custom') {
+        const record = turnTimingFromEntry(entry)
+        if (!record || !timingInputId(record.inputId) || !timingInputId(entry.id)) return
+        const candidates = this.rows.filter((row) => row.role === 'user' && row.timingInputId === record.inputId)
+        if (candidates.length !== 1) {
+          for (const candidate of candidates) this.rejectTiming(candidate)
+          return
+        }
+        const row = candidates[0]
+        this.eventRows.set(event, row.liveMessageId!)
+        if (row.timingRejected) return
+        if (row.timingStartedAt !== record.startedAt || row.timestamp !== record.startedAt
+          || (row.entryId && row.entryId !== record.userEntryId)
+          || this.rows.some((candidate) => candidate !== row && candidate.entryId === record.userEntryId)
+          || (this.entryOwners.has(record.userEntryId) && this.entryOwners.get(record.userEntryId) !== row.liveMessageId)) {
+          this.rejectTiming(row)
+          return
+        }
+        const timing = parseTurnTiming(record)!
+        if (row.timing && JSON.stringify(row.timing) !== JSON.stringify(timing)) { this.rejectTiming(row); return }
+        row.entryId = record.userEntryId
+        row.timing = timing
+        this.entryOwners.set(record.userEntryId, row.liveMessageId!)
+        if (this.entryOwners.size > 64) this.entryOwners.delete(this.entryOwners.keys().next().value!)
+        this.replace(row, row.events.map((item) => item.type === 'message_start' || item.type === 'message_end'
+          ? { ...item, message: { ...object(item.message), _pionLiveEntryId: row.entryId, _pionTurnTiming: timing } } as WireEventInput : item))
+        return
+      }
       if (entry.type !== 'message' || typeof entry.id !== 'string') return
       if (!entry.id || entry.id.length > 512) return
       const key = timestampKey(message.timestamp)
@@ -281,6 +350,13 @@ export class LiveSessionProjection {
         ? { ...e, message: { ...object(e.message), _pionLiveEntryId: row.entryId } } as WireEventInput : e)
       this.replace(row, [...events, attached])
     }
+  }
+
+  private rejectTiming(row: Row): void {
+    row.timingRejected = true
+    row.timing = undefined
+    this.replace(row, row.events.map((event) => event.type === 'message_start' || event.type === 'message_end'
+      ? { ...event, message: { ...object(event.message), _pionTurnTiming: null } } as WireEventInput : event))
   }
 
   private add(row: Row): void { this.rows.push(row); this.bytes += row.bytes; this.trim(row) }
@@ -317,6 +393,8 @@ export class LiveSessionProjection {
         continue
       }
       const [removed] = this.rows.splice(index, 1); this.bytes -= removed.bytes; this.truncated = true
+      if (removed.timingInputId) this.previousProofs = [...this.previousProofs,
+        { role: removed.role, timingInputId: removed.timingInputId }].slice(-64)
     }
   }
 

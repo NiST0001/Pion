@@ -23,6 +23,7 @@ import type {
   WireEventInput
 } from '../../../shared/types'
 import type { SubagentBatch } from '../../../shared/subagent-batches'
+import type { TurnTiming } from '../../../shared/conversation-timing'
 import type { ToolResultImage } from '../../../shared/tool-images'
 import type { GeneratedImageModelInfo, GeneratedImageSettingsInfo } from '../../../shared/image-generation'
 
@@ -77,6 +78,8 @@ export type TimelineItem = (
       liveMessageId?: string
       /** Stable timestamp carried by the SDK user message itself. */
       messageTimestamp?: number
+      /** Exact final SDK display receipt; null retires conflicting source evidence. */
+      turnTiming?: TurnTiming | null
       text: string
       images?: ImageContent[]
       timestamp?: string

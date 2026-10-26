@@ -305,19 +305,28 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     state.liveSessionScopeSelected, state.liveSessionBackendId, state.liveSessionRevision])
 
   /** Load only the newest history window; older windows are fetched on demand. */
-  const reloadTimeline = useCallback(async (sessionPath?: string, refreshLive = false): Promise<void> => {
+  const reloadTimeline = useCallback(async (sessionPath?: string, refreshLive = false, waitForActualReads = false): Promise<void> => {
     if (!api) return
     const loadId = ++timelineLoadId.current
     const revision = scopeRevision.current
     const deadline = Date.now() + 15_000
+    const actualReads = new Set<Promise<unknown>>()
+    const read = <T,>(operation: () => Promise<T>): Promise<T> => readWithDeadline(() => {
+      const request = operation()
+      if (waitForActualReads) {
+        actualReads.add(request)
+        void request.then(() => actualReads.delete(request), () => actualReads.delete(request))
+      }
+      return request
+    }, deadline)
     const initialSelection = readSelection()
     try {
     const path = sessionPath
       ?? timelineOwnerPath.current
-      ?? (await readWithDeadline(() => api.getState(), deadline))?.sessionFile
+      ?? (await read(() => api.getState()))?.sessionFile
     if ((initialSelection.ownerPath || initialSelection.sessionId) && readSelection() !== initialSelection) return
     const mutation = revertInFlight.current
-    if (mutation && mutation.path === path && !mutation.settled) await readWithDeadline(() => mutation.done, deadline)
+    if (mutation && mutation.path === path && !mutation.settled) await read(() => mutation.done)
     if (loadId !== timelineLoadId.current) return
     const selection = readSelection()
     const preserveToolState: ToolStateScope | undefined = path && selection.ownerPath === path
@@ -350,7 +359,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       // JSONL may have the same leaf/count while the retained backend has new
       // unpersisted output. Pull its owned display snapshot independently of
       // STATE delivery, without restarting the backend or replaying input.
-      void readWithDeadline(() => api.getState(), deadline).then((session) => {
+      void read(() => api.getState()).then((session) => {
         if (loadId !== timelineLoadId.current || revision !== scopeRevision.current
           || timelineOwnerPath.current !== path || readSelection() !== selection
           || !session || session.sessionFile !== path
@@ -372,7 +381,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     let page = null
     for (let attempt = 0; attempt < 3; attempt++) {
       if (Date.now() >= deadline) break
-      page = await readWithDeadline(() => api.getEntriesPage(undefined, getViewportHistoryPageSize(), path), deadline)
+      page = await read(() => api.getEntriesPage(undefined, getViewportHistoryPageSize(), path))
         .catch(() => null)
       if (page || loadId !== timelineLoadId.current || Date.now() >= deadline || attempt === 2) break
       await new Promise<void>((resolve) => window.setTimeout(resolve, 80 * (attempt + 1)))
@@ -469,6 +478,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       if (loadId === timelineLoadId.current && revision === scopeRevision.current) {
         dispatch({ type: 'timelineLoading', loading: false })
       }
+      // The UI watchdog may finish first; deletion retains its real read slot.
+      if (waitForActualReads) await Promise.allSettled([...actualReads])
     }
   }, [api, dispatch, readSelection, showTimeline])
 

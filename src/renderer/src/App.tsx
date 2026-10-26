@@ -87,6 +87,14 @@ export function App(): ReactElement {
   const sessionOrganization = useSessionOrganization(window.pion)
   const [archiveOpen, setArchiveOpen] = useState(false)
   const closeArchive = useCallback(() => setArchiveOpen(false), [])
+  const deletionOwnerRef = useRef({ api: window.pion })
+  if (deletionOwnerRef.current.api !== window.pion) deletionOwnerRef.current = { api: window.pion }
+  const deletionOwner = deletionOwnerRef.current
+  const deletionRequests = useRef(new Map<string, Promise<void>>())
+  const [pendingDeletePaths, setPendingDeletePaths] = useState<ReadonlySet<string>>(new Set())
+  const [deletionFailure, setDeletionFailure] = useState<{ owner: object; message: string } | null>(null)
+  const deletionMounted = useRef(false)
+  useEffect(() => { deletionMounted.current = true; return () => { deletionMounted.current = false } }, [])
   const childSessions = useSubagentSessions(window.pion, hasBridge)
   const viewingChild = Boolean(childSessions.selectedTarget)
   const childSummary = childSessions.selected ?? childSessions.sessions.find((item) =>
@@ -629,20 +637,38 @@ export function App(): ReactElement {
     [actions, reviewPath, selectedSession, selectionRef, state.session?.sessionFile, state.status.cwd, state.status.phase, state.timelineError, state.timelineReady, state.timelineLoading, childSessions.close, viewingChild]
   )
 
-  const handleDeleteSession = useCallback(
-    async (cwd: string, path: string) => {
-      if (selectedSession?.path === path || selectionRef.current.ownerPath === path) {
+  const handleDeleteSession = useCallback((cwd: string, path: string): Promise<void> => {
+    const existing = deletionRequests.current.get(path)
+    if (existing) return existing
+    if (!deletionMounted.current || deletionOwnerRef.current !== deletionOwner || !deletionOwner.api) {
+      return Promise.reject(new Error('会话删除所属页面已失效，请重新选择。'))
+    }
+    const requestId = sessionSelectionId.current
+    const selected = selectedSession?.path === path || selectionRef.current.ownerPath === path
+    setDeletionFailure(null)
+    const operation = Promise.resolve().then(async () => {
+      await actions.deleteSession(path)
+      if (!deletionMounted.current || deletionOwnerRef.current !== deletionOwner) return
+      if (selected && sessionSelectionId.current === requestId) {
         sessionSelectionId.current += 1
         setSelectedSession(null)
       }
       setFavoriteSessionPaths((current) => current.includes(path)
-        ? current.filter((favoritePath) => favoritePath !== path)
-        : current)
-      await actions.deleteSession(path)
+        ? current.filter((favoritePath) => favoritePath !== path) : current)
       await actions.refreshProjectSessions(cwd)
-    },
-    [actions, selectedSession?.path, selectionRef]
-  )
+    }).catch((error) => {
+      if (deletionMounted.current && deletionOwnerRef.current === deletionOwner) {
+        setDeletionFailure({ owner: deletionOwner, message: error instanceof Error ? error.message : String(error) })
+      }
+      throw error
+    }).finally(() => {
+      if (deletionRequests.current.get(path) === operation) deletionRequests.current.delete(path)
+      if (deletionMounted.current) setPendingDeletePaths(new Set(deletionRequests.current.keys()))
+    })
+    deletionRequests.current.set(path, operation)
+    setPendingDeletePaths(new Set(deletionRequests.current.keys()))
+    return operation
+  }, [actions, deletionOwner, selectedSession?.path, selectionRef])
 
   const handleCopySession = useCallback(
     async (_cwd: string, path: string) => {
@@ -876,6 +902,7 @@ export function App(): ReactElement {
                 onClick={() => void sessionOrganization.refresh()}>重试读取</button>
             </div>}
             <FavoriteSessions
+              pendingDeletePaths={pendingDeletePaths}
               onArchive={archiveFavorite}
               organizationDisabled={organizationDisabled}
               sessions={favoriteSessions}
@@ -896,6 +923,7 @@ export function App(): ReactElement {
               onFork={(session, entryId) => handleForkSession(session.projectCwd ?? state.status.cwd ?? '', session.path, entryId)}
             />
             <ProjectList
+              pendingDeletePaths={pendingDeletePaths}
               organization={sessionOrganization.organization}
               organizationDisabled={organizationDisabled}
               onOrganizationChange={sessionOrganization.update}
@@ -931,6 +959,10 @@ export function App(): ReactElement {
               onToggleFavorite={handleToggleFavorite}
             />
           </div>
+          {deletionFailure?.owner === deletionOwner && <div className="banner" role="alert">
+            <span>{deletionFailure.message}</span>
+            <button type="button" onClick={() => setDeletionFailure(null)} aria-label="关闭删除提示">关闭</button>
+          </div>}
           {branchNotice && <div className="banner" role="status">
             <span>{branchNotice}</span>
             <button type="button" onClick={() => setBranchNotice('')} aria-label="关闭分支操作提示">关闭</button>

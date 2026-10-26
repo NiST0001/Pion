@@ -89,23 +89,67 @@ describe('SessionFolderTree organization projection', () => {
     expect(itemProps.onSelect).not.toHaveBeenCalled()
   })
 
-  it('awaits collapse persistence, keeps failure visible, and gates every organization control when disabled', async () => {
+  it('preserves the reorder capability layout while respecting item-level reorder disablement', () => {
+    const org = organization(); org.folders[1].collapsed = false
+    const itemProps = { ...items(), reorderDisabled: true }
+    const view = render(<SessionFolderTree cwd={cwd} organization={org} itemProps={itemProps} onOrganizationChange={vi.fn()} />)
+    const nestedRow = row(view.container, a.path)
+    expect(nestedRow).toHaveClass('reorderable')
+    expect(nestedRow.querySelector('.side-session-drag')).toBeInTheDocument()
+    expect(nestedRow).not.toHaveAttribute('draggable', 'true')
+    fireEvent.drop(nestedRow, { dataTransfer: { getData: () => b.path } })
+    expect(itemProps.onReorder).not.toHaveBeenCalled()
+  })
+
+  it('opens immediately, retains rows and grips through persistence, restores failures and gates disabled mutations', async () => {
     const org = organization(), itemProps = items()
     let reject!: (reason: Error) => void
     const change = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail }))
     const props = { cwd, organization: org, itemProps, onOrganizationChange: change }
     const view = render(<SessionFolderTree {...props} />)
     const toggle = screen.getByRole('button', { name: '文件夹 子目录' })
+    const rootRow = row(view.container, root.path), nestedRow = row(view.container, a.path)
+    const grip = rootRow.querySelector('.side-session-drag')
     fireEvent.click(toggle)
     expect(change).toHaveBeenCalledWith({ type: 'setFolderCollapsed', id: 'child', collapsed: false })
-    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(nestedRow).toBeVisible()
     expect(toggle).toBeDisabled()
+    expect(row(view.container, root.path)).toBe(rootRow)
+    expect(rootRow.querySelector('.side-session-drag')).toBe(grip)
+    expect(rootRow).toHaveClass('reorderable')
+    expect(rootRow).not.toHaveAttribute('draggable', 'true')
+    fireEvent.drop(nestedRow, { dataTransfer: { getData: () => b.path } })
+    expect(itemProps.onReorder).not.toHaveBeenCalled()
     await act(async () => { reject(new Error('保存失败')) })
     expect(screen.getByRole('alert')).toHaveTextContent('保存失败')
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(row(view.container, a.path)).toBe(nestedRow)
+    expect(nestedRow).not.toBeVisible()
+    expect(nestedRow.closest('.session-folder-content')).toHaveAttribute('inert')
     view.rerender(<SessionFolderTree {...props} organizationDisabled />)
     for (const button of view.container.querySelectorAll<HTMLButtonElement>('.session-folder-heading button, .session-folder-create')) expect(button).toBeDisabled()
     expect(row(view.container, root.path)).not.toHaveAttribute('draggable', 'true')
+    expect(rootRow.querySelector('.side-session-drag')).toBe(grip)
+    expect(rootRow).toHaveClass('reorderable')
+  })
+
+  it('collapses immediately without replacing the hidden subtree and settles against the saved snapshot', async () => {
+    const org = organization(); org.folders[1].collapsed = false
+    let resolve!: () => void
+    const change = vi.fn(() => new Promise<void>((done) => { resolve = done }))
+    const props = { cwd, organization: org, itemProps: items(), onOrganizationChange: change }
+    const view = render(<SessionFolderTree {...props} />)
+    const nestedRow = row(view.container, a.path), grip = nestedRow.querySelector('.side-session-drag')
+    fireEvent.click(screen.getByRole('button', { name: '文件夹 子目录' }))
+    expect(nestedRow).not.toBeVisible()
+    expect(nestedRow.closest('.session-folder-content')).toHaveAttribute('inert')
+    const saved = { ...org, revision: 2, folders: org.folders.map((folder) => folder.id === 'child' ? { ...folder, collapsed: true } : folder) }
+    await act(async () => { view.rerender(<SessionFolderTree {...props} organization={saved} />); resolve() })
+    expect(row(view.container, a.path)).toBe(nestedRow)
+    expect(nestedRow.querySelector('.side-session-drag')).toBe(grip)
+    expect(nestedRow).not.toBeVisible()
+    expect(screen.getByRole('button', { name: '文件夹 子目录' })).toBeEnabled()
   })
 
   it('excludes a folder and descendants from move choices, and explains delete promotion', () => {
@@ -150,9 +194,41 @@ describe('SessionFolderTree organization projection', () => {
     view.rerender(<SessionFolderTree {...props} cwd={kind === 'worktree' ? '/other' : cwd}
       onOrganizationChange={kind === 'callback' ? vi.fn().mockResolvedValue(undefined) : change} />)
     expect(screen.getByRole('button', { name: '新建文件夹' })).toBeDisabled()
+    if (kind === 'callback') expect(screen.getByRole('button', { name: '文件夹 子目录' })).toHaveAttribute('aria-expanded', 'false')
     await act(async () => { reject(new Error('旧目录错误')) })
     expect(screen.queryByText('旧目录错误')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '新建文件夹' })).toBeEnabled()
+  })
+
+  it('closes delete confirmation immediately, keeps the folder pending, reports local failure and waits for the saved removal', async () => {
+    const org = organization()
+    let reject!: (reason: Error) => void, resolve!: () => void
+    const change = vi.fn(() => new Promise<void>((done, fail) => { resolve = done; reject = fail }))
+    const props = { cwd, organization: org, itemProps: items(), onOrganizationChange: change }
+    const view = render(<SessionFolderTree {...props} />)
+    const folder = view.container.querySelector<HTMLElement>('[data-folder-id="child"]')!
+    const rootRow = row(view.container, root.path)
+    fireEvent.click(screen.getByRole('button', { name: '删除文件夹 子目录' }))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '删除文件夹' }))
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(folder).toHaveAttribute('aria-busy', 'true')
+    expect(within(folder).getByRole('status')).toHaveTextContent('正在保存')
+    expect(view.container.querySelector('[data-folder-id="child"]')).toBe(folder)
+    expect(row(view.container, root.path)).toBe(rootRow)
+    await act(async () => { reject(new Error('删除保存失败')) })
+    expect(within(folder).getByRole('alert')).toHaveTextContent('删除保存失败')
+    expect(folder).toHaveAttribute('aria-busy', 'false')
+    fireEvent.click(screen.getByRole('button', { name: '删除文件夹 子目录' }))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '删除文件夹' }))
+    await act(async () => { resolve() })
+    expect(folder).toBeInTheDocument()
+    const saved = { ...org, revision: 2, folders: org.folders.filter((entry) => entry.id !== 'child'),
+      sessions: org.sessions.map((entry) => ({ ...entry, folderId: 'parent' })) }
+    view.rerender(<SessionFolderTree {...props} organization={saved} />)
+    expect(folder).not.toBeInTheDocument()
+    expect(row(view.container, a.path)).toBeVisible()
+    expect(row(view.container, root.path)).toBe(rootRow)
+    expect(change).toHaveBeenCalledTimes(2)
   })
 
   it('handles cycles/missing parents and orphaned placement without losing session rows', () => {
@@ -162,6 +238,32 @@ describe('SessionFolderTree organization projection', () => {
     const view = render(<SessionFolderTree cwd={cwd} organization={org} itemProps={items()} onOrganizationChange={vi.fn()} />)
     expect(view.container.querySelectorAll('[data-folder-id]')).toHaveLength(3)
     expect(view.container.querySelectorAll('[data-session-path]')).toHaveLength(3)
+  })
+
+  it('preserves rows and grips during archive persistence, blocks reorder, and removes only the archived snapshot row', async () => {
+    const org = organization(); org.folders[1].collapsed = false
+    let resolve!: () => void
+    const change = vi.fn(() => new Promise<void>((done) => { resolve = done }))
+    const itemProps = items(), props = { cwd, organization: org, itemProps, onOrganizationChange: change }
+    const view = render(<SessionFolderTree {...props} />)
+    const rootRow = row(view.container, root.path), nestedRow = row(view.container, b.path)
+    const grip = nestedRow.querySelector('.side-session-drag')
+    fireEvent.contextMenu(row(view.container, a.path))
+    fireEvent.click(screen.getByRole('button', { name: '归档会话' }))
+    expect(row(view.container, a.path)).toBeVisible()
+    expect(row(view.container, root.path)).toBe(rootRow)
+    expect(row(view.container, b.path)).toBe(nestedRow)
+    expect(nestedRow.querySelector('.side-session-drag')).toBe(grip)
+    expect(nestedRow).toHaveClass('reorderable')
+    expect(nestedRow).not.toHaveAttribute('draggable', 'true')
+    fireEvent.drop(nestedRow, { dataTransfer: { getData: () => a.path } })
+    expect(itemProps.onReorder).not.toHaveBeenCalled()
+    const saved = { ...org, revision: 2, sessions: org.sessions.map((entry) => entry.path === a.path ? { ...entry, archived: true } : entry) }
+    await act(async () => { view.rerender(<SessionFolderTree {...props} organization={saved} />); resolve() })
+    expect(row(view.container, a.path)).toBeUndefined()
+    expect(row(view.container, b.path)).toBe(nestedRow)
+    expect(nestedRow.querySelector('.side-session-drag')).toBe(grip)
+    expect(row(view.container, root.path)).toBe(rootRow)
   })
 
   it('sends archive metadata with the owning cwd and original title; display follows only snapshots', async () => {

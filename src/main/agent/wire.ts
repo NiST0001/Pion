@@ -5,6 +5,7 @@ import type { SessionEntry, SessionTreeNode } from '@earendil-works/pi-coding-ag
 import type { AgentMode, SessionTask, TreeNodeLite, WireEntry, WireMessage } from '../../shared/types'
 import { taskSnapshotFromEntry, taskSnapshotFromResult } from '../../shared/task-history'
 import { messageText, messageToolCalls } from '../../shared/types'
+import { parseTurnTiming, turnTimingFromEntry, type TurnTiming, type TurnTimingRecord } from '../../shared/conversation-timing'
 
 /** Derive the current build/plan mode from Pion plan-mode-state custom entries. */
 export function sessionMode(entries: SessionEntry[]): AgentMode {
@@ -36,6 +37,45 @@ export function sessionBranch(entries: SessionEntry[], leafId: string | null): S
     id = entry.parentId
   }
   return branch.reverse()
+}
+
+/** Timing receipts are display evidence on this ancestry only, independent of page bounds. */
+export function sessionTurnTimings(branchEntries: SessionEntry[]): Map<string, TurnTiming> {
+  const counts = new Map<string, number>()
+  const users = new Map<string, { index: number; timestamp: unknown }>()
+  branchEntries.forEach((entry, index) => {
+    counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1)
+    if (entry.type === 'message' && entry.message.role === 'user') {
+      users.set(entry.id, { index, timestamp: entry.message.timestamp })
+    }
+  })
+  const records = new Map<string, TurnTimingRecord>()
+  const sources = new Map<string, string>()
+  const rejected = new Set<string>()
+  branchEntries.forEach((entry, index) => {
+    const record = turnTimingFromEntry(entry)
+    if (!record) return
+    const user = users.get(record.userEntryId)
+    const owner = sources.get(record.inputId)
+    if (owner !== undefined && owner !== record.userEntryId) {
+      rejected.add(owner); rejected.add(record.userEntryId)
+    }
+    sources.set(record.inputId, record.userEntryId)
+    const previous = records.get(record.userEntryId)
+    if (!user || counts.get(record.userEntryId) !== 1 || counts.get(entry.id) !== 1
+      || user.index >= index || user.timestamp !== record.startedAt
+      || (previous && JSON.stringify(previous) !== JSON.stringify(record))) {
+      rejected.add(record.userEntryId)
+      return
+    }
+    records.set(record.userEntryId, record)
+  })
+  const timings = new Map<string, TurnTiming>()
+  for (const [id, record] of records) {
+    const timing = parseTurnTiming(record)
+    if (!rejected.has(id) && timing) timings.set(id, timing)
+  }
+  return timings
 }
 
 /** Latest valid full task snapshot on the selected branch, not the visible page.
@@ -94,7 +134,7 @@ export function filterToolResults(entries: SessionEntry[], ids: Set<string>): Se
   })
 }
 
-export function toWireEntry(entry: SessionEntry): WireEntry {
+export function toWireEntry(entry: SessionEntry, timing?: TurnTiming): WireEntry {
   const wire: WireEntry = {
     type: entry.type,
     id: entry.id,
@@ -103,7 +143,9 @@ export function toWireEntry(entry: SessionEntry): WireEntry {
   }
   const record = entry as unknown as Record<string, unknown>
   if (entry.type === 'message') {
-    wire.message = record.message as WireMessage
+    const message = record.message as WireMessage
+    const safeTiming = message.role === 'user' ? parseTurnTiming(timing) : undefined
+    wire.message = safeTiming ? { ...message, _pionTurnTiming: safeTiming } : message
   } else if (entry.type === 'compaction') {
     wire.summary = record.summary as string
     if (typeof record.firstKeptEntryId === 'string') wire.firstKeptEntryId = record.firstKeptEntryId

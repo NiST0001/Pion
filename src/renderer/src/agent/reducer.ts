@@ -11,6 +11,7 @@ import type {
 import { messageImages, messageText, messageThinking, messageToolCalls } from '../../../shared/types'
 import { subagentBatchesEqual, type SubagentBatch } from '../../../shared/subagent-batches'
 import { taskSnapshotFromEntry, taskSnapshotFromResult } from '../../../shared/task-history'
+import { mergeTurnTiming, parseTurnTiming, PION_TURN_TIMING_TYPE, turnTimingFromEntry } from '../../../shared/conversation-timing'
 import { orderSessions, reorderSessionsByPaths } from './sessionOrder'
 import {
   applyPartialToolResult,
@@ -18,6 +19,7 @@ import {
   assistantErrorText,
   collectToolResults,
   compactionFingerprint,
+  messageTurnTiming,
   nextTimelineId,
   orderTimelineAroundAnchors,
   parseToolArgs,
@@ -288,7 +290,8 @@ export function reducer(state: AgentState, action: Action): AgentState {
           ...((item.kind === 'user' || item.kind === 'assistant') && (current.kind === 'user' || current.kind === 'assistant')
             ? { entryId: current.entryId ?? item.entryId, liveMessageId: current.liveMessageId ?? item.liveMessageId } : {}),
           ...(item.kind === 'user' && current.kind === 'user'
-            ? { images: current.images?.length ? current.images : item.images } : {}),
+            ? { images: current.images?.length ? current.images : item.images,
+              turnTiming: mergeTurnTiming(current.turnTiming, item.turnTiming) } : {}),
           historical: item.historical, noReveal: item.noReveal }
         const fields = cachedSnapshotFields(state, current)
         if (replacement.kind === 'assistant' && item.kind === 'assistant') {
@@ -762,6 +765,7 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
         && replacement.historical === current.historical && replacement.noReveal === current.noReveal) return current
     }
     if (replacement.kind === 'user' && current.kind === 'user') {
+      replacement.turnTiming = mergeTurnTiming(current.turnTiming, replacement.turnTiming)
       if (fields.has('text') && replacement.text.length < current.text.length) replacement.text = current.text
       if (current.images?.length && !replacement.images?.length) replacement.images = current.images
     }
@@ -898,7 +902,7 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
       if (message?.role === 'user') {
         const row: Extract<TimelineItem, { kind: 'user' }> = {
           kind: 'user', id: nextTimelineId(), ...liveMessageIdentity(message),
-          messageTimestamp: wireMessageTimestamp(message),
+          messageTimestamp: wireMessageTimestamp(message), turnTiming: messageTurnTiming(message),
           text: messageText(message), images: messageImages(message), live: true
         }
         const candidates = state.timeline.filter((item) => sameStrongMessageIdentity(item, row))
@@ -910,6 +914,7 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
           const replacement = { ...current, liveMessageId: row.liveMessageId ?? current.liveMessageId,
             ...((current.entryId ?? row.entryId) ? { entryId: current.entryId ?? row.entryId } : {}),
             messageTimestamp: row.messageTimestamp ?? current.messageTimestamp,
+            turnTiming: mergeTurnTiming(current.turnTiming, row.turnTiming),
             text: truncated ? current.text : row.text,
             images: row.images?.length ? row.images : current.images }
           return { ...state, timeline: state.timeline.map((item) => item === current ? replacement : item) }
@@ -990,7 +995,8 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
         const current = candidates.length === 1 ? candidates[0] : undefined
         if (current?.kind !== 'user') return state
         return { ...state, timeline: state.timeline.map((item) => item === current
-          ? { ...current, ...identity, messageTimestamp: wireMessageTimestamp(message) ?? current.messageTimestamp } : item) }
+          ? { ...current, ...identity, messageTimestamp: wireMessageTimestamp(message) ?? current.messageTimestamp,
+            turnTiming: mergeTurnTiming(current.turnTiming, messageTurnTiming(message)) } : item) }
       }
       if (message?.role !== 'assistant') return state
       // A call can arrive in the authoritative assistant message before its
@@ -1043,6 +1049,31 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
       if (customTasks !== undefined) return state
       const entry = event.entry
       if (!entry) return state
+      if (entry.type === 'custom' && entry.customType === PION_TURN_TIMING_TYPE && entry._pionTurnTimingRejected === true) {
+        const liveId = typeof entry._pionLiveMessageId === 'string' && entry._pionLiveMessageId.length <= 512
+          ? entry._pionLiveMessageId : undefined
+        const candidates = liveId ? state.timeline.filter(item => item.kind === 'user' && item.liveMessageId === liveId) : []
+        const current = candidates.length === 1 ? candidates[0] : undefined
+        return current?.kind === 'user' && current.turnTiming !== null
+          ? { ...state, timeline: state.timeline.map(item => item === current ? { ...current, turnTiming: null } : item) }
+          : state
+      }
+      const timing = turnTimingFromEntry(entry)
+      if (timing) {
+        const liveId = typeof entry._pionLiveMessageId === 'string' && entry._pionLiveMessageId.length <= 512
+          ? entry._pionLiveMessageId : undefined
+        // Count every strong match before validating clocks: split or duplicate
+        // live/entry identities stay unknown, even with identical user text.
+        const candidates = state.timeline.filter((item) => item.kind === 'user'
+          && (item.entryId === timing.userEntryId || (liveId && item.liveMessageId === liveId)))
+        const current = candidates.length === 1 ? candidates[0] : undefined
+        if (current?.kind !== 'user' || current.messageTimestamp !== timing.startedAt
+          || (current.entryId && current.entryId !== timing.userEntryId)
+          || (liveId && current.liveMessageId && current.liveMessageId !== liveId)) return state
+        if (current.turnTiming !== undefined) return state
+        return { ...state, timeline: state.timeline.map((item) => item === current
+          ? { ...current, entryId: timing.userEntryId, turnTiming: parseTurnTiming(timing) } : item) }
+      }
       if (state.timeline.some((item) => 'entryId' in item && item.entryId === entry.id)) return state
       if (entry.type === 'custom' && entry.customType === 'plan-mode-state') {
         const data = entry.data

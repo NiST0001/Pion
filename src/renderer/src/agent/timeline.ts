@@ -13,6 +13,7 @@ import type {
 import { messageImages, messageText, messageThinking, messageToolCalls, messageTimestamp } from '../../../shared/types'
 import { plannedSubagentBatch, projectSubagentBatchResult, subagentBatchesEqual } from '../../../shared/subagent-batches'
 import { collectToolImages } from '../../../shared/tool-images'
+import { mergeTurnTiming, parseTurnTiming, type TurnTiming } from '../../../shared/conversation-timing'
 import {
   CODEX_IMAGE_REQUEST_ALIAS,
   generatedImageModelInfo,
@@ -430,6 +431,14 @@ export function collectToolResults(entries: WireEntry[]): Map<string, Historical
   return results
 }
 
+/** Only an exact SDK user clock can accept its display-only completion receipt. */
+export function messageTurnTiming(message: WireMessage | undefined): TurnTiming | null | undefined {
+  if (message?.role !== 'user') return undefined
+  if (message._pionTurnTiming === null) return null
+  const timing = parseTurnTiming(message._pionTurnTiming)
+  return timing?.startedAt === wireMessageTimestamp(message) ? timing : undefined
+}
+
 export function entriesToTimeline(
   entries: WireEntry[],
   toolResults: Map<string, HistoricalToolResult> = collectToolResults(entries),
@@ -463,6 +472,7 @@ export function entriesToTimeline(
         id: stableTimelineId(`entry:${entry.id}`),
         entryId: entry.id,
         messageTimestamp: wireMessageTimestamp(message),
+        turnTiming: messageTurnTiming(message),
         text: messageText(message),
         images: messageImages(message),
         timestamp: entry.timestamp
@@ -568,6 +578,7 @@ function reconcileLiveRow(live: TimelineItem, persisted: TimelineItem): Timeline
     : timelineItemIdentity(live) ? live.historyReconciled : undefined
   if (live.kind === 'user' && persisted.kind === 'user') {
     return { ...live, entryId: persisted.entryId ?? live.entryId, timestamp: persisted.timestamp ?? live.timestamp,
+      turnTiming: mergeTurnTiming(live.turnTiming, persisted.turnTiming),
       ...(persisted.liveMessageId && !live.liveMessageId ? { liveMessageId: persisted.liveMessageId } : {}),
       // A real image-free page projects []; normalize that empty projection on
       // the first merge too, without erasing any known original attachments.
@@ -683,6 +694,7 @@ export function preserveTimelineToolState(
     // row. Carry that proof/key without treating the cache as a new disk page.
     if (!item.entryId) mountedCacheIds.add(mounted.id)
     return { ...item, id: mounted.id, entryId: item.entryId ?? mounted.entryId, live: mounted.live,
+      ...(item.kind === 'user' && mounted.kind === 'user' ? { turnTiming: mergeTurnTiming(mounted.turnTiming, item.turnTiming) } : {}),
       historical: mounted.historical, noReveal: mounted.noReveal,
       historyReconciled: mounted.historyReconciled,
       ...(mounted.liveMessageId ? { liveMessageId: mounted.liveMessageId } : {}) }
@@ -801,7 +813,7 @@ function reconcileTimelinePage(
   const pinnedLiveIds = new Set<number>()
   const liveByIdentity = new Map<string, TimelineItem[]>()
   const existingTools = new Map<string, Extract<TimelineItem, { kind: 'tool' }>>()
-  const completedTools = new Map<number, TimelineItem>()
+  const rowUpdates = new Map<number, TimelineItem>()
   const liveByMessage = new Map<string, TimelineItem[]>()
   const liveByStableId = new Map<string, TimelineItem[]>()
   const streamingByTimestamp = new Map<number, TimelineItem[]>()
@@ -889,8 +901,14 @@ function reconcileTimelinePage(
       const existingTool = identity ? existingTools.get(identity) : undefined
       if (item.kind === 'tool' && item.tool.resultReceived
         && existingTool && (existingTool.tool.status === 'running' || !existingTool.tool.resultReceived)
-        && !completedTools.has(existingTool.id)) {
-        completedTools.set(existingTool.id, reconcileLiveRow(existingTool, item))
+        && !rowUpdates.has(existingTool.id)) {
+        rowUpdates.set(existingTool.id, reconcileLiveRow(existingTool, item))
+      }
+      const current = knownRows[0]
+      if (current.kind === 'user' && item.kind === 'user'
+        && incoming.filter(row => timelineItemIdentity(row) === identity).length === 1) {
+        const turnTiming = mergeTurnTiming(current.turnTiming, item.turnTiming)
+        if (turnTiming !== current.turnTiming) rowUpdates.set(current.id, { ...current, turnTiming })
       }
       // Expose known overlaps for ordering, but never count them as new rows.
       if (!page.some((row) => row.id === knownRows[0].id)) page.push(knownRows[0])
@@ -946,7 +964,7 @@ function reconcileTimelinePage(
   }
 
   const retained = existing.filter((item) => !pinnedLiveIds.has(item.id))
-    .map((item) => completedTools.get(item.id) ?? item)
+    .map((item) => rowUpdates.get(item.id) ?? item)
   const tailItems = existing.filter((item) => pinnedLiveIds.has(item.id) && !matchedIds.has(item.id))
   const items = completeTimelineToolResults([...retained, ...appended, ...tailItems], toolResults)
   const byId = new Map(items.map((item) => [item.id, item]))

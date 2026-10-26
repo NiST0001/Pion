@@ -13,9 +13,12 @@ vi.mock('@earendil-works/pi-coding-agent', async (original) => ({
 }))
 vi.mock('../../src/main/agent/image-generation', () => ({ createImageGenerationTool: mocks.image }))
 const cwd = resolve('project')
+const fakeSession = (sessionManager: unknown, getActiveToolNames = () => ['read', 'bash', 'edit', 'write']) => ({
+  sessionManager, getActiveToolNames, subscribe: vi.fn(() => vi.fn()), dispose: vi.fn()
+})
 beforeEach(() => {
   vi.clearAllMocks()
-  const manager = { getCwd: () => cwd, buildSessionContext: () => ({ messages: [] }) }
+  const manager = { getCwd: () => cwd, buildSessionContext: () => ({ messages: [] }), appendMessage: vi.fn() }
   const settings = { getEnabledModels: () => [], getDefaultProvider: () => undefined, getDefaultModel: () => undefined, getDefaultTools: () => undefined, getSettings: () => ({}), applyOverrides: vi.fn() }
   mocks.create.mockReturnValue(manager)
   mocks.open.mockReturnValue(manager)
@@ -27,7 +30,7 @@ beforeEach(() => {
     execute: async (signal: AbortSignal) => options.getAuth({ signal, minOAuthValidityMs: 300_000 })
   }))
   mocks.services.mockResolvedValue({ settingsManager: settings, modelRuntime: { getAuth: mocks.auth }, resourceLoader: { getExtensions: () => ({ extensions: [] }) }, diagnostics: [] })
-  mocks.session.mockResolvedValue({ session: { getActiveToolNames: () => ['read', 'bash', 'edit', 'write'] }, extensionsResult: {} })
+  mocks.session.mockImplementation(async ({ sessionManager }) => ({ session: fakeSession(sessionManager), extensionsResult: {} }))
   mocks.runtime.mockImplementation(async (factory, target) => factory(target))
 })
 
@@ -39,7 +42,8 @@ it('parses only the private RPC arguments and fails closed on unknown flags', ()
 })
 
 it('injects a compiled SDK tool, preserves trust gating, and recreates tools for replacement sessions', async () => {
-  await createPionRuntime(['--mode', 'rpc', '--no-approve', '--extension', './permissions.ts'], cwd)
+  const initial = await createPionRuntime(['--mode', 'rpc', '--no-approve', '--extension', './permissions.ts'], cwd)
+
   expect(mocks.settings).toHaveBeenCalledWith(cwd, expect.any(String), { projectTrusted: false })
   expect(mocks.session).toHaveBeenCalledWith(expect.objectContaining({ customTools: [expect.objectContaining({ name: 'pion_ask_user' }), expect.objectContaining({ name: 'pion_subagents' }), expect.objectContaining({ name: 'pion_generate_image' })] }))
   expect(mocks.image).toHaveBeenCalledWith({ cwd, getAuth: expect.any(Function) })
@@ -48,9 +52,12 @@ it('injects a compiled SDK tool, preserves trust gating, and recreates tools for
     expect.objectContaining({ name: 'codemode', builtin: true, replaceable: true }),
     expect.objectContaining({ name: 'tool-search', builtin: true, replaceable: true }),
     expect.objectContaining({ name: 'mcp', builtin: true, replaceable: true }),
-    expect.any(Function), expect.any(Function), expect.any(Function), expect.any(Function)
+    expect.any(Function), expect.objectContaining({ name: 'pion-subagents', factory: expect.any(Function) }), expect.any(Function), expect.any(Function),
+    expect.objectContaining({ name: 'pion-conversation-timing', factory: expect.any(Function) })
   ] } }))
   const [factory, target] = mocks.runtime.mock.calls[0]
+  // Match SDK teardownCurrent: disposal precedes replacement factory invocation.
+  initial.session.dispose()
   await factory({ ...target, sessionStartEvent: { reason: 'new' } })
   expect(mocks.session).toHaveBeenCalledTimes(2)
   expect(mocks.image).toHaveBeenCalledTimes(2)
@@ -71,11 +78,13 @@ it('injects a compiled SDK tool, preserves trust gating, and recreates tools for
 })
 
 it('captures each backend’s own model runtime and only resolves Codex OAuth when the image tool executes', async () => {
-  await createPionRuntime(['--mode', 'rpc', '--approve'], cwd)
+  const initial = await createPionRuntime(['--mode', 'rpc', '--approve'], cwd)
+
   const [factory, target] = mocks.runtime.mock.calls[0]
   const nextAuth = vi.fn().mockResolvedValue(undefined)
   const services = await mocks.services.mock.results[0].value
   mocks.services.mockResolvedValue({ ...services, modelRuntime: { getAuth: nextAuth } })
+  initial.session.dispose()
   await factory({ ...target, sessionStartEvent: { reason: 'resume' } })
   expect(mocks.auth).not.toHaveBeenCalled()
   expect(nextAuth).not.toHaveBeenCalled()
@@ -121,7 +130,7 @@ it('freezes raw explicit loadouts before RPC MCP lifecycle binding', async () =>
   settings.getDefaultTools = () => ['codemode', 'mcp__docs__*']
   const initial = ['read', 'bash', 'edit', 'write', 'codemode']
   const getActiveToolNames = vi.fn(() => [...initial])
-  mocks.session.mockResolvedValue({ session: { getActiveToolNames }, extensionsResult: {} })
+  mocks.session.mockResolvedValue({ session: fakeSession(mocks.create(), getActiveToolNames), extensionsResult: {} })
   await createPionRuntime(['--mode', 'rpc'], cwd)
   expect(settings.applyOverrides).not.toHaveBeenCalled()
   expect(getActiveToolNames).toHaveBeenCalledTimes(1)
