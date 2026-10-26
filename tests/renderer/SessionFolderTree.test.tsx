@@ -13,6 +13,9 @@ const cwd = '/project'
 const session = (id: string): SessionMeta => ({ id, path: `/sessions/${id}.jsonl`, projectCwd: cwd,
   timestamp: '2026-01-01', mtime: 1, preview: id, messageCount: 2 })
 const a = session('a'), b = session('b'), root = session('root')
+const renderHeader: NonNullable<ComponentProps<typeof SessionFolderTree>['renderHeader']> = (controls) => (
+  <button type="button" onClick={controls.onCreateFolder} disabled={controls.disabled}>新建文件夹</button>
+)
 function items(sessions = [a, root, b]): ComponentProps<typeof SessionItems> {
   return { sessions, previewDensity: 'compact', runningSessionPaths: new Set([a.path]),
     attentionSessionPaths: new Set([a.path]), favoritePaths: new Set(), onSelect: vi.fn(), onReorder: vi.fn(),
@@ -34,7 +37,7 @@ describe('SessionFolderTree organization projection', () => {
   it('creates root folders with a valid omitted parent and preserves IME drafts on Escape', async () => {
     vi.stubGlobal('crypto', { randomUUID: () => 'root-created' })
     const change = vi.fn(async (patch: SessionOrganizationChange) => { validateSessionOrganizationChange(patch) })
-    render(<SessionFolderTree cwd={cwd} organization={organization()} itemProps={items()} onOrganizationChange={change} />)
+    render(<SessionFolderTree cwd={cwd} organization={organization()} itemProps={items()} onOrganizationChange={change} renderHeader={renderHeader} />)
     fireEvent.click(screen.getByRole('button', { name: '新建文件夹' }))
     const input = screen.getByRole('textbox', { name: '文件夹名称' })
     fireEvent.change(input, { target: { value: '新根目录' } })
@@ -105,7 +108,7 @@ describe('SessionFolderTree organization projection', () => {
     const org = organization(), itemProps = items()
     let reject!: (reason: Error) => void
     const change = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail }))
-    const props = { cwd, organization: org, itemProps, onOrganizationChange: change }
+    const props = { cwd, organization: org, itemProps, onOrganizationChange: change, renderHeader }
     const view = render(<SessionFolderTree {...props} />)
     const toggle = screen.getByRole('button', { name: '文件夹 子目录' })
     const rootRow = row(view.container, root.path), nestedRow = row(view.container, a.path)
@@ -128,7 +131,8 @@ describe('SessionFolderTree organization projection', () => {
     expect(nestedRow).not.toBeVisible()
     expect(nestedRow.closest('.session-folder-content')).toHaveAttribute('inert')
     view.rerender(<SessionFolderTree {...props} organizationDisabled />)
-    for (const button of view.container.querySelectorAll<HTMLButtonElement>('.session-folder-heading button, .session-folder-create')) expect(button).toBeDisabled()
+    for (const button of view.container.querySelectorAll<HTMLButtonElement>('.session-folder-heading button')) expect(button).toBeDisabled()
+    expect(screen.getByRole('button', { name: '新建文件夹' })).toBeDisabled()
     expect(row(view.container, root.path)).not.toHaveAttribute('draggable', 'true')
     expect(rootRow.querySelector('.side-session-drag')).toBe(grip)
     expect(rootRow).toHaveClass('reorderable')
@@ -188,7 +192,7 @@ describe('SessionFolderTree organization projection', () => {
   it.each(['worktree', 'callback'])('ignores a late old-owner failure after %s change and holds its actual pending slot', async (kind) => {
     let reject!: (reason: Error) => void
     const change = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail }))
-    const props = { organization: organization(), itemProps: items(), onOrganizationChange: change }
+    const props = { organization: organization(), itemProps: items(), onOrganizationChange: change, renderHeader }
     const view = render(<SessionFolderTree {...props} cwd={cwd} />)
     fireEvent.click(screen.getByRole('button', { name: '文件夹 子目录' }))
     view.rerender(<SessionFolderTree {...props} cwd={kind === 'worktree' ? '/other' : cwd}

@@ -127,9 +127,13 @@ describe('session folder drag interaction', () => {
     expectNoSessionAction(itemProps)
   })
 
-  it('treats the current folder and an existing root placement as no-ops, and moves nested rows back to root', async () => {
+  it('uses the standalone tree as the undecorated root target, treats existing placements as no-ops and moves nested rows to root', async () => {
     const itemProps = { ...items(), onReorder: vi.fn() }, change = vi.fn().mockResolvedValue(undefined)
     const view = render(<SessionFolderTree cwd={cwd} organization={organization()} itemProps={itemProps} onOrganizationChange={change} />)
+    expect(target(view.container, 'root')).toBe(view.container.querySelector('.session-folder-tree'))
+    expect(screen.queryByRole('group', { name: '会话根目录' })).not.toBeInTheDocument()
+    expect(screen.queryByText('根目录', { exact: true })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '新建文件夹', exact: true })).not.toBeInTheDocument()
     for (const [path, id] of [[root.path, 'root'], [nested.path, 'child']]) {
       const dataTransfer = start(row(view.container, path))
       hover(target(view.container, id), dataTransfer)

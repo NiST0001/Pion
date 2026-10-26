@@ -8,6 +8,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.95',
+    changes: [
+      '新建文件夹入口移到各分支的新建会话按钮旁，移除列表中的虚拟根目录行；原有会话和文件夹归属保留。',
+      '会话拖到所属分支标题即可回到根级，继续支持嵌套文件夹投放、保存状态保护和折叠时创建。'
+    ]
+  },
+  {
     version: '0.1.94',
     changes: [
       '用户消息下方显示本地发送时间，每轮末尾显示完成或结束时间与耗时；记录随会话分支保存，旧历史缺少收据时保持未知。',

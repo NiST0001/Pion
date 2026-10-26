@@ -22,7 +22,7 @@ import type {
 } from '../../../../shared/types'
 import type { SubagentSessionSummary } from '../../../../shared/subagent-sessions'
 import { SessionItems, sessionMatchesQuery } from '../session/SessionList'
-import { SessionFolderTree } from '../session/SessionFolderTree'
+import { SessionFolderTree, type SessionFolderHeaderControls } from '../session/SessionFolderTree'
 import { sessionPlacementKey, type SessionOrganization, type SessionOrganizationChange } from '../../../../shared/session-organization'
 
 import type { SessionPreviewDensity } from '../../utils/sessionPreview'
@@ -558,10 +558,10 @@ function ProjectBranch({
     onFork: (path, entryId) => onFork(branch.cwd, path, entryId)
   }
 
-  return (
-    <div className="project-branch">
+  const renderHeader = (folders?: SessionFolderHeaderControls): ReactElement => (
       <div
-        className={`project-branch-head${sessions.some((session) => session.path === activePath) ? ' active' : ''}`}
+        {...folders?.rootDropProps}
+        className={`project-branch-head${sessions.some((session) => session.path === activePath) ? ' active' : ''}${folders?.rootDropProps.className ? ` ${folders.rootDropProps.className}` : ''}`}
         draggable
         data-sidebar-drag-kind="branch"
         title={`${branch.name} · Git worktree：${branch.cwd} · 拖动排序`}
@@ -615,7 +615,29 @@ function ProjectBranch({
         >
           <MessageSquarePlus size={13} />
         </button>
+        {folders && <button type="button" className="project-branch-new project-branch-new-folder"
+          title={`在 ${branch.name} 分支中新建文件夹`} aria-label={`在 ${branch.name} 分支中新建文件夹`}
+          disabled={folders.disabled}
+          onDragStart={(event) => { event.preventDefault(); event.stopPropagation() }}
+          onClick={(event) => { event.stopPropagation(); setOpen(true); folders.onCreateFolder() }}>
+          <FolderPlus size={13} />
+        </button>}
       </div>
+  )
+
+  return (
+    <div className="project-branch">
+      {organization && onOrganizationChange ? (
+        <SessionFolderTree cwd={branch.cwd} organization={organization}
+          organizationDisabled={organizationDisabled} onOrganizationChange={onOrganizationChange}
+          searchActive={searchActive} itemProps={itemProps} renderHeader={renderHeader}
+          className="project-branch-sessions" hidden={!expanded} />
+      ) : <>
+        {renderHeader()}
+        <div className="project-branch-sessions" hidden={!expanded} inert={!expanded}>
+          {sessions.length === 0 ? <div className="project-folder-empty">暂无会话</div> : <SessionItems {...itemProps} />}
+        </div>
+      </>}
       <TextInputDialog
         open={renameOpen}
         title="重命名 Git 分支"
@@ -651,15 +673,6 @@ function ProjectBranch({
           setDeleteError('')
         }}
       />
-      <div className="project-branch-sessions" hidden={!expanded} inert={!expanded}>
-          {organization && onOrganizationChange ? (
-            <SessionFolderTree cwd={branch.cwd} organization={organization}
-              organizationDisabled={organizationDisabled} onOrganizationChange={onOrganizationChange}
-              searchActive={searchActive} itemProps={itemProps} />
-          ) : sessions.length === 0 ? (
-            <div className="project-folder-empty">暂无会话</div>
-          ) : <SessionItems {...itemProps} />}
-      </div>
     </div>
   )
 }

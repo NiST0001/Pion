@@ -7,12 +7,23 @@ import { TextInputDialog } from '../common/TextInputDialog'
 import { SessionFolderMoveDialog, SessionItems } from './SessionList'
 import { getSessionDrag, SESSION_DRAG_MIME } from '../../utils/sessionDrag'
 
+export interface SessionFolderHeaderControls {
+  disabled: boolean
+  onCreateFolder: () => void
+  rootDropProps: Pick<ComponentProps<'div'>, 'onDragOver' | 'onDragLeave' | 'onDrop' | 'className' | 'aria-busy'> & {
+    'data-session-drop-target': 'root'
+  }
+}
+
 export interface SessionFolderTreeProps {
   cwd: string
   organization: SessionOrganization
   onOrganizationChange: (change: SessionOrganizationChange) => Promise<void>
   organizationDisabled?: boolean
   searchActive?: boolean
+  className?: string
+  hidden?: boolean
+  renderHeader?: (controls: SessionFolderHeaderControls) => ReactElement
   itemProps: ComponentProps<typeof SessionItems>
 }
 
@@ -23,7 +34,8 @@ type FolderDialog = { scope: Scope } & (
 )
 
 export function SessionFolderTree({
-  cwd, organization, onOrganizationChange, organizationDisabled = false, searchActive = false, itemProps
+  cwd, organization, onOrganizationChange, organizationDisabled = false, searchActive = false,
+  className, hidden = false, renderHeader, itemProps
 }: SessionFolderTreeProps): ReactElement {
   const scope = useRef<Scope>({ cwd, update: onOrganizationChange })
   if (scope.current.cwd !== cwd || scope.current.update !== onOrganizationChange) scope.current = { cwd, update: onOrganizationChange }
@@ -252,15 +264,19 @@ export function SessionFolderTree({
     return true
   }) : options
 
-  return <div className="session-folder-tree">
-    <div className={`session-folder-root${dropTarget?.scope === owner && dropTarget.id === null && !mutationsDisabled ? ' session-folder-drop-target' : ''}`}
-      data-session-drop-target="root" role="group" aria-label="会话根目录" aria-busy={rootBusy}
-      onDragOver={(event) => dragOver(event, null)} onDragLeave={dragLeave} onDrop={(event) => drop(event, null)}>
-      <span className="session-folder-root-label">{rootBusy ? <Loader2 size={13} className="spin" aria-hidden="true" /> : <Folder size={13} aria-hidden="true" />}根目录</span>
-      <button type="button" className="session-folder-create" disabled={mutationsDisabled}
-        onClick={() => openDialog({ scope: owner, kind: 'create' })}><FolderPlus size={13} />新建文件夹</button>
-      {rootBusy && <span role="status" className="session-folder-status">正在保存…</span>}
-    </div>
+  const rootDropProps: SessionFolderHeaderControls['rootDropProps'] = {
+    'data-session-drop-target': 'root',
+    'aria-busy': rootBusy,
+    className: dropTarget?.scope === owner && dropTarget.id === null && !mutationsDisabled ? 'session-folder-drop-target' : undefined,
+    onDragOver: (event) => dragOver(event, null), onDragLeave: dragLeave, onDrop: (event) => drop(event, null)
+  }
+  return <>
+    {renderHeader?.({ disabled: mutationsDisabled,
+      onCreateFolder: () => openDialog({ scope: owner, kind: 'create' }), rootDropProps })}
+    <div {...(!renderHeader ? rootDropProps : {})}
+      className={`session-folder-tree${className ? ` ${className}` : ''}${!renderHeader && rootDropProps.className ? ` ${rootDropProps.className}` : ''}`}
+      hidden={hidden} inert={hidden}>
+    {rootBusy && <span role="status" className="session-folder-status">正在保存…</span>}
     {error && !activeDialog && !currentFailure?.folderId && <div role="alert" className="session-organization-error">{error}</div>}
     {renderItems()}
     {renderFolders()}
@@ -293,5 +309,6 @@ export function SessionFolderTree({
       }}
       onCancel={cancelDialog}
     />
-  </div>
+    </div>
+  </>
 }
