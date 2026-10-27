@@ -52,29 +52,27 @@ export function SessionFolderTree({
   const [dialog, setDialog] = useState<FolderDialog | null>(null)
   const [failure, setFailure] = useState<{ scope: Scope; message: string; folderId?: string } | null>(null)
   const [pendingFolder, setPendingFolder] = useState<{ scope: Scope; id: string | null } | null>(null)
-  const [dropTarget, setDropTarget] = useState<{ scope: Scope; id: string | null } | null>(null)
+  const [dropTarget, setDropTarget] = useState<{ scope: Scope; epoch: object; id: string | null } | null>(null)
   const [collapseIntent, setCollapseIntent] = useState<{ scope: Scope; id: string; collapsed: boolean } | null>(null)
   const reorderDisabled = useRef(itemProps.reorderDisabled)
   reorderDisabled.current = itemProps.reorderDisabled
   const api = window.pion
-  const dragState = { owner, api, organization, searchActive, manualOrder, hidden, organizationDisabled, busy,
-    reorderDisabled: itemProps.reorderDisabled, sessions: itemProps.sessions, deleting: itemProps.pendingDeletePaths }
+  const sessionSignature = JSON.stringify(itemProps.sessions.map((session) => [session.projectCwd ?? cwd, session.path, session.id, Boolean(session.optimistic)]))
+  const deletingSignature = JSON.stringify([...(itemProps.pendingDeletePaths ?? [])].sort())
+  const dragState = { owner, api, organization, revision: organization.revision, searchActive, manualOrder, hidden, organizationDisabled, busy,
+    reorderDisabled: itemProps.reorderDisabled, sessionSignature, deletingSignature }
   const dragEpoch = useRef(dragState)
   if (dragEpoch.current.owner !== owner || dragEpoch.current.api !== api || dragEpoch.current.organization !== organization
+    || dragEpoch.current.revision !== organization.revision
     || dragEpoch.current.searchActive !== searchActive || dragEpoch.current.manualOrder !== manualOrder || dragEpoch.current.hidden !== hidden
     || dragEpoch.current.organizationDisabled !== organizationDisabled || dragEpoch.current.busy !== busy
-    || dragEpoch.current.reorderDisabled !== itemProps.reorderDisabled || dragEpoch.current.sessions !== itemProps.sessions
-    || dragEpoch.current.deleting !== itemProps.pendingDeletePaths) {
+    || dragEpoch.current.reorderDisabled !== itemProps.reorderDisabled || dragEpoch.current.sessionSignature !== sessionSignature
+    || dragEpoch.current.deletingSignature !== deletingSignature) {
     dragEpoch.current = dragState
   }
   const epoch = dragEpoch.current
   const [draggedFolder, setDraggedFolder] = useState<{ epoch: object; id: string } | null>(null)
   const [folderOver, setFolderOver] = useState<{ epoch: object; key: string; edge?: 'before' | 'after' } | null>(null)
-  useEffect(() => {
-    setDraggedFolder(null)
-    setFolderOver(null)
-    return () => endSessionFolderDrag(owner)
-  }, [owner, epoch])
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
 
   const { folders, parents, options } = useMemo(() => {
@@ -169,12 +167,16 @@ export function SessionFolderTree({
   const mutationsDisabled = organizationDisabled || busy
   const rootBusy = pendingFolder?.scope === owner && pendingFolder.id === null
   useEffect(() => {
-    if (dropTarget?.scope !== owner && draggedFolder?.epoch !== epoch && folderOver?.epoch !== epoch) return
-    const clear = (): void => { setDropTarget(null); setFolderOver(null); setDraggedFolder(null); endSessionFolderDrag(owner) }
+    const clear = (): void => {
+      setDropTarget((current) => current?.epoch === epoch ? null : current)
+      setFolderOver((current) => current?.epoch === epoch ? null : current)
+      setDraggedFolder((current) => current?.epoch === epoch ? null : current)
+      endSessionFolderDrag(epoch)
+    }
     window.addEventListener('dragend', clear)
     window.addEventListener('drop', clear)
-    return () => { window.removeEventListener('dragend', clear); window.removeEventListener('drop', clear) }
-  }, [dropTarget, owner, draggedFolder, folderOver, epoch])
+    return () => { window.removeEventListener('dragend', clear); window.removeEventListener('drop', clear); clear() }
+  }, [epoch])
   const canReorderFolders = (): boolean => canMutate() && dragEpoch.current === epoch && window.pion === api
     && !busy && !searchActive && !hidden && !reorderDisabled.current
   const groupItems = (parentId?: string): SessionOrganizationItem[] => {
@@ -226,13 +228,16 @@ export function SessionFolderTree({
     void perform({ type: 'reorderItems', cwd, ...(parentId ? { parentId } : {}), expectedRevision: organization.revision,
       items: next.map((key) => byKey.get(key)!) }, false, parentId)
   }
+  const targetEdge = (event: DragEvent<HTMLDivElement>, fraction = 0.5): 'before' | 'after' | undefined => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    if (!(rect.height > 0) || !Number.isFinite(rect.height) || !Number.isFinite(rect.top) || !Number.isFinite(event.clientY)) return
+    if (event.clientY < rect.top + rect.height * fraction) return 'before'
+    if (fraction === 0.5 || event.clientY > rect.top + rect.height * (1 - fraction)) return 'after'
+    return
+  }
   const headingEdge = (event: DragEvent<HTMLDivElement>): 'before' | 'after' | undefined => {
     if (!manualOrder || searchActive || hidden) return
-    const rect = event.currentTarget.getBoundingClientRect()
-    if (!(rect.height > 0) || !Number.isFinite(event.clientY)) return
-    if (event.clientY < rect.top + rect.height * 0.25) return 'before'
-    if (event.clientY > rect.bottom - rect.height * 0.25) return 'after'
-    return
+    return targetEdge(event, 0.25)
   }
   const typedDrag = (event: DragEvent<HTMLDivElement>): boolean => event.dataTransfer.types?.includes(SESSION_FOLDER_DRAG_MIME)
     || event.dataTransfer.types?.includes(SESSION_DRAG_MIME)
@@ -241,7 +246,7 @@ export function SessionFolderTree({
     if (!canReorderFolders() || folder.parentId !== parents.get(folder.id)) { event.preventDefault(); return }
     const isCurrent = (): boolean => canReorderFolders() && folders.get(folder.id) === folder
     if (!beginSessionFolderDrag(event.dataTransfer, { cwd, id: folder.id,
-      ...(folder.parentId ? { parentId: folder.parentId } : {}) }, owner, isCurrent)) { event.preventDefault(); return }
+      ...(folder.parentId ? { parentId: folder.parentId } : {}) }, epoch, isCurrent)) { event.preventDefault(); return }
     event.dataTransfer.effectAllowed = 'move'
     setDraggedFolder({ epoch, id: folder.id })
     setFolderOver(null)
@@ -268,8 +273,8 @@ export function SessionFolderTree({
     if (!typedDrag(event)) return
     event.stopPropagation()
     const folderDrag = event.dataTransfer.types.includes(SESSION_FOLDER_DRAG_MIME)
-    const edge = !folderDrag && id !== null ? headingEdge(event) : undefined
-    const mixed = id !== null && (folderDrag && manualOrder || Boolean(edge))
+    const edge = id !== null ? (folderDrag ? targetEdge(event) : headingEdge(event)) : undefined
+    const mixed = id !== null && (folderDrag ? manualOrder : Boolean(edge))
     const target: SessionOrganizationItem | null = id === null ? null : { kind: 'folder', id }
     const source = mixed ? mixedSource(event, target!, 'over')
       : folderDrag ? folderSource(event, id, 'over') : dragSource(event, id, 'over')
@@ -283,7 +288,7 @@ export function SessionFolderTree({
         ? current : { epoch, key, ...(edge ? { edge } : {}) })
     } else {
       setFolderOver(null)
-      setDropTarget(current => current?.scope === owner && current.id === id ? current : { scope: owner, id })
+      setDropTarget(current => current?.epoch === epoch && current.id === id ? current : { scope: owner, epoch, id })
     }
   }
   const dragLeave = (event: DragEvent<HTMLDivElement>): void => {
@@ -298,8 +303,8 @@ export function SessionFolderTree({
     event.stopPropagation()
     const folderDrag = event.dataTransfer.types.includes(SESSION_FOLDER_DRAG_MIME)
     // Recompute the actual drop geometry; the last hover may have a different intent.
-    const edge = !folderDrag && id !== null ? headingEdge(event) : undefined
-    const mixed = id !== null && (folderDrag && manualOrder || Boolean(edge))
+    const edge = id !== null ? (folderDrag ? targetEdge(event) : headingEdge(event)) : undefined
+    const mixed = id !== null && (folderDrag ? manualOrder : Boolean(edge))
     setFolderOver(null)
     setDraggedFolder(null)
     setDropTarget(null)
@@ -311,8 +316,9 @@ export function SessionFolderTree({
       const source = folderSource(event, id, 'drop')
       if (source) {
         const siblings = groupItems(source.parentId).filter((item) => item.kind === 'folder').map((item) => item.id)
-        const ids = moveSidebarKey(siblings, source.id, id!)
-        if (ids !== siblings) void perform({ type: 'reorderFolders', cwd, ids,
+        const ids = edge ? siblings.filter((id) => id !== source.id) : moveSidebarKey(siblings, source.id, id!)
+        if (edge) ids.splice(ids.indexOf(id!) + (edge === 'after' ? 1 : 0), 0, source.id)
+        if (!ids.every((id, index) => id === siblings[index])) void perform({ type: 'reorderFolders', cwd, ids,
           ...(source.parentId ? { parentId: source.parentId } : {}) }, false, source.parentId)
       }
     } else {
@@ -328,9 +334,9 @@ export function SessionFolderTree({
     if (!mixedSource(event, target, 'over')) { event.dataTransfer.dropEffect = 'none'; setFolderOver(null); return }
     event.preventDefault()
     event.dataTransfer.dropEffect = 'move'
-    const key = sessionOrganizationItemKey(target)
-    setFolderOver(current => current?.epoch === epoch && current.key === key && current.edge === undefined
-      ? current : { epoch, key })
+    const key = sessionOrganizationItemKey(target), edge = targetEdge(event)
+    setFolderOver(current => current?.epoch === epoch && current.key === key && current.edge === edge
+      ? current : { epoch, key, ...(edge ? { edge } : {}) })
   }
   const sessionDrop: NonNullable<ComponentProps<typeof SessionItems>['siblingDrag']>['onDrop'] = (event, session) => {
     if (!typedDrag(event)) return
@@ -341,7 +347,7 @@ export function SessionFolderTree({
     setFolderOver(null)
     setDraggedFolder(null)
     setDropTarget(null)
-    if (source) reorderItems(source, target)
+    if (source) reorderItems(source, target, targetEdge(event))
   }
 
   const renderLevel = (folderId?: string): ReactElement => {
@@ -375,6 +381,7 @@ export function SessionFolderTree({
       siblingDrag={{
         targetPath: group.find((session) => folderOver?.epoch === epoch
           && folderOver.key === sessionOrganizationItemKey({ kind: 'session', path: session.path }))?.path,
+        targetEdge: folderOver?.epoch === epoch ? folderOver.edge : undefined,
         onDragOver: sessionDragOver, onDragLeave: dragLeave, onDrop: sessionDrop
       }}
       renderWithSiblings={(renderSession) => refs.map((ref) => ref.kind === 'session'
@@ -388,7 +395,7 @@ export function SessionFolderTree({
       const folderBusy = pendingFolder?.scope === owner && pendingFolder.id === folder.id
       const over = folderOver?.epoch === epoch && folderOver.key === sessionOrganizationItemKey({ kind: 'folder', id: folder.id }) ? folderOver : null
       return <div key={sessionOrganizationItemKey({ kind: 'folder', id: folder.id })} className="session-folder" data-folder-id={folder.id} aria-busy={folderBusy}>
-        <div className={`session-folder-heading${dropTarget?.scope === owner && dropTarget.id === folder.id && !mutationsDisabled ? ' session-folder-drop-target' : ''}${draggedFolder?.epoch === epoch && draggedFolder.id === folder.id ? ' is-dragging' : ''}${over ? ' is-drop-target' : ''}`}
+        <div className={`session-folder-heading${dropTarget?.scope === owner && dropTarget.epoch === epoch && dropTarget.id === folder.id && !mutationsDisabled ? ' session-folder-drop-target' : ''}${draggedFolder?.epoch === epoch && draggedFolder.id === folder.id ? ' is-dragging' : ''}${over ? ' is-drop-target' : ''}`}
           data-session-drop-target={folder.id} data-drop-edge={over?.edge}
           onDragOver={(event) => dragOver(event, folder.id)} onDragLeave={dragLeave}
           onDrop={(event) => drop(event, folder.id)}>
@@ -397,7 +404,12 @@ export function SessionFolderTree({
             draggable={canReorderFolders() && folder.parentId === parents.get(folder.id)}
             title={manualOrder ? '拖拽调整同级会话和文件夹顺序' : '拖拽调整同级文件夹顺序'}
             onDragStart={(event) => startFolderDrag(event, folder)}
-            onDragEnd={(event) => { event.stopPropagation(); endSessionFolderDrag(owner); setDraggedFolder(null); setFolderOver(null) }}
+            onDragEnd={(event) => {
+              event.stopPropagation()
+              endSessionFolderDrag(epoch)
+              setDraggedFolder((current) => current?.epoch === epoch ? null : current)
+              setFolderOver((current) => current?.epoch === epoch ? null : current)
+            }}
             onClick={() => void toggleFolder(folder.id, !collapsed)}>
             <GripVertical size={13} className="side-session-drag session-folder-drag" aria-hidden="true" />
             <ChevronRight size={12} className={expanded ? 'expanded' : ''} aria-hidden="true" />
@@ -437,7 +449,7 @@ export function SessionFolderTree({
   const rootDropProps: SessionFolderHeaderControls['rootDropProps'] = {
     'data-session-drop-target': 'root',
     'aria-busy': rootBusy,
-    className: dropTarget?.scope === owner && dropTarget.id === null && !mutationsDisabled ? 'session-folder-drop-target' : undefined,
+    className: dropTarget?.scope === owner && dropTarget.epoch === epoch && dropTarget.id === null && !mutationsDisabled ? 'session-folder-drop-target' : undefined,
     onDragOver: (event) => dragOver(event, null), onDragLeave: dragLeave, onDrop: (event) => drop(event, null)
   }
   return <>

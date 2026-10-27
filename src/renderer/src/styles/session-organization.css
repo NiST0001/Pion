@@ -19,10 +19,15 @@
 .session-folder-heading { position: relative; display: flex; align-items: center; min-width: 0; gap: 2px; }
 .session-folder-heading.is-dragging { opacity: 0.45; }
 .session-folder-heading.is-drop-target { outline: 1px dashed var(--accent-strong); outline-offset: -1px; }
-.session-folder-heading.is-drop-target[data-drop-edge] { outline: none; }
-.session-folder-heading[data-drop-edge]::after { content: ''; position: absolute; left: 0; right: 0; height: 2px; background: var(--accent-strong); pointer-events: none; }
-.session-folder-heading[data-drop-edge='before']::after { top: -1px; }
-.session-folder-heading[data-drop-edge='after']::after { bottom: -1px; }
+.session-folder-heading.is-drop-target[data-drop-edge],
+.side-session.drag-over[data-drop-edge] { outline: none; }
+.session-folder-heading[data-drop-edge]::after,
+.side-session.drag-over[data-drop-edge]::after { content: ''; position: absolute; left: 0; right: 0; height: 2px; background: var(--accent-strong); pointer-events: none; }
+.side-session.drag-over[data-drop-edge]::after { display: block; inset: auto 0; border-radius: 0; box-shadow: none !important; animation: none; opacity: 1; }
+.session-folder-heading[data-drop-edge='before']::after,
+.side-session.drag-over[data-drop-edge='before']::after { top: -1px; }
+.session-folder-heading[data-drop-edge='after']::after,
+.side-session.drag-over[data-drop-edge='after']::after { bottom: -1px; }
 .session-folder-heading .session-folder-drag { margin-top: 0; }
 .session-folder-heading:hover .session-folder-drag { color: var(--accent-strong); opacity: 1; }
 .session-folder-toggle { flex: 1; min-width: 0; padding: 3px 4px; text-align: left; }
@@ -64,7 +69,8 @@ html.pion-keyboard-focus .archived-sessions-panel button:focus-visible { outline
 }
 @media (forced-colors: active) {
   .session-folder-drop-target, .session-folder-heading.is-drop-target { outline: 1px solid Highlight; outline-offset: -1px; }
-  .session-folder-heading[data-drop-edge]::after { background: Highlight; }
+  .session-folder-heading[data-drop-edge]::after,
+  .side-session.drag-over[data-drop-edge]::after { background: Highlight; forced-color-adjust: none; }
   .session-folder-heading .session-folder-drag { color: CanvasText; }
   .session-folder-content, .archived-session { border-color: CanvasText; }
   .archived-session-open, .archived-session-restore { color: CanvasText; }

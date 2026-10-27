@@ -57,6 +57,7 @@ interface SessionItemActions {
   renderWithSiblings?: (renderSession: (session: SessionMeta) => ReactElement) => ReactElement[]
   siblingDrag?: {
     targetPath?: string
+    targetEdge?: 'before' | 'after'
     onDragOver: (event: React.DragEvent<HTMLDivElement>, session: SessionMeta) => void
     onDragLeave: (event: React.DragEvent<HTMLDivElement>, session: SessionMeta) => void
     onDrop: (event: React.DragEvent<HTMLDivElement>, session: SessionMeta) => void
@@ -241,6 +242,7 @@ export function SessionItems({
         <Fragment key={session.path}>
         <div
           data-session-path={session.path}
+          data-drop-edge={session.path === siblingDrag?.targetPath ? siblingDrag.targetEdge : undefined}
           className={`side-item side-session side-session-${previewDensity}${dragCapable && !session.optimistic ? ' reorderable' : ''}${!selectedSubagent && session.path === activePath ? ' active' : ''}${runningSessionPaths.has(session.path) || session.optimistic ? ' running' : ''}${unreadSessionPaths?.has(session.path) ? ' unread' : ''}${session.optimistic ? ' optimistic' : ''}${session.path === draggedPath ? ' dragging' : ''}${session.path === dragOverPath || session.path === siblingDrag?.targetPath ? ' drag-over' : ''}`}
           aria-current={!selectedSubagent && session.path === activePath ? 'true' : undefined}
           aria-busy={deletingSession || runningSessionPaths.has(session.path) || session.optimistic}
