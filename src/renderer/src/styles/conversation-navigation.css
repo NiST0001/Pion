@@ -1,0 +1,33 @@
+.chat-stage > .conversation-bottom-button {
+  position: absolute;
+  z-index: 32;
+  right: 24px;
+  bottom: calc(var(--conversation-navigation-bottom-clearance, var(--conversation-interaction-bottom-clearance, var(--conversation-bottom-clearance, 0px))) + 12px);
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  color: var(--fg-dim);
+  box-shadow: var(--shadow-pop);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.chat-stage > .conversation-bottom-button[hidden] { display: none; }
+.chat-stage > .conversation-bottom-button:hover:not(:disabled) { background: var(--bg-hover); color: var(--fg); }
+.chat-stage > .conversation-bottom-button:disabled { opacity: .45; cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-stage > .conversation-bottom-button { transition: none; }
+}
+
+@media (forced-colors: active) {
+  .chat-stage > .conversation-bottom-button {
+    background: ButtonFace;
+    color: ButtonText;
+    border-color: ButtonText;
+    box-shadow: none;
+  }
+  .chat-stage > .conversation-bottom-button:disabled { color: GrayText; opacity: 1; }
+}

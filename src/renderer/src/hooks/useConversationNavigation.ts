@@ -7,6 +7,7 @@ import { consumedInside, useHistoryPaging } from './useHistoryPaging'
 import { createEndFollowAnimator } from '../utils/endFollowAnimator'
 import { DISCLOSURE_REVEAL_READY_EVENT, type DisclosureRevealRequest } from '../utils/disclosureScroll'
 import { createHistoryJumpAnimator } from '../utils/historyJumpAnimator'
+import { useConversationReadingPosition } from './useConversationReadingPosition'
 
 const noNewerHistory = () => false
 // Only tolerate pixel rounding here; the 96px pagination prefetch zone is NOT
@@ -21,6 +22,12 @@ interface UseConversationNavigationOptions {
   timelineMutation: AgentState['timelineMutation']
   busy: boolean
   timelineLoading?: boolean
+  timelineReady?: boolean
+  timelineError?: string | null
+  persistReadingPosition?: boolean
+  historyScopeRevision?: number
+  restoreHistoryReadingPosition?: (entryId: string, offset: number, isCurrent?: () => boolean, readingToken?: object) => Promise<boolean>
+  loadLatestHistory?: (isCurrent?: () => boolean) => Promise<boolean>
   projectCwd?: string
   sessionPath?: string
   historyIndexSessionPath?: string
@@ -50,6 +57,12 @@ export function useConversationNavigation({
   timelineMutation,
   busy,
   timelineLoading = false,
+  timelineReady = false,
+  timelineError,
+  persistReadingPosition = false,
+  historyScopeRevision = 0,
+  restoreHistoryReadingPosition,
+  loadLatestHistory,
   projectCwd,
   sessionPath,
   historyIndexSessionPath,
@@ -75,6 +88,7 @@ export function useConversationNavigation({
   const nearBottomRef = useRef(true)
   const navigationSession = useRef(sessionPath)
   const navigationProject = useRef(projectCwd)
+  const navigationScope = useRef(historyScopeRevision)
   const observedHistoryResetRevision = useRef(historyResetRevision)
   const readingHistory = useRef(false)
   const explicitHistoryEntry = useRef<string | undefined>(undefined)
@@ -88,10 +102,10 @@ export function useConversationNavigation({
   const lastScrollTop = useRef(0)
   const loadingRef = useRef(timelineLoading)
   const hasContentRef = useRef(timeline.length > 0)
-  const followScope = useRef({ viewportActive, sessionPath, projectCwd, historyResetRevision, hasNewerHistory })
-  followScope.current = { viewportActive, sessionPath, projectCwd, historyResetRevision, hasNewerHistory }
+  const followScope = useRef({ viewportActive, sessionPath, projectCwd, historyResetRevision, historyScopeRevision, hasNewerHistory })
+  followScope.current = { viewportActive, sessionPath, projectCwd, historyResetRevision, historyScopeRevision, hasNewerHistory }
   const endFollow = useRef<{
-    element: HTMLElement; sessionPath?: string; projectCwd?: string; reset: number
+    element: HTMLElement; sessionPath?: string; projectCwd?: string; reset: number; scope: number
     controller: ReturnType<typeof createEndFollowAnimator>
   } | null>(null)
   const cancelEndFollow = useCallback(() => { endFollow.current?.controller.cancel() }, [])
@@ -100,8 +114,8 @@ export function useConversationNavigation({
     historyMotion.current?.cancel()
     historyMotion.current = null
   }, [])
-  const jumpScope = useRef({ viewportActive, sessionPath, projectCwd, historyResetRevision, nonce: historyJump?.nonce })
-  jumpScope.current = { viewportActive, sessionPath, projectCwd, historyResetRevision, nonce: historyJump?.nonce }
+  const jumpScope = useRef({ viewportActive, sessionPath, projectCwd, historyResetRevision, historyScopeRevision, nonce: historyJump?.nonce })
+  jumpScope.current = { viewportActive, sessionPath, projectCwd, historyResetRevision, historyScopeRevision, nonce: historyJump?.nonce }
   const panelPinSnapshot = useRef<{ element: HTMLElement; panelsVisible?: boolean; height: number; top: string; bottom: string; scope: string } | null>(null)
   // This is provisional blank space, not an estimate of the entire history.
   // Keep its extent while the user is scrolling; actual content can fill it
@@ -130,6 +144,38 @@ export function useConversationNavigation({
     lastScrollTop.current = element.scrollTop
     nearBottomRef.current = true
   }, [cancelEndFollow, cancelHistoryMotion])
+
+  const holdReading = useCallback(() => {
+    cancelEndFollow()
+    cancelHistoryMotion()
+    nearBottomRef.current = false
+    readingHistory.current = true
+  }, [cancelEndFollow, cancelHistoryMotion])
+  const beginBottom = useCallback(() => {
+    holdReading()
+    pendingJumpNonce.current = null
+    explicitHistoryEntry.current = undefined
+    // Keep the reader's real offset/reservation while latest is pending.
+    // followEnd releases them only after that replacement actually commits.
+    gestureUntil.current = 0
+    if (historyHighlightTimer.current !== null) window.clearTimeout(historyHighlightTimer.current)
+    historyHighlightTimer.current = null
+    highlightedHistoryRow.current?.classList.remove('history-jump-target')
+    highlightedHistoryRow.current = null
+  }, [holdReading])
+  const readingPosition = useConversationReadingPosition({
+    scrollRef, persist: persistReadingPosition, viewportActive,
+    cwd: projectCwd, path: sessionPath, reset: historyResetRevision, scope: historyScopeRevision,
+    ready: timelineReady, loading: timelineLoading, error: timelineError, timeline,
+    index: historyIndex, indexPath: historyIndexSessionPath,
+    restore: restoreHistoryReadingPosition, loadLatest: loadLatestHistory,
+    loadNewer, hasNewer: hasNewerHistory, anchor: historyAnchor,
+    following: () => nearBottomRef.current && !readingHistory.current && !manualScroll.current,
+    canCapture: () => pendingJumpNonce.current === null && !historyMotion.current?.isActive(),
+    hold: holdReading, beginBottom, follow: followEnd
+  })
+  const { capture: captureReadingPosition, retire: retireReadingPosition, blocked: readingPositionBlocked,
+    isRestoreJump, completeRestore, failRestore, extendRestore, restoreLayoutRevision } = readingPosition
 
   // Active-marker tracking is read-only and independently frame-coalesced;
   // neither layout delivery nor an index refresh represents a scroll gesture.
@@ -189,16 +235,17 @@ export function useConversationNavigation({
     historyScrollFrame.current = window.requestAnimationFrame(() => {
       historyScrollFrame.current = null
       updateVisibleHistoryEntry()
+      captureReadingPosition()
     })
-  }, [updateVisibleHistoryEntry, viewportActive])
+  }, [updateVisibleHistoryEntry, viewportActive, captureReadingPosition])
 
   const requestEndFollow = useCallback((element: HTMLElement, durationMs?: number) => {
     const scope = followScope.current
     let owned = endFollow.current
     if (!owned || owned.element !== element || owned.sessionPath !== scope.sessionPath
-      || owned.projectCwd !== scope.projectCwd || owned.reset !== scope.historyResetRevision) {
+      || owned.projectCwd !== scope.projectCwd || owned.reset !== scope.historyResetRevision || owned.scope !== scope.historyScopeRevision) {
       cancelEndFollow()
-      const session = scope.sessionPath, project = scope.projectCwd, reset = scope.historyResetRevision
+      const session = scope.sessionPath, project = scope.projectCwd, reset = scope.historyResetRevision, revision = scope.historyScopeRevision
       const motion = window.matchMedia?.('(prefers-reduced-motion: reduce)')
       const controller = createEndFollowAnimator({
         position: () => element.scrollTop,
@@ -207,6 +254,7 @@ export function useConversationNavigation({
           const current = followScope.current
           return current.viewportActive && scrollRef.current === element
             && current.sessionPath === session && current.projectCwd === project && current.historyResetRevision === reset
+            && current.historyScopeRevision === revision
             && nearBottomRef.current && !manualScroll.current && !readingHistory.current
             && pendingJumpNonce.current === null && !current.hasNewerHistory()
             && !(loadingRef.current && !hasContentRef.current)
@@ -222,7 +270,7 @@ export function useConversationNavigation({
           scheduleVisibleHistoryUpdate()
         }
       })
-      owned = { element, sessionPath: session, projectCwd: project, reset, controller }
+      owned = { element, sessionPath: session, projectCwd: project, reset, scope: revision, controller }
       endFollow.current = owned
     }
     owned.controller.request(durationMs)
@@ -242,7 +290,7 @@ export function useConversationNavigation({
       const scope = followScope.current
       return !disposed && scope.viewportActive && scrollRef.current === element
         && scope.sessionPath === sessionPath && scope.projectCwd === projectCwd
-        && scope.historyResetRevision === historyResetRevision
+        && scope.historyResetRevision === historyResetRevision && scope.historyScopeRevision === historyScopeRevision
     }
     const release = (): void => {
       for (const waiter of releases) waiter.resolve()
@@ -282,12 +330,23 @@ export function useConversationNavigation({
       if (frame !== null) window.cancelAnimationFrame(frame)
       release()
     }
-  }, [scrollRef, viewportActive, sessionPath, projectCwd, historyResetRevision, requestEndFollow])
+  }, [scrollRef, viewportActive, sessionPath, projectCwd, historyResetRevision, historyScopeRevision, requestEndFollow])
 
   const timelineLength = timeline.length
+  const allowHistoryPaging = useCallback((options?: { viaScroll?: boolean }) => {
+    if (!viewportActive) return false
+    if (!readingPositionBlocked()) return true
+    if (!options?.viaScroll) return false
+    retireReadingPosition('gesture')
+    return true
+  }, [viewportActive, readingPositionBlocked, retireReadingPosition])
+  const navigationLoadOlder = useCallback((options?: { viaScroll?: boolean }) =>
+    allowHistoryPaging(options) ? loadOlder(options) : Promise.resolve(), [allowHistoryPaging, loadOlder])
+  const navigationLoadNewer = useCallback((options?: { viaScroll?: boolean }) =>
+    allowHistoryPaging(options) ? loadNewer(options) : Promise.resolve(), [allowHistoryPaging, loadNewer])
   const { onScroll: pageOnScroll } = useHistoryPaging({
-    scrollRef, timelineLength, loadOlder, loadNewer,
-    owner: JSON.stringify([projectCwd, sessionPath, historyJump?.nonce, historyResetRevision])
+    scrollRef, timelineLength, loadOlder: navigationLoadOlder, loadNewer: navigationLoadNewer,
+    owner: JSON.stringify([projectCwd, sessionPath, historyJump?.nonce, historyResetRevision, historyScopeRevision])
   })
   const lastItem = timeline[timelineLength - 1]
   const lastGrow = lastItem
@@ -330,13 +389,14 @@ export function useConversationNavigation({
       setVisibleHistoryEntryId(undefined)
       followEnd(element)
     }
-    if (navigationSession.current !== sessionPath || navigationProject.current !== projectCwd) {
+    if (navigationSession.current !== sessionPath || navigationProject.current !== projectCwd || navigationScope.current !== historyScopeRevision) {
       cancelEndFollow()
       cancelHistoryMotion()
       pendingJumpNonce.current = null
       const assigningFirstPath = navigationProject.current === projectCwd && navigationSession.current === undefined && sessionPath !== undefined && manualScroll.current
       navigationSession.current = sessionPath
       navigationProject.current = projectCwd
+      navigationScope.current = historyScopeRevision
       if (!assigningFirstPath) {
         nearBottomRef.current = true
         readingHistory.current = false
@@ -351,23 +411,31 @@ export function useConversationNavigation({
         if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
       }
     }
+    if (readingPositionBlocked()) holdReading()
     if (historyJump?.nonce !== observedJumpNonce.current) {
-      cancelEndFollow()
-      cancelHistoryMotion()
-      observedJumpNonce.current = historyJump?.nonce
-      pendingJumpNonce.current = historyJump?.nonce ?? null
-      explicitHistoryEntry.current = historyJump?.entryId
-      if (historyJump) {
-        // An explicit jump starts a new reading window, not a continuation of
-        // manual scrolling through the previous window. Drop its provisional
-        // height BEFORE measuring/clamping the target. Otherwise a short page
-        // inherits the old page's blank tail until a bottom scroll releases it.
-        manualScroll.current = false
-        gestureUntil.current = 0
-        reservedHeight.current = 0
-        if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
-        nearBottomRef.current = false
-        readingHistory.current = true
+      const readingRestore = historyJump && Number.isFinite(historyJump.readingOffset)
+      if (readingRestore && !isRestoreJump(historyJump)) {
+        observedJumpNonce.current = historyJump.nonce
+        pendingJumpNonce.current = null
+      } else {
+        if (historyJump && !readingRestore) retireReadingPosition('jump')
+        cancelEndFollow()
+        cancelHistoryMotion()
+        observedJumpNonce.current = historyJump?.nonce
+        pendingJumpNonce.current = historyJump?.nonce ?? null
+        explicitHistoryEntry.current = historyJump?.entryId
+        if (historyJump) {
+          // An explicit jump starts a new reading window, not a continuation of
+          // manual scrolling through the previous window. Drop its provisional
+          // height BEFORE measuring/clamping the target. Otherwise a short page
+          // inherits the old page's blank tail until a bottom scroll releases it.
+          manualScroll.current = false
+          gestureUntil.current = 0
+          reservedHeight.current = 0
+          if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
+          nearBottomRef.current = false
+          readingHistory.current = true
+        }
       }
     }
     const reservedBeforeLayout = reservedHeight.current
@@ -435,7 +503,7 @@ export function useConversationNavigation({
       ? { element: firstRow, top: firstRow.offsetTop, parent: firstRow.offsetParent }
       : null
     lastScrollTop.current = element.scrollTop
-  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, historyResetRevision, sessionPath, projectCwd, reserveSpace, hasNewerHistory, followEnd, viewportActive, requestEndFollow, cancelEndFollow, cancelHistoryMotion])
+  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, historyResetRevision, historyScopeRevision, sessionPath, projectCwd, reserveSpace, hasNewerHistory, followEnd, viewportActive, requestEndFollow, cancelEndFollow, cancelHistoryMotion, readingPositionBlocked, holdReading, isRestoreJump, retireReadingPosition])
 
   // Banners resize the viewport; floating summary/composer rows change its
   // padding. Preserve follow intent for both instead of deriving it again
@@ -535,7 +603,7 @@ export function useConversationNavigation({
     const element = scrollRef.current
     if (!viewportActive || !element) { panelPinSnapshot.current = null; return }
     const style = getComputedStyle(element)
-    const scope = JSON.stringify([projectCwd, sessionPath, historyResetRevision])
+    const scope = JSON.stringify([projectCwd, sessionPath, historyResetRevision, historyScopeRevision])
     const snapshot = { element, panelsVisible, height: element.clientHeight, top: style.paddingTop, bottom: style.paddingBottom, scope }
     const previous = panelPinSnapshot.current
     panelPinSnapshot.current = snapshot
@@ -547,11 +615,11 @@ export function useConversationNavigation({
     cancelEndFollow()
     element.scrollTop = element.scrollHeight
     lastScrollTop.current = element.scrollTop
-  }, [scrollRef, panelsVisible, hasNewerHistory, viewportActive, projectCwd, sessionPath, historyResetRevision, cancelEndFollow])
+  }, [scrollRef, panelsVisible, hasNewerHistory, viewportActive, projectCwd, sessionPath, historyResetRevision, historyScopeRevision, cancelEndFollow])
 
   useEffect(() => {
     scheduleVisibleHistoryUpdate()
-  }, [scheduleVisibleHistoryUpdate, projectCwd, sessionPath, timeline, timelineLoading, historyResetRevision, historyIndexSessionPath, historyIndex, panelsVisible])
+  }, [scheduleVisibleHistoryUpdate, projectCwd, sessionPath, timeline, timelineLoading, timelineReady, timelineError, historyResetRevision, historyScopeRevision, historyIndexSessionPath, historyIndex, panelsVisible])
 
   useLayoutEffect(() => {
     const jump = historyJump
@@ -568,16 +636,57 @@ export function useConversationNavigation({
       const current = jumpScope.current
       if (disposed || historyMotion.current?.isActive() || pendingJumpNonce.current !== jump.nonce || !current.viewportActive || current.sessionPath !== scope.sessionPath
         || current.projectCwd !== scope.projectCwd || current.historyResetRevision !== scope.historyResetRevision
-        || current.nonce !== jump.nonce) return
+        || current.historyScopeRevision !== scope.historyScopeRevision || current.nonce !== jump.nonce) return
+      const readingRestore = Number.isFinite(jump.readingOffset)
+      if (readingRestore && !isRestoreJump(jump)) return
       const container = scrollRef.current
-      const target = container
-        ? [...container.querySelectorAll<HTMLElement>('[data-entry-id]')]
-            .find((element) => element.dataset.entryId === jump.entryId)
-        : undefined
+      const targets = container
+        ? [...container.querySelectorAll<HTMLElement>(readingRestore ? '.row-user[data-entry-id]' : '[data-entry-id]')]
+            .filter((element) => element.dataset.entryId === jump.entryId)
+        : []
+      const target = readingRestore && targets.length !== 1 ? undefined : targets[0]
       if (!target || !container || !target.isConnected) {
         // A lazy history row can mount after the timeline commit. Observe real
         // DOM arrival within a bounded wait; never move toward an old row or
         // estimate missing page heights.
+        return
+      }
+      if (readingRestore) {
+        if (timelineLoading || !timelineReady || timelineError) return
+        const desired = container.scrollTop + target.getBoundingClientRect().top - historyAnchor(container) - jump.readingOffset!
+        const maximum = Math.max(0, container.scrollHeight - container.clientHeight)
+        // A live assistant may be kept after a discontinuous history window.
+        // Its height supplies no evidence that this historical offset exists.
+        const liveTail = hasNewerHistory()
+          ? container.querySelector<HTMLElement>('.row-assistant.streaming-reveal') : null
+        const crossesLiveGap = liveTail && target.getBoundingClientRect().top - jump.readingOffset!
+          >= liveTail.getBoundingClientRect().top
+        // Long turns can span several real pages. A clipped first window is
+        // still pending; grow that window rather than persisting its page end.
+        if ((desired > maximum + 1 || crossesLiveGap) && hasNewerHistory()) {
+          extendRestore()
+          return
+        }
+        observer?.disconnect()
+        if (timeout !== undefined) window.clearTimeout(timeout)
+        cancelHistoryMotion()
+        highlightedHistoryRow.current?.classList.remove('history-jump-target')
+        highlightedHistoryRow.current = null
+        reservedHeight.current = 0
+        if (scrollSurfaceRef.current) scrollSurfaceRef.current.style.minHeight = ''
+        nearBottomRef.current = false
+        readingHistory.current = true
+        manualScroll.current = false
+        gestureUntil.current = 0
+        container.scrollTop = Math.max(0, Math.min(maximum, desired))
+        lastScrollTop.current = container.scrollTop
+        previousTimelineHeight.current = container.scrollHeight
+        pendingJumpNonce.current = null
+        explicitHistoryEntry.current = jump.entryId
+        setVisibleHistoryEntryId(jump.entryId)
+        armPendingHistoryRevealRows(container)
+        if (desired < -1 || desired > maximum + 1 || Math.abs(container.scrollTop - desired) > 1) failRestore()
+        else completeRestore()
         return
       }
       observer?.disconnect()
@@ -601,7 +710,7 @@ export function useConversationNavigation({
           const current = jumpScope.current
           return current.viewportActive && current.sessionPath === scope.sessionPath
             && current.projectCwd === scope.projectCwd && current.historyResetRevision === scope.historyResetRevision
-            && current.nonce === jump.nonce && pendingJumpNonce.current === jump.nonce
+            && current.historyScopeRevision === scope.historyScopeRevision && current.nonce === jump.nonce && pendingJumpNonce.current === jump.nonce
             && scrollRef.current === container && container.contains(target) && target.dataset.entryId === jump.entryId
             && target.isConnected
         },
@@ -616,6 +725,10 @@ export function useConversationNavigation({
         settled: () => {
           if (pendingJumpNonce.current === jump.nonce) pendingJumpNonce.current = null
           if (historyMotion.current === controller) historyMotion.current = null
+          const current = jumpScope.current
+          if (current.viewportActive && current.sessionPath === scope.sessionPath && current.projectCwd === scope.projectCwd
+            && current.historyResetRevision === scope.historyResetRevision && current.historyScopeRevision === scope.historyScopeRevision
+            && current.nonce === jump.nonce) captureReadingPosition()
         }
       })
       historyMotion.current = controller
@@ -646,9 +759,10 @@ export function useConversationNavigation({
       if (pendingJumpNonce.current === jump.nonce && !historyMotion.current?.isActive()) {
         pendingJumpNonce.current = null
         explicitHistoryEntry.current = undefined
+        if (Number.isFinite(jump.readingOffset)) failRestore()
         scheduleVisibleHistoryUpdate()
       }
-    }, 1_600)
+    }, Number.isFinite(jump.readingOffset) ? 15_000 : 1_600)
     scheduleLocate()
     return () => {
       disposed = true
@@ -656,7 +770,7 @@ export function useConversationNavigation({
       observer?.disconnect()
       if (timeout !== undefined) window.clearTimeout(timeout)
     }
-  }, [historyJump?.nonce, historyResetRevision, projectCwd, sessionPath, timeline, timelineLoading, scrollRef, scheduleVisibleHistoryUpdate, viewportActive, cancelEndFollow])
+  }, [historyJump?.nonce, historyResetRevision, historyScopeRevision, projectCwd, sessionPath, timeline, timelineLoading, timelineReady, timelineError, scrollRef, scheduleVisibleHistoryUpdate, viewportActive, cancelEndFollow, cancelHistoryMotion, isRestoreJump, completeRestore, failRestore, extendRestore, hasNewerHistory, restoreLayoutRevision, captureReadingPosition])
 
   // Arm eager historical rows after scroll restoration. Lazy chat rows also
   // arm themselves when their chunk finishes mounting; otherwise Suspense can
@@ -709,6 +823,7 @@ export function useConversationNavigation({
     const element = scrollRef.current
     if (!viewportActive || !element) return
     const resume = () => {
+      retireReadingPosition('gesture')
       cancelEndFollow()
       cancelHistoryMotion()
       if (pendingJumpNonce.current !== null) {
@@ -720,6 +835,7 @@ export function useConversationNavigation({
       readingHistory.current = true
       nearBottomRef.current = false
       reserveSpace(element, loadingRef.current && !hasContentRef.current)
+      scheduleVisibleHistoryUpdate()
     }
     const resumeAtEnd = () => {
       if (!loadingRef.current && hasContentRef.current && !hasNewerHistory() && atScrollEnd(element)) {
@@ -791,7 +907,7 @@ export function useConversationNavigation({
       element.removeEventListener('pointerdown', pointerDown)
       element.removeEventListener('keydown', key)
     }
-  }, [scrollRef, reserveSpace, hasNewerHistory, followEnd, historyResetRevision, scheduleVisibleHistoryUpdate, viewportActive, cancelEndFollow, cancelHistoryMotion])
+  }, [scrollRef, reserveSpace, hasNewerHistory, followEnd, historyResetRevision, scheduleVisibleHistoryUpdate, viewportActive, cancelEndFollow, cancelHistoryMotion, retireReadingPosition])
 
   const handleTimelineScroll = useCallback((): void => {
     const element = scrollRef.current
@@ -829,5 +945,10 @@ export function useConversationNavigation({
     scheduleVisibleHistoryUpdate()
   }, [pageOnScroll, scheduleVisibleHistoryUpdate, scrollRef, reserveSpace, hasNewerHistory, followEnd, viewportActive])
 
-  return { visibleHistoryEntryId, handleTimelineScroll, scrollSurfaceRef }
+  return {
+    visibleHistoryEntryId, handleTimelineScroll, scrollSurfaceRef,
+    showScrollToBottom: readingPosition.showScrollToBottom,
+    scrollToBottom: readingPosition.scrollToBottom,
+    scrollToBottomBusy: readingPosition.scrollToBottomBusy
+  }
 }

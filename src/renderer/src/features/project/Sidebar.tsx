@@ -630,7 +630,7 @@ function ProjectBranch({
       {organization && onOrganizationChange ? (
         <SessionFolderTree cwd={branch.cwd} organization={organization}
           organizationDisabled={organizationDisabled} onOrganizationChange={onOrganizationChange}
-          searchActive={searchActive} itemProps={itemProps} renderHeader={renderHeader}
+          searchActive={searchActive} manualOrder={manualOrder} itemProps={itemProps} renderHeader={renderHeader}
           className="project-branch-sessions" hidden={!expanded} />
       ) : <>
         {renderHeader()}

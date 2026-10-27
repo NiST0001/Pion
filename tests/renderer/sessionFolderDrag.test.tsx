@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ComponentProps } from 'react'
-import type { SessionOrganization } from '../../src/shared/session-organization'
+import { applySessionOrganizationChange, type SessionOrganization, type SessionOrganizationChange } from '../../src/shared/session-organization'
 import type { SessionMeta } from '../../src/shared/types'
 import { SessionFolderTree } from '../../src/renderer/src/features/session/SessionFolderTree'
 import { SessionItems } from '../../src/renderer/src/features/session/SessionList'
@@ -81,13 +81,29 @@ describe('session folder drag interaction', () => {
     expect(favoriteProps.onSelect).not.toHaveBeenCalled()
   })
 
-  it('preserves manual row sorting without issuing a folder move', () => {
-    const itemProps = { ...items(), onReorder: vi.fn() }, change = vi.fn()
-    const view = render(<SessionFolderTree cwd={cwd} organization={organization()} itemProps={itemProps} onOrganizationChange={change} />)
-    const dataTransfer = start(row(view.container, root.path))
-    fireEvent.drop(row(view.container, peer.path), { dataTransfer })
-    expect(itemProps.onReorder).toHaveBeenCalledExactlyOnceWith([peer, nested, root])
-    expect(change).not.toHaveBeenCalled()
+  it('preserves manual row sorting through the complete organization group without issuing a folder move', async () => {
+    const org = organization(), itemProps = { ...items(), onReorder: vi.fn() }, change = vi.fn().mockResolvedValue(undefined)
+    const props = { cwd, organization: org, itemProps, onOrganizationChange: change }
+    const view = render(<SessionFolderTree {...props} />)
+    const source = row(view.container, root.path), other = row(view.container, peer.path)
+    const dataTransfer = start(source)
+    expect(dataTransfer.types).toContain(SESSION_DRAG_MIME)
+    await act(async () => { fireEvent.drop(other, { dataTransfer }) })
+    const patch: SessionOrganizationChange = { type: 'reorderItems', cwd, expectedRevision: org.revision,
+      items: [{ kind: 'session', path: peer.path }, { kind: 'session', path: root.path }, { kind: 'folder', id: 'parent' }] }
+    expect(change).toHaveBeenCalledExactlyOnceWith(patch)
+    expect(itemProps.onReorder).not.toHaveBeenCalled()
+    expect([...view.container.querySelectorAll('[data-session-path]')].map((entry) => entry.getAttribute('data-session-path')))
+      .toEqual([root.path, peer.path, nested.path])
+    await act(async () => { fireEvent.drop(other, { dataTransfer }) })
+    expect(change).toHaveBeenCalledTimes(1)
+    view.rerender(<SessionFolderTree {...props} organization={applySessionOrganizationChange(org, patch)} />)
+    expect([...view.container.querySelectorAll('[data-session-path]')].map((entry) => entry.getAttribute('data-session-path')))
+      .toEqual([peer.path, root.path, nested.path])
+    expect(row(view.container, root.path)).toBe(source)
+    expect(row(view.container, peer.path)).toBe(other)
+    expect(row(view.container, nested.path).closest('[data-folder-id]')).toHaveAttribute('data-folder-id', 'child')
+    expectNoSessionAction(itemProps)
   })
 
   it('moves a real row without manual sorting, accepts protected hover and waits for the authoritative snapshot', async () => {
@@ -120,8 +136,8 @@ describe('session folder drag interaction', () => {
     expect(source.parentElement).toBe(sourceParent)
     await act(async () => { fireEvent.drop(heading, { dataTransfer }) })
     expect(change).toHaveBeenCalledTimes(1)
-    view.rerender(<SessionFolderTree {...props} organization={{ ...org, revision: 2,
-      sessions: [...org.sessions, { cwd, path: root.path, folderId: 'child' }] }} />)
+    view.rerender(<SessionFolderTree {...props} organization={applySessionOrganizationChange(org,
+      { type: 'setSession', cwd, path: root.path, folderId: 'child' })} />)
     expect(row(view.container, root.path).closest('[data-folder-id]')).toHaveAttribute('data-folder-id', 'child')
     expect(row(view.container, peer.path)).toBe(other)
     expectNoSessionAction(itemProps)

@@ -84,7 +84,8 @@ describe('session folder sibling ordering', () => {
     expect(target).toHaveClass('is-drop-target')
     expect(dataTransfer.dropEffect).toBe('move')
     fireEvent.drop(target, { dataTransfer })
-    expect(change).toHaveBeenCalledExactlyOnceWith({ type: 'reorderFolders', cwd, ids: ['b', 'c', 'a'] })
+    expect(change).toHaveBeenCalledExactlyOnceWith({ type: 'reorderItems', cwd, expectedRevision: 1,
+      items: [{ kind: 'folder', id: 'b' }, { kind: 'folder', id: 'c' }, { kind: 'folder', id: 'a' }] })
     expect(order(view.container)).toEqual(['a', 'b', 'c'])
     for (const element of view.container.querySelectorAll('.session-folder-toggle')) expect(element).not.toHaveAttribute('draggable', 'true')
     expect(heading(view.container, 'b').querySelector('.lucide-grip-vertical')).toBe(grip)
@@ -99,8 +100,11 @@ describe('session folder sibling ordering', () => {
     await drop(target, dataTransfer)
     expect(change).toHaveBeenCalledTimes(1)
     const rootIds = ['b', 'c', 'a']
-    const saved = applySessionOrganizationChange(current.organization, { type: 'reorderFolders', cwd, ids: rootIds })
-    expect(saved.folders.map((folder) => folder.id)).toEqual(['b', 'a1', 'c', 'foreign', 'a2', 'a', 'a3'])
+    const saved = applySessionOrganizationChange(current.organization, { type: 'reorderItems', cwd, expectedRevision: 1,
+      items: rootIds.map((id) => ({ kind: 'folder', id })) })
+    expect(saved.folders.map((folder) => folder.id)).toEqual(current.organization.folders.map((folder) => folder.id))
+    expect(saved.folders.filter((folder) => folder.cwd === cwd && !folder.parentId)
+      .map((folder) => [folder.id, folder.order])).toEqual([['a', 2], ['b', 0], ['c', 1]])
     view.rerender(wrap(saved))
     expect(order(view.container)).toEqual(rootIds)
     expect(heading(view.container, 'a')).toBe(source)
@@ -118,7 +122,8 @@ describe('session folder sibling ordering', () => {
     const dataTransfer = start(heading(view.container, 'a3'))
     hover(heading(view.container, 'a1'), dataTransfer)
     await drop(heading(view.container, 'a1'), dataTransfer)
-    expect(current.onOrganizationChange).toHaveBeenCalledExactlyOnceWith({ type: 'reorderFolders', cwd, parentId: 'a', ids: ['a3', 'a1', 'a2'] })
+    expect(current.onOrganizationChange).toHaveBeenCalledExactlyOnceWith({ type: 'reorderItems', cwd, parentId: 'a', expectedRevision: 1,
+      items: [{ kind: 'folder', id: 'a3' }, { kind: 'folder', id: 'a1' }, { kind: 'folder', id: 'a2' }] })
     expect(order(view.container, 'a')).toEqual(['a1', 'a2', 'a3'])
     expect(order(view.container)).toEqual(['a', 'b', 'c'])
   })

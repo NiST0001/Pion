@@ -3,6 +3,7 @@ interface InternalDragReceipt {
   data: { cwd: string }
   payload: string
   owner: object
+  context?: object
   isCurrent: () => boolean
 }
 
@@ -21,6 +22,7 @@ export function createInternalDrag<T extends { cwd: string }>(
       data: T,
       owner: object,
       isCurrent: () => boolean,
+      context?: object,
     ): boolean {
       activeDrag = null
       try {
@@ -28,7 +30,7 @@ export function createInternalDrag<T extends { cwd: string }>(
         const copied = snapshot(data)
         const payload = JSON.stringify({ version: 1, ...copied })
         transfer.setData(mime, payload)
-        activeDrag = { source, data: copied, payload, owner, isCurrent }
+        activeDrag = { source, data: copied, payload, owner, isCurrent, context }
         return true
       } catch {
         return false
@@ -39,6 +41,7 @@ export function createInternalDrag<T extends { cwd: string }>(
       transfer: Pick<DataTransfer, 'types' | 'getData'>,
       cwd: string,
       phase: 'over' | 'drop',
+      expectedContext?: object,
     ): T | null {
       const receipt = activeDrag
       if (!receipt || receipt.source !== source) return null
@@ -47,6 +50,7 @@ export function createInternalDrag<T extends { cwd: string }>(
       try {
         if (!transfer.types.includes(mime)
           || receipt.data.cwd !== cwd
+          || (expectedContext !== undefined && receipt.context !== expectedContext)
           || !receipt.isCurrent()) return null
         // Native dragover uses protected mode: only the MIME list is available.
         if (phase === 'drop' && transfer.getData(mime) !== receipt.payload) return null

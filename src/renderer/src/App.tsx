@@ -49,6 +49,7 @@ import { ArchivedSessionsPanel } from './features/session/ArchivedSessionsPanel'
 import { QueuedMessagesCard } from './features/session/QueuedMessagesCard'
 import { ComposerSupportPanels } from './features/session/ComposerSupportPanels'
 import { ChatTimeline } from './features/chat/ChatTimeline'
+import { ConversationBottomButton } from './features/chat/ConversationBottomButton'
 import { Composer } from './features/chat/Composer'
 import { ConfirmDialog } from './features/common/ConfirmDialog'
 import { SubagentsToggle } from './features/chat/SubagentsToggle'
@@ -328,8 +329,18 @@ export function App(): ReactElement {
   const newSessionInFlight = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const agentTodos = useMemo(() => (state.tasks ?? []).filter((task) => task.status !== 'deleted'), [state.tasks])
-  const { visibleHistoryEntryId, handleTimelineScroll, scrollSurfaceRef } = useConversationNavigation({
+  const conversationTimelineReady = state.timelineReady && state.status.cwd === resourceCwd
+    && state.session?.sessionFile === resourceSessionPath
+  const { visibleHistoryEntryId, handleTimelineScroll, scrollSurfaceRef,
+    showScrollToBottom, scrollToBottom, scrollToBottomBusy } = useConversationNavigation({
     scrollRef,
+    viewportActive: !viewingChild,
+    persistReadingPosition: true,
+    timelineReady: conversationTimelineReady,
+    timelineError: state.timelineError,
+    historyScopeRevision: state.timelineScopeRevision,
+    restoreHistoryReadingPosition: actions.restoreHistoryReadingPosition,
+    loadLatestHistory: actions.loadLatestHistory,
     timeline: state.timeline,
     timelineMutation: state.timelineMutation,
     busy: state.busy,
@@ -1068,6 +1079,9 @@ export function App(): ReactElement {
                 agentActivity={agentActivity}
                 workingStatus={workingStatus}
               />
+              <ConversationBottomButton visible={showScrollToBottom} hidden={viewingChild}
+                disabled={scrollToBottomBusy || state.timelineLoading || !conversationTimelineReady}
+                onClick={scrollToBottom} />
             <div className="session-interaction-panels"
               hidden={viewingChild || !hasSessionInteractions}
               inert={viewingChild || undefined}>

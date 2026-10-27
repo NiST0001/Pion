@@ -75,6 +75,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   const expectedTimeline = useRef<{ path: string; items: TimelineItem[]; loadId?: number } | null>(null)
   const currentState = useRef(state)
   currentState.current = state
+  const currentApiRef = useRef(api)
+  currentApiRef.current = api
   // A switch may finish in one React batch. Mirror only our queued status
   // until the next render acknowledges dispatch order; never pin a cwd over
   // a later authoritative status or an external project/session selection.
@@ -150,6 +152,20 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     }
     return selectionRef.current
   }, [readStatus])
+  const captureReadingOwner = useCallback(() => {
+    const selection = readSelection()
+    const capturedApi = api
+    const renderedApi = currentApiRef.current
+    const windowApi = window.pion
+    const cwd = selection.cwd
+    const path = selection.ownerPath
+    const isApiOwner = (): boolean => Boolean(capturedApi) && capturedApi === renderedApi
+      && currentApiRef.current === renderedApi && window.pion === windowApi
+    const isSelected = (): boolean => isApiOwner() && readSelection() === selection
+      && currentState.current.status.cwd === cwd
+      && currentState.current.session?.sessionFile === path && selection.sessionPath === path
+    return { selection, isApiOwner, isSelected }
+  }, [api, readSelection])
   const { ownerPath: logicalOwnerPath, sessionId: logicalSessionId } = readSelection()
   useEffect(() => () => {
     selectionRef.current = { ...selectionRef.current, generation: selectionRef.current.generation + 1 }
@@ -305,8 +321,11 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     state.liveSessionScopeSelected, state.liveSessionBackendId, state.liveSessionRevision])
 
   /** Load only the newest history window; older windows are fetched on demand. */
-  const reloadTimeline = useCallback(async (sessionPath?: string, refreshLive = false, waitForActualReads = false): Promise<void> => {
-    if (!api) return
+  const reloadTimelinePage = useCallback(async (
+    sessionPath?: string, refreshLive = false, waitForActualReads = false, forceLatest = false,
+    requestCurrent?: () => boolean, readingOwner?: ReturnType<typeof captureReadingOwner>
+  ): Promise<boolean> => {
+    if (!api || requestCurrent?.() === false || readingOwner?.isSelected() === false) return false
     const loadId = ++timelineLoadId.current
     const revision = scopeRevision.current
     const deadline = Date.now() + 15_000
@@ -320,14 +339,20 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       return request
     }, deadline)
     const initialSelection = readSelection()
+    const resetRevision = currentState.current.historyResetRevision
+    const isOwnedCleanup = (): boolean => (!forceLatest && !initialSelection.ownerPath && !initialSelection.sessionId
+      || readSelection() === initialSelection) && readingOwner?.isApiOwner() !== false
+    const stillSelected = (): boolean => isOwnedCleanup() && readingOwner?.isSelected() !== false
+      && (!forceLatest || currentState.current.historyResetRevision === resetRevision)
     try {
     const path = sessionPath
       ?? timelineOwnerPath.current
       ?? (await read(() => api.getState()))?.sessionFile
-    if ((initialSelection.ownerPath || initialSelection.sessionId) && readSelection() !== initialSelection) return
+    if (requestCurrent?.() === false
+      || ((initialSelection.ownerPath || initialSelection.sessionId) && !stillSelected())) return false
     const mutation = revertInFlight.current
     if (mutation && mutation.path === path && !mutation.settled) await read(() => mutation.done)
-    if (loadId !== timelineLoadId.current) return
+    if (loadId !== timelineLoadId.current || !stillSelected() || requestCurrent?.() === false) return false
     const selection = readSelection()
     const preserveToolState: ToolStateScope | undefined = path && selection.ownerPath === path
       && (!selection.sessionPath || selection.sessionPath === path)
@@ -361,7 +386,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       // STATE delivery, without restarting the backend or replaying input.
       void read(() => api.getState()).then((session) => {
         if (loadId !== timelineLoadId.current || revision !== scopeRevision.current
-          || timelineOwnerPath.current !== path || readSelection() !== selection
+          || timelineOwnerPath.current !== path || readSelection() !== selection || requestCurrent?.() === false
           || !session || session.sessionFile !== path
           || (session.liveState && (session.liveState.cwd !== selection.cwd
             || session.liveState.sessionPath !== path))) return
@@ -370,44 +395,56 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
           && selectedBackendId !== session.liveState.backendId) return
         dispatch({ type: 'session', session })
       }).catch((error) => {
+        if (requestCurrent?.() === false) return
         console.warn('[pion] selected live snapshot read failed; keeping visible timeline:', path, error)
       })
     }
-    historyCursor.current = null
+    // Retain a failed explicit latest read's existing pagination window. Its
+    // loading flag also keeps scroll paging out of this replacement request.
+    const retainedCursor = forceLatest && historyCursor.current && historyCursor.current.path === path
+      ? { ...historyCursor.current, loadId, loading: true } : null
+    historyCursor.current = retainedCursor
     // A retained session is already fully paintable from memory. Revalidate its
     // JSONL in the background without showing a loading state or blanking it.
-    if (path && !keepVisibleCache) dispatch({ type: 'timelineLoading', loading: true })
+    if (!forceLatest && path && !keepVisibleCache) dispatch({ type: 'timelineLoading', loading: true })
 
     let page = null
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (Date.now() >= deadline) break
+      if (Date.now() >= deadline || loadId !== timelineLoadId.current
+        || revision !== scopeRevision.current || !stillSelected() || requestCurrent?.() === false) break
       page = await read(() => api.getEntriesPage(undefined, getViewportHistoryPageSize(), path))
         .catch(() => null)
-      if (page || loadId !== timelineLoadId.current || Date.now() >= deadline || attempt === 2) break
+      if (page || requestCurrent?.() === false || loadId !== timelineLoadId.current || Date.now() >= deadline || attempt === 2) break
       await new Promise<void>((resolve) => window.setTimeout(resolve, 80 * (attempt + 1)))
     }
     if (loadId !== timelineLoadId.current || revision !== scopeRevision.current
-      || readSelection() !== selection) return
+      || readSelection() !== selection || !stillSelected() || requestCurrent?.() === false) return false
     const visibleItems = readDisplayedItems()
     if (!page) {
-      if (keepVisibleCache && visibleItems.length > 0) {
+      if (!forceLatest && keepVisibleCache && visibleItems.length > 0) {
         console.warn('[pion] retained timeline revalidation failed; keeping cached view:', path)
-        return
+        return false
       }
       dispatch({
         type: 'timelineError',
         error: '会话历史加载失败，请重新选择该会话或检查会话文件是否仍然存在。'
       })
-      return
+      return false
+    }
+    if (forceLatest && page.end < page.total) {
+      dispatch({ type: 'timelineError', error: '无法加载最新会话历史。' })
+      return false
     }
 
+    if (requestCurrent?.() === false || readingOwner?.isSelected() === false) return false
     if (path) invalidatedBranches.current.delete(path)
     if (page.taskSnapshot !== undefined) {
       dispatch({ type: 'restoreTasks', id: loadId, tasks: page.taskSnapshot })
     }
 
     if (
-      path
+      !forceLatest
+      && path
       && cached
       // Only reuse a currently paintable projection. The source cache can still
       // contain filtered drafts from a stopped/replaced backend.
@@ -427,7 +464,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       storeTimelineCache(timelineCache.current, path, refreshed)
       // The exact snapshot is already on screen. Avoid a second replace action,
       // which would reset scroll position and look like another session load.
-      return
+      return true
     }
 
     const toolResults = collectToolResults([...page.entries, ...page.toolResults])
@@ -451,6 +488,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       loadId
     }
 
+    if (requestCurrent?.() === false || readingOwner?.isSelected() === false) return false
     if (path) {
       storeTimelineCache(timelineCache.current, path, {
         items: cursor.items,
@@ -468,20 +506,52 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     } else {
       dispatch({ type: 'loadEntries', items: cursor.items, mode: cursor.mode })
     }
+    return requestCurrent?.() !== false && (!forceLatest || stillSelected())
     } catch (error) {
-      if (loadId === timelineLoadId.current && revision === scopeRevision.current) {
+      if (loadId === timelineLoadId.current && revision === scopeRevision.current && stillSelected()
+        && requestCurrent?.() !== false) {
         dispatch({ type: 'timelineError', error: error instanceof Error ? error.message : String(error) })
       }
     } finally {
-      // A stale selection can discard its page without publishing loadEntries.
+      // A retired reading intent still owns its pending shell until this read
+      // settles. Release by real selection/scope/loadId, independent of intent.
       // Release only this reader's shell, never a newer reader or clear scope.
       if (loadId === timelineLoadId.current && revision === scopeRevision.current) {
-        dispatch({ type: 'timelineLoading', loading: false })
+        if (historyCursor.current?.loadId === loadId) historyCursor.current.loading = false
+        if (isOwnedCleanup()) dispatch({ type: 'timelineLoading', loading: false })
       }
       // The UI watchdog may finish first; deletion retains its real read slot.
       if (waitForActualReads) await Promise.allSettled([...actualReads])
     }
+    return false
   }, [api, dispatch, readSelection, showTimeline])
+
+  const reloadTimeline = useCallback(async (
+    sessionPath?: string, refreshLive = false, waitForActualReads = false
+  ): Promise<void> => {
+    await reloadTimelinePage(sessionPath, refreshLive, waitForActualReads)
+  }, [reloadTimelinePage])
+
+  const loadLatestHistory = useCallback(async (isCurrent?: () => boolean): Promise<boolean> => {
+    if (isCurrent?.() === false) return false
+    const readingOwner = captureReadingOwner()
+    const { selection } = readingOwner
+    const current = currentState.current
+    const path = selection.ownerPath
+    if (!readingOwner.isSelected() || !api || !path || !selection.cwd || current.status.cwd !== selection.cwd
+      || current.session?.sessionFile !== path || selection.sessionPath !== path
+      || (revertInFlight.current?.path === path && !revertInFlight.current.settled)) return false
+    const revision = scopeRevision.current
+    const resetRevision = current.historyResetRevision
+    const request = reloadTimelinePage(path, false, false, true, isCurrent, readingOwner)
+    const loadId = timelineLoadId.current
+    const applied = await request
+    // Dispatch acceptance precedes React's commit. Callers must wait for the
+    // owned timeline render before measuring or scrolling its newest rows.
+    return applied && loadId === timelineLoadId.current && revision === scopeRevision.current
+      && currentState.current.historyResetRevision === resetRevision && readingOwner.isSelected()
+      && isCurrent?.() !== false
+  }, [api, captureReadingOwner, reloadTimelinePage])
 
   /** Fetch and prepend the next older history window when the user reaches the top. */
   const loadOlder = useCallback(async (options?: { viaScroll?: boolean }): Promise<void> => {
@@ -862,12 +932,21 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       refreshHistoryIndex, reloadTimeline, restoreCachedTimeline, selectStatus]
   )
 
-  const jumpToHistoryLandmark = useCallback(async (landmark: HistoryLandmark): Promise<void> => {
+  const jumpToHistoryLandmarkPage = useCallback(async (
+    landmark: HistoryLandmark, readingOffset?: number, requestCurrent?: () => boolean,
+    readingToken?: object, readingOwner?: ReturnType<typeof captureReadingOwner>
+  ): Promise<boolean> => {
     const index = currentState.current.historyIndex
-    if (!api || !index || !index.sessionPath || index.totalEntries <= 0
+    if (requestCurrent?.() === false || readingOwner?.isSelected() === false
+      || !api || !index || !index.sessionPath || index.totalEntries <= 0
       || timelineOwnerPath.current !== index.sessionPath
-      || (revertInFlight.current?.path === index.sessionPath && !revertInFlight.current.settled)) return
+      || (revertInFlight.current?.path === index.sessionPath && !revertInFlight.current.settled)) return false
     const selection = readSelection()
+    const resetRevision = currentState.current.historyResetRevision
+    const restoring = readingOffset !== undefined
+    const isOwnedCleanup = (): boolean => readSelection() === selection && readingOwner?.isApiOwner() !== false
+    const stillSelected = (): boolean => isOwnedCleanup() && readingOwner?.isSelected() !== false
+      && (!restoring || currentState.current.historyResetRevision === resetRevision)
     const preserveToolState: ToolStateScope = {
       revision: scopeRevision.current, cwd: selection.cwd,
       sessionId: selection.sessionId, sessionPath: index.sessionPath
@@ -885,21 +964,34 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     )
     const limit = Math.min(getViewportHistoryPageSize(), end)
     dispatch({ type: 'beginTaskRestore', id: loadId })
-    dispatch({ type: 'timelineLoading', loading: true })
+    if (restoring && historyCursor.current?.path === index.sessionPath) {
+      historyCursor.current = { ...historyCursor.current, loadId, loading: true }
+    }
+    // Keep the current error/view intact until a restored page is accepted.
+    if (!restoring) dispatch({ type: 'timelineLoading', loading: true })
 
     let page = null
     for (let attempt = 0; attempt < 3; attempt++) {
-      if (Date.now() >= deadline) break
+      if (Date.now() >= deadline || loadId !== timelineLoadId.current
+        || revision !== scopeRevision.current || !stillSelected() || requestCurrent?.() === false) break
       page = await readWithDeadline(() => api.getEntriesPage(end, limit, index.sessionPath), deadline).catch(() => null)
-      if (page || loadId !== timelineLoadId.current || Date.now() >= deadline || attempt === 2) break
+      if (page || requestCurrent?.() === false || loadId !== timelineLoadId.current || Date.now() >= deadline || attempt === 2) break
       await new Promise<void>((resolve) => window.setTimeout(resolve, 80 * (attempt + 1)))
     }
-    if (loadId !== timelineLoadId.current || revision !== scopeRevision.current || readSelection() !== selection) return
+    if (loadId !== timelineLoadId.current || revision !== scopeRevision.current
+      || !stillSelected() || requestCurrent?.() === false) return false
     if (!page) {
       dispatch({ type: 'timelineError', error: '无法加载所选历史消息。' })
-      return
+      return false
+    }
+    // Reading restoration requires the exact persisted user row in this
+    // selected branch, even if the index changed during its bounded read.
+    if (restoring) {
+      const matches = page.entries.filter((entry) => entry.id === landmark.entryId)
+      if (matches.length !== 1 || matches[0].type !== 'message' || matches[0].message?.role !== 'user') return false
     }
 
+    if (requestCurrent?.() === false || readingOwner?.isSelected() === false) return false
     if (page.taskSnapshot !== undefined) {
       dispatch({ type: 'restoreTasks', id: loadId, tasks: page.taskSnapshot })
     }
@@ -931,6 +1023,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       loading: false,
       loadId
     }
+    if (requestCurrent?.() === false || readingOwner?.isSelected() === false) return false
     timelineOwnerPath.current = index.sessionPath
     historyCursor.current = cursor.complete && cursor.newerComplete ? null : cursor
     storeTimelineCache(timelineCache.current, index.sessionPath, {
@@ -948,18 +1041,58 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     dispatch({
       type: 'historyJump',
       entryId: landmark.entryId,
-      nonce: ++historyJumpNonce.current
+      nonce: ++historyJumpNonce.current,
+      ...(restoring ? { readingOffset } : {}),
+      ...(readingToken ? { readingToken } : {})
     })
+    return requestCurrent?.() !== false && (!restoring || stillSelected())
     } catch (error) {
-      if (loadId === timelineLoadId.current && revision === scopeRevision.current) {
+      if (loadId === timelineLoadId.current && revision === scopeRevision.current && stillSelected()
+        && requestCurrent?.() !== false) {
         dispatch({ type: 'timelineError', error: error instanceof Error ? error.message : String(error) })
       }
     } finally {
+      // Reset/retired display intent leaves the real reader's cleanup fence intact.
       if (loadId === timelineLoadId.current && revision === scopeRevision.current) {
-        dispatch({ type: 'timelineLoading', loading: false })
+        if (historyCursor.current?.loadId === loadId) historyCursor.current.loading = false
+        if (isOwnedCleanup()) dispatch({ type: 'timelineLoading', loading: false })
       }
     }
+    return false
   }, [api, dispatch, readSelection, showTimeline])
+
+  const jumpToHistoryLandmark = useCallback(async (
+    landmark: HistoryLandmark, readingOffset?: number
+  ): Promise<void> => {
+    await jumpToHistoryLandmarkPage(landmark, readingOffset)
+  }, [jumpToHistoryLandmarkPage])
+
+  const restoreHistoryReadingPosition = useCallback(async (
+    entryId: string, offset: number, isCurrent?: () => boolean, readingToken?: object
+  ): Promise<boolean> => {
+    if (isCurrent?.() === false) return false
+    const readingOwner = captureReadingOwner()
+    const { selection } = readingOwner
+    const current = currentState.current
+    const path = selection.ownerPath
+    const index = current.historyIndex
+    if (!readingOwner.isSelected() || !api || !entryId || !Number.isFinite(offset) || !path || !selection.cwd
+      || current.status.cwd !== selection.cwd || current.session?.sessionFile !== path
+      || selection.sessionPath !== path || !current.timelineReady || !index
+      || index.sessionPath !== path || invalidatedBranches.current.has(path)) return false
+    const matches = index.landmarks.filter((landmark) => landmark.entryId === entryId)
+    if (matches.length !== 1) return false
+    // Unknown/failed indexes and an absent real entry both return false. The
+    // navigation owner distinguishes pending index readiness before calling.
+    const revision = scopeRevision.current
+    const resetRevision = current.historyResetRevision
+    const request = jumpToHistoryLandmarkPage(matches[0], offset, isCurrent, readingToken, readingOwner)
+    const loadId = timelineLoadId.current
+    const applied = await request
+    return applied && loadId === timelineLoadId.current && revision === scopeRevision.current
+      && currentState.current.historyResetRevision === resetRevision && readingOwner.isSelected()
+      && isCurrent?.() !== false
+  }, [api, captureReadingOwner, jumpToHistoryLandmarkPage])
 
   /** Undo conversation context in place; file rollback is a separate action. */
   const revertMessage = useCallback(async (entryId: string): Promise<MessageRevertResult | null> => {
@@ -1061,6 +1194,8 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     timelineOwnerPath,
     expectedTimeline,
     reloadTimeline,
+    loadLatestHistory,
+    restoreHistoryReadingPosition,
     loadOlder,
     loadNewer,
     hasNewerHistory,

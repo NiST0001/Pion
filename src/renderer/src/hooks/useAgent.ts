@@ -41,7 +41,9 @@ export function useAgent() {
     refreshHistoryIndex,
     forkAt: forkHistoryAt,
     switchSession: switchHistorySession,
-    jumpToHistoryLandmark
+    jumpToHistoryLandmark,
+    restoreHistoryReadingPosition,
+    loadLatestHistory
   } = useAgentHistory({ api, state, dispatch })
 
   const modelScope = useRef({ api, state })
@@ -312,6 +314,8 @@ export function useAgent() {
       loadNewer,
       hasNewerHistory,
       jumpToHistoryLandmark,
+      restoreHistoryReadingPosition,
+      loadLatestHistory,
       send,
       queue,
       sendQueuedMessage,
@@ -365,6 +369,8 @@ export function useAgent() {
       loadNewer,
       hasNewerHistory,
       jumpToHistoryLandmark,
+      restoreHistoryReadingPosition,
+      loadLatestHistory,
       send,
       queue,
       sendQueuedMessage,

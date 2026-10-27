@@ -3,10 +3,11 @@ import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ComponentProps } from 'react'
-import { validateSessionOrganizationChange, type SessionOrganization, type SessionOrganizationChange } from '../../src/shared/session-organization'
+import { applySessionOrganizationChange, validateSessionOrganizationChange, type SessionOrganization, type SessionOrganizationChange } from '../../src/shared/session-organization'
 import type { SessionMeta } from '../../src/shared/types'
 import { SessionFolderTree } from '../../src/renderer/src/features/session/SessionFolderTree'
 import { SessionItems } from '../../src/renderer/src/features/session/SessionList'
+import { SESSION_DRAG_MIME } from '../../src/renderer/src/utils/sessionDrag'
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 const cwd = '/project'
@@ -31,6 +32,15 @@ function organization(): SessionOrganization {
 }
 function row(container: HTMLElement, path: string): HTMLElement {
   return [...container.querySelectorAll<HTMLElement>('[data-session-path]')].find((element) => element.dataset.sessionPath === path)!
+}
+function startDrag(source: HTMLElement) {
+  const values = new Map<string, string>()
+  const dataTransfer = { get types() { return [...values.keys()] },
+    getData: (type: string) => values.get(type) ?? '',
+    setData: (type: string, value: string) => { values.set(type, value) }, effectAllowed: '', dropEffect: '' }
+  fireEvent.dragStart(source, { dataTransfer })
+  expect(dataTransfer.types).toContain(SESSION_DRAG_MIME)
+  return dataTransfer
 }
 
 describe('SessionFolderTree organization projection', () => {
@@ -82,30 +92,51 @@ describe('SessionFolderTree organization projection', () => {
     expect(change).not.toHaveBeenCalled()
   })
 
-  it('merges folder reorder into only that group’s original slots', () => {
+  it('saves session reorder for only the complete owning group', async () => {
     const org = organization(); org.folders[1].collapsed = false
-    const itemProps = items()
-    const view = render(<SessionFolderTree cwd={cwd} organization={org} itemProps={itemProps} onOrganizationChange={vi.fn()} />)
-    const dataTransfer = { getData: () => b.path, setData: vi.fn(), effectAllowed: '', dropEffect: '' }
-    fireEvent.drop(row(view.container, a.path), { dataTransfer })
-    expect(itemProps.onReorder).toHaveBeenCalledWith([b, root, a])
+    const itemProps = items(), change = vi.fn().mockResolvedValue(undefined)
+    const props = { cwd, organization: org, itemProps, onOrganizationChange: change }
+    const view = render(<SessionFolderTree {...props} />)
+    const first = row(view.container, a.path), second = row(view.container, b.path), rootRow = row(view.container, root.path)
+    const dataTransfer = startDrag(second)
+    await act(async () => { fireEvent.drop(first, { dataTransfer }) })
+    const patch: SessionOrganizationChange = { type: 'reorderItems', cwd, parentId: 'child', expectedRevision: org.revision,
+      items: [{ kind: 'session', path: b.path }, { kind: 'session', path: a.path }] }
+    expect(change).toHaveBeenCalledExactlyOnceWith(patch)
+    expect(itemProps.onReorder).not.toHaveBeenCalled()
+    expect([...first.parentElement!.querySelectorAll('[data-session-path]')].map((entry) => entry.getAttribute('data-session-path')))
+      .toEqual([a.path, b.path])
+    await act(async () => { fireEvent.drop(first, { dataTransfer }) })
+    expect(change).toHaveBeenCalledTimes(1)
+    view.rerender(<SessionFolderTree {...props} organization={applySessionOrganizationChange(org, patch)} />)
+    expect([...first.parentElement!.querySelectorAll('[data-session-path]')].map((entry) => entry.getAttribute('data-session-path')))
+      .toEqual([b.path, a.path])
+    expect(row(view.container, a.path)).toBe(first)
+    expect(row(view.container, b.path)).toBe(second)
+    expect(row(view.container, root.path)).toBe(rootRow)
+    expect(itemProps.onReorder).not.toHaveBeenCalled()
     expect(itemProps.onSelect).not.toHaveBeenCalled()
   })
 
   it('preserves the reorder capability layout while respecting item-level reorder disablement', () => {
     const org = organization(); org.folders[1].collapsed = false
-    const itemProps = { ...items(), reorderDisabled: true }
-    const view = render(<SessionFolderTree cwd={cwd} organization={org} itemProps={itemProps} onOrganizationChange={vi.fn()} />)
+    const itemProps = items(), change = vi.fn().mockResolvedValue(undefined)
+    const props = { cwd, organization: org, itemProps, onOrganizationChange: change }
+    const view = render(<SessionFolderTree {...props} />)
     const nestedRow = row(view.container, a.path)
+    const dataTransfer = startDrag(row(view.container, b.path))
+    view.rerender(<SessionFolderTree {...props} itemProps={{ ...itemProps, reorderDisabled: true }} />)
     expect(nestedRow).toHaveClass('reorderable')
     expect(nestedRow.querySelector('.side-session-drag')).toBeInTheDocument()
     expect(nestedRow).not.toHaveAttribute('draggable', 'true')
-    fireEvent.drop(nestedRow, { dataTransfer: { getData: () => b.path } })
+    fireEvent.drop(nestedRow, { dataTransfer })
+    expect(change).not.toHaveBeenCalled()
     expect(itemProps.onReorder).not.toHaveBeenCalled()
   })
 
   it('opens immediately, retains rows and grips through persistence, restores failures and gates disabled mutations', async () => {
-    const org = organization(), itemProps = items()
+    const peer = session('peer')
+    const org = organization(), itemProps = items([a, root, b, peer])
     let reject!: (reason: Error) => void
     const change = vi.fn(() => new Promise<void>((_resolve, fail) => { reject = fail }))
     const props = { cwd, organization: org, itemProps, onOrganizationChange: change, renderHeader }
@@ -113,6 +144,9 @@ describe('SessionFolderTree organization projection', () => {
     const toggle = screen.getByRole('button', { name: '文件夹 子目录' })
     const rootRow = row(view.container, root.path), nestedRow = row(view.container, a.path)
     const grip = rootRow.querySelector('.side-session-drag')
+    const peerRow = row(view.container, peer.path)
+    expect(peerRow).toBeVisible()
+    const dataTransfer = startDrag(peerRow)
     fireEvent.click(toggle)
     expect(change).toHaveBeenCalledWith({ type: 'setFolderCollapsed', id: 'child', collapsed: false })
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
@@ -122,7 +156,8 @@ describe('SessionFolderTree organization projection', () => {
     expect(rootRow.querySelector('.side-session-drag')).toBe(grip)
     expect(rootRow).toHaveClass('reorderable')
     expect(rootRow).not.toHaveAttribute('draggable', 'true')
-    fireEvent.drop(nestedRow, { dataTransfer: { getData: () => b.path } })
+    fireEvent.drop(rootRow, { dataTransfer })
+    expect(change).toHaveBeenCalledTimes(1)
     expect(itemProps.onReorder).not.toHaveBeenCalled()
     await act(async () => { reject(new Error('保存失败')) })
     expect(screen.getByRole('alert')).toHaveTextContent('保存失败')
@@ -148,7 +183,7 @@ describe('SessionFolderTree organization projection', () => {
     fireEvent.click(screen.getByRole('button', { name: '文件夹 子目录' }))
     expect(nestedRow).not.toBeVisible()
     expect(nestedRow.closest('.session-folder-content')).toHaveAttribute('inert')
-    const saved = { ...org, revision: 2, folders: org.folders.map((folder) => folder.id === 'child' ? { ...folder, collapsed: true } : folder) }
+    const saved = applySessionOrganizationChange(org, { type: 'setFolderCollapsed', id: 'child', collapsed: true })
     await act(async () => { view.rerender(<SessionFolderTree {...props} organization={saved} />); resolve() })
     expect(row(view.container, a.path)).toBe(nestedRow)
     expect(nestedRow.querySelector('.side-session-drag')).toBe(grip)
@@ -226,8 +261,7 @@ describe('SessionFolderTree organization projection', () => {
     fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: '删除文件夹' }))
     await act(async () => { resolve() })
     expect(folder).toBeInTheDocument()
-    const saved = { ...org, revision: 2, folders: org.folders.filter((entry) => entry.id !== 'child'),
-      sessions: org.sessions.map((entry) => ({ ...entry, folderId: 'parent' })) }
+    const saved = applySessionOrganizationChange(org, { type: 'deleteFolder', id: 'child' })
     view.rerender(<SessionFolderTree {...props} organization={saved} />)
     expect(folder).not.toBeInTheDocument()
     expect(row(view.container, a.path)).toBeVisible()
@@ -252,6 +286,7 @@ describe('SessionFolderTree organization projection', () => {
     const view = render(<SessionFolderTree {...props} />)
     const rootRow = row(view.container, root.path), nestedRow = row(view.container, b.path)
     const grip = nestedRow.querySelector('.side-session-drag')
+    const dataTransfer = startDrag(row(view.container, a.path))
     fireEvent.contextMenu(row(view.container, a.path))
     fireEvent.click(screen.getByRole('button', { name: '归档会话' }))
     expect(row(view.container, a.path)).toBeVisible()
@@ -260,9 +295,10 @@ describe('SessionFolderTree organization projection', () => {
     expect(nestedRow.querySelector('.side-session-drag')).toBe(grip)
     expect(nestedRow).toHaveClass('reorderable')
     expect(nestedRow).not.toHaveAttribute('draggable', 'true')
-    fireEvent.drop(nestedRow, { dataTransfer: { getData: () => a.path } })
+    fireEvent.drop(nestedRow, { dataTransfer })
+    expect(change).toHaveBeenCalledExactlyOnceWith({ type: 'setSession', cwd, path: a.path, archived: true, title: 'a' })
     expect(itemProps.onReorder).not.toHaveBeenCalled()
-    const saved = { ...org, revision: 2, sessions: org.sessions.map((entry) => entry.path === a.path ? { ...entry, archived: true } : entry) }
+    const saved = applySessionOrganizationChange(org, { type: 'setSession', cwd, path: a.path, archived: true, title: 'a' })
     await act(async () => { view.rerender(<SessionFolderTree {...props} organization={saved} />); resolve() })
     expect(row(view.container, a.path)).toBeUndefined()
     expect(row(view.container, b.path)).toBe(nestedRow)

@@ -4,9 +4,10 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import type { ComponentProps } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ProjectList } from '../../src/renderer/src/features/project/Sidebar'
-import type { SessionOrganization } from '../../src/shared/session-organization'
+import { applySessionOrganizationChange, type SessionOrganization, type SessionOrganizationChange } from '../../src/shared/session-organization'
 import type { SessionMeta } from '../../src/shared/types'
 import { SESSION_DRAG_MIME } from '../../src/renderer/src/utils/sessionDrag'
+import { SESSION_FOLDER_DRAG_MIME } from '../../src/renderer/src/utils/sessionFolderDrag'
 
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals() })
 const cwd = '/project'
@@ -39,14 +40,14 @@ function header(name: string): HTMLElement {
 function row(container: HTMLElement, path: string): HTMLElement {
   return [...container.querySelectorAll<HTMLElement>('[data-session-path]')].find((element) => element.dataset.sessionPath === path)!
 }
-function drag(source: HTMLElement) {
+function drag(source: HTMLElement, mime = SESSION_DRAG_MIME) {
   const values = new Map<string, string>()
   const dataTransfer = { effectAllowed: '', dropEffect: '',
     get types() { return [...values.keys()] },
     setData: (type: string, value: string) => { values.set(type, value) },
     getData: (type: string) => values.get(type) ?? '' }
   fireEvent.dragStart(source, { dataTransfer })
-  expect(dataTransfer.types).toContain(SESSION_DRAG_MIME)
+  expect(dataTransfer.types).toContain(mime)
   return dataTransfer
 }
 
@@ -123,6 +124,39 @@ it('keeps nested drop targets and uses the owning branch header for root drops w
   await act(async () => { resolve() })
   expect(head).toHaveAttribute('aria-busy', 'false')
   expect(within(head).getByRole('button', { name: '在 main 分支中新建文件夹' })).toBeEnabled()
+  expect(callbacks.onReorder).not.toHaveBeenCalled()
+  expect(callbacks.onSelectSession).not.toHaveBeenCalled()
+})
+
+it('disables cross-type ordering in automatic sort while keeping folder-center moves and branch-root drops', async () => {
+  const callbacks = props(), view = render(<ProjectList {...callbacks} />)
+  fireEvent.click(screen.getByRole('button', { name: '排序会话' }))
+  fireEvent.click(screen.getByRole('menuitemradio', { name: '最近更新' }))
+  const parent = view.container.querySelector<HTMLElement>('[data-session-drop-target="parent"]')!
+  const folderDrag = drag(within(parent).getByRole('button', { name: '文件夹 父目录' }), SESSION_FOLDER_DRAG_MIME)
+  const rootRow = row(view.container, root.path)
+  fireEvent.dragOver(rootRow, { dataTransfer: folderDrag })
+  expect(folderDrag.dropEffect).toBe('none')
+  await act(async () => { fireEvent.drop(rootRow, { dataTransfer: folderDrag }) })
+  expect(callbacks.onOrganizationChange).not.toHaveBeenCalled()
+  expect(row(view.container, root.path)).toBe(rootRow)
+  const child = view.container.querySelector<HTMLElement>('[data-session-drop-target="child"]')!
+  vi.spyOn(child, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 40, height: 40 } as DOMRect)
+  const centerDrag = drag(rootRow)
+  fireEvent.dragOver(child, { dataTransfer: centerDrag, clientY: 20 })
+  expect(child).toHaveClass('session-folder-drop-target')
+  await act(async () => { fireEvent.drop(child, { dataTransfer: centerDrag, clientY: 20 }) })
+  const move: SessionOrganizationChange = { type: 'setSession', cwd, path: root.path, folderId: 'child' }
+  expect(callbacks.onOrganizationChange).toHaveBeenCalledExactlyOnceWith(move)
+  view.rerender(<ProjectList {...callbacks} organization={applySessionOrganizationChange(callbacks.organization!, move)} />)
+  const moved = row(view.container, root.path)
+  expect(moved.closest('[data-folder-id]')).toHaveAttribute('data-folder-id', 'child')
+  const head = header('main'), rootDrag = drag(moved)
+  fireEvent.dragOver(head, { dataTransfer: rootDrag })
+  expect(head).toHaveClass('session-folder-drop-target')
+  await act(async () => { fireEvent.drop(head, { dataTransfer: rootDrag }) })
+  expect(callbacks.onOrganizationChange).toHaveBeenLastCalledWith({ type: 'setSession', cwd, path: root.path, folderId: null })
+  expect(callbacks.onOrganizationChange).toHaveBeenCalledTimes(2)
   expect(callbacks.onReorder).not.toHaveBeenCalled()
   expect(callbacks.onSelectSession).not.toHaveBeenCalled()
 })

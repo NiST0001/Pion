@@ -10,6 +10,7 @@ export function useConversationOverlays(hasMetrics: boolean, hasInteractions = f
     disconnect.current = undefined
     if (!shell) return
     const metrics = hasMetrics ? shell.querySelector<HTMLElement>('.run-metrics-strip') : null
+    const stage = shell.querySelector<HTMLElement>('.chat-stage')
     const composer = shell.querySelector<HTMLElement>('.composer-dock')
     const composerInput = composer?.querySelector<HTMLElement>('.composer-input-scroll')
     let active = true
@@ -18,7 +19,11 @@ export function useConversationOverlays(hasMetrics: boolean, hasInteractions = f
     const measure = () => {
       if (!active) return
       const support = composer?.querySelector<HTMLElement>('.composer-support-row')
-      const targets = new Set<Element>(support ? [support, ...support.children] : [])
+      const panels = stage?.querySelector<HTMLElement>('.session-interaction-panels')
+      const targets = new Set<Element>([
+        ...(support ? [support, ...support.children] : []),
+        ...(panels ? [panels, ...panels.children] : []),
+      ])
       for (const target of supportTargets) if (!targets.has(target)) {
         observer?.unobserve(target)
         supportTargets.delete(target)
@@ -58,6 +63,23 @@ export function useConversationOverlays(hasMetrics: boolean, hasInteractions = f
         }
       }
       shell.style.setProperty('--conversation-interaction-bottom-clearance', `${interactionHeight}px`)
+      // Navigation alone clears the visible request stack. Its variable only
+      // positions the button, so it never feeds back into the observed cards.
+      const parentHidden = shell.classList.contains('is-subagent-view')
+        || Boolean(composer?.closest('[hidden], [inert], [aria-hidden="true"]'))
+      if (!stage || parentHidden || stage.closest('[hidden], [inert], [aria-hidden="true"]')) {
+        shell.style.removeProperty('--conversation-navigation-bottom-clearance')
+      } else {
+        let navigationHeight = interactionHeight
+        if (panels && !panels.closest('[hidden], [inert], [aria-hidden="true"]')) {
+          const style = getComputedStyle(panels)
+          const rect = panels.getBoundingClientRect()
+          if (style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0) {
+            navigationHeight = Math.max(navigationHeight, stage.getBoundingClientRect().bottom - rect.top)
+          }
+        }
+        shell.style.setProperty('--conversation-navigation-bottom-clearance', `${navigationHeight}px`)
+      }
     }
     if (typeof ResizeObserver === 'function') {
       observer = new ResizeObserver(measure)
@@ -68,15 +90,23 @@ export function useConversationOverlays(hasMetrics: boolean, hasInteractions = f
       window.addEventListener('resize', measure)
     }
     // Tasks/queue can mount after this ref attached, without resizing composer.
-    const mutations = new MutationObserver(measure)
-    if (composer) mutations.observe(composer, { childList: true, subtree: true, attributes: true,
-      attributeFilter: ['class', 'hidden', 'aria-hidden'] })
+    const mutations = new MutationObserver((records) => {
+      // Streaming timeline text and the navigation button do not affect these
+      // extents. Watch request stacks and chrome visibility without style writes.
+      if (records.some(({ target }) => target instanceof Element && (
+        target === shell || target === stage || target.classList.contains('parent-conversation-chrome')
+        || target.closest('.composer-dock, .session-interaction-panels')
+      ))) measure()
+    })
+    mutations.observe(shell, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ['class', 'hidden', 'aria-hidden', 'inert'] })
     measure()
     disconnect.current = () => {
       active = false
       mutations.disconnect()
       observer?.disconnect()
       supportTargets.clear()
+      shell.style.removeProperty('--conversation-navigation-bottom-clearance')
       window.removeEventListener('resize', measure)
     }
   }, [hasMetrics, hasInteractions])

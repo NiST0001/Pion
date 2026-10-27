@@ -73,6 +73,28 @@ describe('renderer-local folder drag receipt', () => {
     expect(getSessionDrag(sessionTransfer, data.cwd, 'drop')).toEqual(session)
   })
 
+  it('keeps context private, rejects mismatched hover and consumes a mismatched drop once', () => {
+    const drag = createInternalDrag(SESSION_FOLDER_DRAG_MIME, (input: typeof data) => ({ ...input }))
+    const transfer = makeTransfer(), context = {}, otherContext = {}
+    expect(drag.begin(transfer, data, owner, () => true, context)).toBe(true)
+    expect(transfer.setData).toHaveBeenCalledExactlyOnceWith(
+      SESSION_FOLDER_DRAG_MIME, JSON.stringify({ version: 1, ...data }),
+    )
+    expect(drag.get(transfer, data.cwd, 'over', otherContext)).toBeNull()
+    expect(drag.get(transfer, data.cwd, 'over', context)).toEqual(data)
+    expect(drag.get(transfer, data.cwd, 'over')).toEqual(data)
+    expect(transfer.getData).not.toHaveBeenCalled()
+    expect(drag.get(transfer, data.cwd, 'drop', otherContext)).toBeNull()
+    expect(drag.get(transfer, data.cwd, 'drop', context)).toBeNull()
+    expect(transfer.getData).not.toHaveBeenCalled()
+    drag.begin(transfer, data, owner, () => true, context)
+    expect(drag.get(transfer, data.cwd, 'drop')).toEqual(data)
+    drag.begin(transfer, data, owner, () => true)
+    expect(drag.get(transfer, data.cwd, 'over', context)).toBeNull()
+    expect(drag.get(transfer, data.cwd, 'drop', context)).toBeNull()
+    expect(drag.get(transfer, data.cwd, 'drop')).toBeNull()
+  })
+
   it('requires this factory instance even when another instance uses the same MIME and owner', () => {
     const other = createInternalDrag(SESSION_FOLDER_DRAG_MIME, (input: typeof data) => ({ ...input }))
     const transfer = makeTransfer()

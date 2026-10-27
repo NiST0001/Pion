@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SessionOrganizationStore } from '../../src/main/session-organization'
 import {
   applySessionOrganizationChange as apply,
+  orderedSessionOrganizationItems,
+  sessionOrganizationItemKey,
   sessionPlacementKey,
   validateSessionOrganization,
   validateSessionOrganizationChange,
@@ -137,6 +139,104 @@ describe('session organization graph', () => {
     expect(getter).not.toHaveBeenCalled()
   })
 
+  it('persists mixed ranks without changing ownership and projects only current real session paths', () => {
+    const state: SessionOrganization = {
+      version: 1, revision: 4,
+      folders: [
+        { id: 'a', cwd: '/project', name: 'A', collapsed: true },
+        { id: 'child', cwd: '/project', name: 'Child', parentId: 'a', order: 8 },
+        { id: 'b', cwd: '/project', name: 'B' },
+        { id: 'foreign', cwd: '/other', name: 'Foreign', order: 3 }
+      ],
+      sessions: [
+        { cwd: '/project', path: 'known', title: 'Kept' },
+        { cwd: '/project', path: 'deleted-sdk-session', order: 0 },
+        { cwd: '/project', path: 'archived', archived: true, order: 0 }
+      ]
+    }
+    const before = structuredClone(state)
+    expect(orderedSessionOrganizationItems(state, '/project', undefined, ['implicit', 'known'])).toEqual([{ kind: 'session', path: 'implicit' }, { kind: 'session', path: 'known' }, { kind: 'folder', id: 'a' }, { kind: 'folder', id: 'b' }])
+    const refs = [{ kind: 'folder', id: 'b' }, { kind: 'session', path: 'a' }, { kind: 'folder', id: 'a' }, { kind: 'session', path: 'known' }] as const
+    const next = apply(state, { type: 'reorderItems', cwd: '/project', expectedRevision: 4, items: [...refs] })
+    expect(next.folders).toEqual(state.folders.map((entry) => entry.id === 'a' ? { ...entry, order: 2 } : entry.id === 'b' ? { ...entry, order: 0 } : entry))
+    expect(next.sessions).toEqual([{ ...state.sessions[0], order: 3 }, ...state.sessions.slice(1), { cwd: '/project', path: 'a', order: 1 }])
+    expect(orderedSessionOrganizationItems(next, '/project', undefined, ['known', 'a', 'archived', 'unranked'])).toEqual([...refs, { kind: 'session', path: 'unranked' }])
+    expect(sessionOrganizationItemKey(refs[1])).not.toBe(sessionOrganizationItemKey(refs[2]))
+    const legacy = apply(next, { type: 'reorderFolders', cwd: '/project', ids: ['a', 'b'] })
+    expect(orderedSessionOrganizationItems(legacy, '/project', undefined, ['known', 'a'])).toEqual([refs[2], refs[1], refs[0], refs[3]])
+    expect(legacy.sessions).toEqual(next.sessions)
+    const tied = validateSessionOrganization({ ...next, sessions: [...next.sessions, { cwd: '/project', path: 'restored', order: 1 }] })
+    expect(orderedSessionOrganizationItems(tied, '/project', undefined, ['restored', 'a'])).toEqual([refs[0], { kind: 'session', path: 'restored' }, refs[1], refs[2]])
+    next.folders[1].name = 'caller mutation'
+    next.sessions[1].order = 20
+    expect(state).toEqual(before)
+  })
+
+  it('clears ranks only on actual parent changes and direct promotion', () => {
+    const state: SessionOrganization = {
+      version: 1, revision: 1,
+      folders: [
+        { id: 'a', cwd: '/project', name: 'A', order: 1 },
+        { id: 'child', cwd: '/project', name: 'Child', parentId: 'a', order: 2 },
+        { id: 'grandchild', cwd: '/project', name: 'Grandchild', parentId: 'child', order: 3 }
+      ],
+      sessions: [{ cwd: '/project', path: 's', folderId: 'a', order: 0, archived: true }]
+    }
+    const patched = apply(state, { type: 'setSession', cwd: '/project', path: 's', folderId: 'a', archived: false, title: 'New' })
+    expect(patched.sessions[0]).toMatchObject({ order: 0, title: 'New', archived: false })
+    expect(apply(patched, { type: 'setSession', cwd: '/project', path: 's', folderId: null }).sessions[0]).not.toHaveProperty('order')
+    expect(apply(state, { type: 'moveFolder', id: 'child', parentId: 'a' }).folders[1].order).toBe(2)
+    expect(apply(state, { type: 'moveFolder', id: 'child' }).folders[1]).not.toHaveProperty('order')
+    const promoted = apply(state, { type: 'deleteFolder', id: 'a' })
+    expect(promoted.folders[0]).not.toHaveProperty('order')
+    expect(promoted.folders[1].order).toBe(3)
+    expect(promoted.sessions[0]).toEqual({ cwd: '/project', path: 's', archived: true })
+  })
+
+  it('rejects stale revisions, incomplete folder sets and foreign or archived mixed refs', () => {
+    const state: SessionOrganization = {
+      version: 1, revision: 5,
+      folders: [{ id: 'a', cwd: '/project', name: 'A' }, { id: 'child', cwd: '/project', name: 'Child', parentId: 'a' }, { id: 'other', cwd: '/other', name: 'Other' }],
+      sessions: [{ cwd: '/project', path: 'nested', folderId: 'a' }, { cwd: '/project', path: 'archived', archived: true }, { cwd: '/other', path: 'foreign', order: 9 }]
+    }
+    const base = { type: 'reorderItems', cwd: '/project', expectedRevision: 5, items: [{ kind: 'folder', id: 'a' }] }
+    for (const change of [
+      { ...base, expectedRevision: 4 }, { ...base, items: [] },
+      ...['child', 'other', 'missing'].map((id) => ({ ...base, items: [{ kind: 'folder', id }] })),
+      ...['nested', 'archived', 'foreign'].map((path) => ({ ...base, items: [...base.items, { kind: 'session', path }] })),
+      ...['other', 'missing'].map((parentId) => ({ ...base, parentId, items: [] })),
+      { ...base, parentId: 'a', items: [{ kind: 'folder', id: 'child' }, { kind: 'session', path: 'unknown' }] }
+    ]) expect(() => apply(state, change)).toThrow()
+    expect(apply(state, { ...base, parentId: 'a', items: [{ kind: 'session', path: 'nested' }, { kind: 'folder', id: 'child' }] }).sessions[0]).toMatchObject({ folderId: 'a', order: 0 })
+    expect(state.sessions[2].order).toBe(9)
+  })
+
+  it('validates mixed rank descriptors and clones refs without invoking accessors', () => {
+    const valid = { type: 'reorderItems', cwd: '/project', expectedRevision: 0, items: [{ kind: 'folder', id: 'a' }] }
+    const parsed = validateSessionOrganizationChange(valid)
+    expect(parsed).toEqual(valid)
+    expect(parsed).not.toBe(valid)
+    if (parsed.type !== 'reorderItems') throw new Error('unexpected change')
+    expect(parsed.items).not.toBe(valid.items)
+    expect(parsed.items[0]).not.toBe(valid.items[0])
+    const getter = vi.fn(() => 0)
+    for (const change of [
+      ...[-1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1, undefined].map((expectedRevision) => ({ ...valid, expectedRevision })),
+      { ...valid, items: Array(1) }, { ...valid, items: [valid.items[0], valid.items[0]] },
+      { ...valid, items: [{ kind: 'folder', id: 'a', path: 'a' }] },
+      { ...valid, items: [{ kind: 'session', id: 'a', path: 'a' }] },
+      { ...valid, items: [{ kind: 'other', id: 'a' }] },
+      { ...valid, items: Object.defineProperty([valid.items[0]], '0', { enumerable: true, get: getter }) },
+      { ...valid, items: [Object.defineProperty({ kind: 'folder' }, 'id', { enumerable: true, get: getter })] },
+      Object.defineProperty({ ...valid }, 'expectedRevision', { enumerable: true, get: getter })
+    ]) expect(() => validateSessionOrganizationChange(change)).toThrow()
+    for (const order of [-1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1, undefined]) {
+      expect(() => validateSessionOrganization({ ...empty(), folders: [{ id: 'a', cwd: '/project', name: 'A', order }] })).toThrow()
+      expect(() => validateSessionOrganization({ ...empty(), sessions: [{ cwd: '/project', path: 'a', order }] })).toThrow()
+    }
+    expect(getter).not.toHaveBeenCalled()
+  })
+
   it('rejects malformed primitive fields, unknown fields, accessors and exotic objects', () => {
     const changes = [null, [], 'setSession', Object.create({ type: 'deleteFolder', id: 'x' }),
       { type: 'deleteFolder', id: 'x', extra: true }, { type: 'deleteFolder', id: 1 },
@@ -221,6 +321,28 @@ describe('session organization persistence', () => {
     await expect(stale).rejects.toThrow()
     expect(await new SessionOrganizationStore(() => path).get()).toEqual(current)
     expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(current)
+  })
+
+  it('roundtrips mixed ranks, captures queued refs and preserves bytes after stale revisions', async () => {
+    const { path, store } = await fixture()
+    await store.update(create('a'))
+    await store.update(create('b'))
+    const patch = { type: 'reorderItems', cwd: '/project', expectedRevision: 2, items: [{ kind: 'folder', id: 'b' }, { kind: 'session', path: 'implicit' }, { kind: 'folder', id: 'a' }] }
+    const pending = store.update(patch)
+    patch.items[0].id = 'caller mutation'
+    const saved = await pending
+    expect(saved.version).toBe(1)
+    expect(await new SessionOrganizationStore(() => path).get()).toEqual(saved)
+    const bytes = await readFile(path, 'utf8')
+    await expect(store.update({ ...patch, items: [{ kind: 'folder', id: 'a' }, { kind: 'folder', id: 'b' }] })).rejects.toThrow()
+    expect(await readFile(path, 'utf8')).toBe(bytes)
+    const clone = validateSessionOrganization(saved)
+    clone.folders[0].order = 90
+    clone.sessions[0].order = 91
+    expect(saved.folders[0].order).toBe(2)
+    expect(saved.sessions[0].order).toBe(1)
+    expect(saved.folders[0]).not.toHaveProperty('parentId')
+    expect(JSON.parse(bytes)).toEqual(saved)
   })
 
   it('preserves corrupted bytes and propagates non-ENOENT failures on get and update', async () => {

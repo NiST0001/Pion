@@ -208,7 +208,10 @@ export function reducer(state: AgentState, action: Action): AgentState {
     case 'historyIndex':
       return { ...state, historyIndex: action.index }
     case 'historyJump':
-      return { ...state, historyJump: { entryId: action.entryId, nonce: action.nonce } }
+      return { ...state, historyJump: { entryId: action.entryId, nonce: action.nonce,
+        ...(typeof action.readingOffset === 'number' && Number.isFinite(action.readingOffset)
+          ? { readingOffset: action.readingOffset,
+              ...(action.readingToken ? { readingToken: action.readingToken } : {}) } : {}) } }
     case 'projects': {
       const projectCwds = new Set(action.projects.map((project) => project.cwd))
       const branchesByProject = Object.fromEntries(

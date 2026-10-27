@@ -62,6 +62,7 @@ function mockSupportGeometry() {
     unobserve = (target: Element) => { this.targets.delete(target) }
   })
   let supportHeight = 64
+  let requestHeight = 90
   vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(() => 600)
   vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
     if (this.classList.contains('composer-dock')) return 100
@@ -69,8 +70,13 @@ function mockSupportGeometry() {
     return 0
   })
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-    const bottom = this.classList.contains('composer-support-row') ? 692 : 800
-    const height = this.classList.contains('composer-support-row') ? supportHeight
+    const isRequest = this.matches('.session-interaction-panels, .request-card')
+    const bottom = isRequest ? 780 - (108 + supportHeight) - 14
+      : this.classList.contains('chat-stage') ? 780
+      : this.classList.contains('composer-support-row') ? 692 : 800
+    const height = isRequest ? requestHeight
+      : this.classList.contains('chat-stage') ? 540
+      : this.classList.contains('composer-support-row') ? supportHeight
       : this.classList.contains('composer-dock') ? 100 : 600
     return { x: 40, y: bottom - height, top: bottom - height, bottom, left: 40, right: 640, width: 600, height, toJSON() {} }
   })
@@ -81,13 +87,17 @@ function mockSupportGeometry() {
       for (const observer of observers) if (observer.targets.has(target)) observer.callback()
     }),
     setHeight: (height: number) => { supportHeight = height },
+    setRequestHeight: (height: number) => { requestHeight = height },
   }
 }
 
-function SupportHarness({ task = false, queue = false, hidden = false, ariaHidden = false }) {
+function SupportHarness({ task = false, queue = false, hidden = false, ariaHidden = false, request = false }) {
   const ref = useConversationOverlays(false, true)
   return <div ref={ref} data-testid="shell">
-    <div className="chat-stage">history</div>
+    <div className="chat-stage">history{request && <div className="session-interaction-panels"
+      style={{ display: 'flex', visibility: 'visible' }}>
+      <section className="request-card" style={{ display: 'block', visibility: 'visible' }}>request</section>
+    </div>}</div>
     <div className="composer-dock">
       <div data-testid="support-parent" hidden={hidden} aria-hidden={ariaHidden || undefined}>
         {(task || queue) && <div className="composer-support-row">
@@ -187,6 +197,81 @@ it.each(['hidden', 'aria-hidden'] as const)('ignores %s support ancestors and re
   expect(geometry.isObserved(support)).toBe(true)
   expect(shell.querySelector('textarea')).toBe(draft)
   expect(draft.value).toBe('hidden-view draft')
+})
+
+it('measures request-stack top from stage coordinates and tracks card resize without changing composer clearance', async () => {
+  const geometry = mockSupportGeometry()
+  const mutationDisconnect = vi.spyOn(MutationObserver.prototype, 'disconnect')
+  const view = render(<SupportHarness task />)
+  const shell = view.getByTestId('shell')
+  const composer = shell.querySelector('.composer-dock')!
+  const draft = shell.querySelector('textarea')!
+  draft.value = 'navigation draft'
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('172px')
+  await act(async () => { view.rerender(<SupportHarness task request />) })
+  const panels = shell.querySelector('.session-interaction-panels')!
+  const card = shell.querySelector('.request-card')!
+  expect(geometry.isObserved(panels)).toBe(true)
+  expect(geometry.isObserved(card)).toBe(true)
+  // Stage bottom 780 - actual stack top 504; shell bottom is separately 800.
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('276px')
+  geometry.setRequestHeight(210)
+  geometry.resize(card)
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('396px')
+  expect(shell.style.getPropertyValue('--conversation-bottom-clearance')).toBe('100px')
+  expect(shell.style.getPropertyValue('--conversation-interaction-bottom-clearance')).toBe('172px')
+  expect(shell.querySelector('.composer-dock')).toBe(composer)
+  expect(shell.querySelector('textarea')).toBe(draft)
+  expect(draft.value).toBe('navigation draft')
+  const lateCallbacks = geometry.observers.map(observer => observer.callback)
+  view.unmount()
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('')
+  expect(geometry.observers.every(observer => observer.disconnect.mock.calls.length > 0 && observer.targets.size === 0)).toBe(true)
+  expect(mutationDisconnect).toHaveBeenCalled()
+  act(() => { for (const callback of lateCallbacks) callback() })
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('')
+})
+
+it.each(['hidden', 'inert', 'aria-hidden'] as const)('ignores a retained %s request stack with non-zero geometry', async attribute => {
+  const geometry = mockSupportGeometry()
+  const view = render(<SupportHarness task request />)
+  const shell = view.getByTestId('shell')
+  const panels = shell.querySelector('.session-interaction-panels')!
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('276px')
+  await act(async () => { panels.setAttribute(attribute, attribute === 'aria-hidden' ? 'true' : '') })
+  expect(panels.getBoundingClientRect().height).toBe(90)
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('172px')
+  expect(shell.style.getPropertyValue('--conversation-bottom-clearance')).toBe('100px')
+  expect(shell.style.getPropertyValue('--conversation-interaction-bottom-clearance')).toBe('172px')
+  await act(async () => { panels.removeAttribute(attribute) })
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('276px')
+  expect(geometry.isObserved(panels)).toBe(true)
+})
+
+it.each([
+  ['.chat-stage', 'hidden', ''],
+  ['.chat-stage', 'inert', ''],
+  ['.composer-dock', 'aria-hidden', 'true'],
+  ['[data-testid="shell"]', 'class', 'is-subagent-view'],
+] as const)('clears navigation clearance for retained %s with %s', async (selector, attribute, value) => {
+  mockSupportGeometry()
+  const view = render(<SupportHarness task request />)
+  const shell = view.getByTestId('shell')
+  const target = shell.matches(selector) ? shell : shell.querySelector(selector)!
+  const composer = shell.querySelector('.composer-dock')!
+  const draft = shell.querySelector('textarea')!
+  draft.value = 'retained draft'
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('276px')
+  await act(async () => { target.setAttribute(attribute, value) })
+  expect(shell.querySelector('.session-interaction-panels')!.getBoundingClientRect().height).toBe(90)
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('')
+  await act(async () => { target.removeAttribute(attribute) })
+  expect(shell.style.getPropertyValue('--conversation-navigation-bottom-clearance')).toBe('276px')
+  expect(shell.style.getPropertyValue('--conversation-bottom-clearance')).toBe('100px')
+  expect(shell.style.getPropertyValue('--conversation-interaction-bottom-clearance')).toBe('172px')
+  expect(shell.querySelector('.composer-dock')).toBe(composer)
+  expect(shell.querySelector('textarea')).toBe(draft)
+  expect(draft.value).toBe('retained draft')
 })
 
 it('bounds a real support row in a tiny dock instead of hiding the interaction header', async () => {

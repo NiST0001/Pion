@@ -3,7 +3,7 @@ import type { IpcMainInvokeEvent } from 'electron'
 import { expect, it, vi } from 'vitest'
 import { IPC } from '../../src/shared/ipc'
 import { registerSessionOrganizationIpc } from '../../src/main/ipc/session-organization'
-import type { SessionOrganization } from '../../src/shared/session-organization'
+import { applySessionOrganizationChange, type SessionOrganization } from '../../src/shared/session-organization'
 
 const snapshot = (): SessionOrganization => ({ version: 1, revision: 0, folders: [], sessions: [] })
 function fixture() {
@@ -45,6 +45,35 @@ it('validates argument counts and forwards the update publication guard', async 
   const change = { type: 'reorderFolders', cwd: '/project', parentId: 'parent', ids: ['b', 'a'] }
   await expect(f.invoke(IPC.SessionOrganizationUpdate, change)).resolves.toEqual(snapshot())
   expect(f.store.update).toHaveBeenCalledWith(change, expect.any(Function))
+  expect(f.sender.listenerCount('did-start-navigation')).toBe(0)
+})
+
+it('keeps the publication guard for mixed orders and rejects invalid revisions or foreign ranks at the update boundary', async () => {
+  const f = fixture()
+  let current: SessionOrganization = {
+    version: 1, revision: 3,
+    folders: [{ id: 'a', cwd: '/project', name: 'A' }, { id: 'other', cwd: '/other', name: 'Other', order: 4 }],
+    sessions: [{ cwd: '/other', path: 'foreign', order: 5 }]
+  }
+  f.store.update.mockImplementation(async (change, guard) => {
+    guard?.()
+    const next = applySessionOrganizationChange(current, change)
+    guard?.()
+    current = next
+    return next
+  })
+  const change = { type: 'reorderItems', cwd: '/project', expectedRevision: 3, items: [{ kind: 'folder', id: 'a' }] }
+  const before = structuredClone(current)
+  for (const invalid of [
+    { ...change, expectedRevision: -1 }, { ...change, expectedRevision: 2 },
+    { ...change, items: [{ kind: 'folder', id: 'other' }] },
+    { ...change, items: [...change.items, { kind: 'session', path: 'foreign' }] }
+  ]) await expect(f.invoke(IPC.SessionOrganizationUpdate, invalid)).rejects.toThrow()
+  expect(current).toEqual(before)
+  await expect(f.invoke(IPC.SessionOrganizationUpdate, change)).resolves.toMatchObject({ revision: 4 })
+  expect(f.store.update).toHaveBeenLastCalledWith(change, expect.any(Function))
+  expect(current.folders[1].order).toBe(4)
+  expect(current.sessions[0].order).toBe(5)
   expect(f.sender.listenerCount('did-start-navigation')).toBe(0)
 })
 

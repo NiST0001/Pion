@@ -154,7 +154,7 @@ export interface AgentState {
   branchesByProject: Record<string, BranchInfo[]>
   tree: { tree: TreeNodeLite[]; leafId: string | null } | null
   historyIndex: SessionHistoryIndex | null
-  historyJump: { entryId: string; nonce: number } | null
+  historyJump: { entryId: string; nonce: number; readingOffset?: number; readingToken?: object } | null
   /** Explicit destructive branch selection, independent of ordinary history replacement. */
   historyResetRevision: number
   projects: ProjectMeta[]
@@ -260,7 +260,7 @@ export type Action =
   | { type: 'branchRemoved'; projectCwd: string; cwd: string }
   | { type: 'tree'; tree: { tree: TreeNodeLite[]; leafId: string | null } | null }
   | { type: 'historyIndex'; index: SessionHistoryIndex | null }
-  | { type: 'historyJump'; entryId: string; nonce: number }
+  | { type: 'historyJump'; entryId: string; nonce: number; readingOffset?: number; readingToken?: object }
   | { type: 'resetHistoryNavigation' }
   | { type: 'projects'; projects: ProjectMeta[] }
   | { type: 'reorderSessions'; cwd: string; paths: string[] }
