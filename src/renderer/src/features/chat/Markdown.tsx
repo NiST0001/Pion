@@ -1,6 +1,7 @@
-import { memo, useCallback, useContext, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import type { Components } from 'react-markdown'
+import type { Parser, Plugin } from 'unified'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import { Check, Copy } from 'lucide-react'
@@ -404,12 +405,31 @@ export const Markdown = memo(function Markdown({
   readOnly?: boolean
   revealMode?: TextRevealMode
 }): React.ReactElement {
-  const [highlightPlugin] = useState(() => {
-    // ReactMarkdown creates a processor per render; reuse this instance's
-    // transformer instead of registering lowlight's languages on each cleanup.
+  const { remarkPlugins, highlightPlugin } = useMemo(() => {
+    // This fixed pipeline owns both source caches; replacing its processor or
+    // plugins invalidates them together. Reveal and security postprocessing
+    // remain per-render, downstream of fresh clones of the cached trees.
+    let parsed: { text: string; tree: ReturnType<Parser> } | undefined
+    const cacheParse: Plugin = function () {
+      const parse = this.parser!
+      this.parser = (text, file) => {
+        if (parsed?.text === text) return structuredClone(parsed.tree)
+        const tree = parse(text, file)
+        parsed = { text, tree: structuredClone(tree) }
+        return tree
+      }
+    }
     const transform = rehypeHighlight()
-    return () => transform
-  })
+    let highlighted: { text: string; tree: Parameters<typeof transform>[0] } | undefined
+    const highlightPlugin: Plugin<[], Parameters<typeof transform>[0]> = () => (tree, file) => {
+      const text = String(file)
+      if (highlighted?.text === text) return structuredClone(highlighted.tree)
+      transform(tree, file)
+      highlighted = { text, tree: structuredClone(tree) }
+      return tree
+    }
+    return { remarkPlugins: [remarkGfm, cacheParse], highlightPlugin }
+  }, [ReactMarkdown, remarkGfm, rehypeHighlight])
   const rootRef = useRef<HTMLDivElement>(null)
   const committedRef = useRef<{
     text: string
@@ -493,7 +513,7 @@ export const Markdown = memo(function Markdown({
   return (
     <div className="markdown" ref={rootRef}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={remarkPlugins}
         rehypePlugins={effectiveMode
           ? [highlightPlugin, rehypeLineReveal(effectiveMode, liveTail)]
           : [highlightPlugin]}

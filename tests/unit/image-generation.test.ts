@@ -1,12 +1,19 @@
 import { dirname, relative, resolve, sep } from 'node:path'
+import { inflateSync } from 'node:zlib'
 import { afterEach, expect, expectTypeOf, it, vi } from 'vitest'
 import { resizeImage, type ExtensionToolContext, type withFileMutationQueue } from '@earendil-works/pi-coding-agent'
 import { createImageGenerationTool, type ImageGenerationFileHandle, type ImageGenerationFileSystem, type ImageGenerationParameters, type ImageGenerationToolOptions } from '../../src/main/agent/image-generation'
-import { MAX_IMAGE_PROMPT_LENGTH, type CodexImageGenerator } from '../../src/main/agent/codex-image-transport'
+import { createCodexImageGeneratorWithValidation, MAX_IMAGE_PROMPT_LENGTH, type CodexImageGenerator } from '../../src/main/agent/codex-image-transport'
 import { CODEX_IMAGE_MODEL_OPTIONS, CODEX_IMAGE_REQUEST_ALIAS, CODEX_IMAGE_QUALITIES, type CodexImageRequestModel, type CodexImageRequestQuality } from '../../src/shared/image-generation'
 import { ImageInputError, readImageReferences } from '../../src/main/agent/image-inputs'
 import { MAX_TOOL_IMAGE_BASE64_LENGTH, MAX_TOOL_IMAGE_BYTES } from '../../src/shared/tool-images'
 import { makeStaticPng } from '../fixtures/static-png'
+
+// Count actual bounded zlib validations; transport/network/preview remain mocked.
+vi.mock('node:zlib', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:zlib')>()
+  return { ...actual, inflateSync: vi.fn(actual.inflateSync) }
+})
 
 const png = makeStaticPng()
 const image = () => ({ bytes: new Uint8Array(png), width: 1, height: 1 })
@@ -325,6 +332,96 @@ it('saves complete source bytes at captured runtime cwd, with wx and a bounded p
   expect(result).not.toHaveProperty('usage')
   expect(JSON.stringify(result)).not.toContain('originalWidth')
   expect(updates.mock.calls.every(([update]) => update.content.length === 1 && update.content[0].type === 'text' && update.content[0].text.length < 80)).toBe(true)
+})
+
+it('reuses one complete built-in PNG validation before saving a private copy', async () => {
+  const h = setupTransport(new Response(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }), {
+    headers: { 'Content-Type': 'application/json' }
+  }))
+  await h.execute()
+  expect(inflateSync).toHaveBeenCalledTimes(1)
+  expect(h.disk.entries.get(resolve(cwd, parameters.path))?.bytes).toEqual(image().bytes)
+})
+
+it('retains complete reference validation and a private upload snapshot during OAuth while reusing only output validation', async () => {
+  const h = setupTransport(new Response(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }), {
+    headers: { 'Content-Type': 'application/json' }
+  }))
+  const source = Buffer.from(png)
+  h.readReferences.mockResolvedValue([{ bytes: source, width: 1, height: 1, mimeType: 'image/png' }])
+  const resolveAuth = h.getAuth.getMockImplementation()!
+  h.getAuth.mockImplementation(async (options) => { source.fill(0); return resolveAuth(options) })
+  await h.execute({ ...parameters, referenced_image_paths: ['images/source.png'] })
+  expect(inflateSync).toHaveBeenCalledTimes(2) // Reference and output each fully validate once.
+  expect(JSON.parse(String(h.fetch.mock.calls[0][1]?.body)).images).toEqual([
+    { image_url: `data:image/png;base64,${png.toString('base64')}` }
+  ])
+  expect(h.disk.entries.get(resolve(cwd, parameters.path))?.bytes).toEqual(image().bytes)
+})
+
+it('fully revalidates injected output even when it came from another built-in receipt channel', async () => {
+  const token = ['test-header', Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'test-account' } })).toString('base64url'), 'test-signature'].join('.')
+  const builtin = createCodexImageGeneratorWithValidation({
+    getAuth: vi.fn<ImageGenerationToolOptions['getAuth']>().mockResolvedValue({ source: 'OAuth', auth: { apiKey: token } }),
+    fetch: vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }), {
+      headers: { 'Content-Type': 'application/json' }
+    }))
+  })
+  try {
+    const generated = await builtin.generate({ prompt: 'synthetic image' }, new AbortController().signal)
+    const h = setup()
+    h.generate.mockResolvedValue(generated)
+    await h.execute()
+    expect(inflateSync).toHaveBeenCalledTimes(2)
+    expect(h.resize.mock.calls[0][0]).not.toBe(generated.bytes)
+    expect(h.disk.entries.get(resolve(cwd, parameters.path))?.bytes).toEqual(image().bytes)
+  } finally { builtin.dispose() }
+})
+
+it('fully validates a shared injected view using native byte slots and actual PNG dimensions', async () => {
+  const valid = makeStaticPng(2, 3)
+  const shared = new Uint8Array(new SharedArrayBuffer(valid.length + 4), 2, valid.length)
+  shared.set(valid)
+  const source = Buffer.from(shared.buffer, shared.byteOffset, shared.byteLength).slice(0)
+  const getter = vi.fn(() => { throw new Error('Untrusted byte or dimension getter') })
+  for (const key of ['buffer', 'byteOffset', 'byteLength', 'length']) Object.defineProperty(source, key, { get: getter })
+  const injected = Object.defineProperties({ bytes: source, width: 2, height: 3 }, { width: { get: getter }, height: { get: getter } })
+  const h = setup()
+  h.generate.mockResolvedValue(injected)
+  const result = await h.execute(parameters, undefined, (update) => {
+    if (update.content.some((part) => part.type === 'text' && part.text === '正在保存原图…')) shared.fill(0)
+  })
+  expect(inflateSync).toHaveBeenCalledTimes(1)
+  expect(result.details?.imageGeneration).toMatchObject({ width: 2, height: 3, byteLength: valid.length })
+  expect(h.disk.entries.get(resolve(cwd, parameters.path))?.bytes).toEqual(new Uint8Array(valid))
+  expect(getter).not.toHaveBeenCalled()
+  expect(h.getAuth).not.toHaveBeenCalled()
+})
+
+it('keeps an injected Buffer snapshot stable across progress callbacks and queued save awaits', async () => {
+  const source = Buffer.from(png)
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  const mutationQueue: typeof withFileMutationQueue = async (_path, task) => {
+    entered.resolve()
+    await release.promise
+    return task()
+  }
+  const h = setup({ mutationQueue })
+  h.generate.mockResolvedValue({ bytes: source, width: 9000, height: 9000 })
+  const running = h.execute(parameters, undefined, (update) => {
+    if (update.content.some((part) => part.type === 'text' && part.text === '正在保存原图…')) source.fill(0)
+  })
+  try {
+    await entered.promise
+    source.fill(0xff)
+    release.resolve()
+    const result = await running
+    expect(inflateSync).toHaveBeenCalledTimes(1)
+    expect(result.details?.imageGeneration).toMatchObject({ width: 1, height: 1 })
+    expect(h.disk.entries.get(resolve(cwd, parameters.path))?.bytes).toEqual(image().bytes)
+    expect(h.resize.mock.calls[0][0]).not.toBe(source)
+  } finally { release.resolve(); await running }
 })
 
 it.each(CODEX_IMAGE_MODEL_OPTIONS)('persists v2 requestedModel $id with a label and unknown actual version, without trusting provider model echoes or headers', async ({ id, label }) => {

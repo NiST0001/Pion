@@ -19,12 +19,42 @@ export interface QueuedMessageEditResult {
   images: ImageContent[]
 }
 
+/** Fixed display codes only; raw admission diagnostics stay in the main process. */
+export const QUEUE_ADMISSION_ERROR_MESSAGES = {
+  'admission-failed': '发送准备失败，消息保持未发送；可手动发送或取回编辑。'
+} as const
+export interface QueuedMessageAdmissionError {
+  runId: string
+  code: keyof typeof QUEUE_ADMISSION_ERROR_MESSAGES
+}
+
+/** Keep one whitelisted error per unambiguous local run, never match message text. */
+export function projectQueueAdmissionErrors(value: unknown, runIds: readonly (string | null)[]): QueuedMessageAdmissionError[] {
+  if (!Array.isArray(value)) return []
+  const ids = new Set<string>(), repeated = new Set<string>()
+  for (const id of runIds) {
+    if (typeof id !== 'string' || id.length === 0 || id.length > 256) continue
+    if (ids.has(id)) repeated.add(id)
+    ids.add(id)
+  }
+  const errors = new Map<string, QueuedMessageAdmissionError>()
+  for (let index = 0; index < Math.min(value.length, runIds.length); index++) {
+    const entry = value[index] as Partial<QueuedMessageAdmissionError> | null
+    if (entry && typeof entry.runId === 'string' && ids.has(entry.runId) && !repeated.has(entry.runId)
+      && entry.code === 'admission-failed') errors.set(entry.runId, { runId: entry.runId, code: entry.code })
+  }
+  return [...errors.values()]
+}
+
 export interface QueuedMessagesSnapshot {
   steering: string[]
   followUp: string[]
   nativeFollowUpCount: number
   /** Parallel to followUp; native or unsupported entries have null identity. */
   followUpRunIds?: (string | null)[]
+  admissionErrors?: QueuedMessageAdmissionError[]
+  /** Main-owned queue revision, independent of root SDK event revisions. */
+  queueScope?: { backendId: string; revision: number; cwd: string; sessionPath?: string }
 }
 
 export type { PionApi } from './pion-api'
@@ -189,7 +219,7 @@ export type WireEvent =
   | { type: 'tool_execution_start'; toolCallId: string; parentToolCallId?: string; toolName: string; args: unknown }
   | { type: 'tool_execution_update'; toolCallId: string; parentToolCallId?: string; toolName: string; partialResult: unknown }
   | { type: 'tool_execution_end'; toolCallId: string; parentToolCallId?: string; toolName: string; result: unknown; isError: boolean }
-  | { type: 'queue_update'; steering: string[]; followUp: string[]; nativeFollowUpCount?: number; followUpRunIds?: (string | null)[] }
+  | ({ type: 'queue_update' } & Omit<QueuedMessagesSnapshot, 'nativeFollowUpCount'> & { nativeFollowUpCount?: number })
   | { type: 'compaction_start'; reason: string }
   | { type: 'compaction_end'; reason: string; result: unknown; aborted: boolean; willRetry: boolean; errorMessage?: string }
   | { type: 'session_info_changed'; name?: string }

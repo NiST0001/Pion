@@ -1,9 +1,12 @@
+import { projectQueueAdmissionErrors, type QueuedMessageAdmissionError } from '../../shared/types'
+
 export interface QueueSnapshot {
   steering: string[]
   followUp: string[]
   /** Leading followUp entries owned by Pi's native queue (not Pion-editable). */
   nativeFollowUpCount?: number
   followUpRunIds?: (string | null)[]
+  admissionErrors?: QueuedMessageAdmissionError[]
 }
 
 /**
@@ -15,7 +18,8 @@ export function projectQueueSnapshot(
   raw: QueueSnapshot,
   directSteering: string[],
   localFollowUps: string[],
-  localFollowUpRunIds: (string | null)[] = []
+  localFollowUpRunIds: (string | null)[] = [],
+  localAdmissionErrors: QueuedMessageAdmissionError[] = []
 ): { queue: QueueSnapshot; directSteering: string[] } {
   const hiddenCounts = new Map<string, number>()
   for (const message of directSteering) {
@@ -47,6 +51,8 @@ export function projectQueueSnapshot(
       steering,
       followUp: [...raw.followUp, ...localFollowUps],
       nativeFollowUpCount: raw.followUp.length,
+      ...(localAdmissionErrors.length > 0 ? { admissionErrors: projectQueueAdmissionErrors(localAdmissionErrors,
+        localFollowUps.map((_, index) => localFollowUpRunIds[index] ?? null)) } : {}),
       followUpRunIds: [
         ...raw.followUp.map(() => null),
         ...localFollowUps.map((_, index) => localFollowUpRunIds[index] ?? null)

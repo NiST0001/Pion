@@ -19,7 +19,7 @@
 - pi 作为内置运行时，用户凭证仍归用户管理，不得打入安装包或提交。SDK 入口通过 native-extensions.ts 显式注入 CLI 同源 MCP/codemode/tool-search，runtime-host 显式注入 factory，capabilities 复用只读 catalogue 与所属既有 runtime 的已核验元数据，保持 builtin/replaceable 身份；未设置 Pion 能力偏好时不覆写默认工具激活，codemode/tool_search 沿 Pi 原生默认 inactive；显式能力开关可以请求激活，但仍取用户 defaultTools 执行边界与实际扩展入口的交集，MCP 的 codemode/deferred 曝光按原生规则处理；旧插件注册 /mcp 可替换原生 builtin，不能双启或假称原生已活动。能力扫描仅读目录和已核验元数据，不执行 factory、安装包、连接服务器或读取凭据；未做真实 MCP 验证时不得承诺可卸载所有插件，先复核配置兼容性与服务器。ExtensionToolContext 的 executeTool/tools 契约不等于新增工具，不扩大子代理范围。提供商 ID 与 API 类型分开处理，Azure 改名不自动迁移用户认证、模型、设置或会话偏好。OpenAI ChatGPT 登录的设备 UUID 沿 SDK global-only 设置并等待 flush/检查错误，不读取或迁移用户凭据；生图的 openai-codex OAuth 不自动换 provider。
 - 原生 MCP 沿用用户 ~/.pi/agent/mcp.json、项目 .pi/mcp.json 的 canonical mcpServers；项目配置仅在用户信任后生效并受用户全局服务器基线约束，不自动迁移凭据或删除旧插件。启用服务器会在 tool-call 之前后台 spawn stdio/继承完整环境、执行 !command 或触发 HTTP OAuth；工具闸门不是启动门控或 OS 沙箱。禁用曝光不停止连接，服务器 enabled:false 才停止。RPC /mcp 是文字状态/login/logout/reconnect，不宣称支持 GUI custom TUI。
 - MCP 列表仅读取已选后端的私有状态缓存，不新建后端/manager、发 prompt、连接/重连或触发认证、模型调用。SDK 状态适配只接受已核对版本的真正 builtin:mcp 空参数 RPC handler，保留原生启动与命令来源门及真实 command context；旧插件接管时不调用未知同名命令，不把注册/曝光当连接。状态投影有界且只保留服务器名、状态、曝光及连接后登记工具数，不透传原始诊断、地址、命令、配置路径或凭据；私有 widget 在正文/计费/UI 投影前消费，key 不是认证边界。查询超时只停止采集，实际 pending 跨 SDK 替换保持单槽至收口；缓存沿单调时间过期，界面有独立过期门，挂起读取、重复缓存或时钟回拨不能无限保留/复活已过期连接列表。保持 owner/主帧与 cwd/path/backend/选择 generation 隔离，关闭/隐藏时停止页面轮询与订阅，不改变服务器生命周期。
-- 原生 codemode 启用 models:true，可能调用付费模型；外层每次须 allowOnce 并声明费用，检查 read/write/shell/network/external，任一 deny 禁止 execute，不伪造逐模型审批，不作为 pion_generate_image 失败自动回退。每 script 最多 8 次模型调用、5 分钟 host deadline 并传递 parent abort；停止等待不证明请求已停止，失败/取消可能收费。原 SDK usage 只累计计费、不充父上下文、不双计。codemode/MCP/resource 图片结果 fail-closed，最多 4 张静态 PNG/JPEG、512/边、96 KiB/张，超限安全提示、不解码原图；清除 structuredContent 可能影响程序化结构化 MCP，任意文字/base64/script/store/参数未保证不记录，SDK 可保存 OS 临时原图而非项目、metadata 未保证清除。计划模式重新应用白名单并执行时阻止 codemode/tool-search/动态 MCP；显式工具集合持续约束，不以 defaultTools 代替执行边界，子代理仅 SDK 编码工具/noExtensions。嵌套事件保留 parentToolCallId 供过滤，不另建根 transcript 或重复统计。
+- 原生 codemode 启用 models:true，可能调用付费模型；外层每次须 allowOnce 并声明费用，检查 read/write/shell/network/external，任一 deny 禁止 execute，不伪造逐模型审批，不作为 pion_generate_image 失败自动回退。每 script 最多 8 次模型调用、5 分钟 host deadline 并传递 parent abort；停止等待不证明请求已停止，失败/取消可能收费。原 SDK usage 只累计计费、不充父上下文、不双计。取消或期限只阻止新调用并屏蔽进度，宿主等待原 SDK execute 收口，以一次 isError 结果保留其已返回 usage、丢弃迟到正文及 structuredContent；原 execute 挂起继续持槽。SDK sandbox 自身仍可能早于模型/认证返回，未回报用量保持未知，不补估算或伪造收费停止。codemode/MCP/resource 图片结果 fail-closed，最多 4 张静态 PNG/JPEG、512/边、96 KiB/张，超限安全提示、不解码原图；清除 structuredContent 可能影响程序化结构化 MCP，任意文字/base64/script/store/参数未保证不记录，SDK 可保存 OS 临时原图而非项目、metadata 未保证清除。计划模式重新应用白名单并执行时阻止 codemode/tool-search/动态 MCP；显式工具集合持续约束，不以 defaultTools 代替执行边界，子代理仅 SDK 编码工具/noExtensions。嵌套事件保留 parentToolCallId 供过滤，不另建根 transcript 或重复统计。
 - 原生脚本上下文及模型 registry 使用独立 descriptor façade，保留 SDK 惰性 getter、原接收者与每次读取的运行时活性检查；冻结源对象的只读函数属性仍可安全访问。包装不向脚本暴露原 registry，也不放宽调用预算、取消及输出投影。
 
 ### 工具与能力开关
@@ -56,7 +56,7 @@
 - 内置提问等待独立保存到 userData/pion-questions.json，默认10分钟，可选1–300分钟或不自动超时，只影响下一题；同题选择和自定义输入共享原单调deadline。私有 widget 在正文/计费/UI前消费，核对 captured backend/client/nonce 与真实 pion_ask_user 工具receipt，nonce/标题不是认证边界或OS沙箱；不改变120秒工具确认或普通扩展/认证交互政策，无自动期限仍支持手动取消/中止。
 - 原生自定义回答仅支持 `question:true`、`method:'select'`、非 global 且含自定义选项的原请求；宿主仅接受单字段 `{customAnswer:string}`，字符串须 trim 后非空且原长 ≤256000，普通扩展、认证或非法混合响应拒绝。沿原提问真实 receipt 投影，私有 prefix/marker 不是认证；转为 SDK 原 `value`，不透传新字段。运行时解码自定义答案，普通选择仍拒未知选项，兼容旧 select→input，并保留8000字符截断及提示。
 - 内置提问可用于普通/计划模式；取消、超时、无 UI 或中止均不得视作默认答案或授权。问答不替代工具权限检查，不触发写入检查点；答案会进入模型上下文和会话历史，不用此工具索取密码或密钥。
-- 排队发送、移除及取回编辑均以真实 `runId + cwd/sessionFile` 经所属活主窗口核验，只操作尚未派发的本地项。index 和正文仅供显示；过期请求保留其他消息，缺身份及 SDK 原生项保留显示并停用相关控制。纯移除与编辑沿现有后端完成，不启动新后端；自动准入失败保留未发送记录及错误，不重发已调用项。
+- 排队发送、移除及取回编辑均以真实 `runId + cwd/sessionFile` 经所属活主窗口核验，只操作尚未派发的本地项。index 和正文仅供显示；过期请求保留其他消息，缺身份及 SDK 原生项保留显示并停用相关控制。纯移除与编辑沿现有后端完成，不启动新后端；自动准入失败保留未发送记录及错误，不重发已调用项。卡内仅投影固定 `admission-failed` 代码的中文提示，按真实 runId/cwd/session/backend/client 收据关联；原始诊断留在主进程记录。独立 queueScope 修订统一推送、STATE 与缓存，拒旧身份/旧修订，缺字段清旧错误；实际派发、编辑取回或移除退休所属提示。
 
 ### 生图与参考文件事务
 
@@ -66,6 +66,8 @@
 - 参考图原文件连同文件内 metadata 上传，不承诺去除 EXIF/ICC/文本等信息。`src/main/agent/image-inputs.ts` 只读打开使用 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`，严格 flags 不支持即失败，不降级或重试；绑定捕获的真实项目/worktree root，复查 cwd 映射、root/父目录的 BigInt dev/ino 身份以及路径/FD 的 dev/ino、size、mtimeNs/ctimeNs 快照。分块读完并探测 EOF，拒绝成长、截断或快照变化；输入每张非空且最多 8 MiB、总计最多 16 MiB、每边最多 4096、累计最多 1600 万像素，在 PNG inflate 前检查剩余累计预算。PNG 做完整有界 CRC/zlib/scanline/元数据完整性检查，JPEG 只做有界结构及完整 EOI 检查，不是 full decoder 或完整色彩/ICC 语义验证。读取真实操作在同进程跨工具实例保持单槽，不排队；取消/超时仅停止等待，late open/read/close 仍持槽至实际 Promise 收口，迟到 FD 必须关闭，永久挂起持续阻止新读取。close reject 不能确认关闭，锁存进程级参考图读取隔离，不重试 close 或新读取，只有重建 backend 进程才恢复；空引用不占槽或读取文件。路径检查不是 openat/OS 沙箱，不能排除全部并发目录替换或证明硬链接来源。
 - 生图保存先用同目录私有随机 `wx` 暂存文件，再以原子 hard-link no-replace 发布，不删除最终目标、不降级为覆盖式 rename/copy。不支持安全发布或发生目标冲突时保留已完整写入的临时 PNG 并报告恢复路径，禁止自动重新生成或静默改路径。真实目录/身份和已知符号链接检查不是 OS 沙箱，不能宣称杜绝所有并发目录替换。
 - 生图请求 JSON 和响应均最多 24 MiB、输出原图最多 16 MiB、每边最多 4096 像素且最多 1600 万像素，取消作用域/请求期限最多 5 分钟；已开始的文件事务仍需等待收尾。提交前做有界 PNG CRC、IDAT zlib、scanline/调色板及元数据完整性检查，不等同于全部色彩/ICC 语义或真实解码验证。发布后的私有暂存清理失败须报告残留相对路径而保留成功；缩略图失败或提交后的中止不回滚已保存成功，实际未结束的缩略图解码在同进程内保持单槽背压，不把停止等待宣称为取消解码；需要 Codex 登录、账号权益和图片额度，失败/中止可能消耗额度，不把图片用量伪装成 chat token 计费。真实协议兼容和账号额度未经验证时不得宣称可用或免费。
+- 默认内建生图以单次执行私有回执复用已完成的 PNG 完整验证：绑定独立字节快照、实际尺寸及全部固定预算，逐字节相等才一次消费；参数仅接纳自有数据属性，访问器及异常消费保守拒绝。注入生成器、变异或跨 scope 输出仍完整校验；保存使用独立快照，异常/dispose 退休回执。参考图、跨进程图片、ComputerUse 校验、路径及解码背压继续独立，调用计数回归仅证明重复 inflate 减少。
+
 ### 子代理与临时只读会话
 
 - 内置子代理默认开启，但须与全局能力开关取交集；由输入框按后端会话关闭/重新开启，能力设置的同会话 runtime 替换保留原会话偏好，普通重建后端恢复受全局约束的默认开启；重新开启须在构建模式空闲时，关闭中止当前子任务。用户未明确指定子模型时，主 AI 必须省略逐任务 model，使用设置默认模型，未设置才继承父模型；仅用户明确指定时传 `model:{provider,id}` 覆盖，`model:null` 仅用于明确要求继承父模型，不自主选模型绕过默认。旧配置缺字段兼容为空。设置模型目录独立沿所属 ProviderAuthService 的 SDK 本地 availability snapshot 读取，不依赖父会话候选或 Pion 显示过滤，typed IPC 保留主帧/owner 和迟到窗口校验，不登录或切换父模型。数量 1–100、超时 1–300 分钟、轮次 1–1000，默认仍 3/10/24，显示容量仍有界且不足拒绝启动。模型使用精确 SDK 提供商/模型 ID，不以 API 类型或显示名猜测，不静默回退、不新增登录/迁移或直接读写凭据，不把 Pion 提供商隐藏偏好当 SDK 禁用；从所属现有 runtime catalog/availability snapshot 同步检查，未知/当前不可用仅该子任务失败且不调用其模型。主 AI 接收有界可用 ID 提示并尊重用户逐任务指定；可用快照不保证远程请求成功，价格不同仍属额外用量而非扩权。子会话继承父级项目和实时工具权限/检查点门控，仅使用父级可见的内置编码工具，不加载插件或递归委派；并发、轮数、时间与结果大小必须有界。全局子代理参数保存后仅对下一批生效；每批读取并深拷贝/冻结校验后的配置与模型身份，逐任务模型在等待前捕获，不中断已有批次；普通后端重建恢复受全局能力约束的默认开启，能力设置替换保留会话偏好，均不恢复正在运行的批次。按钮与相邻控件保持胶囊形，须明确区分悬浮和开启状态，保留文字/图标标识。开启状态下提示主 AI 对可安全拆分的复杂任务主动委派；多个独立任务就绪时，应按当前上限合并到同一次 tasks 批次并发执行，不把独立工作拆成连续的单任务调用；阶段间重新评估，依赖任务留待前置完成，不为凑数量制造任务，上限为 1 时仍合法。简单或强依赖任务不强制；开关本身不派发任务、不代替工具授权，工具被当前模式隐藏或设置不可读时不得提示可委派或重新激活工具。子工具 ID 隔离，取消信号传入权限交互，未获批准不得执行；子模型回复计入累计用量，不污染父级上下文占用。写工具的实时权限及检查点准入与实际执行共用串行槽，出队后复查取消、父级工具可见性及最新 deny；批准与执行共享 SDK validated args，原前后钩子保持单次语义。只读工具保持并行；主 AI 继续分配不重叠的文件范围。
@@ -79,7 +81,7 @@
 ### 应用配置与项目列表
 
 - AppSettings 与 ProjectStore 的配置仅缺失时初始化；读取或校验失败保源并向调用方报告。串行变更使用同目录独占暂存，完整写入、sync、真实 close 后原子替换，发布成功才提交内存，失败保原值；保未知设置字段与历史项目记录。项目列表文件访问采用异步接口，退出关闭准入并等待已接纳读写。此轻量原语独立于长期账本的锁、目录 sync 与来源收据协议。
-- 工作流与验证存储先完整读取校验再接纳，坏文件或读取失败拒绝后续覆盖；工作流保存失败锁存写隔离。取消信号贯穿准备、持久化、验证发现和命令/修复派发，每个副作用前后复查。worker 容量及 cwd 占用持有至原准备/RPC Promise、SDK stop、真实进程 exit 与 stdio close；未知状态保留隔离。
+- 工作流与验证存储先完整读取校验再接纳，坏文件或读取失败拒绝后续覆盖；工作流保存失败锁存写隔离。取消信号贯穿准备、持久化、验证发现和命令/修复派发，每个副作用前后复查。worker 容量及 cwd 占用持有至原准备/RPC Promise、SDK stop、真实进程 exit 与 stdio close；未知状态保留隔离。历史撤销复用相同退出核心，已启动 writer 的 null/missing handle 拒绝提供退出凭据；历史 idle/owner/queue 独占门仍在调用方。历史停止与重叠的应用 shutdown 共享同 client 的单次停止 Promise，失败或迟到 close 继续沿原隔离。
 
 ### 原生窗口与终端
 
@@ -209,6 +211,9 @@
 - 复制、分叉的显式选择意图与自身 STATE/历史接管分离；旧 API、卸载或新导航使旧回调永久退休，A→B→A 保持隔离。分叉预填另核 App 请求代际及空草稿，迟到结果保留当前输入。旧历史响应仍拒绝正文发布，所属读取实际收口后按 API/scope/loadId 释放其 loading；新读取和新 clear scope 保持独立。
 - 分栏 pointermove 按 RAF 合帧，相同有效比例保留布局引用；用户调整合并保存，拖动结束、取消、pagehide 与卸载 flush 最后捕获位置。初读失败的默认值仍保源。相同工具 partial 保状态引用，成功 edit/write 改动统计按真实工具对象及字段修订弱缓存；终态及空 final 继续权威。
 
+- 基础会话发现使用 `SessionDiscovery` 只读流式解析 SDK 已保存元数据，跳过全量 allMessagesText；保实际 header、规范 cwd、全部 message 条目计数、用户预览、名称清除及活动时间。仅确认缺失的目录视为已知空，文件/目录失读、坏行、变化或未知 close 拒绝整份新发布并保旧列表；未变文件也实际 no-follow open，复查 FD/路径/目录 stamp 及可读性。元数据桶缓存有界，pending/未知 close 保槽，满额拒新准入；完整账本无采集限额的约束保持独立。
+- `SessionTokenCache` 按精确 path/header ID/cwd/FS 实例复用成功只读回执，expected 身份采用冻结数据快照。命中仍实际 no-follow open，前后核 dev/ino/size/mtimeNs/ctimeNs 与路径，只省正文解析；同身份 singleflight 持槽至实际 close，取消仅退休调用者结果，失读清旧回执，close 未知隔离路径且保容量。缓存属于 Bridge，列表失效不重建；账本完整读取与 lineage 继续独立。
+
 ### 会话文件夹与归档
 
 - 分支标题的新建会话按钮旁提供新建文件夹入口，树内省去虚拟根目录装饰行，保留真实根级会话与文件夹归属。文件夹按精确 worktree cwd 管理，支持嵌套、新建、改名、移动和持久折叠；父级必须存在且同 cwd，完整图拒绝循环、重复 ID 与无效归属。删除文件夹仅将直属子文件夹/会话提升到父级，保留全部历史与归档状态。会话移动只更新分组，名称和路径保持真实来源；手动排序只更新所属同级项的显示次序，保其他组与隐藏数据。搜索/状态筛选临时展开目录，保原折叠配置。
@@ -284,12 +289,14 @@
 - 用户首次显式展开原本折叠的工具组时，尚未挂载的标题统一采用历史行 280ms/20ms 入场，包括分页 noReveal 和实时来源，避免同组一半渐显、一半直接亮出；这是标题首开资格，不清除原 noReveal，不改变详情/子代理或只读发送规则。标题与组标题均冻结首次模式，后续来源回填不移除/重加动画 class。已展开组被动补入的历史标题静态插入，不在已显示尾部前重开一段；实时新增仍按原 live 资格。已经真正收到所属行 animationend 才退役行动画，避免已完成淡入因 display:none 重开而重播，未完成动画不提前标静态。
 - 可见字符块跨实例按所属 root/真实 DOM 排序，IO 仅唤醒、不采用回调数组顺序；字符间隔/上限作用于整批，不为每块另开零延迟。父行或前方兄弟标题未 ready 时等待，ready 但未来才开始仍守其绝对 start；反向屏障要求前方可见文字真正提交准入后才放行后行，后行不得早于该块 start，慢帧也不能让中段先亮。屏外或嵌套裁切掉的块不阻塞；隐藏与门关闭不新增字符，未准入文本用透明普通文字保真实几何，不写 scrollTop。字符 tail 按 root/scope 隔离，普通披露暂停仍保未来尾部；退出清理 RAF/observer/listener，迟到回调核原订阅身份。
 - 工具/用户/审查分块按已提交正文复用完整旧块，仅重切旧尾块和追加内容，保 Unicode surrogate 边界；补全字符只归新范围，不与旧高代理范围重叠。替换/缩短仍立即使用真实新正文。history/live 复用按实际准入的后缀范围，每范围冻结自己的排队延迟/剩余上限/时长/清理宽限，未准入不能算完成，不再用整块固定 468ms 提前回收；旧前缀/原 DOM 与期限保留，短后缀先结束不截断旧 fade。历史压缩摘要也复用同一行/分块排序，并遵守 noReveal。
-- Markdown 在实例内复用高亮 transformer，按有界活跃字符建立批次索引；每次转换重置本次投影草稿，StrictMode/中断渲染不累计草稿或消费已提交窗口。字符回收不移除仍在淡入的行/链接宿主，收口新增静态行的资格跨后续清理保留。受管行未 ready 的 Markdown 字符批次只保 pending/暂停，不消费淡入或回收期限；收到所属实际 line start 后才冻结批次等待及期限，正常收口也保留未启动批次，旧批次不重排。当前仍会完整解析/高亮正文，并保留当前尾行的静态字符 span 以免挪动活跃节点 key；不据静态修改或 JSDOM 回归宣称实际帧率、浏览器动画/完整性能验收；定向回归不替代类型检查、构建与 GUI。
+- Markdown 在实例内复用高亮 transformer，按有界活跃字符建立批次索引；每次转换重置本次投影草稿，StrictMode/中断渲染不累计草稿或消费已提交窗口。字符回收不移除仍在淡入的行/链接宿主，收口新增静态行的资格跨后续清理保留。受管行未 ready 的 Markdown 字符批次只保 pending/暂停，不消费淡入或回收期限；收到所属实际 line start 后才冻结批次等待及期限，正常收口也保留未启动批次，旧批次不重排。同正文及同解析/GFM/高亮管线身份下，每挂载实例仅保最新解析树与高亮树；读取返回独立克隆，渐显、URL/HTML 安全后处理及 JSX 转换仍逐次执行。正文或管线变化失效，卸载释放；当前尾行静态字符 span 继续保活跃节点 key；不据静态修改或 JSDOM 回归宣称实际帧率、浏览器动画/完整性能验收；定向回归不替代类型检查、构建与 GUI。
 
 ### 生图预览
 
 - 生图输出原图保留在项目中，工具结果/历史预览仅返回保存路径、非敏感输出元数据和有界静态 PNG/JPEG 预览，不加入输入原图、输入 metadata、引用路径数组或输出原图；SDK 工具参数历史仍保留用户 prompt 和引用路径，不得宣称从未记录。新结果 v2 元数据必须包含 operation、requestedSize、requestedQuality、referenceCount；实际保存 width/height 来自输出 PNG 校验，renderer 的 savedWidth/savedHeight 不从请求尺寸或服务回显推断，也不宣称测得实际质量。回放只读投影，旧 v1/v2 缺失设置保持未知，不补填 auto、generate 或 0 张引用、不重写历史。通用预览最多 4 张，每张最多 512 像素/边、96 KiB 原始字节（128 KiB base64）。预览 PNG 拒绝压缩文本/ICC 元数据，不靠编码大小宣称已限制其解压量。实时增量仅处理文字，最终结果与历史回放共用预览投影，最终消息优先；结果无拒绝提示时，型号/请求设置/保存尺寸/文字/状态的终态变化不重新解码相同有效预览，带拒绝提示的混合结果仍保守重新投影；详情收起后释放图片，加载/失败事件只更新固定预览框状态，不滚动消息区或恢复跟随。
 ### 改动与运行统计
+
+- 工具组旧身份匹配按真实调用 ID 建索引，保持原先“最早未使用旧组”规则及重复 ID/key 的保守语义；merge/split/prepend 保 key、DOM 和开闭状态。派生索引及 summary 仅在所属 timeline/scope 变化时重算，真实终态字段继续更新；该优化保持历史窗口及滚动/渐显协议。
 
 - 连续相邻工具调用默认汇总折叠为一行，消息（包括空助手项）和压缩标记是边界；读取/编辑按原始参数路径去重，搜索/其他工具/终端按真实调用ID计数，重复投影不重复计数，未知路径单列未知调用，不解析shell命令猜搜索。仅统计当前显示组的调用尝试，不宣称文件修改成功或Git净变化；执行中/失败在折叠行仍可见。整行原生按钮支持键盘、焦点、主题/减少动效/强制色；窄窗只省略统计文案，完整统计保tooltip。首次展开才挂载现有工具卡，之后收起保已挂载工具DOM、正文状态与子摘要；用户展开/收起使用原生grid高度、间距和透明度过渡，不缩放文字，收起立即inert并在过渡结束后hidden，负间距抵消时间线gap避免隐藏时二次跳变；快速重开/卸载清理旧收起计时器，减少动态效果立即收起，无写入/导航/执行副作用；文字阶段门新增的DOM层不改变工具卡边距清零范围，tool-activity-inner直接或经disclosure-reveal-gate包裹的卡片均清零原全局负margin，保持主会话相邻工具8px/只读子会话4px间距，收起抵消timeline gap逻辑不变；平铺工具稳定key不因新调用/旧页prepend改变组首而重挂，组首沿真实工具身份保汇总状态，同正文更新/历史回填不重播标题渐入。状态仅限当前窗口且按真实父/子会话作用域隔离；展开只查看，不执行、重连或改变授权/队列/计费。
 
@@ -300,7 +307,7 @@
 ## 安装与发布
 
 - scripts/install-local.sh 默认递增 patch 版本并构建，默认安装到 ~/.local/share/pion/app/；设置 XDG_DATA_HOME 时沿其 pion/app，启动器仍为 ~/.local/bin/pion。生成启动器绑定实际绝对安装路径，shell 与 desktop 入口各自转义并保参数转发。质量流程复用同一次构建产物运行 Electron E2E，保留独立 types、unit 和 coverage 检查。
-- 推送 v* 标签会触发 .github/workflows/release.yml，构建 Windows NSIS、Linux AppImage/deb 并发布。
+- 推送 v* 标签会触发 .github/workflows/release.yml，先通过同 SHA 的可复用 quality，再核质量输出、checkout、触发修订与 tag/package/latest release notes 一致，成功后构建 Windows NSIS、Linux AppImage/deb 并发布。Linux quality 保原 types/unit/coverage/build/E2E；Windows 发布另做 types/unit，未宣称 Windows E2E。质量失败/取消无成功 SHA；contents 写权限限发布 job，GH_TOKEN 仅交打包发布步骤，checkout 不持久化凭据。源码合同回归保留实际 GitHub/打包/平台验收的独立状态。
 - 每次发布后，总结本版本实际交付的新增、修复及重要行为变化，核对并填写 src/shared/release-notes.ts 的更新日志（供设置 → 关于 Pion 展示），按版本倒序排列，不写未经验证的性能或测试结论，不将仅本机安装的版本当作正式发布。
 - 更新日志随安装包内置，因此打标签、打包前先准备本版本日志；发布完成后再核对最终发布内容并补充遗漏，同时同步 GitHub Release 说明。若打包后修改日志，不宣称已经生成的安装包包含该修改。
 - 构建通过不等同于类型检查、测试或真机验证通过。

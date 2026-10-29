@@ -1,3 +1,11 @@
+.queue-item-message { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.queue-item-admission-error {
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .queue-edit-notice {
   display: flex;
   flex-wrap: wrap;
@@ -18,6 +26,7 @@
 .queue-edit-notice button:hover { background: var(--bg-hover); }
 .queue-edit-notice button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (forced-colors: active) {
+  .queue-item-admission-error { color: CanvasText; }
   .queue-edit-notice { color: CanvasText; }
   .queue-edit-notice button { color: ButtonText; border-color: ButtonText; background: ButtonFace; }
   .queue-edit-notice button:focus-visible { outline-color: Highlight; }

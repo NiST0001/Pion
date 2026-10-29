@@ -128,6 +128,19 @@ describe('backend initialization child ownership', () => {
     expect(sdk.stop).toHaveBeenCalledTimes(1)
   })
 
+  it('requires the pinned start implementation before trusting a rejected start with no child', async () => {
+    const h = harness()
+    h.bridge.attachBackendEvents.mockImplementationOnce((backend: BackendRecord) => {
+      backend.client.start = vi.fn(async () => { throw new Error('custom start failed') })
+    })
+    await expect(h.bridge.createBackend('writer', h.cwd, h.path)).rejects.toThrow('custom start failed')
+    expect(h.pool.get('writer')).toMatchObject({ historyStopFailed: true, startupProcess: null })
+    expect(h.bridge.startupQuarantinedCwds.has(h.cwd)).toBe(true)
+    expect(h.bridge.quarantinedSessionPaths.has(h.path)).toBe(true)
+    expect(sdk.start).not.toHaveBeenCalled()
+    expect(sdk.stop).not.toHaveBeenCalled()
+  })
+
   it('keeps an incompatible or lost child handle isolated rather than treating null as a negative receipt', async () => {
     const h = harness()
     sdk.start.mockImplementation(async (client: { process: unknown }) => {

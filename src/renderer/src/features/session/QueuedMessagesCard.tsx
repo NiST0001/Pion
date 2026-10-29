@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import { Clock3, MessageSquare, Pencil, Send, Trash2, Zap } from 'lucide-react'
 import { loadPanelExpanded, savePanelExpanded } from '../../utils/sessionPanelPreferences'
+import { QUEUE_ADMISSION_ERROR_MESSAGES, projectQueueAdmissionErrors, type QueuedMessageAdmissionError } from '../../../../shared/types'
 
 type QueueKind = 'steering' | 'followUp'
 
@@ -25,6 +26,7 @@ export function QueuedMessagesCard({
   nativeFollowUpCount = 0,
   controlsDisabled = false,
   followUpRunIds = [],
+  admissionErrors = [],
   agentBusy = false,
   onSendItem,
   onEditItem,
@@ -37,6 +39,7 @@ export function QueuedMessagesCard({
   nativeFollowUpCount?: number
   controlsDisabled?: boolean
   followUpRunIds?: (string | null)[]
+  admissionErrors?: QueuedMessageAdmissionError[]
   agentBusy?: boolean
   onSendItem?: (kind: QueueKind, index: number, runId: string) => void | Promise<void>
   onEditItem?: (item: QueueItem) => void | Promise<void>
@@ -47,9 +50,11 @@ export function QueuedMessagesCard({
     ...followUp.map((text, index) => ({ kind: 'followUp' as const, text, index,
       runId: index >= nativeFollowUpCount ? followUpRunIds[index] ?? null : null }))
   ]
+  const errors = new Map(projectQueueAdmissionErrors(admissionErrors, items.map(item => item.runId))
+    .map(error => [error.runId, QUEUE_ADMISSION_ERROR_MESSAGES[error.code]]))
   const [expanded, setExpanded] = useState(() => loadPanelExpanded('queue', sessionKey))
   const [sendingKey, setSendingKey] = useState<string | null>(null)
-  const expandedHeight = Math.min(360, Math.max(102, 52 + items.length * 34))
+  const expandedHeight = Math.min(360, Math.max(102, 52 + items.length * 34 + errors.size * 32))
   const panelStyle = {
     '--task-panel-expanded-height': `${expandedHeight}px`
   } as CSSProperties
@@ -117,6 +122,7 @@ export function QueuedMessagesCard({
               // Pion-local follow-ups support queue mutations.
               const local = !isSteering && item.index >= nativeFollowUpCount
               const actionable = local && Boolean(item.runId?.trim())
+              const error = actionable && item.runId ? errors.get(item.runId) : undefined
               return (
                 <div
                   key={item.runId ?? `${item.kind}-${item.index}-${item.text}`}
@@ -132,7 +138,10 @@ export function QueuedMessagesCard({
                   <span className="task-index">{String(index + 1).padStart(2, '0')}</span>
                   <span className="queue-item-copy">
                     <span className="queue-item-kind">{isSteering ? '插入' : '稍后'}</span>
-                    <span className="queue-item-text">{text}</span>
+                    <span className="queue-item-message">
+                      <span className="queue-item-text">{text}</span>
+                      {error && <span className="queue-item-admission-error" role="status">{error}</span>}
+                    </span>
                   </span>
                   {onEditItem && (
                     <button

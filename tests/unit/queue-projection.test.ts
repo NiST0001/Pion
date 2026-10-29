@@ -43,6 +43,16 @@ describe('queue projection', () => {
       .toEqual({ steering: [], followUp: ['known', 'unknown'], nativeFollowUpCount: 0, followUpRunIds: ['real-run', null] })
   })
 
+  it('projects errors by real local run identity and ignores raw native diagnostics', () => {
+    const raw = { steering: [], followUp: ['same'], admissionErrors: [{ runId: 'native', code: 'admission-failed' as const }] }
+    const queue = projectQueueSnapshot(raw, [], ['same', 'same'], ['first', 'second'], [
+      { runId: 'second', code: 'admission-failed' }, { runId: 'native', code: 'admission-failed' }
+    ]).queue
+    expect(queue.followUpRunIds).toEqual([null, 'first', 'second'])
+    expect(queue.admissionErrors).toEqual([{ runId: 'second', code: 'admission-failed' }])
+    expect(projectQueueSnapshot(raw, [], ['same'], ['first']).queue.admissionErrors).toBeUndefined()
+  })
+
   it('drops stale hidden steering after Pi consumes it', () => {
     const result = projectQueueSnapshot(
       { steering: ['still-visible'], followUp: [] },

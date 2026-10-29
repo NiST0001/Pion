@@ -9,6 +9,7 @@ import {
 } from '../../shared/image-generation'
 import { decodeImageBase64, inspectRasterImage } from '../../shared/tool-images'
 import { assertGeneratedPngData } from './png-validation'
+import { createGeneratedPngValidationReceipt, snapshotGeneratedPngBytes } from './generated-png-validation-receipt'
 
 /** Codex's independent Images API, not Responses tools or API-key Images.
  * Protocol: github.com/openai/codex/blob/31519549/codex-rs/codex-api/src/images.rs
@@ -210,6 +211,10 @@ function providerFailure(status: number, body: string, secrets: string[], reques
 }
 
 export function inspectGeneratedPng(bytes: Uint8Array): { width: number; height: number } {
+  return checkGeneratedPng(bytes, assertGeneratedPngData)
+}
+
+function checkGeneratedPng(bytes: Uint8Array, validate: typeof assertGeneratedPngData): { width: number; height: number } {
   if (!bytes.byteLength || bytes.byteLength > MAX_GENERATED_IMAGE_BYTES) throw new CodexImageError('protocol', '生成的原图超过 16 MiB 安全限制。')
   // Before any raster decoder (including thumbnail resize) sees the bytes.
   const dimensions = inspectRasterImage(bytes, 'image/png', {
@@ -218,7 +223,7 @@ export function inspectGeneratedPng(bytes: Uint8Array): { width: number; height:
     allowCompressedPngMetadata: true
   })
   if (!dimensions) throw new CodexImageError('protocol', '图片服务未返回有效静态 PNG，或原图尺寸超过 4096 像素/边、1600 万像素限制。')
-  try { assertGeneratedPngData(bytes, dimensions) }
+  try { validate(bytes, dimensions) }
   catch { throw new CodexImageError('protocol', '图片服务返回的 PNG 数据不完整、损坏或超过解码安全限制。') }
   return dimensions
 }
@@ -425,6 +430,35 @@ function prepareImageRequest(request: CodexImageRequest): {
 
 /** Created per backend, but auth is resolved only inside an approved execute. */
 export function createCodexImageGenerator(options: CodexImageTransportOptions): CodexImageGenerator {
+  return createImageGenerator(options, assertGeneratedPngData)
+}
+
+/** Execution-private channel for the built-in tool only. Injected generators
+ * never receive it. Every boundary still inspects framing, limits and exact
+ * bytes; an absent/mismatched receipt runs the full validator on a private copy. */
+export function createCodexImageGeneratorWithValidation(options: CodexImageTransportOptions) {
+  const receipt = createGeneratedPngValidationReceipt()
+  const generate = createImageGenerator(options, receipt.validate)
+  return {
+    async generate(request: CodexImageRequest, signal: AbortSignal): Promise<GeneratedCodexImage> {
+      try { return await generate(request, signal) }
+      catch (error) { receipt.dispose(); throw error }
+    },
+    validate(image: GeneratedCodexImage): GeneratedCodexImage {
+      try {
+        const source = image.bytes
+        const bytes = snapshotGeneratedPngBytes(source)
+        const dimensions = checkGeneratedPng(bytes, (snapshot, dimensions) => {
+          if (!receipt.consume(source, snapshot, dimensions)) assertGeneratedPngData(snapshot, dimensions)
+        })
+        return { bytes, ...dimensions }
+      } finally { receipt.dispose() }
+    },
+    dispose: receipt.dispose
+  }
+}
+
+function createImageGenerator(options: CodexImageTransportOptions, validate: typeof assertGeneratedPngData): CodexImageGenerator {
   const fetchImage = options.fetch ?? globalThis.fetch
   const timeoutMs = checkedImageTimeout(options.timeoutMs)
   return async (request, parentSignal) => {
@@ -490,7 +524,7 @@ export function createCodexImageGenerator(options: CodexImageTransportOptions): 
       const encoded: unknown = (data[0] as Record<string, unknown>).b64_json
       const bytes = decodeImageBase64(encoded, MAX_GENERATED_IMAGE_BYTES)
       if (!bytes) throw new CodexImageError('protocol', '图片服务返回了无效 base64，或原图超过 16 MiB 安全限制。')
-      const dimensions = inspectGeneratedPng(bytes)
+      const dimensions = checkGeneratedPng(bytes, validate)
       checkImageAbort(signal)
       // Undocumented model echoes/headers are not actual-version evidence.
       // Image usage is not chat-token usage; do not estimate or forward it.

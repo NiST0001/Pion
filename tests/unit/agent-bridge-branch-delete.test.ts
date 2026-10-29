@@ -14,12 +14,42 @@ function deferred() {
   const promise = new Promise<void>((done) => { resolve = done })
   return { promise, resolve }
 }
+// Pinned SDK 1.4.0 spawns exactly three pipes; child close follows exit and every pipe close.
+class HistoryProcess extends EventEmitter {
+  exitCode: number | null = null
+  signalCode: NodeJS.Signals | null = null
+  stdio = Array.from({ length: 3 }, () => Object.assign(new EventEmitter(), { closed: false }))
+  stdin = this.stdio[0]
+  stdout = this.stdio[1]
+  stderr = this.stdio[2]
+
+  exit(): void {
+    this.exitCode = 0
+    this.emit('exit', 0, null)
+    this.emitClose()
+  }
+
+  closePipe(index: number): void {
+    const stream = this.stdio[index]
+    if (stream.closed) return
+    stream.closed = true
+    stream.emit('close')
+    this.emitClose()
+  }
+
+  close(): void { this.stdio.forEach((_stream, index) => this.closePipe(index)) }
+
+  private emitClose(): void {
+    if (this.exitCode !== null && this.stdio.every((stream) => stream.closed)) this.emit('close', this.exitCode, this.signalCode)
+  }
+}
+
 function fixture() {
-  const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null })
+  const child = new HistoryProcess()
   const client = {
     process: child as typeof child | null,
     getState: vi.fn(async () => ({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 })),
-    stop: vi.fn(async () => { child.exitCode = 0; child.emit('exit', 0, null); client.process = null })
+    stop: vi.fn(async () => { child.exit(); client.process = null; child.close() })
   }
   const backend = { key: 'target', cwd: request.cwd, sessionPath: '/history/target.jsonl',
     phase: 'running', busy: false, compacting: false, pendingRunIds: [], localFollowUps: [],
@@ -72,6 +102,7 @@ describe('AgentBridge branch deletion lifecycle', () => {
     const h = fixture()
     h.git.mockImplementation(async () => {
       expect(h.child.exitCode).toBe(0)
+      expect(h.child.stdio.every((stream) => stream.closed)).toBe(true)
       expect(h.fields.backendPool.get(h.backend.key)).toBeUndefined()
       expect(h.fields.backendKeysBySessionPath.size).toBe(0)
       return result
@@ -144,18 +175,81 @@ describe('AgentBridge branch deletion lifecycle', () => {
     expect(h.backend.historyMutation).toBe(false)
   })
 
-  it('does not equate SDK stop resolution with actual process exit', async () => {
+  it.each(['SDK stop', 'process exit', 'stdin close', 'stdout close', 'stderr close'] as const)(
+    'keeps backend records and the deletion gate until %s settles last', async (last) => {
+      const h = fixture()
+      const started = deferred()
+      const stopped = deferred()
+      h.client.stop.mockImplementation(async () => {
+        started.resolve()
+        await stopped.promise
+        h.client.process = null // SDK escalation may discard the handle before real exit.
+      })
+      const deletion = h.bridge.deleteBranch(request, 7, h.idle)
+      await started.promise
+      const lastPipe = ['stdin close', 'stdout close', 'stderr close'].indexOf(last)
+      try {
+        if (last !== 'SDK stop') stopped.resolve()
+        if (last !== 'process exit') h.child.exit()
+        h.child.stdio.forEach((_stream, index) => { if (index !== lastPipe) h.child.closePipe(index) })
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        expect(h.git).not.toHaveBeenCalled()
+        expect(h.fields.backendPool.get(h.backend.key)).toBe(h.backend)
+        expect(h.fields.backendKeysBySessionPath.get(h.backend.sessionPath!)).toBe(h.backend.key)
+        expect(h.fields.branchDeletionInFlight).toBe(true)
+        expect(h.backend.historyMutation).toBe(true)
+        expect(h.client.stop).toHaveBeenCalledTimes(1)
+        if (last !== 'SDK stop') expect(h.client.process).toBeNull()
+        await expect(h.bridge.withSessionOperation(() => undefined)).rejects.toThrow('正在删除分支')
+      } finally {
+        stopped.resolve()
+        if (last === 'process exit') h.child.exit()
+        h.child.close()
+        await deletion
+      }
+      expect(h.git).toHaveBeenCalledTimes(1)
+      expect(h.client.stop).toHaveBeenCalledTimes(1)
+      expect(h.fields.backendPool.get(h.backend.key)).toBeUndefined()
+      expect(h.fields.backendKeysBySessionPath.size).toBe(0)
+      expect(h.fields.branchDeletionInFlight).toBe(false)
+      expect(h.child.listenerCount('exit')).toBe(0)
+      expect(h.child.listenerCount('close')).toBe(0)
+      expect(h.child.listenerCount('error')).toBe(0)
+    }
+  )
+
+  it('quarantines missing stdio close at the deadline and rejects a late close retry', async () => {
+    vi.useFakeTimers()
     const h = fixture()
-    const stopped = deferred()
-    h.client.stop.mockImplementation(async () => { h.client.process = null; stopped.resolve() })
-    const deletion = h.bridge.deleteBranch(request, 7, h.idle)
-    await stopped.promise
-    expect(h.git).not.toHaveBeenCalled()
-    expect(h.fields.backendPool.get(h.backend.key)).toBe(h.backend)
-    h.child.exitCode = 0
-    h.child.emit('exit', 0, null)
-    await deletion
-    expect(h.git).toHaveBeenCalledTimes(1)
+    const started = deferred()
+    h.client.stop.mockImplementation(async () => {
+      h.child.exit()
+      h.client.process = null
+      h.child.closePipe(0)
+      h.child.closePipe(1)
+      started.resolve()
+    })
+    const deletion = expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow('Timed out waiting for Agent process exit and stdio close')
+    try {
+      await started.promise
+      await vi.advanceTimersByTimeAsync(5_000)
+      await deletion
+      expect(h.backend.historyStopFailed).toBe(true)
+      expect(h.fields.backendPool.get(h.backend.key)).toBe(h.backend)
+      expect(h.fields.backendKeysBySessionPath.get(h.backend.sessionPath!)).toBe(h.backend.key)
+      expect(h.fields.quarantinedSessionPaths.has(h.backend.sessionPath!)).toBe(true)
+      expect(h.fields.unconfirmedStoppedWorktreeCwds.has(request.cwd)).toBe(true)
+      expect(h.fields.branchDeletionInFlight).toBe(false)
+      h.child.closePipe(2)
+      await expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow('旧Agent退出未确认')
+      expect(h.client.stop).toHaveBeenCalledTimes(1)
+      expect(h.git).not.toHaveBeenCalled()
+      expect(h.backend.historyStopFailed).toBe(true)
+      expect(h.child.listenerCount('exit')).toBe(0)
+      expect(h.child.listenerCount('close')).toBe(0)
+      expect(h.child.listenerCount('error')).toBe(0)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
   })
 
   it('quarantines failed shutdown and never retries from a null process', async () => {
@@ -169,14 +263,34 @@ describe('AgentBridge branch deletion lifecycle', () => {
     expect(h.git).not.toHaveBeenCalled()
   })
 
-  it('rejects a previously discarded handle and a currently null handle', async () => {
+  it('rejects a previously discarded handle before querying or stopping', async () => {
     const h = fixture()
     h.fields.unconfirmedStoppedWorktreeCwds.add(request.cwd)
     await expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow('旧Agent退出未确认')
-    h.fields.unconfirmedStoppedWorktreeCwds.clear()
-    h.client.process = null
+    expect(h.client.getState).not.toHaveBeenCalled()
+    expect(h.client.stop).not.toHaveBeenCalled()
+    expect(h.git).not.toHaveBeenCalled()
+  })
+
+  it.each(['null', 'missing', 'undefined'] as const)('quarantines a started writer with a %s process handle', async (handle) => {
+    const h = fixture()
+    if (handle === 'null') h.client.process = null
+    else if (handle === 'missing') Reflect.deleteProperty(h.client, 'process')
+    else Object.assign(h.client, { process: undefined })
+    await expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow(
+      handle === 'null' ? '旧Agent退出未确认' : 'incompatible SDK RpcClient'
+    )
+    expect(h.backend.historyStopFailed).toBe(true)
+    expect(h.fields.backendPool.get(h.backend.key)).toBe(h.backend)
+    expect(h.fields.backendKeysBySessionPath.get(h.backend.sessionPath!)).toBe(h.backend.key)
+    expect(h.fields.quarantinedSessionPaths.has(h.backend.sessionPath!)).toBe(true)
+    expect(h.fields.unconfirmedStoppedWorktreeCwds.has(request.cwd)).toBe(true)
+    expect(h.fields.branchDeletionInFlight).toBe(false)
+    h.child.exit()
+    h.child.close()
     await expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow('旧Agent退出未确认')
     expect(h.client.stop).not.toHaveBeenCalled()
+    expect(h.git).not.toHaveBeenCalled()
   })
 
   it('preflights Git before any backend state query or stop, with zero lifecycle side effects on failure', async () => {
@@ -261,9 +375,9 @@ describe('AgentBridge branch deletion lifecycle', () => {
     })
     h.client.stop.mockImplementation(async () => {
       identity++
-      h.child.exitCode = 0
-      h.child.emit('exit', 0, null)
+      h.child.exit()
       h.client.process = null
+      h.child.close()
     })
     await expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow('目录身份已改变')
     expect(h.prepare).toHaveBeenCalledTimes(1)

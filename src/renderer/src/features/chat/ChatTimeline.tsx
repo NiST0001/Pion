@@ -11,7 +11,7 @@ import { TurnTime } from './ConversationTime'
 import { ToolCallItem } from './ToolCallItem'
 import { ToolActivityHeader } from './ToolActivityHeader'
 import { DisclosureRevealGate } from '../common/DisclosureRevealGate'
-import { groupToolActivity, summarizeToolActivity, type ToolTimelineItem } from '../../agent/toolActivityGroups'
+import { groupToolActivity, retainToolActivityGroups, summarizeToolActivity, type RetainedToolActivityGroup, type ToolTimelineItem } from '../../agent/toolActivityGroups'
 import { assignLineRevealDelay, SCREEN_TEXT_REVEAL_LINE_CLASS, SCREEN_TEXT_REVEAL_LINE_HISTORY_CLASS, SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS } from '../../utils/screenTextReveal'
 import { watchLineReveals } from '../../utils/lineReveal'
 
@@ -114,20 +114,14 @@ export function ChatTimeline({
 }: ChatTimelineProps): ReactElement {
   const scope = scopeKey ?? cwd ?? ''
   const turns = useMemo(() => deriveTurnChanges(timeline), [timeline])
-  const turnsByEnd = new Map(turns.map(turn => [turn.lastItemId, turn]))
-  const usersById = new Map(timeline.flatMap(item => item.kind === 'user' ? [[item.id, item] as const] : []))
-  const previousGroups = useRef<{ scope: string; groups: { key: string; ids: Set<string> }[] }>({ scope, groups: [] })
+  const turnsByEnd = useMemo(() => new Map(turns.map(turn => [turn.lastItemId, turn])), [turns])
+  const usersById = useMemo(() => new Map(timeline.flatMap(item => item.kind === 'user' ? [[item.id, item] as const] : [])), [timeline])
+  const previousGroups = useRef<{ scope: string; groups: RetainedToolActivityGroup[] }>({ scope, groups: [] })
   const [expandedGroups, setExpandedGroups] = useState<{ scope: string; keys: Set<string> }>({ scope, keys: new Set() })
   const groups = useMemo(() => {
     const previous = previousGroups.current.scope === scope ? previousGroups.current.groups : []
-    const used = new Set<string>()
-    return groupToolActivity(timeline).map(group => {
-      const ids = new Set(group.items.map(item => item.tool.id))
-      const retained = previous.find(old => !used.has(old.key) && [...old.ids].some(id => ids.has(id)))
-      const key = retained?.key ?? `group:${scope}:${group.items[0].tool.id}:${group.items[0].id}`
-      used.add(key)
-      return { ...group, key, ids }
-    })
+    return retainToolActivityGroups(groupToolActivity(timeline), previous, scope)
+      .map(group => ({ ...group, summary: summarizeToolActivity(group.items) }))
   }, [timeline, scope])
   useLayoutEffect(() => { previousGroups.current = { scope, groups } }, [groups, scope])
   useEffect(() => {
@@ -138,9 +132,11 @@ export function ChatTimeline({
       return previous.scope === scope && keys.size === previous.keys.size ? previous : { scope, keys }
     })
   }, [groups, scope])
-  const groupsByStart = new Map(groups.map(group => [group.firstIndex, group]))
-  const groupByIndex = new Map<number, typeof groups[number]>()
-  for (const group of groups) for (let index = group.firstIndex; index <= group.lastIndex; index++) groupByIndex.set(index, group)
+  const groupByIndex = useMemo(() => {
+    const byIndex = new Map<number, typeof groups[number]>()
+    for (const group of groups) for (let index = group.firstIndex; index <= group.lastIndex; index++) byIndex.set(index, group)
+    return byIndex
+  }, [groups])
   const toggleGroup = (key: string) => setExpandedGroups(previous => {
     const keys = previous.scope === scope ? new Set(previous.keys) : new Set<string>()
     if (keys.has(key)) keys.delete(key)
@@ -194,8 +190,8 @@ export function ChatTimeline({
               const group = groupByIndex.get(index)!
               const open = expandedGroups.scope === scope && expandedGroups.keys.has(group.key)
               const nodes = [<ToolActivityItem key={`tool:${scope}:${item.id}`} item={item} visible={open} readOnly={readOnly} />]
-              if (groupsByStart.has(index)) nodes.unshift(<ToolActivityHeader key={group.key}
-                summary={summarizeToolActivity(group.items)} open={open} onToggle={() => toggleGroup(group.key)}
+              if (group.firstIndex === index) nodes.unshift(<ToolActivityHeader key={group.key}
+                summary={group.summary} open={open} onToggle={() => toggleGroup(group.key)}
                 historical={group.items[0].historical} noReveal={group.items[0].noReveal} />)
               return [...nodes, card, time]
             }

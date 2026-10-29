@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import { BackendPool } from '../../src/main/agent/backend-pool'
 import { PendingRequestStore } from '../../src/main/agent/pending-requests'
+import { SessionDiscovery } from '../../src/main/agent/session-discovery'
 import { nativePlanModeExtensionSource } from '../../src/main/agent/plan-mode'
 import type { BackendRecord } from '../../src/main/agent/types'
 import { registerAgentIpc } from '../../src/main/ipc/agent'
@@ -51,11 +52,19 @@ function observe<T>(promise: Promise<T>) {
 class HistoryProcess extends EventEmitter {
   exitCode: number | null = null
   signalCode: NodeJS.Signals | null = null
+  stdio = [{ closed: false }, { closed: false }, { closed: false }]
 
-  exit(): void {
-    if (this.exitCode !== null) return
-    this.exitCode = 0
-    this.emit('exit', 0, null)
+  close(): void {
+    this.stdio.forEach((stream) => { stream.closed = true })
+    this.emit('close', this.exitCode, this.signalCode)
+  }
+
+  exit(closeStdio = true): void {
+    if (this.exitCode === null) {
+      this.exitCode = 0
+      this.emit('exit', 0, null)
+    }
+    if (closeStdio) this.close()
   }
 }
 
@@ -184,9 +193,10 @@ function runtime(key: string, cwd: string, path: string) {
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'pion-bridge-revert-'))
   roots.push(root)
-  // Real refresh calls SessionManager.list(), which creates its default session
-  // directory. Keep that directory (not only the JSONL fixtures) out of user data.
-  vi.stubEnv('PI_CODING_AGENT_DIR', join(root, 'agent-data'))
+  // SDK writers and asynchronous sidebar discovery share a fixed fixture root;
+  // late scans retain it after the environment stub is restored during cleanup.
+  const agentDir = join(root, 'agent-data')
+  vi.stubEnv('PI_CODING_AGENT_DIR', agentDir)
   const session = transcript(root)
   const original = runtime('selected-backend', session.cwd, session.request.sessionPath)
   const backendPool = new BackendPool()
@@ -227,6 +237,7 @@ function fixture() {
     messageRevertInFlight: false, sessionOperationsInFlight: 0,
     sessionSelectionGeneration: 1, historyRevision: 0,
     backendPool, backendKeysBySessionPath, pendingRequests, runStore, createBackend,
+    sessionDiscovery: new SessionDiscovery(() => agentDir),
     desiredModes: new Map<string, AgentMode>([[original.backend.key, 'build']]),
     sessionManagers: new Map<string, SessionManager>(), sessionManagerSignatures: new Map<string, string>(),
     unreadSessionPaths: new Set<string>(), yoloSessions: new Set<string>()
@@ -297,9 +308,9 @@ function addPending(h: Fixture, kind: 'permission' | 'extension', sessionPath = 
 function holdStop(h: Fixture) {
   const stopped = deferred<void>(undefined)
   h.client.stop.mockImplementation(async () => {
-    h.client.process = null // pinned SDK behavior: this alone does NOT prove exit
     h.stopStarted.resolve()
     await stopped.promise
+    h.client.process = null // SDK stop clears this just before resolving, ahead of a possible late SIGKILL exit.
   })
   return stopped
 }
@@ -319,7 +330,7 @@ async function timeoutWriter(h: Fixture): Promise<void> {
   await h.stopStarted.promise
   await vi.advanceTimersByTimeAsync(5_001)
   expect(await result).toMatchObject({ ok: false, error: expect.objectContaining({
-    message: expect.stringMatching(/Timed out.*shutdown/)
+    message: expect.stringMatching(/Timed out.*exit and stdio close/)
   }) })
 }
 
@@ -554,7 +565,7 @@ describe('AgentBridge conversation-only message revert', () => {
     expect(h.bridge.getPendingExtensionUiRequests()).toHaveLength(1)
   })
 
-  it.each(['SDK stop', 'process exit'] as const)('does not open or append with the SDK while %s is still pending', async (last) => {
+  it.each(['SDK stop', 'process exit', 'stdio close'] as const)('does not open or append with the SDK while %s is still pending', async (last) => {
     const h = fixture()
     const before = readFileSync(h.request.sessionPath)
     const stopped = holdStop(h)
@@ -562,9 +573,12 @@ describe('AgentBridge conversation-only message revert', () => {
     const append = vi.spyOn(SessionManager.prototype, 'appendCustomEntry')
     const result = observe(h.bridge.revertMessage(h.request, OWNER_ID))
     await h.stopStarted.promise
-    expect(h.client.process).toBeNull()
+    expect(h.client.process).toBe(h.child)
     if (last === 'SDK stop') h.child.exit()
-    else stopped.resolve()
+    else {
+      stopped.resolve()
+      if (last === 'stdio close') h.child.exit(false)
+    }
     await Promise.resolve()
     expect(open).not.toHaveBeenCalled()
     expect(append).not.toHaveBeenCalled()
@@ -578,6 +592,41 @@ describe('AgentBridge conversation-only message revert', () => {
     expect(await result).toMatchObject({ ok: true, value: { text: h.text, images: h.images } })
     expect(append).toHaveBeenCalledWith('pion-message-revert', expect.objectContaining({ entryId: h.selected }))
     await finishRestart(h)
+  })
+
+  it('shares the history stop barrier when application shutdown overlaps a pending SDK stop', async () => {
+    const h = fixture()
+    const before = readFileSync(h.request.sessionPath)
+    const stopped = holdStop(h)
+    const reverted = observe(h.bridge.revertMessage(h.request, OWNER_ID))
+    await h.stopStarted.promise
+    const shutdown = observe(h.bridge.stop())
+    try {
+      // Shutdown has reached its SDK-stop phase; an already-owned stop stays single.
+      await vi.waitFor(() => expect(h.internals.activeKey).toBeNull())
+      expect(h.client.stop).toHaveBeenCalledTimes(1)
+    } finally {
+      stopped.resolve()
+      h.child.exit()
+      await Promise.all([reverted, shutdown])
+    }
+    expect(h.createBackend).not.toHaveBeenCalled()
+    unchanged(h, before)
+  })
+
+  it('quarantines a running writer with an already-lost handle before opening history', async () => {
+    const h = fixture()
+    const before = readFileSync(h.request.sessionPath)
+    h.client.process = null
+    const open = vi.spyOn(SessionManager, 'open')
+    await expect(h.bridge.revertMessage(h.request, OWNER_ID)).rejects.toThrow('shutdown is unknown')
+    expect(open).not.toHaveBeenCalled()
+    expect(h.client.stop).not.toHaveBeenCalled()
+    expect(h.backend.historyStopFailed).toBe(true)
+    expect(h.backendPool.get(h.backend.key)).toBe(h.backend)
+    expect(h.internals.quarantinedSessionPaths).toEqual(new Set([h.request.sessionPath]))
+    expect(h.createBackend).not.toHaveBeenCalled()
+    unchanged(h, before)
   })
 
   it('quarantines a timed-out null-handle writer instead of retrying, deleting, or restarting it', async () => {
@@ -599,6 +648,7 @@ describe('AgentBridge conversation-only message revert', () => {
     expect(h.client.stop).toHaveBeenCalledTimes(1)
     expect(h.createBackend).not.toHaveBeenCalled()
     expect(h.child.listenerCount('exit')).toBe(0)
+    expect(h.child.listenerCount('close')).toBe(0)
     expect(h.child.listenerCount('error')).toBe(0)
     // A late exit cannot retrospectively authorize the failed undo or clear quarantine.
     h.child.exit()

@@ -1,7 +1,8 @@
 import { Buffer } from 'node:buffer'
 import { deflateRawSync, deflateSync, gzipSync, inflateSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { assertGeneratedPngData } from '../../src/main/agent/png-validation'
+import { assertGeneratedPngData, GENERATED_PNG_VALIDATION_LIMITS } from '../../src/main/agent/png-validation'
+import { createGeneratedPngValidationReceipt, snapshotGeneratedPngBytes } from '../../src/main/agent/generated-png-validation-receipt'
 import { makeStaticPng } from '../fixtures/static-png'
 
 // Real, in-memory zlib except the one explicit large-budget observation below.
@@ -80,6 +81,145 @@ function adam7Rows(width: number, height: number, bitsPerPixel: number): Buffer 
   }
   return Buffer.concat(rows)
 }
+
+describe('execution-private complete-validation receipts', () => {
+  const dimensions = { width: 1, height: 1 }
+
+  it('binds one exact snapshot and dimensions to one consume, across nonzero Buffer offsets', () => {
+    const backing = Buffer.concat([Buffer.of(1, 2, 3), makeStaticPng(), Buffer.of(4)])
+    const source = backing.subarray(3, -1)
+    const receipt = createGeneratedPngValidationReceipt()
+    receipt.validate(source, dimensions)
+    const snapshot = snapshotGeneratedPngBytes(source)
+    expect(snapshot.buffer).not.toBe(source.buffer)
+    expect(receipt.consume(source, snapshot, dimensions)).toBe(true)
+    expect(receipt.consume(source, snapshot, dimensions)).toBe(false)
+    expect(inflateSync).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps SharedArrayBuffer and Buffer slice snapshots private, without reading overridden byte slots', () => {
+    const valid = makeStaticPng()
+    const shared = new Uint8Array(new SharedArrayBuffer(valid.length + 2), 1, valid.length)
+    shared.set(valid)
+    const source = Buffer.from(shared.buffer, shared.byteOffset, shared.byteLength).slice(0)
+    const getter = vi.fn(() => { throw new Error('Unexpected byte getter') })
+    for (const key of ['buffer', 'byteOffset', 'byteLength', 'length']) Object.defineProperty(source, key, { get: getter })
+    const receipt = createGeneratedPngValidationReceipt()
+    receipt.validate(source, dimensions)
+    const snapshot = snapshotGeneratedPngBytes(source)
+    shared.fill(0)
+    expect(snapshot.buffer).toBeInstanceOf(ArrayBuffer)
+    expect(snapshot).toEqual(new Uint8Array(valid))
+    expect(receipt.consume(source, snapshot, dimensions)).toBe(true)
+    expect(() => assertPng(snapshot)).not.toThrow()
+    expect(getter).not.toHaveBeenCalled()
+  })
+
+  it('rejects accessor dimensions without issuing a receipt or invoking the getter', () => {
+    const source = makeStaticPng()
+    const getter = vi.fn(() => 1)
+    const dimensions = Object.defineProperty({ height: 1 }, 'width', { get: getter }) as { width: number; height: number }
+    const receipt = createGeneratedPngValidationReceipt()
+    expect(() => receipt.validate(source, dimensions)).toThrow('dimensions')
+    expect(receipt.consume(source, snapshotGeneratedPngBytes(source), { width: 1, height: 1 })).toBe(false)
+    expect(getter).not.toHaveBeenCalled()
+  })
+
+  it('honours disposal re-entered from a descriptor trap before validation completes', () => {
+    const source = makeStaticPng()
+    const receipt = createGeneratedPngValidationReceipt()
+    const inspected = new Proxy(dimensions, {
+      getOwnPropertyDescriptor(target, key) { receipt.dispose(); return Reflect.getOwnPropertyDescriptor(target, key) }
+    })
+    receipt.validate(source, inspected)
+    expect(receipt.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
+  })
+
+  it.each(['dimensions', 'limits', 'exception'] as const)('retires a receipt on %s descriptor rejection without calling accessors', (kind) => {
+    const source = makeStaticPng()
+    const receipt = createGeneratedPngValidationReceipt()
+    receipt.validate(source, dimensions)
+    const getter = vi.fn(() => 1)
+    const inspected = Object.defineProperty({ height: 1 }, 'width', { get: getter }) as { width: number; height: number }
+    const limits = Object.defineProperty({ ...GENERATED_PNG_VALIDATION_LIMITS }, 'maxBytes', { get: getter })
+    const snapshot = snapshotGeneratedPngBytes(source)
+    if (kind === 'exception') {
+      const throwing = new Proxy(dimensions, { getOwnPropertyDescriptor() { throw new Error('descriptor failure') } })
+      expect(() => receipt.consume(source, snapshot, throwing)).toThrow('descriptor failure')
+    } else expect(receipt.consume(source, snapshot, kind === 'dimensions' ? inspected : dimensions,
+      kind === 'limits' ? limits : GENERATED_PNG_VALIDATION_LIMITS)).toBe(false)
+    expect(receipt.consume(source, snapshot, dimensions)).toBe(false)
+    expect(getter).not.toHaveBeenCalled()
+  })
+
+  it('rejects same-Buffer mutation, forged tags, different source objects and wrong dimensions', () => {
+    const source = Buffer.from(makeStaticPng())
+    Object.assign(source, { validated: true, validationReceipt: 'trusted' })
+    const receipt = createGeneratedPngValidationReceipt()
+    receipt.validate(source, dimensions)
+    source[source.length - 1] ^= 1
+    expect(receipt.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
+    source[source.length - 1] ^= 1
+    expect(receipt.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
+    for (const [key, inspected] of [[Buffer.from(source), dimensions], [source, { width: 2, height: 1 }]] as const) {
+      const other = createGeneratedPngValidationReceipt()
+      other.validate(source, dimensions)
+      expect(other.consume(key, snapshotGeneratedPngBytes(source), inspected)).toBe(false)
+    }
+    const unrelated = createGeneratedPngValidationReceipt()
+    expect(unrelated.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
+  })
+
+  it.each(Object.keys(GENERATED_PNG_VALIDATION_LIMITS) as (keyof typeof GENERATED_PNG_VALIDATION_LIMITS)[])(
+    'rejects a different %s budget, consuming the receipt even on mismatch', (key) => {
+      const source = makeStaticPng()
+      const receipt = createGeneratedPngValidationReceipt()
+      receipt.validate(source, dimensions)
+      const snapshot = snapshotGeneratedPngBytes(source)
+      expect(receipt.consume(source, snapshot, dimensions, {
+        ...GENERATED_PNG_VALIDATION_LIMITS, [key]: GENERATED_PNG_VALIDATION_LIMITS[key] - 1
+      })).toBe(false)
+      expect(receipt.consume(source, snapshot, dimensions)).toBe(false)
+    }
+  )
+
+  it('clears prior receipts on validation failure and never issues after failure or disposal', () => {
+    const source = makeStaticPng()
+    const invalid = Buffer.from(source)
+    invalid[invalid.length - 1] ^= 1
+    const receipt = createGeneratedPngValidationReceipt()
+    receipt.validate(source, dimensions)
+    expect(() => receipt.validate(invalid, dimensions)).toThrow(/CRC/)
+    expect(receipt.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
+    const failed = createGeneratedPngValidationReceipt()
+    expect(() => failed.validate(invalid, dimensions)).toThrow(/CRC/)
+    failed.validate(source, dimensions)
+    expect(failed.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
+    const disposed = createGeneratedPngValidationReceipt()
+    disposed.dispose()
+    disposed.validate(source, dimensions)
+    expect(disposed.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
+  })
+
+  it('uses native slots and private copies, bounds bytes before copy, and retains all inflate limits', () => {
+    const source = makeStaticPng()
+    Object.defineProperty(source, Symbol.iterator, { value: () => { throw new Error('Unexpected iterator') } })
+    Object.defineProperty(source, 'byteLength', { get: () => { throw new Error('Unexpected byteLength getter') } })
+    expect(snapshotGeneratedPngBytes(source)).toEqual(new Uint8Array(makeStaticPng()))
+    const oversized = Buffer.alloc(GENERATED_PNG_VALIDATION_LIMITS.maxBytes + 1)
+    Object.defineProperty(oversized, 'byteLength', { value: 1 })
+    expect(() => snapshotGeneratedPngBytes(oversized)).toThrow(/byte size/)
+    for (const invalid of [
+      encoded(RGB_ROW, {}, [badCrc('tEXt', Buffer.from('Name\0text'))]),
+      encoded(Buffer.alloc(1024 * 1024)),
+      encoded(RGB_ROW, {}, [compressedText('zTXt', deflateSync(Buffer.alloc(1024 * 1024 + 1)))])
+    ]) {
+      const receipt = createGeneratedPngValidationReceipt()
+      expect(() => receipt.validate(invalid, dimensions)).toThrow(/CRC|budget/)
+      expect(receipt.consume(invalid, snapshotGeneratedPngBytes(invalid), dimensions)).toBe(false)
+    }
+  })
+})
 
 describe('static PNG fixture and supported raster formats', () => {
   it('creates a deterministic, valid default 1x1 RGB fixture with independent known CRCs', () => {

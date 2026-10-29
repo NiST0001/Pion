@@ -107,7 +107,6 @@ function boundedCodemode(definition: ToolDefinition): ToolDefinition {
       if (parentSignal?.aborted) abort()
       const timer = setTimeout(() => controller.abort(new Error('Native script reached the five-minute host deadline')), NATIVE_SCRIPT_DEADLINE_MS)
       const signal = controller.signal
-      let stopWaiting: (() => void) | undefined
       try {
         if (signal.aborted) throw signal.reason
         let registry: ExtensionToolContext['modelRegistry'] | undefined
@@ -119,21 +118,24 @@ function boundedCodemode(definition: ToolDefinition): ToolDefinition {
             return typeof value === 'function' ? value.bind(ctx) : value
           }
         })
-        const stopped = new Promise<never>((_resolve, reject) => {
-          stopWaiting = () => reject(signal.reason)
-          signal.addEventListener('abort', stopWaiting, { once: true })
-        })
-        const execution = definition.execute(id, params, signal, onUpdate ? (update) => {
+        // Keep the SDK tool/RPC pending until its original execute settles. Throwing on
+        // abort would discard the SDK result's usage in runToolCall's error conversion.
+        // SDK sandbox abort can return while registry/auth work is still pending;
+        // only usage already collected by that SDK result is available here.
+        const result = await definition.execute(id, params, signal, onUpdate ? (update) => {
           if (!signal.aborted) onUpdate({ ...update, ...safeNativeResult(update) })
         } : undefined, scopedContext)
-        // This bounds waiting, not proof of provider cancellation or process exit. A request
-        // already dispatched may still consume quota; the SDK owns its usage aggregation.
-        const result = await Promise.race([execution, stopped])
+        if (signal.aborted) return {
+          content: [{ type: 'text', text: '原生脚本已请求取消，SDK 执行已返回；尚未回报的用量未知，底层请求与收费停止状态仍待服务确认。' }],
+          details: undefined, isError: true,
+          // Sole usage carrier: preserve only usage actually included by the SDK.
+          // Never publish late script output, structured data or partial-call rows.
+          ...(result.usage ? { usage: result.usage } : {})
+        }
         return { ...result, ...safeNativeResult(result), structuredContent: undefined }
       } finally {
         clearTimeout(timer)
         parentSignal?.removeEventListener('abort', abort)
-        if (stopWaiting) signal.removeEventListener('abort', stopWaiting)
         controller.abort(new Error('Native script invocation finished'))
       }
     }

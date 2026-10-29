@@ -33,7 +33,7 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 
 ## Agent 与会话关键规则
 
-- SDK factory 与原生扩展入口共用，保持 builtin/replaceable 身份、RPC/项目信任/用户配置；插件接管不能双启。系统 Node 的运行时入口及共享块须解包，兼顾 Windows 路径。能力目录仅读 catalogue 与所属既有 runtime 收据；原生脚本 descriptor façade 保惰性 getter、接收者、预算及冻结属性兼容。
+- SDK factory 与原生扩展入口共用，保持 builtin/replaceable 身份、RPC/项目信任/用户配置；插件接管不能双启。系统 Node 的运行时入口及共享块须解包，兼顾 Windows 路径。能力目录仅读 catalogue 与所属既有 runtime 收据；原生脚本 descriptor façade 保惰性 getter、接收者、预算及冻结属性兼容；取消继续等原 SDK execute，已返回 usage 仅消费一次、迟到正文省略，SDK sandbox 先返时底层请求及未回报用量保持未知。
 - 工具/扩展/MCP/Skill/子代理开关独立保存在 pion-capabilities.json；三种预设只是一次批量写入，不持久化或强制 mode，单项可继续修改。当前会话仅真实空闲/所属轮次与实际 RPC 收口后应用，保会话、精确模型与草稿，优先于下一 FIFO；读目录不执行工厂、安装、连接或认证。开关与信任/权限/计划/SDK 显式工具范围取交集，MCP 在 spawn/!command/OAuth 前覆盖 enabled，未知 close 隔离不自动重启；私有回执核真实命名来源和 runtime epoch，不发 prompt。详见功能约束「工具与能力开关」。
 - Pi 核心斜杠命令由桌面原生拦截，未接入项明确标注，不把 TUI 命令送入 prompt/队列或终端回退；资源命令仍归 SDK。只读命令不启动后端或认证，变更守真实 pending 与会话身份；导出占槽不屏蔽 SDK 事件，未知私有文件收尾仅隔离对应文件能力。详见功能约束的原生斜杠命令章节。
 - 子代理仅继承父级可见内置编码工具、实时权限/检查点，无插件或递归委派。独立工作合并并发批次，分配不重叠文件；未指定子模型省略 `task.model`，使用设置默认，仅用户明确选择才覆盖或传 null 继承父模型。不猜 ID、静默回退或重复计费。
@@ -44,7 +44,7 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 - 本地队列发送/移除/编辑均传真实 runId 与 cwd/sessionFile，拒绝位置或正文猜目标；缺身份/原生项保显示并停用相关控制。复制/分叉以独立显式选择意图拒旧 API、卸载和 A→B→A 回执，自身 STATE 保归属；预填再核空草稿。
 - 自动队列按消息所属 agent_settled 正面凭证及全部 prompt/steer/abort 实际 RPC、检查点/完成监听器收口逐项 FIFO，不因正常、工具错误、权限超时、模型失败或中止建立长期暂停；原生任务 pending 不阻塞队列。逻辑 stop/idle/handled/超时不等于实际结束，未知 pending 继续占槽，旧 owner/generation 不得唤醒新队列，不重发已调用项或授予权限，执行前独立检查 deny。单项发送后须等所属本轮真实收口才自动下一项，不整批派发；状态读取/调用前本地准备失败保留未发项并显示错误，不忙循环，可在可靠后续收口或手动新输入后重试。旧 queuePauses 不恢复；保留真实运行恢复与历史撤销，SDK RPC 收口不冒称 provider 底层请求或收费已停止。
 - 新分支 worktree 放在主项目 `.pion-worktrees/`，工作流角色放 `.pion-workflow-worktrees/<UUID>/`，均使用 Git 本地排除、不搬迁旧目录，起点仍归请求工作树 HEAD。旧 flat 路径权限沿实际 Git 管理元数据确认归属，不拆名字猜项目；角色专用权限保留。工作流重建/清理仅真实登记与 clean 路径，非 force，保独有 detached 提交及失败记录。GitCommitTree 只读本地可达历史，按修订分页，不 fetch/启动 Agent，隐藏保留视图且拒迟到。
-- 撤销仅回到消息前并保留旧分支/草稿/图片，不回滚文件；写历史前确认旧进程实际退出。worktree 删除须真实目录/Git登记/合并/clean（含 ignored）和生命周期复查，仅非 force remove/branch -d，保历史，报告部分成功，不自动强删。
+- 撤销仅回到消息前并保留旧分支/草稿/图片，不回滚文件；写历史前经共享 process-exit 核 SDK stop、真实 exit 与 stdio close；已启动 writer 的 null handle 拒绝，历史停止与重叠应用退出共享实际停止 Promise，原独占准入保持。worktree 删除须真实目录/Git登记/合并/clean（含 ignored）和生命周期复查，仅非 force remove/branch -d，保历史，报告部分成功，不自动强删。
 - 区分累计费用与上下文占用、Git 工作区改动与本轮工具记录、有限统计窗口与整个会话。行内改动卡按真实用户轮次放在各轮下方，仅用已加载成功 edit/write 记录；卡内只读查看当时差异，不读 Git/当前文件或绑定无轮次身份的撤销，Git 审查保持独立。压缩后未知占用显示待更新，不造 0%；终态消息/压缩事件优先，不重复错误或用量。
 - 使用总览是 userData/pion-usage-ledger.json 的长期本地累计，不绑定 cwd；固定 SDK 会话根补录可能含共用 SDK 历史，按真实 session/entry/已核验 lineage 去重，删除/复制分叉/迁移前先 capture，失败不静默删源。采集不设文件/扫描/账本大小数量人为上限，不裁去重证据；面板打开完整采集，后台默认开启、低频串行让出事件循环并跳过未变文件，设置可关闭，退出只flush已通知路径而非全扫；坏账本不默认覆写，已有/未知 wx 锁不按 PID 或年龄清除，关闭 UI 不解除真实 FS pending。年/月/日筛选互斥，按UTC自然年/自然日及月账期1–31日起点（短月截月末）在全历史去重后投影，不能从近30天反推；旧金额保持原period标签，coverage始终全局。费用仅 SDK 估算，协议见功能约束「使用总览与长期本地账本」。
 
@@ -53,7 +53,8 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 - 会话文件夹按真实 worktree cwd/session path 作虚拟嵌套，新建入口位于分支标题的新建会话按钮旁，省去虚拟根目录装饰行，保真实根级归属及拖到分支标题回到根级；同 cwd/父级文件夹与会话可混合拖排，按落点前后排序、文件夹标题中央归类；来源凭证按真实成员变化退休、保等价刷新，旧 epoch 只清所属拖拽；当前树来源凭证与完整同级项携 revision 保存 order，保子树与会话归属；支持同 cwd 会话拖入归类，独立保存到 userData/pion-session-organization.json；归档仅更新列表分类，保后台、草稿、收藏与待处理请求。删除文件夹将直属内容提升到父级，恢复归档保文件夹归属；分支删除门仍查全量会话。typed IPC 守活主帧、局部补丁、图校验与真实保存收口，错误保原数据；保存期间保行/拖拽占位与侧栏宽度，删除确认及时退出模态，真实请求继续持槽；协议见功能约束「会话文件夹与归档」。
 - 会话阅读位置在同 profile/origin 按真实 cwd/path 独立保存用户 entry/阅读偏移及末尾意图；等所属历史/索引与 DOM 成功恢复，坏初读、失败及未知保源，旧 API/选择/分支/token 拒迟到，子会话不落盘。回底按钮位于输入框上方并按真实浮层顶部避让，分页须先接纳 latest 再跟随，失败保位置/错误；协议见功能约束「布局、历史与阅读」。
 - 面板位置/分栏比例/显隐自动保存并在重启恢复，显式重置才恢复默认；初始读取失败不把默认值覆写缓存。保组件、草稿、阅读位置及固定面板身份；用户主动阅读后，实时输出、布局/图片变化不能拉回末尾。分页、定位、跟随分别维护；只在真正末尾恢复跟随，不用重挂载或临时高度掩盖定位错误。
-- 侧栏基础会话行不等待可选 Token 统计，后台补齐守 exact cwd、发现修订/源快照和窗口收据；同修订基础结果不能清除已补统计，新修订未知不沿用旧值。侧栏渐入结束释放 opacity/transform 动画状态，不依赖悬停、强制重绘或重挂载显示列表。
+- 侧栏发现使用只读流式 SessionDiscovery 与有界元数据缓存，失读/坏行保旧列表；Token 缓存命中仍重新 no-follow 打开并核路径/FD 前后完整 stamp、真实header身份，pending/未知 close 保槽，账本独立全量采集。侧栏基础会话行不等待可选 Token 统计，后台补齐守 exact cwd、发现修订/源快照和窗口收据；同修订基础结果不能清除已补统计，新修订未知不沿用旧值。侧栏渐入结束释放 opacity/transform 动画状态，不依赖悬停、强制重绘或重挂载显示列表。
+- Markdown 仅按每实例最新正文及管线身份缓存纯解析/高亮树，逐次克隆后走安全与渐显投影；工具组线性匹配保持原最早未用组身份。默认生图的 PNG 回执绑定私有完整字节/尺寸/全部预算并单次消费，变异及注入输出完整校验，跨进程/Cua与参考图门继续独立。
 - 保留渐入动效并按可见有界窗口优化，history/live按所属视口同序启用，前置可见字符真实准入及正在展开的可见门收口前不放后行，屏外不阻塞；工具组首次显式展开的标题统一入场，分页标记不令其中部分先亮，已展开组被动补入历史不重开渐显，详情原资格不变；仅新后缀播放，实际排队等待纳入期限，未结束动画不提前回收；历史/只读/noReveal 不重播发送动作。使用主题变量、共享圆角及键盘焦点门控，兼容 reduced-motion/forced-colors。
 - 下拉使用 PionSelect 自绘控件，保分组、精确值、disabled/fieldset、键盘/IME、可访问性与菜单独立滚动。Enter 发送、Shift+Enter 换行，@ 菜单不劫持 Enter，IME 不发送。
 - 提问/权限默认展开、可手动收起并仅在所属会话显示，按任务/队列浮层真实顶部向上避让，切换保请求/草稿/展开状态，不自动授权或重置期限；待处理蓝点复用未读标记，阅读不清除；设置左侧快跳按真实cwd/会话路径合并请求，点击入口展开/收起列表、悬浮或单纯聚焦不展开，点击会话复用普通选择，不自动回答/授权，全局认证不混入；原生选择题自定义回答可本地返回选项，保草稿/原请求/期限/蓝点，仅明确提交发送答案；全局认证仍独立居中。
@@ -71,5 +72,5 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 
 ## 安装与发布
 
-- `scripts/install-local.sh` 默认递增 patch 并构建，安装到 `~/.local/share/pion/app/`，启动器 `~/.local/bin/pion`；自定义 `XDG_DATA_HOME` 时绑定实际安装绝对路径，保参数及 shell/desktop 转义。`v*` 标签触发 release workflow。
+- `scripts/install-local.sh` 默认递增 patch 并构建，安装到 `~/.local/share/pion/app/`，启动器 `~/.local/bin/pion`；自定义 `XDG_DATA_HOME` 时绑定实际安装绝对路径，保参数及 shell/desktop 转义。`v*` 标签触发 release workflow，发布先等同 SHA quality 并核 tag/package/latest notes，Windows 保独立 types/unit；质量失败/取消拒发行。
 - 打包/打标签前准备 `src/shared/release-notes.ts`，按版本倒序，只写实际交付变化；发布后核对并同步 GitHub Release。不把本地安装当正式发布，包生成后改日志不能声称已进旧包。

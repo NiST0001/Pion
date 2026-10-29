@@ -11,11 +11,12 @@ import {
 } from '../../shared/image-generation'
 import { decodeImageBase64, inspectRasterImage, MAX_TOOL_IMAGE_BASE64_LENGTH, MAX_TOOL_IMAGE_BYTES, MAX_TOOL_IMAGE_DIMENSION } from '../../shared/tool-images'
 import {
-  checkedImageTimeout, checkImageAbort, CodexImageError, createCodexImageGenerator,
+  checkedImageTimeout, checkImageAbort, CodexImageError, createCodexImageGeneratorWithValidation,
   createImageAbortScope, inspectGeneratedPng, MAX_IMAGE_PROMPT_LENGTH, validateImagePrompt,
   waitForImageOperation, type CodexImageGenerator, type CodexImageTransportOptions, type GeneratedCodexImage
 } from './codex-image-transport'
 import { ImageInputError, readImageReferences } from './image-inputs'
+import { snapshotGeneratedPngBytes } from './generated-png-validation-receipt'
 
 interface ImageFileStat {
   dev: number | bigint
@@ -337,12 +338,13 @@ function tryResizePreview(resize: typeof resizeImage, bytes: Uint8Array): Return
 /** First-party compiled tool. SDK beforeToolCall gates run before execute. */
 export function createImageGenerationTool(options: ImageGenerationToolOptions) {
   const cwd = resolve(options.cwd)
-  const generate = options.generate ?? createCodexImageGenerator(options)
+  const injectedGenerate = options.generate
+  const timeoutMs = checkedImageTimeout(options.timeoutMs)
+  const transportOptions: CodexImageTransportOptions = { getAuth: options.getAuth, fetch: options.fetch, timeoutMs }
   const resize = options.resize ?? resizeImage
   const readReferences = options.readReferences ?? readImageReferences
   const files = options.files ?? localFiles
   const mutationQueue = options.mutationQueue ?? withFileMutationQueue
-  const timeoutMs = checkedImageTimeout(options.timeoutMs)
   const previewTimeoutMs = Math.min(15_000, checkedImageTimeout(options.previewTimeoutMs ?? 10_000))
   let inFlight = false
   return defineTool<typeof parameters, ImageGenerationToolDetails | undefined>({
@@ -382,6 +384,8 @@ export function createImageGenerationTool(options: ImageGenerationToolOptions) {
       inFlight = true
       const scope = createImageAbortScope(parentSignal, timeoutMs)
       const signal = scope.signal
+      const builtin = injectedGenerate ? undefined : createCodexImageGeneratorWithValidation(transportOptions)
+      const generate = injectedGenerate ?? builtin!.generate
       const progress = (text: string) => {
         try { onUpdate?.({ content: [{ type: 'text', text }], details: undefined }) }
         catch { /* progress cannot change whether a file was saved */ }
@@ -417,7 +421,15 @@ export function createImageGenerationTool(options: ImageGenerationToolOptions) {
           throw new Error(`${message} 失败或中止仍可能消耗图片额度；不要自动再次生成。`)
         }
         let dimensions: { width: number; height: number }
-        try { checkImageAbort(signal); dimensions = inspectGeneratedPng(image.bytes) }
+        try {
+          checkImageAbort(signal)
+          if (builtin) image = builtin.validate(image)
+          else {
+            const bytes = snapshotGeneratedPngBytes(image.bytes)
+            image = { bytes, ...inspectGeneratedPng(bytes) }
+          }
+          dimensions = { width: image.width, height: image.height }
+        }
         catch { throw new Error('图片服务返回的原图不可用或请求已中止，未保存文件；可能已消耗图片额度，请勿自动再次生成。') }
         progress('正在保存原图…')
         let saved: ImageSaveResult
@@ -468,7 +480,7 @@ export function createImageGenerationTool(options: ImageGenerationToolOptions) {
         }]
         if (preview) content.push(preview)
         return { content, details: { imageGeneration: details } }
-      } finally { scope.dispose(); inFlight = false }
+      } finally { builtin?.dispose(); scope.dispose(); inFlight = false }
     }
   })
 }

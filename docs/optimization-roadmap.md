@@ -12,19 +12,24 @@
 
 具体行为以 [功能约束](feature-contracts.md) 和当前源码为准。
 
+## 已接入的第二批优化
+
+- **Markdown 与工具组**：每挂载实例复用最新正文及管线对应的纯解析/高亮树，逐次克隆后执行渐显及安全转换；工具组按真实调用 ID 线性保留原组身份，派生索引与摘要随真实时间线更新。
+- **侧栏文件读取**：`SessionDiscovery` 以严格流式元数据替换 SDK best-effort 全文发现，保文件/目录与 FD 快照、失败保旧列表及有界桶缓存；`SessionTokenCache` 命中仍实际打开核验，省去未变正文解析。账本采集保持独立。
+- **取消与错误反馈**：Codemode 等原 SDK execute，单次保留已返回 usage、屏蔽迟到正文，未回报用量及 provider 停止状态保持未知；队列卡显示真实 runId 对应的固定准入错误，queueScope 统一推送/STATE/缓存修订。
+- **验证与退出复用**：默认生图以单次执行私有完整字节回执复用 PNG 校验，注入或变异输出重新完整验证；历史撤销与工作流共用真实进程退出核心，历史停止与重叠应用退出合并实际停止 Promise。
+- **发布质量门**：tag 先等待同 SHA 的 reusable quality，核 checkout/tag/package/latest notes，再进入发行任务；Windows 补独立 types/unit，质量及 checkout 保只读/无持久凭据。实际 GitHub 与平台发布尚未执行。
+
 ## 后续待实施
 
 | 事项 | 实施边界与验收重点 |
 | --- | --- |
-| Markdown 解析与渐显分离 | 先测量正文解析与动画更新成本，再拆纯解析结果和渐显投影；保持 suffix、期限、终态、稳定节点及 reduced-motion。 |
 | 长历史窗口 | 独立设计已读窗口、DOM 身份、真实锚点与双向分页策略；保持草稿、手动阅读和末尾意图，避免以估算高度掩盖定位。 |
-| PNG 验证结果复用 | 仅复用绑定精确私有字节副本及 frame/scope 的验证回执；跨进程校验、解码背压与取消后的真实收尾继续独立。 |
-| ComputerUse 去重代际退休 | 依据真实 runtime/session、watch/unwatch 与请求收口退休；未知和仍活跃身份继续保留，容量处理维持 fail-closed。 |
-| 会话发现错误及重复读取 | 区分 SDK 吞掉的读取故障与真实空列表；复用已验证 header/stamp 回执，保基础行、Token 槽与窗口修订独立。 |
-| Codemode 取消后的 usage | 分离停止等待和实际 execution，沿 SDK 原用量及一次消费身份保留已发生用量，避免估算补录与双计。 |
-| 队列自动准入错误呈现 | 已保留所属未发送 run 及错误；后续补队列卡内的有界所属错误投影，保无忙循环及单项 FIFO。 |
-| 大模块与进程封装收敛 | 按 dispatcher、capability controller 等完整职责组拆分 AgentBridge；lease、receipt 和状态随职责一起迁移，历史写入独占门保留。 |
-| CSS 与发布质量门 | 逐组件收敛覆盖层，保主题/forced-colors；发布质量门绑定同一修订，保 Windows 与 Linux 各自验证范围。 |
+| ComputerUse 图片计算与性能测量 | 默认生图重复验证已复用；ComputerUse 的原图/frame/scope 与跨进程校验继续独立。后续评估受控异步计算及字节私有证明，真实解码/worker 仍持槽。 |
+| ComputerUse 去重代际退休 | 已核设计需 Main 铸造的 sessionIdentity 分桶、旧 epoch 失效前 drain、真实 auth/stream/unwatch 及交付收据。SDK OAuth 刷新可能晚于取消收口，目前缺底层正面凭证，原全局预算及 fail-closed 保留；WeakMap/GC、TTL、逻辑 stop 均不充当资源退休证明。 |
+| Codemode 底层未回报用量 | 已保原 SDK execute 及一次 usage；SDK sandbox 可能先于模型/认证返回。后续沿真实底层收据处理尚未回报部分，避免估算补录、二次计费或假称物理停止。 |
+| 大模块与进程封装收敛 | 共享 writer 退出核心已接入；后续按 dispatcher、capability controller 等完整职责组拆分 AgentBridge，继续收敛 Git 底层执行封装；lease、receipt 和状态随职责迁移。 |
+| CSS 与实机性能 | 逐组件收敛覆盖层，保主题/forced-colors；评估克隆/转换、长正文与真实帧率。Windows、GitHub workflow、构建安装及 GUI 沿各自授权验收。 |
 
 ## 验证与授权
 

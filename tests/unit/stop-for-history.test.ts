@@ -2,11 +2,18 @@ import { EventEmitter } from 'node:events'
 import type { RpcClient } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { stopForHistory } from '../../src/main/agent/stop-for-history'
+import { stopWithProcessExit } from '../../src/main/process-exit'
 
 class MockChild extends EventEmitter {
   exitCode: number | null = null
   signalCode: NodeJS.Signals | null = null
   killed = false
+  stdio = [{ closed: false }, { closed: false }, { closed: false }]
+
+  close(): void {
+    this.stdio.forEach((stream) => { stream.closed = true })
+    this.emit('close', this.exitCode, this.signalCode)
+  }
 
   exit(code: number | null = 0, signal: NodeJS.Signals | null = null): void {
     this.exitCode = code
@@ -43,11 +50,15 @@ function expectPending(result: ReturnType<typeof observe>) {
 
 function expectClean(child: MockChild) {
   expect(child.listenerCount('exit')).toBe(0)
+  expect(child.listenerCount('close')).toBe(0)
   expect(child.listenerCount('error')).toBe(0)
   expect(vi.getTimerCount()).toBe(0)
 }
 
-describe('stopForHistory private SDK process adapter', () => {
+describe.each([
+  { label: 'history', stopForHistory },
+  { label: 'shared', stopForHistory: (client: RpcClient) => stopWithProcessExit(client, true) }
+])('$label private SDK process adapter', ({ stopForHistory }) => {
   beforeEach(() => { vi.useFakeTimers() })
   afterEach(() => {
     try { expect(vi.getTimerCount()).toBe(0) } finally { vi.useRealTimers() }
@@ -68,6 +79,7 @@ describe('stopForHistory private SDK process adapter', () => {
     expectPending(result)
 
     child.exit()
+    child.close()
     await result.settled
     expect(result.fulfilled).toHaveBeenCalledOnce()
     expect(result.rejected).not.toHaveBeenCalled()
@@ -80,6 +92,7 @@ describe('stopForHistory private SDK process adapter', () => {
     stop.mockImplementation(async () => {
       // The exit event alone is authoritative, even before fields are updated.
       child.emit('exit', 0, null)
+      child.close()
     })
     await expect(stopForHistory(client)).resolves.toBeUndefined()
     expectClean(child)
@@ -96,6 +109,7 @@ describe('stopForHistory private SDK process adapter', () => {
     await vi.advanceTimersByTimeAsync(0)
     expectPending(result)
 
+    child.close()
     stopping.resolve()
     await result.settled
     expect(result.fulfilled).toHaveBeenCalledOnce()
@@ -110,15 +124,47 @@ describe('stopForHistory private SDK process adapter', () => {
     const child = new MockChild()
     child.exitCode = code
     child.signalCode = signal
+    child.close()
     const { client, stop } = setup(child)
     await expect(stopForHistory(client)).resolves.toBeUndefined()
     expect(stop).toHaveBeenCalledOnce()
     expectClean(child)
   })
 
-  it('accepts an explicitly null SDK process as stopped without calling stop', async () => {
+  it.each([0, null])('holds an exited writer until late pipe close (code=%s)', async (code) => {
+    const child = new MockChild()
+    const { client, stop } = setup(child)
+    const result = observe(stopForHistory(client))
+    await vi.advanceTimersByTimeAsync(0)
+    child.exit(code, code === null ? 'SIGTERM' : null)
+    await vi.advanceTimersByTimeAsync(4999)
+    expectPending(result)
+    expect(stop).toHaveBeenCalledOnce()
+    child.close()
+    await result.settled
+    expect(result.fulfilled).toHaveBeenCalledOnce()
+    expectClean(child)
+  })
+
+  it('times out on missing stdio close and never authorizes a late close', async () => {
+    const child = new MockChild()
+    const { client, stop } = setup(child)
+    stop.mockImplementation(async () => { child.exit() })
+    const result = observe(stopForHistory(client))
+    await vi.advanceTimersByTimeAsync(5000)
+    await result.settled
+    expect(result.rejected).toHaveBeenCalledOnce()
+    expect(result.fulfilled).not.toHaveBeenCalled()
+    expectClean(child)
+    child.close()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(result.fulfilled).not.toHaveBeenCalled()
+    expect(stop).toHaveBeenCalledOnce()
+  })
+
+  it('rejects a null handle for an already-started writer without calling stop', async () => {
     const { client, stop } = setup(null)
-    await expect(stopForHistory(client)).resolves.toBeUndefined()
+    await expect(stopForHistory(client)).rejects.toThrow('shutdown is unknown')
     expect(stop).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
   })
@@ -126,7 +172,7 @@ describe('stopForHistory private SDK process adapter', () => {
   it('retains the captured child when SDK stop resolves and clears process before SIGKILL exits', async () => {
     const child = new MockChild()
     const { client, stop, adapter } = setup(child)
-    // Model pi 1.0.4's 1s escalation/null assignment, without spawning a process.
+    // Model pinned pi 1.4.0's 1s escalation/null assignment, without spawning a process.
     stop.mockImplementation(async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 1000))
       child.killed = true
@@ -143,7 +189,7 @@ describe('stopForHistory private SDK process adapter', () => {
 
     // Neither a sent signal nor non-exit transport events establish real exit.
     child.emit('disconnect')
-    child.emit('close', 0, null)
+    child.close()
     await vi.advanceTimersByTimeAsync(1000)
     expectPending(result)
     child.exit(null, 'SIGKILL')
@@ -159,6 +205,7 @@ describe('stopForHistory private SDK process adapter', () => {
     stop.mockImplementation(async () => {
       child.exitCode = code
       child.signalCode = signal
+      child.close()
     })
     await expect(stopForHistory(client)).resolves.toBeUndefined()
     expectClean(child)
@@ -187,7 +234,7 @@ describe('stopForHistory private SDK process adapter', () => {
     stop.mockReturnValue(new Promise<void>(() => {}))
     const result = observe(stopForHistory(client))
     await vi.advanceTimersByTimeAsync(0)
-    if (exited) child.exit()
+    if (exited) { child.exit(); child.close() }
     await vi.advanceTimersByTimeAsync(5000)
     await result.settled
     expect(result.fulfilled).not.toHaveBeenCalled()
@@ -236,7 +283,12 @@ describe('stopForHistory private SDK process adapter', () => {
       stopping.reject(new Error('late SDK failure'))
       await vi.advanceTimersByTimeAsync(0)
       expect(unhandled).not.toHaveBeenCalled()
+      child.exit()
+      child.close()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(result.fulfilled).not.toHaveBeenCalled()
       expect(result.rejected).toHaveBeenCalledOnce()
+      expect(stop).toHaveBeenCalledOnce()
       expectClean(child)
     } finally {
       process.removeListener('unhandledRejection', unhandled)
@@ -270,7 +322,12 @@ describe('stopForHistory private SDK process adapter', () => {
     ['invalid signalCode', (stop) => ({ stop, process: Object.assign(new MockChild(), { signalCode: false }) })],
     ['empty signalCode', (stop) => ({ stop, process: Object.assign(new MockChild(), { signalCode: '' }) })],
     ['missing event registration', (stop) => ({ stop, process: Object.assign(new MockChild(), { once: undefined }) })],
-    ['missing event cleanup', (stop) => ({ stop, process: Object.assign(new MockChild(), { removeListener: undefined }) })]
+    ['missing event cleanup', (stop) => ({ stop, process: Object.assign(new MockChild(), { removeListener: undefined }) })],
+    ['missing stdio', (stop) => ({ stop, process: Object.assign(new MockChild(), { stdio: undefined }) })],
+    ['wrong pipe count', (stop) => ({ stop, process: Object.assign(new MockChild(), { stdio: [] }) })],
+    ['sparse pipes', (stop) => ({ stop, process: Object.assign(new MockChild(), { stdio: new Array(3) }) })],
+    ['null pipe', (stop) => ({ stop, process: Object.assign(new MockChild(), { stdio: [null, null, null] }) })],
+    ['unknown pipe close', (stop) => ({ stop, process: Object.assign(new MockChild(), { stdio: [{}, {}, {}] }) })]
   ]
   it.each(incompatibleClients)('rejects incompatible adapter: %s', async (_name, makeClient) => {
     const stop = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
@@ -282,21 +339,88 @@ describe('stopForHistory private SDK process adapter', () => {
   it.each(['exit', 'timeout'] as const)('removes only its own child listeners after %s', async (outcome) => {
     const child = new MockChild()
     const existingExit = vi.fn()
+    const existingClose = vi.fn()
     const existingError = vi.fn()
     child.on('exit', existingExit)
+    child.on('close', existingClose)
     child.on('error', existingError)
     const { client } = setup(child)
     const result = observe(stopForHistory(client))
     await vi.advanceTimersByTimeAsync(0)
     expect(child.listenerCount('exit')).toBe(2)
+    expect(child.listenerCount('close')).toBe(2)
     expect(child.listenerCount('error')).toBe(2)
-    if (outcome === 'exit') child.exit()
+    if (outcome === 'exit') { child.exit(); child.close() }
     else await vi.advanceTimersByTimeAsync(5000)
     await result.settled
     expect(result.fulfilled).toHaveBeenCalledTimes(outcome === 'exit' ? 1 : 0)
     expect(result.rejected).toHaveBeenCalledTimes(outcome === 'timeout' ? 1 : 0)
     expect(child.listeners('exit')).toEqual([existingExit])
+    expect(child.listeners('close')).toEqual([existingClose])
     expect(child.listeners('error')).toEqual([existingError])
     expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('shared exit barrier with independently proven never-started client', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => {
+    try { expect(vi.getTimerCount()).toBe(0) } finally { vi.useRealTimers() }
+  })
+
+  it('requires explicit never-started proof before accepting a null handle', async () => {
+    const { client, stop } = setup(null)
+    await expect(stopWithProcessExit(client, undefined as unknown as boolean)).rejects.toThrow('shutdown is unknown')
+    expect(stop).not.toHaveBeenCalled()
+  })
+
+  it('waits for SDK stop even when no child was ever created', async () => {
+    const { client, stop } = setup(null)
+    const stopping = deferred()
+    stop.mockReturnValue(stopping.promise)
+    const result = observe(stopWithProcessExit(client, false))
+    await vi.advanceTimersByTimeAsync(0)
+    expectPending(result)
+    stopping.resolve()
+    await result.settled
+    expect(result.fulfilled).toHaveBeenCalledOnce()
+    expect(stop).toHaveBeenCalledOnce()
+  })
+
+  it('still requires exit and pipe close when a child exists despite a never-started claim', async () => {
+    const child = new MockChild()
+    const { client, stop } = setup(child)
+    const result = observe(stopWithProcessExit(client, false))
+    await vi.advanceTimersByTimeAsync(0)
+    expectPending(result)
+    child.exit()
+    await vi.advanceTimersByTimeAsync(0)
+    expectPending(result)
+    child.close()
+    await result.settled
+    expect(result.fulfilled).toHaveBeenCalledOnce()
+    expect(stop).toHaveBeenCalledOnce()
+    expectClean(child)
+  })
+
+  it('bounds a hung stop without inventing a successful negative receipt', async () => {
+    const { client, stop } = setup(null)
+    const stopping = deferred()
+    stop.mockReturnValue(stopping.promise)
+    const result = observe(stopWithProcessExit(client, false))
+    await vi.advanceTimersByTimeAsync(5000)
+    await result.settled
+    expect(result.rejected).toHaveBeenCalledOnce()
+    stopping.resolve()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(result.fulfilled).not.toHaveBeenCalled()
+    expect(stop).toHaveBeenCalledOnce()
+  })
+
+  it('propagates rejected SDK stop even without a child', async () => {
+    const { client, stop } = setup(null)
+    const error = new Error('never-started stop failed')
+    stop.mockRejectedValue(error)
+    await expect(stopWithProcessExit(client, false)).rejects.toBe(error)
   })
 })

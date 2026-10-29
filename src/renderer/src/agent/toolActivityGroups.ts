@@ -27,6 +27,45 @@ export function groupToolActivity(timeline: readonly TimelineItem[]): ToolActivi
   return groups
 }
 
+export interface RetainedToolActivityGroup extends ToolActivityGroup {
+  key: string
+  ids: ReadonlySet<string>
+}
+
+/** Retain the earliest unused old group sharing a real call ID, including conflicts. */
+export function retainToolActivityGroups(
+  groups: readonly ToolActivityGroup[],
+  previous: readonly Pick<RetainedToolActivityGroup, 'key' | 'ids'>[],
+  scope: string
+): RetainedToolActivityGroup[] {
+  const byId = new Map<string, { indices: number[]; cursor: number }>()
+  previous.forEach((group, index) => {
+    for (const id of group.ids) {
+      const candidates = byId.get(id)
+      if (candidates) candidates.indices.push(index)
+      else byId.set(id, { indices: [index], cursor: 0 })
+    }
+  })
+  const used = new Set<string>()
+  return groups.map(group => {
+    const ids = new Set(group.items.map(item => item.tool.id))
+    let earliest = previous.length
+    for (const id of ids) {
+      const candidates = byId.get(id)
+      if (!candidates) continue
+      // Cursors only advance past consumed keys: each old ID membership is
+      // skipped at most once, even when duplicate IDs span several groups.
+      while (candidates.cursor < candidates.indices.length
+        && used.has(previous[candidates.indices[candidates.cursor]].key)) candidates.cursor++
+      const index = candidates.indices[candidates.cursor]
+      if (index !== undefined && index < earliest) earliest = index
+    }
+    const key = previous[earliest]?.key ?? `group:${scope}:${group.items[0].tool.id}:${group.items[0].id}`
+    used.add(key)
+    return { ...group, key, ids }
+  })
+}
+
 /** Tool-call attempts in this group, not successful changes or Git workspace totals. */
 export function summarizeToolActivity(items: readonly ToolTimelineItem[]): {
   label: string

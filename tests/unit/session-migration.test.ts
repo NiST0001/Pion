@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { RpcClient } from '@earendil-works/pi-coding-agent'
@@ -7,6 +8,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import type { BackendRecord } from '../../src/main/agent/types'
 import type { AgentStatus, ModelOption } from '../../src/shared/types'
+
+vi.mock('node:fs/promises', async (original) => {
+  const actual = await original<typeof import('node:fs/promises')>()
+  return { ...actual, writeFile: vi.fn(actual.writeFile) }
+})
 
 type RpcState = Awaited<ReturnType<RpcClient['getState']>>
 const roots: string[] = []
@@ -35,11 +41,23 @@ function observe<T>(promise: Promise<T>) {
 class HistoryProcess extends EventEmitter {
   exitCode: number | null = null
   signalCode: NodeJS.Signals | null = null
+  stdio = [{ closed: false }, { closed: false }, { closed: false }]
 
   exit() {
     if (this.exitCode !== null) return
     this.exitCode = 0
     this.emit('exit', 0, null)
+  }
+
+  closePipe(index: number) {
+    if (this.stdio[index].closed) return
+    this.stdio[index].closed = true
+    // ChildProcess close follows the final stdin/stdout/stderr close.
+    if (this.stdio.every((stream) => stream.closed)) this.emit('close', this.exitCode, this.signalCode)
+  }
+
+  close() {
+    this.stdio.forEach((_stream, index) => this.closePipe(index))
   }
 }
 
@@ -49,11 +67,12 @@ function runtime(key: string, cwd: string, path?: string) {
     isStreaming: false, isCompacting: false, pendingMessageCount: 0, messageCount: 0,
     steeringMode: 'all', followUpMode: 'all', autoCompactionEnabled: true
   }
+  const child = new HistoryProcess()
+  children.push(child)
   const client = {
-    // Explicit SDK adapter: null means there is no child writer, not unknown exit.
-    process: null as HistoryProcess | null,
+    process: child as HistoryProcess | null,
     getState: vi.fn(async (): Promise<RpcState> => ({ ...state })),
-    stop: vi.fn(async () => undefined),
+    stop: vi.fn(async () => { child.exit(); child.close() }),
     setModel: vi.fn(async (_provider: string, _id: string) => undefined)
   }
   const backend: BackendRecord = {
@@ -61,7 +80,7 @@ function runtime(key: string, cwd: string, path?: string) {
     phase: 'running', busy: false, compacting: false,
     pendingRunIds: [], localFollowUps: [], startPromise: Promise.resolve()
   }
-  return { state, client, backend }
+  return { state, client, backend, child }
 }
 
 function fixture(options: { backend?: boolean; path?: boolean; persisted?: boolean } = {}) {
@@ -136,14 +155,15 @@ function fixture(options: { backend?: boolean; path?: boolean; persisted?: boole
   const bridge = Object.assign(Object.create(AgentBridge.prototype), fields) as AgentBridge
   const internals = bridge as unknown as typeof fields
   return { root, bridge, internals, sourceCwd, targetCwd, sourceDir, targetDir,
-    sourcePath, targetPath, content, source, target }
+    sourcePath, targetPath, content, source, target, persisted: options.persisted === true }
 }
 
 afterEach(async () => {
   // Release actual fixture promises/process barriers before deleting directories.
   for (const release of releases.splice(0)) release()
-  for (const child of children.splice(0)) child.exit()
+  for (const child of children.splice(0)) { child.exit(); child.close() }
   await Promise.all(observations.splice(0))
+  vi.mocked(writeFile).mockReset()
   vi.restoreAllMocks()
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
@@ -153,7 +173,9 @@ function unchanged(h: ReturnType<typeof fixture>) {
   expect(h.internals.switchSession).not.toHaveBeenCalled()
   expect(h.internals.ensureActiveBackend).not.toHaveBeenCalled()
   expect(h.internals.activeCwd).toBe(h.sourceCwd)
-  if (existsSync(h.sourcePath)) expect(readFileSync(h.sourcePath, 'utf8')).toBe(h.content)
+  expect(h.internals.activeKey).toBe(h.source.backend.key)
+  expect(h.internals.activeSessionPath).toBe(h.source.backend.sessionPath)
+  if (h.persisted) expect(readFileSync(h.sourcePath, 'utf8')).toBe(h.content)
 }
 
 describe('AgentBridge migration with isolated session buckets and mocked SDK boundaries', () => {
@@ -201,23 +223,23 @@ describe('AgentBridge migration with isolated session buckets and mocked SDK bou
     unchanged(h)
   })
 
-  it('moves persisted history only with an explicit null process and rewrites only the header cwd', async () => {
+  it('moves persisted history after SDK stop, child exit and stdio close, rewriting only the header cwd', async () => {
     const h = fixture({ persisted: true })
     await expect(h.bridge.migrateSessionToProject(h.targetCwd)).resolves.toBe(h.targetPath)
     const lines = readFileSync(h.targetPath, 'utf8').split('\n')
     expect(JSON.parse(lines[0])).toEqual({ ...JSON.parse(h.content.split('\n')[0]), cwd: h.targetCwd })
     expect(lines.slice(1).join('\n')).toBe(h.content.split('\n').slice(1).join('\n'))
     expect(existsSync(h.sourcePath)).toBe(false)
-    expect(h.source.client.stop).not.toHaveBeenCalled()
+    expect(h.source.client.stop).toHaveBeenCalledOnce()
+    expect(h.source.child.exitCode).toBe(0)
+    expect(h.source.child.stdio.every((stream) => stream.closed)).toBe(true)
     expect(h.internals.switchSession).toHaveBeenCalledExactlyOnceWith(h.targetPath)
     expect(h.internals.refreshSidebarSessions).toHaveBeenCalledOnce()
   })
 
-  it('waits for both stop settlement and real exit before any target write or source unlink', async () => {
+  it('waits for stop settlement, real exit and all three pipe closes before any target write or source unlink', async () => {
     const h = fixture({ persisted: true })
-    const child = new HistoryProcess()
-    children.push(child)
-    h.source.client.process = child
+    const child = h.source.child
     const started = deferred<void>(undefined)
     const stop = deferred<void>(undefined)
     h.source.client.stop.mockImplementation(async () => {
@@ -236,15 +258,22 @@ describe('AgentBridge migration with isolated session buckets and mocked SDK bou
     unchanged(h)
     expect(existsSync(h.targetDir)).toBe(false)
     child.exit()
+    await Promise.resolve()
+    unchanged(h)
+    expect(existsSync(h.targetDir)).toBe(false)
+    for (const index of [0, 1]) {
+      child.closePipe(index)
+      await Promise.resolve()
+      unchanged(h)
+      expect(existsSync(h.targetDir)).toBe(false)
+    }
+    child.closePipe(2)
     expect(await result).toEqual({ ok: true, value: h.targetPath })
     expect(existsSync(h.sourcePath)).toBe(false)
   })
 
   it('does not publish or unlink when stop fails and the writer exit is unknown', async () => {
     const h = fixture({ persisted: true })
-    const child = new HistoryProcess()
-    children.push(child)
-    h.source.client.process = child
     h.source.client.stop.mockRejectedValue(new Error('stop failed'))
     await expect(h.bridge.migrateSessionToProject(h.targetCwd)).rejects.toThrow('无法确认旧 Agent 已退出')
     unchanged(h)
@@ -253,38 +282,53 @@ describe('AgentBridge migration with isolated session buckets and mocked SDK bou
     await expect(h.bridge.migrateSessionToProject(h.targetCwd)).rejects.toThrow('重启 Pion')
   })
 
-  it('times out a settled stop with no real exit without changing either file', async () => {
+  it.each(['exit', 'stdin', 'stdout', 'stderr'] as const)('times out with SDK stop settled but %s unconfirmed, preserving the source', async (missing) => {
     const h = fixture({ persisted: true })
-    const child = new HistoryProcess()
-    children.push(child)
-    h.source.client.process = child
+    const child = h.source.child
     const started = deferred<void>(undefined)
     h.source.client.stop.mockImplementation(async () => {
       h.source.client.process = null
+      if (missing === 'exit') child.close()
+      else {
+        child.exit()
+        const missingPipe = ['stdin', 'stdout', 'stderr'].indexOf(missing)
+        child.stdio.forEach((_stream, index) => { if (index !== missingPipe) child.closePipe(index) })
+      }
       started.resolve()
     })
     vi.useFakeTimers()
     try {
       const result = observe(h.bridge.migrateSessionToProject(h.targetCwd))
       await started.promise
-      await vi.advanceTimersByTimeAsync(5000)
+      await vi.advanceTimersByTimeAsync(4999)
+      unchanged(h)
+      expect(existsSync(h.targetDir)).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
       const outcome = await result
       expect(outcome.ok).toBe(false)
       if (!outcome.ok) expect(String(outcome.error)).toContain('无法确认旧 Agent 已退出')
       unchanged(h)
       expect(existsSync(h.targetDir)).toBe(false)
       expect(h.source.backend.historyStopFailed).toBe(true)
+      child.exit()
+      child.close()
+      await expect(h.bridge.migrateSessionToProject(h.targetCwd)).rejects.toThrow('重启 Pion')
+      unchanged(h)
+      expect(h.source.client.stop).toHaveBeenCalledOnce()
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('rejects an incompatible missing process adapter instead of treating it as null', async () => {
+  it.each(['null', 'missing'] as const)('rejects a %s process handle for a started writer while preserving the source', async (handle) => {
     const h = fixture({ persisted: true })
-    Reflect.deleteProperty(h.source.client, 'process')
+    if (handle === 'null') h.source.client.process = null
+    else Reflect.deleteProperty(h.source.client, 'process')
     await expect(h.bridge.migrateSessionToProject(h.targetCwd)).rejects.toThrow('无法确认旧 Agent 已退出')
     unchanged(h)
+    expect(existsSync(h.targetDir)).toBe(false)
     expect(h.source.client.stop).not.toHaveBeenCalled()
+    expect(h.source.backend.historyStopFailed).toBe(true)
   })
 
   it('rejects a pre-existing target without even stopping the source writer', async () => {
@@ -298,15 +342,27 @@ describe('AgentBridge migration with isolated session buckets and mocked SDK bou
     expect(h.internals.switchSession).not.toHaveBeenCalled()
   })
 
-  it('exclusive wx publication never overwrites a target appearing after the existence check', async () => {
+  it('preserves the source and selection when exclusive wx staging fails after the writer closes', async () => {
     const h = fixture({ persisted: true })
-    const child = new HistoryProcess()
-    children.push(child)
-    h.source.client.process = child
+    vi.mocked(writeFile).mockRejectedValueOnce(Object.assign(new Error('staging already exists'), { code: 'EEXIST' }))
+    await expect(h.bridge.migrateSessionToProject(h.targetCwd)).rejects.toThrow('迁移未发布目标，源文件仍保留')
+    expect(writeFile).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/\.session-1\.jsonl\..+\.tmp$/), expect.any(String), { encoding: 'utf8', flag: 'wx' }
+    )
+    expect(h.source.client.stop).toHaveBeenCalledOnce()
+    expect(h.source.child.exitCode).toBe(0)
+    expect(h.source.child.stdio.every((stream) => stream.closed)).toBe(true)
+    unchanged(h)
+  })
+
+  it('exclusive staging and no-replace publication preserve a target appearing after the existence check', async () => {
+    const h = fixture({ persisted: true })
+    const child = h.source.child
     h.source.client.stop.mockImplementation(async () => {
       mkdirSync(h.targetDir)
       writeFileSync(h.targetPath, 'concurrent target; must remain intact')
       child.exit()
+      child.close()
     })
     await expect(h.bridge.migrateSessionToProject(h.targetCwd)).rejects.toThrow()
     expect(readFileSync(h.targetPath, 'utf8')).toBe('concurrent target; must remain intact')
@@ -330,12 +386,11 @@ describe('AgentBridge migration with isolated session buckets and mocked SDK bou
 
   it('rechecks the captured generation after real exit before changing any file', async () => {
     const h = fixture({ persisted: true })
-    const child = new HistoryProcess()
-    children.push(child)
-    h.source.client.process = child
+    const child = h.source.child
     h.source.client.stop.mockImplementation(async () => {
       h.internals.sessionSelectionGeneration += 1
       child.exit()
+      child.close()
     })
     await expect(h.bridge.migrateSessionToProject(h.targetCwd)).rejects.toThrow('会话已切换')
     unchanged(h)

@@ -1146,6 +1146,7 @@ export function App(): ReactElement {
                   followUp={queuedMessages.followUp}
                   nativeFollowUpCount={queuedMessages.nativeFollowUpCount}
                   followUpRunIds={queuedMessages.followUpRunIds}
+                  admissionErrors={queuedMessages.admissionErrors}
                   controlsDisabled={queueEditor.frozen}
                   agentBusy={state.busy}
                   onSendItem={(kind, index, runId) => actions.sendQueuedMessage(kind, index, runId).catch((error: unknown) => {

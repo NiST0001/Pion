@@ -6,7 +6,7 @@ import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import type { SessionEntry } from '@earendil-works/pi-coding-agent'
 import type { BackendRecord } from '../../src/main/agent/types'
 import type { RunOperation } from '../../src/shared/operations'
-import type { ImageContent, QueuedMessageEditRequest, QueuedMessageEditResult, SessionEntriesPage, SessionHistoryIndex, SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
+import type { ImageContent, QueuedMessagesSnapshot, QueuedMessageEditRequest, QueuedMessageEditResult, SessionEntriesPage, SessionHistoryIndex, SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
 import { RunStore } from '../../src/main/run-store'
 import { SessionListCache } from '../../src/main/agent/session-list-cache'
 import { PendingRequestStore } from '../../src/main/agent/pending-requests'
@@ -28,6 +28,7 @@ interface BridgeHarness {
   removeQueuedMessage(request: QueuedMessageEditRequest, ownerId: number): Promise<void>
   editQueuedMessage(request: QueuedMessageEditRequest, ownerId: number): QueuedMessageEditResult
   dispatchNextLocalFollowUp(backend: BackendRecord): void
+  projectedQueueSnapshot(backend: BackendRecord): QueuedMessagesSnapshot
   restoreQueuedRuns(backend: BackendRecord): void
   createRun(backend: BackendRecord, state: null, message: string, images: [], kind: 'follow-up', phase: 'queued'): RunOperation
   activeKey: string
@@ -253,6 +254,115 @@ describe.each(['sendQueuedMessage', 'removeQueuedMessage'] as const)('AgentBridg
     expect(h.getState).not.toHaveBeenCalled()
     expect(h.prompt).not.toHaveBeenCalled()
     expect(h.steer).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+})
+
+describe('AgentBridge bounded queue admission notices', () => {
+  it.each(['state', 'preparation'] as const)('projects only the failed real run after %s failure, without raw diagnostics or busy retries', async source => {
+    const h = await harness()
+    const first = h.addQueued('same'), second = h.addQueued('same')
+    const secret = 'Bearer private-token; <script>secret()</script>\n' + 'diagnostic'.repeat(30_000)
+    if (source === 'state') h.getState.mockRejectedValueOnce(new Error(secret))
+    else vi.spyOn(h.bridge as unknown as { prepareQueuedRunForDispatch(...args: unknown[]): Promise<void> },
+      'prepareQueuedRunForDispatch').mockRejectedValueOnce(new Error(secret))
+    h.bridge.dispatchNextLocalFollowUp(h.backend)
+    await h.backend.localQueueDispatchPromise
+    const pushed = h.wireSend.mock.calls.map(call => call[1]).filter(event => event?.type === 'queue_update').at(-1)
+    const snapshot = h.bridge.projectedQueueSnapshot(h.backend)
+    const errors = [{ runId: first.id, code: 'admission-failed' }]
+    expect(snapshot).toMatchObject({ followUp: ['same', 'same'], followUpRunIds: [first.id, second.id], admissionErrors: errors,
+      queueScope: { cwd: first.cwd, backendId: h.backend.liveState?.backendId } })
+    expect(pushed.admissionErrors).toEqual(errors)
+    expect(JSON.stringify(snapshot)).not.toContain('private-token')
+    expect(JSON.stringify(pushed)).not.toContain('diagnostic')
+    expect(h.runStore.get(first.id)?.error).toBe(secret)
+    expect((await h.bridge.getSessionInfo())?.queuedMessages?.admissionErrors).toEqual(errors)
+    h.bridge.dispatchNextLocalFollowUp(h.backend)
+    await dispatchGap()
+    expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.steer).not.toHaveBeenCalled()
+    expect(h.getState).toHaveBeenCalledTimes(2) // one explicit STATE read, no dispatcher retry
+    await h.runStore.flush()
+  })
+
+  it.each(['edit', 'remove', 'prompt', 'steer'] as const)('retires the exact notice and ledger error after %s', async action => {
+    const h = await harness()
+    const run = h.addQueued('same'), other = h.addQueued('same')
+    h.getState.mockRejectedValueOnce(new Error('private state failure'))
+    h.bridge.dispatchNextLocalFollowUp(h.backend)
+    await h.backend.localQueueDispatchPromise
+    expect(h.bridge.projectedQueueSnapshot(h.backend).admissionErrors).toHaveLength(1)
+    const request = { runId: run.id, cwd: run.cwd, sessionFile: run.sessionPath }
+    if (action === 'edit') h.bridge.editQueuedMessage(request, 7)
+    else if (action === 'remove') await h.bridge.removeQueuedMessage(request, 7)
+    else {
+      if (action === 'steer') { h.state.isStreaming = true; h.backend.busy = true }
+      await h.bridge.sendQueuedMessage(request, 7)
+    }
+    expect(h.bridge.projectedQueueSnapshot(h.backend).admissionErrors).toEqual([])
+    expect(h.runStore.get(run.id)?.error).toBeUndefined()
+    expect(h.backend.localFollowUps?.map(item => item.runId)).toEqual([other.id])
+    expect(h.runStore.get(other.id)?.state).toBe('queued')
+    expect(h.prompt).toHaveBeenCalledTimes(action === 'prompt' ? 1 : 0)
+    expect(h.steer).toHaveBeenCalledTimes(action === 'steer' ? 1 : 0)
+    await h.runStore.flush()
+  })
+
+  it.each(['cwd', 'session', 'client'] as const)('retires a notice after its %s identity changes, including A-B-A', async field => {
+    const h = await harness()
+    const run = h.addQueued('same')
+    h.getState.mockRejectedValueOnce(new Error('private'))
+    h.bridge.dispatchNextLocalFollowUp(h.backend)
+    await h.backend.localQueueDispatchPromise
+    expect(h.bridge.projectedQueueSnapshot(h.backend).admissionErrors).toHaveLength(1)
+    const previousClient = h.backend.client
+    if (field === 'client') h.backend.client = { ...previousClient } as BackendRecord['client']
+    else h.runStore.update(run.id, current => {
+      if (field === 'cwd') current.cwd = '/other'
+      else current.sessionPath = '/other/session.jsonl'
+    })
+    expect(h.bridge.projectedQueueSnapshot(h.backend).admissionErrors).toEqual([])
+    h.backend.client = previousClient
+    h.runStore.update(run.id, current => { current.cwd = run.cwd; current.sessionPath = run.sessionPath })
+    expect(h.bridge.projectedQueueSnapshot(h.backend).admissionErrors).toEqual([])
+    expect(h.prompt).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
+  it.each(['backend', 'client', 'generation', 'run'] as const)('rejects a late state failure after a display timeout and %s replacement', async replacement => {
+    const h = await harness()
+    const run = h.addQueued('same')
+    const receipt = deferred<typeof h.state>()
+    h.getState.mockReturnValueOnce(receipt.promise)
+    h.bridge.dispatchNextLocalFollowUp(h.backend)
+    const dispatch = h.backend.localQueueDispatchPromise!
+    vi.useFakeTimers()
+    const display = Promise.race([dispatch.then(() => 'settled'), new Promise<string>(resolve => setTimeout(() => resolve('timeout'), 100))])
+    await vi.advanceTimersByTimeAsync(100)
+    expect(await display).toBe('timeout')
+    expect(h.backend.localQueueDispatchPromise).toBe(dispatch)
+    if (replacement === 'backend') h.pool.set(h.backend.key, { ...h.backend })
+    else if (replacement === 'client') h.backend.client = { ...h.backend.client } as BackendRecord['client']
+    else if (replacement === 'generation') h.emit('compaction_start')
+    else h.runStore.update(run.id, current => { current.state = 'discarded' })
+    receipt.reject(new Error('private late diagnostic'))
+    await dispatch
+    expect(h.bridge.projectedQueueSnapshot(h.backend).admissionErrors).toEqual([])
+    expect(h.runStore.get(run.id)?.error).toBeUndefined()
+    expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.steer).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
+  it('leaves persisted queue errors retired when restoring unsent runs', async () => {
+    const h = await harness()
+    const run = h.addQueued('unsent')
+    h.runStore.update(run.id, current => { current.error = 'old process diagnostic' })
+    h.backend.localFollowUps = []
+    h.bridge.restoreQueuedRuns(h.backend)
+    expect(h.bridge.projectedQueueSnapshot(h.backend)).toMatchObject({ followUpRunIds: [run.id], admissionErrors: [] })
+    expect(h.prompt).not.toHaveBeenCalled()
     await h.runStore.flush()
   })
 })

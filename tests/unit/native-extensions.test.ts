@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { Type } from 'typebox'
+import { runToolCall } from '@earendil-works/pi-agent-core'
 import { DefaultResourceLoader, SettingsManager, type ExtensionAPI, type ExtensionToolContext, type ToolDefinition, type ToolResultEvent, type ToolResultEventResult, type ResourceLoader } from '@earendil-works/pi-coding-agent'
 import { createPionNativeExtensions, createPionNativeLoadoutBoundary, NATIVE_SCRIPT_DEADLINE_MS, NATIVE_SCRIPT_MAX_MODEL_CALLS } from '../../src/main/agent/native-extensions'
 import { loadAgentCapabilities } from '../../src/main/agent/capabilities'
@@ -189,6 +190,12 @@ async function guardedTool(execute: ToolDefinition['execute']) {
   return resourceLoader.getExtensions().extensions.find((entry) => entry.path === 'builtin:codemode')!.tools.get('codemode')!.definition
 }
 const contextWith = (registry: unknown) => ({ modelRegistry: registry }) as ExtensionToolContext
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
 
 it('budgets mixed classifier/image calls per script before dispatch and leaves global registry untouched', async () => {
   const usage = { cost: { total: 1 } }
@@ -335,27 +342,42 @@ it('scopes frozen own registry methods without changing source descriptors or by
   expect(Object.getOwnPropertyDescriptor(context, 'modelRegistry')).toMatchObject({ value: registry, writable: false, configurable: false })
 })
 
-it('has a hard host deadline regardless of script timeout options, while late calls remain blocked', async () => {
+it('enforces the host deadline but keeps a hung SDK execution pending until its late usage result', async () => {
   vi.useFakeTimers()
   try {
-    const registry = { generateImages: vi.fn((_model: unknown, _context: unknown, _options: { signal: AbortSignal }) => new Promise(() => {})) }
+    const modelResult = deferred<{ usage: NonNullable<ToolResultEvent['usage']> }>()
+    const usage = eventWith('codemode', []).usage!
+    const registry = { generateImages: vi.fn((_model: unknown, _context: unknown, _options: { signal: AbortSignal }) => modelResult.promise) }
     let scoped!: ExtensionToolContext
     let signal!: AbortSignal
-    const tool = await guardedTool(async (_id, _params, scopeSignal, _update, ctx) => {
+    const onUpdate = vi.fn()
+    const tool = await guardedTool(async (_id, _params, scopeSignal, update, ctx) => {
       scoped = ctx
       signal = scopeSignal!
-      await ctx.modelRegistry.generateImages({} as never, {} as never, { signal: new AbortController().signal })
-      return { content: [], details: undefined }
+      const result = await ctx.modelRegistry.generateImages({} as never, {} as never, { signal: new AbortController().signal })
+      update?.({ content: [{ type: 'text', text: 'late update' }], details: undefined })
+      return { content: [{ type: 'text', text: 'late output' }], details: { summary: 'late details' },
+        structuredContent: { late: true }, usage: result.usage }
     })
-    const running = tool.execute('run', { code: '// @options: {"timeout_ms":2147483647}' }, undefined, undefined, contextWith(registry))
-    const rejected = expect(running).rejects.toThrow('five-minute')
-    await vi.advanceTimersByTimeAsync(NATIVE_SCRIPT_DEADLINE_MS)
-    await rejected
+    const running = tool.execute('run', { code: '// @options: {"timeout_ms":2147483647}' }, undefined, onUpdate, contextWith(registry))
+    const settled = vi.fn()
+    void running.then(settled, settled)
+    await vi.advanceTimersByTimeAsync(NATIVE_SCRIPT_DEADLINE_MS * 2)
+    expect(settled).not.toHaveBeenCalled()
     expect(signal.aborted).toBe(true)
+    expect(signal.reason.message).toContain('five-minute')
     expect(registry.generateImages.mock.calls[0][2].signal.aborted).toBe(true)
     expect(() => scoped.modelRegistry.generateImages({} as never, {} as never)).toThrow('cancelled')
     expect(registry.generateImages).toHaveBeenCalledTimes(1)
-    // Settling the host wait does not assert the pending provider Promise stopped or avoided cost.
+    modelResult.resolve({ usage })
+    const result = await running
+    expect(result).toMatchObject({ isError: true, details: undefined })
+    expect(result.usage).toBe(usage)
+    expect(JSON.stringify(result)).not.toContain('late')
+    expect(onUpdate).not.toHaveBeenCalled()
+    expect(settled).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+    // The original execute returning is a software boundary, not a provider-stop receipt.
   } finally { vi.useRealTimers() }
 })
 
@@ -375,9 +397,10 @@ it('combines parent cancellation and prevents dispatch before and after cancella
   expect(registry.classify).not.toHaveBeenCalled()
 })
 
-it('propagates active parent abort to a dispatched model request without retry or paid fallback', async () => {
+it('propagates parent abort while retaining actual pending and never extracts usage from a thrown error', async () => {
   const parent = new AbortController()
-  const registry = { classify: vi.fn((_model: unknown, _context: unknown, _options: { signal: AbortSignal }) => new Promise(() => {})) }
+  const modelResult = deferred<never>()
+  const registry = { classify: vi.fn((_model: unknown, _context: unknown, _options: { signal: AbortSignal }) => modelResult.promise) }
   let scoped!: ExtensionToolContext
   const tool = await guardedTool(async (_id, _params, _signal, _update, ctx) => {
     scoped = ctx
@@ -385,12 +408,150 @@ it('propagates active parent abort to a dispatched model request without retry o
     return { content: [], details: undefined }
   })
   const running = tool.execute('run', {}, parent.signal, undefined, contextWith(registry))
-  const rejected = expect(running).rejects.toThrow('stop request')
+  const settled = vi.fn()
+  void running.then(settled, settled)
   parent.abort(new Error('stop request'))
-  await rejected
+  await Promise.resolve()
+  expect(settled).not.toHaveBeenCalled()
   expect(registry.classify.mock.calls[0][2].signal.aborted).toBe(true)
   expect(() => scoped.modelRegistry.classify({} as never, {} as never)).toThrow('cancelled')
   expect(registry.classify).toHaveBeenCalledTimes(1)
+  const error = Object.assign(new Error('SDK execution failed'), { usage: eventWith('codemode', []).usage })
+  modelResult.reject(error)
+  await expect(running).rejects.toBe(error)
+  expect(settled).toHaveBeenCalledTimes(1)
+})
+
+it('passes a cancelled SDK result through the actual runToolCall pipeline with one usage consumption', async () => {
+  const parent = new AbortController()
+  const entered = deferred<void>()
+  const completed = deferred<Awaited<ReturnType<ToolDefinition['execute']>>>()
+  const usage = eventWith('codemode', []).usage!
+  const tool = await guardedTool(async () => { entered.resolve(); return completed.promise })
+  const call = { type: 'toolCall' as const, id: 'outer', name: 'codemode', arguments: {} }
+  const consume = vi.fn(async ({ result }: { result: Awaited<ReturnType<ToolDefinition['execute']>> }) => {
+    expect(result.usage).toBe(usage)
+    return undefined
+  })
+  const context = { messages: [], tools: [{ ...tool, execute: (id: string, args: unknown, signal?: AbortSignal) =>
+    tool.execute(id, args, signal, undefined, contextWith({})) }] }
+  const running = runToolCall(call, {
+    tools: context.tools, context, signal: parent.signal, afterToolCall: consume,
+    assistantMessage: { role: 'assistant', content: [call], api: 'anthropic-messages', provider: 'fixture', model: 'fixture',
+      usage, stopReason: 'toolUse', timestamp: 1 }
+  })
+  await entered.promise
+  parent.abort(new Error('stop request'))
+  await Promise.resolve()
+  expect(consume).not.toHaveBeenCalled()
+  completed.resolve({ content: [{ type: 'text', text: 'late SDK output' }], details: { summary: 'late SDK details' },
+    structuredContent: { late: true }, usage, isError: true })
+  const outcome = await running
+  expect(outcome.isError).toBe(true)
+  expect(outcome.result.usage).toBe(usage)
+  expect(JSON.stringify(outcome.result)).not.toContain('late SDK')
+  expect(outcome.result).not.toHaveProperty('structuredContent')
+  expect(context.messages).toEqual([])
+  expect(consume).toHaveBeenCalledTimes(1)
+  await running
+  expect(consume).toHaveBeenCalledTimes(1)
+})
+
+it('keeps unknown usage explicit when real SDK sandbox abort returns before a fixture model settles', async () => {
+  const sdk = await vi.importActual<typeof import('@earendil-works/pi-coding-agent')>('@earendil-works/pi-coding-agent')
+  mocks.codemode.mockImplementation(sdk.createCodemodeExtension)
+  const registerTool = vi.fn<(tool: ToolDefinition) => void>()
+  const entry = createPionNativeExtensions().find((extension) => typeof extension !== 'function' && extension.name === 'codemode')!
+  if (typeof entry !== 'function') await entry.factory({ registerTool, on: () => () => {}, getAllTools: () => [] } as unknown as ExtensionAPI)
+  const tool = registerTool.mock.calls[0][0]
+  const usage = eventWith('codemode', []).usage!
+  const entered = deferred<void>()
+  const completed = deferred<{ provider: string; model: string; answers: {}; usage: typeof usage; stopReason: 'aborted' }>()
+  const modelSettled = vi.fn()
+  void completed.promise.then(modelSettled)
+  const registry = {
+    getModelOfType: vi.fn(() => ({ type: 'classifier', provider: 'fixture', id: 'fixture', name: 'fixture', api: 'fixture', input: ['text'] })),
+    classify: vi.fn((_model: unknown, _context: unknown, _options: { signal: AbortSignal }) => { entered.resolve(); return completed.promise })
+  }
+  const toolContext = { ...contextWith(registry), tools: [], sessionManager: { getBranch: () => [] } } as unknown as ExtensionToolContext
+  const parent = new AbortController()
+  const consume = vi.fn()
+  const onUpdate = vi.fn()
+  const call = { type: 'toolCall' as const, id: 'outer', name: 'codemode', arguments: { code: `
+    await models.classify({provider: 'fixture', id: 'fixture'}, {
+      state: {}, questions: { ok: { type: 'bool', instructions: 'fixture', criteria: { true: 'yes', false: 'no' } } }
+    });
+    text('late fixture body');
+  ` } }
+  const context = { messages: [], tools: [{ ...tool, execute: (id: string, args: unknown, signal?: AbortSignal) =>
+    tool.execute(id, args, signal, onUpdate, toolContext) }] }
+  const running = runToolCall(call, {
+    tools: context.tools, context, signal: parent.signal, afterToolCall: consume,
+    assistantMessage: { role: 'assistant', content: [call], api: 'anthropic-messages', provider: 'fixture', model: 'fixture',
+      usage, stopReason: 'toolUse', timestamp: 1 }
+  })
+  await entered.promise
+  try {
+    parent.abort(new Error('fixture cancellation'))
+    const outcome = await running
+    expect(registry.classify.mock.calls[0][2].signal.aborted).toBe(true)
+    expect(modelSettled).not.toHaveBeenCalled() // Actual model/auth work is not represented by sandbox settlement.
+    expect(outcome.isError).toBe(true)
+    expect(outcome.result).not.toHaveProperty('usage')
+    expect(outcome.result).not.toHaveProperty('structuredContent')
+    expect(outcome.result.details).toBeUndefined()
+    expect(JSON.stringify(outcome.result.content)).toContain('用量未知')
+    expect(consume).toHaveBeenCalledTimes(1)
+    const published = JSON.stringify(outcome)
+    const updates = onUpdate.mock.calls.length
+    completed.resolve({ provider: 'fixture', model: 'fixture', answers: {}, usage, stopReason: 'aborted' })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(modelSettled).toHaveBeenCalledTimes(1)
+    expect(onUpdate).toHaveBeenCalledTimes(updates)
+    expect(consume).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(outcome)).toBe(published)
+    expect(JSON.stringify(outcome.result)).not.toContain('late fixture body')
+  } finally {
+    parent.abort()
+    completed.resolve({ provider: 'fixture', model: 'fixture', answers: {}, usage, stopReason: 'aborted' })
+    await running
+  }
+})
+
+it.each(['error', 'aborted'] as const)('preserves real SDK codemode usage for a %s result using only a fixture model registry', async (stopReason) => {
+  const sdk = await vi.importActual<typeof import('@earendil-works/pi-coding-agent')>('@earendil-works/pi-coding-agent')
+  mocks.codemode.mockImplementation(sdk.createCodemodeExtension)
+  const registerTool = vi.fn<(tool: ToolDefinition) => void>()
+  const entry = createPionNativeExtensions().find((extension) => typeof extension !== 'function' && extension.name === 'codemode')!
+  if (typeof entry !== 'function') await entry.factory({ registerTool, on: () => () => {}, getAllTools: () => [] } as unknown as ExtensionAPI)
+  const tool = registerTool.mock.calls[0][0]
+  const usage = eventWith('codemode', []).usage!
+  const parent = new AbortController()
+  const registry = {
+    getModelOfType: vi.fn(() => ({ type: 'classifier', provider: 'fixture', id: 'fixture', name: 'fixture', api: 'fixture', input: ['text'] })),
+    classify: vi.fn(async () => ({ provider: 'fixture', model: 'fixture', answers: {}, usage, stopReason, errorMessage: 'fixture model result' }))
+  }
+  const context = { ...contextWith(registry), tools: [], sessionManager: { getBranch: () => [] } } as unknown as ExtensionToolContext
+  const result = await tool.execute('outer', { code: `
+    await models.classify({provider: 'fixture', id: 'fixture'}, {
+      state: {}, questions: { ok: { type: 'bool', instructions: 'fixture', criteria: { true: 'yes', false: 'no' } } }
+    });
+    throw new Error('fixture script failure');
+  ` }, parent.signal, (update) => {
+    const calls = (update.details as { calls?: { cost?: number }[] })?.calls
+    // The real executor has already collected this usage before publishing its call row.
+    if (stopReason === 'aborted' && calls?.some((call) => call.cost === usage.cost.total)) parent.abort(new Error('fixture parent abort'))
+  }, context)
+  expect(result.isError).toBe(true)
+  expect(result.usage).toBe(usage)
+  expect(registry.classify).toHaveBeenCalledTimes(1)
+  if (stopReason === 'aborted') {
+    expect(parent.signal.aborted).toBe(true)
+    expect(result.details).toBeUndefined()
+    expect(JSON.stringify(result.content)).not.toContain('fixture')
+  } else {
+    expect(JSON.stringify(result.content)).toContain('fixture script failure')
+  }
 })
 
 async function resultHandler(name: 'codemode' | 'mcp') {

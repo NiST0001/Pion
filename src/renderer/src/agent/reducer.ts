@@ -3,12 +3,13 @@
  */
 import type {
   LiveSessionState,
+  QueuedMessagesSnapshot,
   ToolResultPayload,
   WireEvent,
   WireEventInput,
   WireMessage
 } from '../../../shared/types'
-import { messageImages, messageText, messageThinking, messageToolCalls } from '../../../shared/types'
+import { messageImages, messageText, messageThinking, messageToolCalls, projectQueueAdmissionErrors } from '../../../shared/types'
 import { subagentBatchesEqual, type SubagentBatch } from '../../../shared/subagent-batches'
 import { taskSnapshotFromEntry, taskSnapshotFromResult } from '../../../shared/task-history'
 import { mergeTurnTiming, parseTurnTiming, PION_TURN_TIMING_TYPE, turnTimingFromEntry } from '../../../shared/conversation-timing'
@@ -49,6 +50,31 @@ function reconcileSessionProjection(incoming: AgentState['sessions'], previous: 
   const persistedIds = new Set(sessions.map((session) => session.id))
   const pending = previous.filter((session) => session.optimistic && !persistedIds.has(session.id))
   return orderSessions([...sessions, ...pending], previous)
+}
+
+function queueSnapshot(state: AgentState, input: Partial<QueuedMessagesSnapshot>, backendId?: string): QueuedMessagesSnapshot {
+  const scope = input.queueScope
+  const previous = state.queuedMessages.queueScope
+  const selectedPath = state.liveSessionScopeSelected ? state.liveSessionOwnerPath : state.session?.sessionFile
+  if (scope && (typeof scope.backendId !== 'string' || !scope.backendId || scope.backendId.length > 256
+    || !Number.isSafeInteger(scope.revision) || scope.revision < 0
+    || (backendId !== undefined && scope.backendId !== backendId)
+    || ((state.liveSessionScopeSelected || state.session) && scope.sessionPath !== selectedPath)
+    || !liveScopeMatches(state, scope)
+    || (previous?.backendId === scope.backendId && scope.revision <= previous.revision))) return state.queuedMessages
+  const steering = Array.isArray(input.steering) ? input.steering.filter((text): text is string => typeof text === 'string') : []
+  const followUp = Array.isArray(input.followUp) ? input.followUp.filter((text): text is string => typeof text === 'string') : []
+  const nativeFollowUpCount = typeof input.nativeFollowUpCount === 'number' && Number.isSafeInteger(input.nativeFollowUpCount)
+    ? Math.max(0, Math.min(followUp.length, input.nativeFollowUpCount)) : 0
+  const followUpRunIds = followUp.map((_, index) => {
+    const id = input.followUpRunIds?.[index]
+    return index >= nativeFollowUpCount && followUp.length === input.followUp?.length
+      && typeof id === 'string' && id.length > 0 && id.length <= 256 ? id : null
+  })
+  return { steering, followUp, nativeFollowUpCount, followUpRunIds,
+    ...(scope || input.admissionErrors !== undefined
+      ? { admissionErrors: scope ? projectQueueAdmissionErrors(input.admissionErrors, followUpRunIds) : [] } : {}),
+    ...((scope ?? previous) ? { queueScope: scope ?? previous } : {}) }
 }
 
 export function reducer(state: AgentState, action: Action): AgentState {
@@ -112,25 +138,23 @@ export function reducer(state: AgentState, action: Action): AgentState {
       const compacting = preserveLifecycle ? state.compacting : compactionEventState ?? incoming?.isCompacting ?? false
       const busy = preserveLifecycle ? state.busy : Boolean(incoming?.isStreaming || compacting)
       const projected = projectable ? applyLiveSnapshot(state, live, busy) : state
-      const queue = !older && incoming?.queuedMessages
+      // Queue receipts have their own clock; an older root display snapshot
+      // can still carry the latest local admission result.
+      const queue = incoming?.queuedMessages && (!older || incoming.queuedMessages.queueScope)
         ? incoming.queuedMessages : sameSession ? projected.queuedMessages
           : { steering: [], followUp: [], nativeFollowUpCount: 0 }
+      const snapshot = queueSnapshot({ ...projected, session: incoming }, queue, live?.backendId)
+      const { admissionErrors: _retiredErrors, ...withoutErrors } = snapshot
       return {
         ...projected,
         session: incoming,
-        queuedMessages: {
-          steering: queue.steering,
-          followUp: queue.followUp,
-          nativeFollowUpCount: queue.nativeFollowUpCount,
-          ...(queue.followUpRunIds ? { followUpRunIds: queue.followUpRunIds } : {})
-        },
-        queued: !older && incoming?.queuedMessages
-          ? { steering: incoming.queuedMessages.steering.length, followUp: incoming.queuedMessages.followUp.length }
-          : sameSession ? projected.queued : { steering: 0, followUp: 0 },
+        queuedMessages: !older && !incoming?.queuedMessages ? withoutErrors : snapshot,
+        queued: { steering: snapshot.steering.length, followUp: snapshot.followUp.length },
         busy,
         compacting,
         liveSessionLifecycleRevision: projectable ? live.revision : state.liveSessionLifecycleRevision,
-        liveSessionBackendHistory: projectable ? rememberLiveBackend(state, live) : state.liveSessionBackendHistory,
+        liveSessionBackendHistory: projectable ? rememberLiveBackend(state, live)
+          : snapshot.queueScope ? rememberLiveBackend(state, snapshot.queueScope) : state.liveSessionBackendHistory,
         compactionEventState,
         yolo: incoming?.yolo ?? false
       }
@@ -435,8 +459,10 @@ export function reducer(state: AgentState, action: Action): AgentState {
       }
     case 'event': {
       const live = action.event._pionLive
-      if (live && (!liveScopeMatches(state, live)
-        || (live.backendId === state.liveSessionBackendId && live.revision <= (state.liveSessionRevision ?? -1)))) return state
+      if (live && !liveScopeMatches(state, live)) return state
+      if (live && live.backendId === state.liveSessionBackendId && live.revision <= (state.liveSessionRevision ?? -1)) {
+        return action.event.type === 'queue_update' && action.event.queueScope ? reduceEvent(state, action.event) : state
+      }
       const base = live ? {
         ...state,
         timeline: state.liveSessionBackendId && state.liveSessionBackendId !== live.backendId
@@ -1188,25 +1214,13 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
     }
 
     case 'queue_update': {
-      const steering = Array.isArray(event.steering)
-        ? event.steering.filter((message): message is string => typeof message === 'string')
-        : []
-      const followUp = Array.isArray(event.followUp)
-        ? event.followUp.filter((message): message is string => typeof message === 'string')
-        : []
-      const nativeFollowUpCount = typeof event.nativeFollowUpCount === 'number'
-        ? event.nativeFollowUpCount
-        : 0
-      return {
-        ...state,
-        queued: { steering: steering.length, followUp: followUp.length },
-        queuedMessages: { steering, followUp, nativeFollowUpCount,
-          followUpRunIds: followUp.map((_, index) => {
-            const id = event.followUpRunIds?.[index]
-            return index >= nativeFollowUpCount && followUp.length === event.followUp.length
-              && typeof id === 'string' && id.length > 0 ? id : null
-          }) }
-      }
+      const snapshot = queueSnapshot(state, event, input._pionLive?.backendId)
+      // Rejection preserves the queue, including its older backend receipt;
+      // that retained receipt must not retire the newly accepted root owner.
+      if (snapshot === state.queuedMessages) return state
+      return { ...state, queued: { steering: snapshot.steering.length, followUp: snapshot.followUp.length },
+        queuedMessages: snapshot,
+        liveSessionBackendHistory: snapshot.queueScope ? rememberLiveBackend(state, snapshot.queueScope) : state.liveSessionBackendHistory }
     }
 
     case 'compaction_end': {

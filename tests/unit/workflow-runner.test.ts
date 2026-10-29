@@ -43,12 +43,12 @@ const rpc = vi.hoisted(() => {
     beforeSubscribe = (): void => {}
     static dispatch: (client: FakeRpc) => Promise<'started' | 'queued' | 'handled'> = async () => 'handled'
     listeners = new Set<(event: { type: string; [key: string]: unknown }) => void>()
-    start = vi.fn(async (): Promise<void> => undefined)
+    start = vi.fn(async (): Promise<void> => { this.process = this.child })
     getState = vi.fn(async () => ({ sessionFile: '/fake/session.jsonl' }))
     getStderr = vi.fn(() => 'worker stderr diagnostic')
     child = new FakeProcess()
-    process: FakeProcess | null = this.child
-    stop = vi.fn(async (): Promise<void> => { this.child.close(); this.process = null })
+    process: FakeProcess | null = null
+    stop = vi.fn(async (): Promise<void> => { this.process?.close(); this.process = null })
     abort = vi.fn(async (): Promise<void> => undefined)
     prompt = vi.fn(async (_message: string) => FakeRpc.dispatch(this))
     waitForIdle = vi.fn(async () => { throw new Error('late waiter must not be used') })
@@ -245,7 +245,10 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     const prepare = vi.fn(async () => '/fake/permission-extension.ts')
     if (stage === 'permission') prepare.mockImplementationOnce(() => preparation.promise.then(() => '/fake/permission-extension.ts'))
     rpc.FakeRpc.configure = (client) => {
-      if (stage === 'start') client.start.mockImplementationOnce(() => preparation.promise)
+      if (stage === 'start') client.start.mockImplementationOnce(() => {
+        client.process = client.child
+        return preparation.promise
+      })
       if (stage === 'getState') client.getState.mockImplementationOnce(() => preparation.promise.then(() => ({ sessionFile: '/fake/late.jsonl' })))
     }
     const worker = new PiWorkflowWorkerRunner(prepare)
@@ -376,7 +379,10 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     const worker = runner()
     let cancellation: Promise<void> | undefined
     rpc.FakeRpc.configure = (client) => {
-      client.start.mockImplementationOnce(async () => { cancellation = worker.cancel(input.id) })
+      client.start.mockImplementationOnce(async () => {
+        client.process = client.child
+        cancellation = worker.cancel(input.id)
+      })
     }
     await expect(worker.run(input, vi.fn())).rejects.toMatchObject({ name: 'AbortError' })
     await cancellation
@@ -410,7 +416,9 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
 
   it('handles late startup rejection after timeout', async () => {
     const startup = deferred<void>()
-    rpc.FakeRpc.configure = (client) => { client.start.mockImplementationOnce(() => startup.promise) }
+    rpc.FakeRpc.configure = (client) => {
+      client.start.mockImplementationOnce(() => { client.process = client.child; return startup.promise })
+    }
     const result = runner().run(input, vi.fn())
     const rejected = expect(result).rejects.toThrow('Timeout waiting for Agent completion')
     await flush()
@@ -528,13 +536,24 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     cleaned(client)
   })
 
-  it('does not report success when RPC stop rejects', async () => {
+  it('retains failed SDK stop isolation after late exit/close and shares the same rejection on cancel', async () => {
     const cleanupError = new Error('stop unavailable')
     rpc.FakeRpc.configure = (client) => { client.stop.mockRejectedValueOnce(cleanupError) }
-    await expect(runner().run(input, vi.fn())).rejects.toMatchObject({
+    const worker = runner()
+    await expect(worker.run(input, vi.fn())).rejects.toMatchObject({
       message: 'Agent 收尾未确认：stop unavailable', cause: cleanupError, cleanupError
     })
-    cleaned(rpc.FakeRpc.instances[0])
+    const client = rpc.FakeRpc.instances[0]
+    client.child.close()
+    await flush()
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
+    await expect(worker.run(input, vi.fn())).rejects.toThrow(/仍被保留/)
+    await expect(worker.run({ ...input, id: 'new-id' }, vi.fn())).rejects.toThrow(/尚未确认/)
+    await expect(worker.cancel(input.id)).rejects.toBe(cleanupError)
+    expect(client.child.listeners.get('exit')?.size ?? 0).toBe(0)
+    expect(client.child.listeners.get('close')?.size ?? 0).toBe(0)
+    expect(client.child.listeners.get('error')?.size ?? 0).toBe(0)
+    cleaned(client)
   })
 
   it('retains primary provider diagnostics and cause when RPC stop also rejects', async () => {
@@ -603,7 +622,10 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     let next = 0
     rpc.FakeRpc.configure = (client) => {
       const pending = preparation[next++]
-      if (stage === 'start') client.start.mockImplementationOnce(() => pending.promise)
+      if (stage === 'start') client.start.mockImplementationOnce(() => {
+        client.process = client.child
+        return pending.promise
+      })
       if (stage === 'getState') client.getState.mockImplementationOnce(() => pending.promise.then(() => ({ sessionFile: '/fake/late.jsonl' })))
     }
     const worker = new PiWorkflowWorkerRunner(prepare)

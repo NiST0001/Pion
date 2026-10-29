@@ -104,7 +104,8 @@ import { ensureNativeTaskExtension } from './task-planning'
 import { ensureNativePlanModeExtension } from './plan-mode'
 import { BackendPool } from './backend-pool'
 import { SessionListCache } from './session-list-cache'
-import { readSessionTokenTotal } from './session-token-total'
+import { SessionTokenCache } from './session-token-cache'
+import { SessionDiscovery } from './session-discovery'
 import { revertSessionMessage } from './message-revert'
 import { stopForHistory } from './stop-for-history'
 import { stopWithProcessExit } from '../process-exit'
@@ -318,6 +319,8 @@ export class AgentBridge {
   private readonly yoloSessions = new Set<string>()
   private readonly sessionManagers = new Map<string, SessionManager>()
   private sessionListCache?: SessionListCache
+  private sessionTokenCache?: SessionTokenCache
+  private sessionDiscovery?: SessionDiscovery
   private sessionListRevision = 0
   private sessionListWindowEpoch = {}
   private readonly sessionManagerSignatures = new Map<string, string>()
@@ -336,6 +339,8 @@ export class AgentBridge {
   /** Event generations are backend-local: RPC responses have no run/event correlation ID. */
   private dispatchLifecycles?: WeakMap<BackendRecord, { generation: number; token?: symbol }>
   private steeringMarkers?: WeakMap<BackendRecord, Array<{ token: symbol; message: string }>>
+  /** Ephemeral admission receipts; persisted raw run errors never restore queue notices. */
+  private queueAdmissionErrors?: WeakMap<BackendRecord, Map<string, { client: RpcClient; cwd: string; sessionPath?: string }>>
   private questionWaitStages?: WeakMap<BackendRecord, QuestionWaitMetadata & { scope: PendingBackendScope }>
   /** UI deadlines stop waiting, not the underlying RPC; retain its slot until settlement. */
   private sessionInfoQueries?: WeakMap<BackendRecord, BackendSessionInfoQuery>
@@ -2743,7 +2748,7 @@ export class AgentBridge {
         backend.busy = true
         stopAttempted = true
         this.markSubagentBackendGone(backend, false)
-        await stopForHistory(backend.client)
+        await this.stopHistoryWriter(backend)
         stopped = true
         assertOwner()
         this.clearBackendToolPermissionRequests(backend.key)
@@ -2854,17 +2859,36 @@ export class AgentBridge {
     })
   }
 
+  private rememberQueueAdmissionError(backend: BackendRecord, runId: string): void {
+    const run = this.runStore.get(runId)
+    if (!this.backendStillOwned(backend) || !run || run.state !== 'queued' || this.hasRunDispatchEvidence(run)
+      || run.cwd !== backend.cwd || run.sessionPath !== backend.sessionPath) return
+    this.queueAdmissionErrors ??= new WeakMap()
+    const errors = this.queueAdmissionErrors.get(backend) ?? new Map()
+    errors.set(runId, { client: backend.client, cwd: backend.cwd, sessionPath: backend.sessionPath })
+    this.queueAdmissionErrors.set(backend, errors)
+  }
+
   private projectedQueueSnapshot(backend: BackendRecord): import('../../shared/types').QueuedMessagesSnapshot {
+    const runIds = (backend.localFollowUps ?? []).map((item) => {
+      const run = this.runStore.get(item.runId)
+      return run?.state === 'queued' && run.cwd === backend.cwd && run.sessionPath === backend.sessionPath
+        && !this.hasRunDispatchEvidence(run) ? item.runId : null
+    })
+    const localIds = new Set(runIds)
+    const errors = this.queueAdmissionErrors?.get(backend)
+    for (const [runId, receipt] of errors ?? []) {
+      if (!localIds.has(runId) || receipt.client !== backend.client || receipt.cwd !== backend.cwd
+        || receipt.sessionPath !== backend.sessionPath) errors?.delete(runId)
+    }
     const projection = projectQueueSnapshot(
       backend.rawQueue ?? { steering: [], followUp: [] },
       backend.directSteering ?? [],
       (backend.localFollowUps ?? []).map((item) => (
         item.text || (item.images.length > 0 ? '（图像消息）' : '')
       )),
-      (backend.localFollowUps ?? []).map((item) => {
-        const run = this.runStore.get(item.runId)
-        return run?.state === 'queued' && !this.hasRunDispatchEvidence(run) ? item.runId : null
-      })
+      runIds,
+      [...(errors?.keys() ?? [])].map(runId => ({ runId, code: 'admission-failed' }))
     )
     backend.directSteering = projection.directSteering
     // Queue events can consume a marker before its RPC response arrives.
@@ -2882,6 +2906,9 @@ export class AgentBridge {
     return {
       ...projection.queue,
       nativeFollowUpCount: projection.queue.nativeFollowUpCount ?? 0,
+      admissionErrors: projection.queue.admissionErrors ?? [],
+      queueScope: { ...(backend.liveState ??= new LiveSessionProjection()).metadata(backend.cwd, backend.sessionPath),
+        revision: backend.queueRevision = (backend.queueRevision ?? 0) + 1 }
     }
   }
 
@@ -2992,6 +3019,7 @@ export class AgentBridge {
               run.error = stateError instanceof Error ? stateError.message : '读取 Agent 状态失败，排队消息保持未发送'
             }
           })
+          this.rememberQueueAdmissionError(backend, item.runId)
         }
         backend.localQueueDispatching = false
         this.pushQueueSnapshot(backend)
@@ -3039,6 +3067,7 @@ export class AgentBridge {
           run.state = 'queued'
           run.error = error instanceof Error ? error.message : String(error)
         })
+        this.rememberQueueAdmissionError(backend, item.runId)
         this.pushQueueSnapshot(backend)
       }
     })().finally(() => {
@@ -3086,6 +3115,12 @@ export class AgentBridge {
     ) {
       if (lease.ownsReservation()) {
         localFollowUps.splice(index, 0, item)
+        if (!state && lease.owns()) {
+          this.runStore.update(item.runId, run => {
+            if (run.state === 'queued' && !this.hasRunDispatchEvidence(run)) run.error = '读取 Agent 状态失败，排队消息保持未发送'
+          })
+          this.rememberQueueAdmissionError(backend, item.runId)
+        }
         this.pushQueueSnapshot(backend)
       }
       throw new Error('当前 Agent 正在切换运行状态，请稍后再次发送该消息')
@@ -3099,6 +3134,7 @@ export class AgentBridge {
         run.state = 'running'
         run.dispatchedAt ??= Date.now()
         run.agentStartedAt ??= Date.now()
+        run.error = undefined
       })
       const marker = this.markDirectSteering(backend, item.text)
       const activeRunId = backend.activeRunId
@@ -3160,6 +3196,7 @@ export class AgentBridge {
         run.state = 'queued'
         run.error = error instanceof Error ? error.message : String(error)
       })
+      if (lease.owns()) this.rememberQueueAdmissionError(backend, item.runId)
       this.pushQueueSnapshot(backend)
       throw error
     }
@@ -3213,6 +3250,7 @@ export class AgentBridge {
     this.runStore.update(run.id, (current) => {
       current.state = 'discarded'
       current.stopReason = 'queue-edited'
+      current.error = undefined
       current.settledAt = Date.now()
     })
     items.splice(index, 1)
@@ -3230,6 +3268,7 @@ export class AgentBridge {
     backend.pendingRunIds = backend.pendingRunIds.filter(id => id !== run.id)
     this.runStore.update(run.id, current => {
       current.state = 'discarded'
+      current.error = undefined
       current.settledAt = Date.now()
     })
     this.pushQueueSnapshot(backend)
@@ -3823,6 +3862,17 @@ export class AgentBridge {
     return this.stopInFlight
   }
 
+  private stopHistoryWriter(backend: BackendRecord): Promise<void> {
+    const client = backend.client
+    if (backend.historyStop) {
+      if (backend.historyStop.client !== client) return Promise.reject(new Error('历史写入进程的所属 client 已改变'))
+      return backend.historyStop.promise
+    }
+    const promise = Promise.resolve().then(() => stopForHistory(client))
+    backend.historyStop = { client, promise }
+    return promise
+  }
+
   private async stopBackends(): Promise<void> {
     this.revokeComputerUseAgent()
     for (const request of this.pendingRequests.getToolPermissionRequests()) this.pendingRequests.getToolPermission(request.id)?.resolveApproval?.(false)
@@ -3847,12 +3897,14 @@ export class AgentBridge {
     this.activeKey = null
     this.activeCwd = undefined
     this.activeSessionPath = undefined
-    await Promise.all(backends.map(async ({ client, cwd, historyStopFailed }) => {
+    await Promise.all(backends.map(async (backend) => {
+      const { client, cwd, historyStopFailed, historyStop } = backend
       this.unconfirmedStoppedWorktreeCwds ??= new Set<string>()
       this.unconfirmedStoppedWorktreeCwds.add(resolve(cwd))
-      if (historyStopFailed) return // a null-handle retry cannot establish exit
+      if (historyStopFailed && !historyStop) return // a null-handle retry cannot establish exit
       try {
-        await client.stop()
+        if (historyStop) await historyStop.promise
+        else await client.stop()
       } catch {
         // the subprocess may already be gone; nothing to recover
       }
@@ -4443,7 +4495,7 @@ export class AgentBridge {
             throw new Error('旧Agent退出未确认，请重启Pion后再删除')
           }
           this.markSubagentBackendGone(backend, false)
-          await stopForHistory(backend.client)
+          await this.stopHistoryWriter(backend)
           this.markSubagentBackendGone(backend, true) // guarded non-null real writer barrier above
         } catch (error) {
           backend.historyStopFailed = true
@@ -4537,7 +4589,7 @@ export class AgentBridge {
       // Do not use a second SessionManager writer until this stronger barrier.
       stoppingWriter = true
       this.markSubagentBackendGone(backend, false)
-      await stopForHistory(backend.client)
+      await this.stopHistoryWriter(backend)
       writerStopped = true
       this.clearBackendToolPermissionRequests(backend.key)
       this.clearBackendExtensionUiRequests(backend.key)
@@ -5828,30 +5880,19 @@ export class AgentBridge {
 
   // ---------------------------------------------------------------- sessions list
 
+  private async loadSessionList(directory: string): Promise<SessionMeta[]> {
+    const sessions = await (this.sessionDiscovery ??= new SessionDiscovery(getAgentDir)).list(directory)
+    const sidebarRevision = this.sessionListRevision = (this.sessionListRevision ?? 0) + 1
+    return sessions.map(session => ({ ...session, sidebarRevision }))
+  }
+
   async listSessions(cwd?: string): Promise<SessionMeta[]> {
     const dir = cwd ?? this.status.cwd
     if (!dir) return []
-    this.sessionListCache ??= new SessionListCache(async (directory) => {
-      const infos = await SessionManager.list(directory)
-      const sidebarRevision = this.sessionListRevision = (this.sessionListRevision ?? 0) + 1
-      const dir = directory
-      // SDK session-directory encoding can collide (for example a-b vs a/b).
-      // The persisted header, not the queried bucket or project group, owns a
-      // session. Never relabel another worktree's history as this directory.
-      return infos.filter((info) => typeof info.cwd === 'string' && info.cwd.length > 0 && resolve(info.cwd) === resolve(dir)).map((info) => ({
-        projectCwd: resolve(dir),
-        path: info.path,
-        id: info.id,
-        name: info.name,
-        timestamp: info.created instanceof Date ? info.created.toISOString() : String(info.created),
-        mtime: info.modified instanceof Date ? info.modified.getTime() : Date.parse(String(info.modified)) || 0,
-        preview: (info.firstMessage ?? '').slice(0, 120),
-        messageCount: info.messageCount,
-        sidebarRevision
-      }))
-    }, undefined, undefined, undefined, {
+    this.sessionListCache ??= new SessionListCache(directory => this.loadSessionList(directory), undefined, undefined, undefined, {
       // Optional statistics must not delay the first usable session rows.
-      read: (session, directory) => readSessionTokenTotal(session.path, { id: session.id, cwd: directory }),
+      read: (session, directory) => (this.sessionTokenCache ??= new SessionTokenCache())
+        .read(session.path, { id: session.id, cwd: directory }),
       capturePublish: (directory) => {
         const win = this.win
         const epoch = this.sessionListWindowEpoch

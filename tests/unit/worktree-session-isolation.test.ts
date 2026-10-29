@@ -1,19 +1,43 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { join, resolve } from 'node:path'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { SessionManager, type SessionInfo } from '@earendil-works/pi-coding-agent'
+import { SessionManager } from '@earendil-works/pi-coding-agent'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
-import * as sessionTokens from '../../src/main/agent/session-token-total'
+import { SessionDiscovery, sessionDiscoveryDirectory } from '../../src/main/agent/session-discovery'
+import { SessionTokenCache } from '../../src/main/agent/session-token-cache'
 import { IPC_EVENTS } from '../../src/shared/ipc'
+import type { SessionMeta } from '../../src/shared/types'
 
-const info = (cwd: string, id: string): SessionInfo => ({
-  cwd, id, path: resolve(`/tmp/${id}.jsonl`), created: new Date(0), modified: new Date(1),
-  messageCount: 1, firstMessage: id, allMessagesText: id
+const info = (cwd: string, id: string): SessionMeta => ({
+  projectCwd: resolve(cwd), id, path: resolve(`/tmp/${id}.jsonl`), timestamp: new Date(0).toISOString(), mtime: 1,
+  messageCount: 1, preview: id
 })
-// Discovery tests exercise projection, not real asynchronous JSONL readers.
-beforeEach(() => { vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockResolvedValue(undefined) })
-afterEach(() => vi.restoreAllMocks())
+const roots: string[] = []
+// Token work has its own boundary; identity tests below retain real discovery.
+beforeEach(() => { vi.spyOn(SessionTokenCache.prototype, 'read').mockResolvedValue(undefined) })
+afterEach(async () => {
+  vi.restoreAllMocks()
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
+
+async function storage() {
+  const root = await mkdtemp(join(tmpdir(), 'pion-bridge-discovery-'))
+  roots.push(root)
+  return root
+}
+
+async function persisted(agentDir: string, cwd: string, id: string) {
+  const directory = sessionDiscoveryDirectory(cwd, agentDir)
+  const path = join(directory, `unrelated-filename-${id}.jsonl`)
+  await mkdir(directory, { recursive: true })
+  await writeFile(path, [
+    { type: 'session', version: 3, cwd, id, timestamp: '2026-01-01T00:00:00.000Z' },
+    { type: 'message', id: 'entry-1', parentId: null, timestamp: '2026-01-01T00:00:01.000Z',
+      message: { role: 'user', content: id, timestamp: Date.parse('2026-01-01T00:00:01.000Z') } }
+  ].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+  return path
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -21,34 +45,39 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-it('filters a colliding SDK bucket by persisted cwd instead of relabeling every session', async () => {
-  const root = resolve('/tmp/repository-feature')
-  const other = resolve('/tmp/repository/feature')
-  const list = vi.spyOn(SessionManager, 'list').mockResolvedValue([
-    info(root, 'own'), info(other, 'foreign'), info('', 'unknown')
-  ])
-  const bridge = Object.create(AgentBridge.prototype) as AgentBridge
-  expect((await bridge.listSessions(root)).map((session) => [session.id, session.projectCwd])).toEqual([['own', root]])
-  expect((await bridge.listSessions(other)).map((session) => [session.id, session.projectCwd])).toEqual([['foreign', other]])
-  expect(list).toHaveBeenCalledWith(root)
-  expect(list).toHaveBeenCalledWith(other)
+it('filters a real colliding SDK bucket by persisted header cwd without SDK factories or filename identity', async () => {
+  const agentDir = await storage()
+  const root = join(agentDir, 'repository-feature')
+  const other = join(agentDir, 'repository', 'feature')
+  expect(sessionDiscoveryDirectory(root, agentDir)).toBe(sessionDiscoveryDirectory(other, agentDir))
+  const own = await persisted(agentDir, root, 'own')
+  const foreign = await persisted(agentDir, other, 'foreign')
+  const list = vi.spyOn(SessionManager, 'list')
+  const open = vi.spyOn(SessionManager, 'open')
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), { sessionDiscovery: new SessionDiscovery(() => agentDir) })
+  expect((await bridge.listSessions(root)).map((session: SessionMeta) => [session.id, session.projectCwd, session.path])).toEqual([['own', root, own]])
+  expect((await bridge.listSessions(other)).map((session: SessionMeta) => [session.id, session.projectCwd, session.path])).toEqual([['foreign', other, foreign]])
+  expect(list).not.toHaveBeenCalled()
+  expect(open).not.toHaveBeenCalled()
 })
 
 it('keeps primary and linked worktree queries separate without moving their session files', async () => {
-  const root = resolve('/tmp/project')
-  const worktree = resolve('/tmp/elsewhere/feature')
-  vi.spyOn(SessionManager, 'list').mockImplementation(async (cwd) => [info(cwd, cwd === root ? 'root' : 'feature')])
-  const bridge = Object.create(AgentBridge.prototype) as AgentBridge
+  const agentDir = await storage()
+  const root = join(agentDir, 'project')
+  const worktree = join(agentDir, 'elsewhere', 'feature')
+  const mainPath = await persisted(agentDir, root, 'root')
+  const branchPath = await persisted(agentDir, worktree, 'feature')
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), { sessionDiscovery: new SessionDiscovery(() => agentDir) })
   const main = await bridge.listSessions(root)
   const branch = await bridge.listSessions(worktree)
-  expect(main[0]).toMatchObject({ projectCwd: root, id: 'root', path: resolve('/tmp/root.jsonl') })
-  expect(branch[0]).toMatchObject({ projectCwd: worktree, id: 'feature', path: resolve('/tmp/feature.jsonl') })
+  expect(main[0]).toMatchObject({ projectCwd: root, id: 'root', path: mainPath })
+  expect(branch[0]).toMatchObject({ projectCwd: worktree, id: 'feature', path: branchPath })
   expect(main[0].path).not.toBe(branch[0].path)
 })
 
-it('shares a repeated SDK discovery without caching full transcript text or caller mutations', async () => {
-  const pending = deferred<SessionInfo[]>()
-  const list = vi.spyOn(SessionManager, 'list').mockReturnValue(pending.promise)
+it('shares repeated discovery without caching caller mutations', async () => {
+  const pending = deferred<SessionMeta[]>()
+  const list = vi.spyOn(SessionDiscovery.prototype, 'list').mockReturnValue(pending.promise)
   const bridge = Object.create(AgentBridge.prototype) as AgentBridge
   const first = bridge.listSessions('/tmp/project')
   const second = bridge.listSessions('/tmp/project')
@@ -62,9 +91,9 @@ it('shares a repeated SDK discovery without caching full transcript text or call
 })
 
 it('retries first-session publication after persistence invalidates an earlier empty scan', async () => {
-  const cwd = '/tmp/background'
+  const cwd = resolve('/tmp/background')
   const session = info(cwd, 'first')
-  const list = vi.spyOn(SessionManager, 'list').mockResolvedValueOnce([]).mockResolvedValueOnce([session])
+  const list = vi.spyOn(SessionDiscovery.prototype, 'list').mockResolvedValueOnce([]).mockResolvedValueOnce([session])
   const send = vi.fn()
   const backend = {
     key: 'background', cwd, sessionPath: session.path,
@@ -120,8 +149,8 @@ it('reuses a parsed cold-session manager until the persisted file signature chan
 })
 
 it('never publishes a delayed sidebar result over a newly selected project', async () => {
-  const pending = deferred<SessionInfo[]>()
-  vi.spyOn(SessionManager, 'list').mockReturnValue(pending.promise)
+  const pending = deferred<SessionMeta[]>()
+  vi.spyOn(SessionDiscovery.prototype, 'list').mockReturnValue(pending.promise)
   const send = vi.fn()
   const bridge = Object.assign(Object.create(AgentBridge.prototype), {
     status: { cwd: '/tmp/old' }, win: { webContents: { send } }
@@ -134,7 +163,7 @@ it('never publishes a delayed sidebar result over a newly selected project', asy
 })
 
 it('retains displayed rows on discovery rejection instead of publishing a false empty list', async () => {
-  vi.spyOn(SessionManager, 'list').mockRejectedValue(new Error('discovery failed'))
+  vi.spyOn(SessionDiscovery.prototype, 'list').mockRejectedValue(new Error('discovery failed'))
   vi.spyOn(console, 'warn').mockImplementation(() => undefined)
   const send = vi.fn()
   const bridge = Object.assign(Object.create(AgentBridge.prototype), {
@@ -157,8 +186,8 @@ it('returns exact-cwd rows before token totals settle, then publishes the scoped
   const firstCwd = resolve('/tmp/first-project')
   const secondCwd = resolve('/tmp/second-project')
   const tokens = deferred<number | undefined>()
-  const list = vi.spyOn(SessionManager, 'list').mockImplementation(async (cwd) => [info(cwd, cwd === firstCwd ? 'first' : 'second'), info('/tmp/foreign', 'foreign')])
-  const read = vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockReturnValue(tokens.promise)
+  const list = vi.spyOn(SessionDiscovery.prototype, 'list').mockImplementation(async (cwd) => [info(cwd, cwd === firstCwd ? 'first' : 'second')])
+  const read = vi.spyOn(SessionTokenCache.prototype, 'read').mockReturnValue(tokens.promise)
   const win = sidebarWindow()
   const bridge = Object.assign(Object.create(AgentBridge.prototype), {
     win, status: { cwd: firstCwd }, ensureActiveBackend: vi.fn()
@@ -189,8 +218,8 @@ it('does not publish an old token result after a hard mutation starts a newer di
   const cwd = resolve('/tmp/project')
   const oldTokens = deferred<number | undefined>()
   const newTokens = deferred<number | undefined>()
-  vi.spyOn(SessionManager, 'list').mockResolvedValueOnce([info(cwd, 'deleted')]).mockResolvedValueOnce([info(cwd, 'fresh')])
-  const read = vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockReturnValueOnce(oldTokens.promise).mockReturnValueOnce(newTokens.promise)
+  vi.spyOn(SessionDiscovery.prototype, 'list').mockResolvedValueOnce([info(cwd, 'deleted')]).mockResolvedValueOnce([info(cwd, 'fresh')])
+  const read = vi.spyOn(SessionTokenCache.prototype, 'read').mockReturnValueOnce(oldTokens.promise).mockReturnValueOnce(newTokens.promise)
   const win = sidebarWindow()
   const bridge = Object.assign(Object.create(AgentBridge.prototype), { win })
   const first = await bridge.listSessions(cwd)
@@ -210,8 +239,8 @@ it('does not publish an old token result after a hard mutation starts a newer di
 it('retires a token publisher after unbind even if the same window object returns', async () => {
   const cwd = resolve('/tmp/project')
   const tokens = deferred<number | undefined>()
-  vi.spyOn(SessionManager, 'list').mockResolvedValue([info(cwd, 'own')])
-  vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockReturnValue(tokens.promise)
+  vi.spyOn(SessionDiscovery.prototype, 'list').mockResolvedValue([info(cwd, 'own')])
+  vi.spyOn(SessionTokenCache.prototype, 'read').mockReturnValue(tokens.promise)
   const win = sidebarWindow()
   const bridge = Object.assign(Object.create(AgentBridge.prototype), { win })
   await bridge.listSessions(cwd)
@@ -226,8 +255,8 @@ it('retires a token publisher after unbind even if the same window object return
 it.each([false, true])('publishes to a replacement window only after it reads that cwd (read=%s)', async (readAgain) => {
   const cwd = resolve('/tmp/project')
   const tokens = deferred<number | undefined>()
-  const list = vi.spyOn(SessionManager, 'list').mockResolvedValue([info(cwd, 'own')])
-  vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockReturnValue(tokens.promise)
+  const list = vi.spyOn(SessionDiscovery.prototype, 'list').mockResolvedValue([info(cwd, 'own')])
+  vi.spyOn(SessionTokenCache.prototype, 'read').mockReturnValue(tokens.promise)
   const firstWin = sidebarWindow()
   const nextWin = sidebarWindow()
   const bridge = Object.assign(Object.create(AgentBridge.prototype), { win: firstWin })
@@ -244,8 +273,8 @@ it.each([false, true])('publishes to a replacement window only after it reads th
 
 it.each(['window', 'webContents'] as const)('does not push a completed supplement to destroyed %s', async (destroyed) => {
   const tokens = deferred<number | undefined>()
-  vi.spyOn(SessionManager, 'list').mockResolvedValue([info('/tmp/project', 'own')])
-  vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockReturnValue(tokens.promise)
+  vi.spyOn(SessionDiscovery.prototype, 'list').mockResolvedValue([info('/tmp/project', 'own')])
+  vi.spyOn(SessionTokenCache.prototype, 'read').mockReturnValue(tokens.promise)
   const win = sidebarWindow()
   const bridge = Object.assign(Object.create(AgentBridge.prototype), { win })
   await bridge.listSessions('/tmp/project')
@@ -256,12 +285,15 @@ it.each(['window', 'webContents'] as const)('does not push a completed supplemen
   expect(win.webContents.send).not.toHaveBeenCalled()
 })
 
-it('does not send an ambiguous empty supplement or read tokens from another cwd', async () => {
-  vi.spyOn(SessionManager, 'list').mockResolvedValue([info('/tmp/foreign', 'foreign')])
-  const read = vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockResolvedValue(5)
+it('does not send an ambiguous empty supplement or read tokens from another persisted cwd', async () => {
+  const agentDir = await storage()
+  const cwd = join(agentDir, 'project-feature')
+  const foreign = join(agentDir, 'project', 'feature')
+  await persisted(agentDir, foreign, 'foreign')
+  const read = vi.spyOn(SessionTokenCache.prototype, 'read').mockResolvedValue(5)
   const win = sidebarWindow()
-  const bridge = Object.assign(Object.create(AgentBridge.prototype), { win })
-  expect(await bridge.listSessions('/tmp/project')).toEqual([])
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), { win, sessionDiscovery: new SessionDiscovery(() => agentDir) })
+  expect(await bridge.listSessions(cwd)).toEqual([])
   await flushTotals()
   expect(read).not.toHaveBeenCalled()
   expect(win.webContents.send).not.toHaveBeenCalled()

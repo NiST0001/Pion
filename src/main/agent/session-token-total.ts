@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { constants } from 'node:fs'
+import { constants, type BigIntStats } from 'node:fs'
 import { open, lstat } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 import type { TokenUsage } from '../../shared/operations'
@@ -49,9 +49,43 @@ export function sessionUsageFileStamp(stat: { dev: bigint; ino: bigint; size: bi
   return digest([stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(value => value.toString()))
 }
 
-/** Only the ledger needs to distinguish an unconfirmed descriptor close. */
+type SessionTokenStat = Pick<BigIntStats, 'isFile' | 'dev' | 'ino' | 'size' | 'mtimeNs' | 'ctimeNs'>
+export interface SessionTokenFileHandle {
+  stat(options: { bigint: true }): Promise<SessionTokenStat>
+  read(buffer: Buffer, offset: number, length: number, position: null): Promise<{ bytesRead: number }>
+  close(): Promise<void>
+}
+
+/** Injectable only for local file reads; no SDK, history writer or authentication. */
+export interface SessionTokenFileSystem {
+  open(path: string, flags: number): Promise<SessionTokenFileHandle>
+  lstat(path: string, options: { bigint: true }): Promise<SessionTokenStat>
+}
+const localFilesystem: SessionTokenFileSystem = { open, lstat }
+
+/** Opaque, immutable sidebar receipt; only successful reads can seed a fast path. */
+export interface SessionTokenSnapshot { readonly total: number }
+const tokenSnapshots = new WeakMap<SessionTokenSnapshot, {
+  path: string; id: string; cwd: string; filesystem: SessionTokenFileSystem; snapshot: SessionUsageSnapshot
+}>()
+interface SidebarReadOptions {
+  filesystem?: SessionTokenFileSystem
+  previous?: SessionTokenSnapshot
+}
+
+/** Readers must preserve an unconfirmed descriptor close as unknown. */
 export class SessionUsageReadError extends Error {
   constructor(readonly closeUnknown = false) { super('Session usage unavailable') }
+}
+
+/** Capture caller-owned data before admission, without evaluating accessors. */
+export function snapshotSessionTokenOwner(expected: { id: string; cwd: string }): Readonly<{ id: string; cwd: string }> {
+  try {
+    const id = Object.getOwnPropertyDescriptor(expected, 'id')?.value as unknown
+    const cwd = Object.getOwnPropertyDescriptor(expected, 'cwd')?.value as unknown
+    if (identity(id) && text(cwd) && !cwd.includes('\0')) return Object.freeze({ id, cwd })
+  } catch { /* Malformed ownership remains unknown, before opening a file. */ }
+  throw new SessionUsageReadError()
 }
 
 function usageTokens(value: unknown): number | undefined {
@@ -95,6 +129,18 @@ export async function readSessionTokenTotal(path: string, expected?: { id: strin
   try { return (await readSessionUsage(path, expected, false)).total } catch { return undefined }
 }
 
+/** Explicit sidebar adapter: every call reopens and validates the file, including cache hits. */
+export async function readSessionTokenSnapshot(
+  path: string, expected: { id: string; cwd: string }, options?: SidebarReadOptions
+): Promise<SessionTokenSnapshot> {
+  const owner = snapshotSessionTokenOwner(expected)
+  const filesystem = options?.filesystem ?? localFilesystem
+  const snapshot = await readSessionUsage(path, owner, false, undefined, { filesystem, previous: options?.previous })
+  const receipt = Object.freeze({ total: snapshot.total })
+  tokenSnapshots.set(receipt, { path, ...owner, filesystem, snapshot })
+  return receipt
+}
+
 /** Ledger reads every entry without sidebar budgets; never retains transcript content. */
 export async function readSessionUsageSnapshot(
   path: string, expected?: { id: string; cwd: string }, options?: { yield?: () => Promise<void> }
@@ -104,15 +150,15 @@ export async function readSessionUsageSnapshot(
 
 async function readSessionUsage(
   path: string, expected: { id: string; cwd: string } | undefined, collectReceipts: boolean,
-  options?: { yield?: () => Promise<void> }
+  options?: { yield?: () => Promise<void> }, sidebar?: SidebarReadOptions
 ): Promise<SessionUsageSnapshot> {
-  let handle: Awaited<ReturnType<typeof open>> | undefined
-  let result: SessionUsageSnapshot | undefined
-  let closeUnknown = false
-  try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    const before = await handle.stat({ bigint: true })
-    if (!before.isFile() || before.size === 0n || (!collectReceipts && before.size > BigInt(MAX_FILE_BYTES))) throw new Error('file budget')
+  const owner = expected === undefined ? undefined : snapshotSessionTokenOwner(expected)
+  if (!text(path) || path.includes('\0')) throw new SessionUsageReadError()
+  return readStableFile(path, collectReceipts, async (handle, before) => {
+    const previous = sidebar?.previous && tokenSnapshots.get(sidebar.previous)
+    if (!collectReceipts && owner && previous && previous.path === path && previous.id === owner.id
+      && previous.cwd === owner.cwd && previous.filesystem === sidebar?.filesystem
+      && previous.snapshot.stamp === sessionUsageFileStamp(before)) return previous.snapshot
     const fileHash = createHash('sha256')
     const receipts: SessionUsageReceipt[] = []
     let header: Pick<SessionUsageSnapshot, 'id' | 'cwd' | 'createdAt' | 'parentSession'> | undefined
@@ -130,7 +176,7 @@ async function readSessionUsage(
         if (value.type !== 'session' || (value.version !== 2 && value.version !== 3)
           || !identity(value.id) || !timestamp(value.timestamp) || !boundedText(value.cwd, 4096)
           || (value.parentSession !== undefined && (!boundedText(value.parentSession, 4096) || !isAbsolute(value.parentSession)))) throw new Error('header')
-        if (expected && (value.id !== expected.id || resolve(value.cwd as string) !== resolve(expected.cwd))) throw new Error('changed owner')
+        if (owner && (value.id !== owner.id || resolve(value.cwd as string) !== resolve(owner.cwd))) throw new Error('changed owner')
         header = { id: value.id, cwd: value.cwd, createdAt: Date.parse(value.timestamp as string),
           ...(value.parentSession !== undefined ? { parentSession: value.parentSession as string } : {}) }
         hasHeader = true
@@ -291,15 +337,32 @@ async function readSessionUsage(
     }
     // An incomplete final line may be an in-flight append, never a partial total.
     if (pendingBytes !== 0 || !hasHeader || BigInt(bytes) !== before.size) throw new Error('incomplete file')
-    const after = await handle.stat({ bigint: true })
-    const current = await lstat(path, { bigint: true })
-    for (const snapshot of [after, current]) {
-      if (!snapshot.isFile() || snapshot.dev !== before.dev || snapshot.ino !== before.ino
-        || snapshot.size !== before.size || snapshot.mtimeNs !== before.mtimeNs || snapshot.ctimeNs !== before.ctimeNs) throw new Error('changed file')
-    }
     if (!header) throw new Error('header')
-    result = { ...header, receipt: fileHash.digest('hex'),
+    return { ...header, receipt: fileHash.digest('hex'),
       stamp: sessionUsageFileStamp(before), bytes, total, receipts }
+  }, sidebar?.filesystem)
+}
+
+async function readStableFile(
+  path: string, collectReceipts: boolean,
+  read: (handle: SessionTokenFileHandle, before: SessionTokenStat) => Promise<SessionUsageSnapshot>,
+  filesystem: SessionTokenFileSystem = localFilesystem
+): Promise<SessionUsageSnapshot> {
+  let handle: SessionTokenFileHandle | undefined
+  let result: SessionUsageSnapshot | undefined
+  let closeUnknown = false
+  const check = (before: SessionTokenStat, after: SessionTokenStat): void => {
+    if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+      || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) throw new Error('changed file')
+  }
+  try {
+    handle = await filesystem.open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const before = await handle.stat({ bigint: true })
+    if (!before.isFile() || before.size === 0n || (!collectReceipts && before.size > BigInt(MAX_FILE_BYTES))) throw new Error('file budget')
+    check(before, await filesystem.lstat(path, { bigint: true }))
+    result = await read(handle, before)
+    check(before, await handle.stat({ bigint: true }))
+    check(before, await filesystem.lstat(path, { bigint: true }))
   } catch {
     result = undefined
   } finally {

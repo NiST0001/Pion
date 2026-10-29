@@ -10,6 +10,13 @@ const MAX_INFLATED_BYTES = 128 * 1024 * 1024
 const MAX_METADATA_STREAM_BYTES = 1024 * 1024
 const MAX_METADATA_TOTAL_BYTES = 4 * 1024 * 1024
 const MAX_METADATA_CHUNKS = 64
+/** Exact fixed policy for execution-private validation receipts. */
+export const GENERATED_PNG_VALIDATION_LIMITS = Object.freeze({
+  maxBytes: MAX_PNG_BYTES, maxDimension: MAX_DIMENSION, maxPixels: MAX_PIXELS,
+  maxInflatedBytes: MAX_INFLATED_BYTES, maxMetadataStreamBytes: MAX_METADATA_STREAM_BYTES,
+  maxMetadataTotalBytes: MAX_METADATA_TOTAL_BYTES, maxMetadataChunks: MAX_METADATA_CHUNKS
+})
+export type GeneratedPngValidationLimits = { readonly [Key in keyof typeof GENERATED_PNG_VALIDATION_LIMITS]: number }
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])
 const ADAM7 = [
   [0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4],

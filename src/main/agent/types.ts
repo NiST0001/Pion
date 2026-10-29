@@ -129,6 +129,8 @@ export interface BackendRecord {
   sessionExportPending?: boolean
   /** Never reuse/evict a writer whose actual process exit could not be confirmed. */
   historyStopFailed?: boolean
+  /** One real writer-stop barrier shared with overlapping application shutdown. */
+  historyStop?: { client: RpcClient; promise: Promise<void> }
   /** Captured at start invocation; retained if SDK cleanup loses the live child handle. */
   startupProcess?: unknown
   modePrimed?: AgentMode
@@ -169,6 +171,8 @@ export interface BackendRecord {
   pendingRunIds: string[]
   /** Pion-owned follow-ups remain removable until explicitly dispatched. */
   localFollowUps?: QueuedBackendMessage[]
+  /** Display-only snapshots advance independently of SDK lifecycle events. */
+  queueRevision?: number
   /** Enter/priority steering is delivered immediately and hidden from the queue card. */
   directSteering?: string[]
   /** Follow-ups promoted to steering are completed with the active run. */

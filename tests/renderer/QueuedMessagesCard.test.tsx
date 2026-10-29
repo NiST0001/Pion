@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueuedMessagesCard } from '../../src/renderer/src/features/session/QueuedMessagesCard'
+import { QUEUE_ADMISSION_ERROR_MESSAGES, type QueuedMessageAdmissionError } from '../../src/shared/types'
 
 beforeEach(() => window.localStorage.clear())
 
@@ -204,6 +205,45 @@ describe('QueuedMessagesCard', () => {
     fireEvent.click(header)
     expect(screen.getByRole('button', { name: '展开排队消息' })).toHaveAttribute('aria-expanded', 'false')
     expect(window.localStorage.getItem('pion:session-queue-panel-state:session-collapse')).toBe('false')
+  })
+
+  it('shows a bounded single-item notice by real run identity after identical rows shift', () => {
+    const send = vi.fn(), edit = vi.fn(), remove = vi.fn()
+    const errors = [{ runId: 'second', code: 'admission-failed' as const,
+      message: '<script>private-token</script>', diagnostic: 'secret'.repeat(10_000) }]
+    const props = { sessionKey: 'admission', followUp: ['same', 'same'], followUpRunIds: ['first', 'second'],
+      admissionErrors: errors, onSendItem: send, onEditItem: edit, onRemoveItem: remove }
+    const { container, rerender } = render(<QueuedMessagesCard {...props} />)
+    const notice = screen.getByRole('status')
+    expect(notice).toHaveTextContent(QUEUE_ADMISSION_ERROR_MESSAGES['admission-failed'])
+    expect(screen.getAllByRole('listitem')[0]).not.toContainElement(notice)
+    expect(screen.getAllByRole('listitem')[1]).toContainElement(notice)
+    expect(container.innerHTML).not.toContain('private-token')
+    expect(container.innerHTML).not.toContain('secret')
+    expect(send).not.toHaveBeenCalled()
+    expect(edit).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: '直接发送第 2 条排队消息' })).toBeEnabled()
+    rerender(<QueuedMessagesCard {...props} followUp={['same']} followUpRunIds={['second']} />)
+    expect(screen.getAllByRole('listitem')[0]).toContainElement(screen.getByRole('status'))
+    rerender(<QueuedMessagesCard {...props} followUp={['same']} followUpRunIds={['first']} />)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    rerender(<QueuedMessagesCard {...props} admissionErrors={undefined} />)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('ignores unknown error codes, native rows and missing identities without changing controls', () => {
+    const send = vi.fn()
+    const errors = [{ runId: 'native', code: 'admission-failed' }, { runId: 'missing', code: 'admission-failed' },
+      { runId: 'local', code: 'private script diagnostic' }] as QueuedMessageAdmissionError[]
+    const { container } = render(<QueuedMessagesCard sessionKey="untrusted-errors" followUp={['same', 'same', 'same']}
+      nativeFollowUpCount={1} followUpRunIds={['native', null, 'local']} admissionErrors={errors} onSendItem={send} />)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(container.innerHTML).not.toContain('private script diagnostic')
+    expect(screen.getByRole('button', { name: '直接发送第 1 条排队消息' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '直接发送第 2 条排队消息' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '直接发送第 3 条排队消息' })).toBeEnabled()
+    expect(send).not.toHaveBeenCalled()
   })
 
   it('does not mount an empty queue', () => {

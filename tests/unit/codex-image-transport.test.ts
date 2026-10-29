@@ -1,6 +1,7 @@
+import { inflateSync } from 'node:zlib'
 import { afterEach, expect, it, vi } from 'vitest'
 import {
-  CODEX_IMAGES_ENDPOINT, CODEX_IMAGE_EDITS_ENDPOINT, CODEX_IMAGE_TIMEOUT_MS, CodexImageError, createCodexImageGenerator,
+  CODEX_IMAGES_ENDPOINT, CODEX_IMAGE_EDITS_ENDPOINT, CODEX_IMAGE_TIMEOUT_MS, CodexImageError, createCodexImageGenerator, createCodexImageGeneratorWithValidation,
   MAX_CODEX_IMAGE_JSON_BYTES, MAX_GENERATED_IMAGE_BYTES, MAX_IMAGE_PROMPT_LENGTH,
   inspectReferenceImage, sanitizeImageDiagnostic,
   type CodexImageReference, type CodexImageRequest, type ResolveCodexImageAuth
@@ -10,6 +11,11 @@ import {
   MAX_IMAGE_REFERENCES, MAX_IMAGE_REFERENCE_BYTES, MAX_IMAGE_REFERENCE_TOTAL_BYTES
 } from '../../src/shared/image-generation'
 import { makeStaticPng } from '../fixtures/static-png'
+
+vi.mock('node:zlib', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:zlib')>()
+  return { ...actual, inflateSync: vi.fn(actual.inflateSync) }
+})
 
 const png = makeStaticPng()
 const accountId = 'test-codex-account'
@@ -64,6 +70,82 @@ function jpegReference(bytes = structuralJpeg(), width = 1, height = 1): CodexIm
   return { bytes, mimeType: 'image/jpeg', width, height }
 }
 afterEach(() => vi.useRealTimers())
+
+it('reuses a complete built-in validation once, with a private copy and full validation on subsequent consumes', async () => {
+  const scoped = createCodexImageGeneratorWithValidation({ getAuth: async () => auth,
+    fetch: vi.fn<typeof globalThis.fetch>().mockResolvedValue(imageResponse()) })
+  try {
+    const generated = await scoped.generate({ prompt: 'boat' }, signal())
+    const checked = scoped.validate(generated)
+    expect(checked.bytes).toEqual(generated.bytes)
+    expect(checked.bytes).not.toBe(generated.bytes)
+    expect(checked.bytes.buffer).not.toBe(generated.bytes.buffer)
+    expect(inflateSync).toHaveBeenCalledTimes(1)
+    expect(scoped.validate(generated)).toEqual(checked)
+    expect(inflateSync).toHaveBeenCalledTimes(2)
+    generated.bytes.fill(0)
+    expect(checked.bytes).toEqual(new Uint8Array(png))
+  } finally { scoped.dispose() }
+})
+
+it.each(['mutation', 'different-buffer', 'disposed', 'framing-failure', 'byte-accessor-failure'] as const)(
+  'never reuses a receipt after %s, including same-Buffer mutations and failure cleanup', async (change) => {
+    const scoped = createCodexImageGeneratorWithValidation({ getAuth: async () => auth,
+      fetch: vi.fn<typeof globalThis.fetch>().mockResolvedValue(imageResponse()) })
+    try {
+      const generated = await scoped.generate({ prompt: 'boat' }, signal())
+      const original = generated.bytes
+      if (change === 'mutation') {
+        original[original.length - 1] ^= 1
+        expect(() => scoped.validate(generated)).toThrow('PNG 数据')
+        original[original.length - 1] ^= 1
+      } else if (change === 'different-buffer') generated.bytes = Buffer.from(original)
+      else if (change === 'disposed') scoped.dispose()
+      else if (change === 'byte-accessor-failure') {
+        Object.defineProperty(generated, 'bytes', { configurable: true, get() { throw new Error('unreadable bytes') } })
+        expect(() => scoped.validate(generated)).toThrow('unreadable bytes')
+        Object.defineProperty(generated, 'bytes', { value: original })
+      } else {
+        original[0] ^= 1
+        expect(() => scoped.validate(generated)).toThrow('静态 PNG')
+        original[0] ^= 1
+      }
+      expect(scoped.validate(generated).bytes).toEqual(new Uint8Array(png))
+      expect(inflateSync).toHaveBeenCalledTimes(2)
+    } finally { scoped.dispose() }
+  }
+)
+
+it('never installs a late receipt after disposal during asynchronous OAuth', async () => {
+  const pending = deferred<typeof auth>()
+  const getAuth = vi.fn<ResolveCodexImageAuth>().mockReturnValue(pending.promise)
+  const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(imageResponse())
+  const scoped = createCodexImageGeneratorWithValidation({ getAuth, fetch })
+  const result = scoped.generate({ prompt: 'boat' }, signal())
+  try {
+    expect(getAuth).toHaveBeenCalledTimes(1)
+    expect(fetch).not.toHaveBeenCalled()
+    scoped.dispose()
+    pending.resolve(auth)
+    const generated = await result
+    expect(scoped.validate(generated).bytes).toEqual(new Uint8Array(png))
+    expect(inflateSync).toHaveBeenCalledTimes(2)
+  } finally { pending.resolve(auth); await result; scoped.dispose() }
+})
+
+it('fully validates unissued artifacts despite forged tags and native-slot byte-length overrides', () => {
+  const scoped = createCodexImageGeneratorWithValidation({ getAuth: async () => auth })
+  try {
+    const artifact = { bytes: Buffer.from(png), width: 1, height: 1, validated: true, validationReceipt: { version: 1 } }
+    expect(scoped.validate(artifact)).toEqual({ bytes: new Uint8Array(png), width: 1, height: 1 })
+    expect(inflateSync).toHaveBeenCalledTimes(1)
+    artifact.bytes[artifact.bytes.length - 1] ^= 1
+    expect(() => scoped.validate(artifact)).toThrow('PNG 数据')
+    const oversized = Buffer.alloc(MAX_GENERATED_IMAGE_BYTES + 1)
+    Object.defineProperty(oversized, 'byteLength', { value: 1 })
+    expect(() => scoped.validate({ bytes: oversized, width: 1, height: 1 })).toThrow('byte size')
+  } finally { scoped.dispose() }
+})
 
 it('uses the independent fixed Codex Images protocol, honest headers and runtime OAuth on execution only', async () => {
   const h = setup()

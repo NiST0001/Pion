@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readSessionTokenTotal, readSessionUsageSnapshot } from '../../src/main/agent/session-token-total'
+import { SessionTokenCache } from '../../src/main/agent/session-token-cache'
 
 vi.mock('node:fs/promises', async (original) => {
   const actual = await original<typeof import('node:fs/promises')>()
@@ -85,6 +86,28 @@ describe('persisted whole-file session token projection', () => {
     expect(copied.receipts.map(receipt => receipt.digest)).toEqual(snapshot.receipts.map(receipt => receipt.digest))
   })
 
+  it('keeps ledger and uncached total reads independent of sidebar snapshot receipts', async () => {
+    const path = await file([header, assistant('first')])
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    const readers: Array<ReturnType<typeof vi.spyOn>> = []
+    vi.mocked(fs.open).mockImplementation(async (...args) => {
+      const handle = await actual.open(...args)
+      readers.push(vi.spyOn(handle, 'read'))
+      return handle
+    })
+    const cache = new SessionTokenCache()
+    const owner = { id: header.id, cwd: header.cwd }
+    expect(await cache.read(path, owner)).toBe(10)
+    expect(await cache.read(path, owner)).toBe(10)
+    expect(await readSessionTokenTotal(path, owner)).toBe(10)
+    expect(await readSessionTokenTotal(path, owner)).toBe(10)
+    const first = await readSessionUsageSnapshot(path, owner)
+    const second = await readSessionUsageSnapshot(path, owner)
+    expect(first.receipts).toHaveLength(1)
+    expect(second).toEqual(first)
+    expect(readers.map(reader => reader.mock.calls.length)).toEqual([2, 0, 2, 2, 2, 2])
+  })
+
   it('reads ledger lines past the sidebar limit and yields once per 64 KiB block without changing identity deduplication', async () => {
     const original = assistant('first', 10, null, 'response-1')
     const first = { ...original, message: { ...original.message, content: [{ type: 'text', text: 'x'.repeat(1024 * 1024) }] } }
@@ -155,6 +178,30 @@ describe('persisted whole-file session token projection', () => {
     expect(await readSessionTokenTotal(path, { id: header.id, cwd: header.cwd })).toBe(10)
     expect(await readSessionTokenTotal(path, { id: 'other-session', cwd: header.cwd })).toBeUndefined()
     expect(await readSessionTokenTotal(path, { id: header.id, cwd: '/other/project' })).toBeUndefined()
+  })
+
+  it.each(['total', 'ledger'] as const)('captures %s ownership before asynchronous file access', async reader => {
+    const path = await file([header, assistant('first')])
+    for (const valid of [true, false]) {
+      const owner = valid ? { id: header.id, cwd: header.cwd } : { id: 'other-id', cwd: '/other/project' }
+      const pending = reader === 'total' ? readSessionTokenTotal(path, owner) : readSessionUsageSnapshot(path, owner)
+      owner.id = valid ? 'other-id' : header.id
+      owner.cwd = valid ? '/other/project' : header.cwd
+      if (valid) {
+        const result = await pending
+        expect(typeof result === 'number' ? result : result?.total).toBe(10)
+      } else if (reader === 'total') expect(await pending).toBeUndefined()
+      else await expect(pending).rejects.toMatchObject({ closeUnknown: false })
+    }
+  })
+
+  it('rejects accessor ownership without evaluating getters or opening a descriptor', async () => {
+    const access = vi.fn(() => header.id)
+    const owner = Object.defineProperties({}, { id: { get: access }, cwd: { value: header.cwd } }) as { id: string; cwd: string }
+    expect(await readSessionTokenTotal('/fixture/session.jsonl', owner)).toBeUndefined()
+    await expect(readSessionUsageSnapshot('/fixture/session.jsonl', owner)).rejects.toMatchObject({ closeUnknown: false })
+    expect(access).not.toHaveBeenCalled()
+    expect(fs.open).not.toHaveBeenCalled()
   })
 
   it('returns a genuine zero only for valid files with no reported tokens', async () => {

@@ -5,10 +5,19 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  quality:
+    uses: ./.github/workflows/quality.yml
+    permissions:
+      contents: read
+
   build:
+    needs: quality
+    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.quality.outputs.sha == github.sha
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -16,13 +25,51 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CI: '1'
+      NO_COLOR: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
+      - name: Verify release revision, tag and bundled notes
+        shell: bash
+        env:
+          QUALITY_SHA: ${{ needs.quality.outputs.sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict'
+          import { execFileSync } from 'node:child_process'
+          import { readFileSync } from 'node:fs'
+          import { RELEASE_NOTES } from './src/shared/release-notes.ts'
+
+          const sha = process.env.GITHUB_SHA
+          assert.ok(sha, 'Missing release SHA')
+          assert.equal(process.env.QUALITY_SHA, sha, 'Quality gates must cover the release SHA')
+          assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), sha, 'Checkout must match the release SHA')
+          assert.equal(process.env.GITHUB_EVENT_NAME, 'push')
+          assert.equal(process.env.GITHUB_REF_TYPE, 'tag')
+          const { version } = JSON.parse(readFileSync('package.json', 'utf8'))
+          assert.equal(typeof version, 'string')
+          assert.ok(version.length > 0, 'Missing package version')
+          assert.equal(process.env.GITHUB_REF, `refs/tags/v${version}`, 'Tag must match the package version')
+          assert.equal(process.env.GITHUB_REF_NAME, `v${version}`)
+          const latest = RELEASE_NOTES[0]
+          assert.equal(latest?.version, version, 'Prepare the latest bundled release notes before tagging')
+          assert.ok(Array.isArray(latest.changes) && latest.changes.length > 0 && latest.changes.every(change => typeof change === 'string' && change.trim().length > 0), 'Release notes must contain changes')
+          NODE
       - run: npm ci
+      - name: Windows typecheck
+        if: runner.os == 'Windows'
+        run: npm run typecheck
+      - name: Windows unit tests
+        if: runner.os == 'Windows'
+        run: npm test
       - run: npm run build
       - run: npx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

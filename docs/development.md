@@ -31,7 +31,9 @@ Pi Durable 的渐进替换提案见 [迁移方案](pi-durable-migration.md)；�
 
 ## 优化与共享基础设施
 
-后续优化拆分与验收边界见 [优化路线](optimization-roadmap.md)。已有基础设施优先复用：`ipc/owner.ts` 校验活主窗口/主帧；`atomic-json-file.ts` 发布轻量配置，调用 Store 成功后提交内存并在退出等待；`process-exit.ts` 为工作流和初始化失败收尾核真实 exit/stdio，历史撤销保留其原独占准入；`shared/capability-item.ts` 统一纯条目解析；`features/session/session-folder-projection.ts` 统一目录与同级索引。
+后续优化拆分与验收边界见 [优化路线](optimization-roadmap.md)。已有基础设施优先复用：`ipc/owner.ts` 校验活主窗口/主帧；`atomic-json-file.ts` 发布轻量配置，调用 Store 成功后提交内存并在退出等待；`process-exit.ts` 为工作流、初始化失败及历史撤销统一核真实 exit/stdio，历史调用方保原独占准入，重叠退出共享其实际停止 Promise；`shared/capability-item.ts` 统一纯条目解析；`features/session/session-folder-projection.ts` 统一目录与同级索引。
+
+`SessionDiscovery` 流式投影只读列表，成功元数据按文件快照复用，坏读拒新列表；`SessionTokenCache` 在重新打开并验证文件回执后跳过未变正文。两者只服务侧栏，完整账本仍独立采集。Markdown 按实例最新正文/管线缓存纯解析与高亮树，逐次克隆后执行渐显及安全转换；工具组按真实调用 ID 线性匹配原组身份。默认生图的私有单次 PNG 回执绑定独立字节及全部预算，注入输出仍完整校验。调用计数改善保持与实机耗时/帧率分开。
 
 ## 测试发现与覆盖率隔离
 
@@ -127,6 +129,8 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 使用前需要 Codex OAuth 登录、账号图片生成权益与额度，不承诺免费或服务可用。发出请求后的失败、超时或中止可能已经消耗图片额度，工具不自动重试；服务返回的图片用量不作为 chat token/费用转发或估算。相关回归源码使用模拟认证、网络和文件系统及内存 PNG/JPEG fixture；验证报告必须区分类型检查、相关模拟回归、全量测试、coverage、构建、安装、GUI 和真实 API 的实际执行范围，不能以源码或模拟测试通过宣称已发布或正在运行的安装版已更新。真实服务协议（含编辑及请求设置的接受情况）、账号权益/额度尚未验证，mock 测试不能替代真实生图或跨平台发布/GUI 验证。真实调用涉及用户凭据、参考图上传和额度，须单独获得用户授权；不以本次文档同步新增正式版本发布日志或测试数量结论。
 
+队列准入失败的卡片提示仅使用固定代码，并沿真实 runId 与独立 queueScope 修订归属；不回显原始网络/模型诊断。发送成功、编辑取回或移除后退休提示，原 FIFO 及实际 pending 门继续生效。
+
 ## 使用总览与账期筛选
 
 工具栏“使用总览”与`/stats`共用全局长期本地账本，不绑定当前项目或有限运行统计。面板打开/刷新完整采集固定SDK会话根，后台默认低频串行补录，可在设置→会话关闭；采集无文件/行/记录数人为上限。账本仅元信息/哈希，按真实session/entry及已核验lineage去重，删除/复制分叉/迁移前capture，失败保源；关闭UI不解除真实FS pending。
@@ -203,7 +207,7 @@ SDK 没有公开结构化状态 getter。`agent/mcp-status-observer.ts` 仅适�
 
 codemode 明确启用 `models: true`，允许脚本调用模型（包括分类和图片生成），可能使用付费服务。外层 codemode 每次执行必须取得 `allowOnce`，确认声明费用风险，并同时检查 `read`、`write`、`shell`、`network`、`external` 五类权限；任一 deny 阻止执行。此授权不是逐模型调用审批，不应声称每个脚本内部模型调用均单独确认，也不能将原生模型图片生成自动作为 `pion_generate_image` 失败后的回退。
 
-每个脚本最多发起 8 次模型调用，主机等待期限为 5 分钟，并传递父级中止信号。停止等待不能证明已经派发的服务请求停止；失败或取消仍可能收费。模型调用的原 SDK usage 只沿既有累计计费链路汇总，不充当父会话上下文占用，不额外重复上报。嵌套工具事件保留 `parentToolCallId` 供过滤，不另建独立的根 transcript 或重复统计。
+每个脚本最多发起 8 次模型调用，5 分钟期限及父级中止信号阻止新派发、屏蔽进度；宿主继续等待原 SDK execute，挂起继续占槽。取消结果只保一次 SDK 已返回 usage 并丢弃迟到正文；SDK sandbox 仍可能先于模型/认证 Promise 返回，未回报的用量及底层请求/收费停止状态保持未知。模型调用的原 SDK usage 只沿既有累计计费链路汇总，不充当父会话上下文占用，不额外重复上报。嵌套工具事件保留 `parentToolCallId` 供过滤，不另建独立的根 transcript 或重复统计。
 
 codemode、MCP 工具及 MCP resource 的图片结果在输出边界做 fail-closed 投影，最多保留 4 张静态 PNG/JPEG，每张不超过 512 像素/边、96 KiB 原始字节；超限或无效载荷返回安全提示，不解码原图。保守清除 `structuredContent` 防止无界副本进入历史，因此可能影响依赖结构化 MCP 结果的程序化脚本。任意文字/base64、脚本/store/参数仍可能进入记录，不保证全面识别或清除。SDK 可能把原图保存在 OS 临时目录而非项目中，metadata 未保证清除；这不是 Pion 内置生图的项目保存契约。
 
@@ -454,7 +458,7 @@ src/
 ## 说明
 
 - 本项目采用 MIT License，完整条款见根目录 `LICENSE`。
-- 本机安装使用 `scripts/install-local.sh`，支持 `XDG_DATA_HOME`，生成启动器绑定实际安装绝对路径并处理 shell/desktop 转义；分发包配置位于 `electron-builder.yml`，推送 v* 标签触发 GitHub Release 工作流。
+- 本机安装使用 `scripts/install-local.sh`，支持 `XDG_DATA_HOME`，生成启动器绑定实际安装绝对路径并处理 shell/desktop 转义；分发包配置位于 `electron-builder.yml`。v* 标签发布先等待同 SHA 的 reusable quality，再核 tag/package/latest notes；Windows 额外做 types/unit，Linux 沿完整 E2E。仅发布 job 持写权限，凭据不随 checkout 持久化。工作流合同使用显式 devDependency `yaml` 解析；本地源码回归保持与真实 GitHub、打包及 Windows 验收分开。
 - 模型/思考等级切换、会话树、fork、斜杠命令、计划模式、手动压缩与 HTML 导出均已接入。
 - 工具策略保存在 Electron userData 下的 `pion-tool-permissions.json`；运行时生成的全局 Pi 权限门扩展位于 `runtime/` 子目录。
 - 会话文件由 pi SDK 管理（JSONL，按目录分桶），列表扫描保持只读；消息撤销在旧写入者退出后用 SDK 追加持久分支标记。跨项目点击会话时交给对应的 pi 后台加载。
