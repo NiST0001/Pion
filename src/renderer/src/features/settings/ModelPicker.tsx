@@ -58,6 +58,7 @@ export function ModelPicker({
         ariaLabel="切换模型"
         className="picker-trigger"
         popupClassName="model-picker-popup"
+        popupMinWidth={360}
         title={current ? `${current.provider}/${current.id}` : '切换模型'}
         onValueChange={(value) => {
           const model = models.find((model) => modelValue(model) === value)

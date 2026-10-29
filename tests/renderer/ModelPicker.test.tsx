@@ -14,7 +14,7 @@ const models: ModelOption[] = [
   { provider: '__proto__', id: 'constructor' }
 ]
 
-afterEach(() => { cleanup(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 function open(button: HTMLElement) {
   act(() => button.focus({ preventScroll: true }))
@@ -59,6 +59,29 @@ it('uses the shared portal and preserves provider groups, precise selection and 
   fireEvent.click(within(screen.getByRole('group', { name: 'alpha' })).getByRole('option', { name: 'beta/shared' }))
   expect(onSelect).toHaveBeenLastCalledWith('alpha', 'beta/shared')
   expect(onSelect).toHaveBeenCalledTimes(2) // These two pairs share the same slash-joined title.
+})
+
+it('widens the model menu for long decorated IDs while keeping thinking at the shared default width', () => {
+  const id = 'model-with-a-very-long-identifier-that-needs-wrapping-in-the-model-menu'
+  render(<>
+    <ModelPicker models={[{ provider: 'p', id, reasoning: true, contextWindow: 128000 }]} currentProvider="p" currentModelId={id} onSelect={vi.fn()} compact />
+    <ThinkingPicker levels={['off', 'high']} onSelect={vi.fn()} />
+  </>)
+  vi.stubGlobal('innerWidth', 1000)
+  const modelButton = screen.getByRole('combobox', { name: '切换模型' })
+  const thinkingButton = screen.getByRole('combobox', { name: '思考等级' })
+  for (const button of [modelButton, thinkingButton]) {
+    vi.spyOn(button, 'getBoundingClientRect').mockReturnValue({ left: 100, right: 200, top: 100, bottom: 130, width: 100, height: 30, x: 100, y: 100, toJSON: () => ({}) })
+  }
+  open(modelButton)
+  expect(screen.getByRole('listbox', { name: '切换模型' })).toHaveStyle({ width: '360px' })
+  const row = screen.getByRole('option', { name: id })
+  expect(row.querySelector('.picker-option-name')).toHaveTextContent(id)
+  expect(row.querySelector('.picker-reasoning')).toHaveAttribute('aria-hidden', 'true')
+  expect(row.querySelector('.picker-option-meta')).toHaveTextContent('128k')
+  fireEvent.keyDown(modelButton, { key: 'Escape' })
+  open(thinkingButton)
+  expect(screen.getByRole('listbox', { name: '思考等级' })).toHaveStyle({ width: '180px' })
 })
 
 it('keeps model navigation uncommitted until Enter and emits the exact provider/id', () => {
@@ -183,6 +206,9 @@ it('keeps picker presentation attached to shared selectors without overriding po
   expect(popup).toContain('font-family: var(--mono)')
   expect(popup).not.toMatch(/(?:^|\n)\s*(?:position|(?:max-|min-)?(?:width|height)|top|bottom|left|right|overflow(?:-[xy])?):/)
   expect(css).toContain('.model-picker-popup .pion-select-option')
+  const modelName = css.match(/\.model-picker-popup \.picker-option-name\s*\{([^}]*)\}/)![1]
+  expect(modelName).toContain('white-space: normal')
+  expect(modelName).toContain('overflow-wrap: anywhere')
   expect(css).toContain('.thinking-picker-popup .pion-select-option')
   expect(css).toContain('prefers-reduced-motion: reduce')
   expect(css).toContain('forced-colors: active')

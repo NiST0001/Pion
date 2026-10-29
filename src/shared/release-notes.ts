@@ -8,6 +8,12 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.100',
+    changes: [
+      '加宽模型选择菜单，长模型名称支持换行，窄窗口下自动适配边界；保留底部按钮与思考等级菜单的紧凑布局。'
+    ]
+  },
+  {
     version: '0.1.99',
     changes: [
       '统一工具权限继承与工作树归属，强化配置原子保存、异步结果身份检查及失败保源。',

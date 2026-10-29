@@ -145,6 +145,11 @@
   white-space: nowrap;
 }
 
+.model-picker-popup .picker-option-name {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .picker-reasoning {
   flex: 0 0 auto;
   color: var(--purple);

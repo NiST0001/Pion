@@ -38,6 +38,8 @@ interface PionSelectProps {
   title?: string
   className?: string
   popupClassName?: string
+  /** Preferred minimum in pixels; the viewport remains the hard limit. */
+  popupMinWidth?: number
   children?: ReactNode
   id?: string
 }
@@ -45,7 +47,7 @@ interface PionSelectProps {
 /** A single-select listbox. Only its trigger participates in the tab order. */
 export function PionSelect({
   value, options, onValueChange, notifyOnReselect = false, disabled = false,
-  ariaLabel, title, className, popupClassName, children, id
+  ariaLabel, title, className, popupClassName, popupMinWidth = 180, children, id
 }: PionSelectProps) {
   const generatedId = useId()
   const listId = `${generatedId}-listbox`
@@ -99,7 +101,7 @@ export function PionSelect({
       if (button.matches(':disabled') || !button.isConnected) { setOpen(false); return }
       const rect = button.getBoundingClientRect()
       const margin = 8, gap = 4
-      const width = Math.min(Math.max(rect.width, 180), Math.max(0, window.innerWidth - margin * 2))
+      const width = Math.min(Math.max(rect.width, popupMinWidth), Math.max(0, window.innerWidth - margin * 2))
       const below = Math.max(0, window.innerHeight - rect.bottom - gap - margin)
       const above = Math.max(0, rect.top - gap - margin)
       // Measure wrapping at the actual clamped width, including on the first layout.
@@ -159,7 +161,7 @@ export function PionSelect({
       mutations.disconnect()
       search.current = { text: '', time: 0 }
     }
-  }, [open, options])
+  }, [open, options, popupMinWidth])
 
   useLayoutEffect(() => {
     if (!open || !popup.current || activeIndex < 0) return
