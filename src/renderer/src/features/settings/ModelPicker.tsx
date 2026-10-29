@@ -1,16 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useMemo } from 'react'
 import type { ReactElement } from 'react'
-import { Brain, ChevronDown } from 'lucide-react'
+import { Brain } from 'lucide-react'
 import type { ModelOption } from '../../../../shared/types'
+import { PionSelect } from '../common/PionSelect'
+import type { PionSelectOption } from '../common/PionSelect'
 
-function useOutsideClose(ref: React.RefObject<HTMLElement | null>, onClose: () => void): void {
-  useEffect(() => {
-    const handler = (e: MouseEvent): void => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose()
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [ref, onClose])
+function modelValue(model: ModelOption): string {
+  return JSON.stringify([model.provider, model.id])
 }
 
 export function ModelPicker({
@@ -28,67 +24,48 @@ export function ModelPicker({
   compact?: boolean
   disabled?: boolean
 }): ReactElement {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  useOutsideClose(ref, () => setOpen(false))
-
   const current = models.find((model) => (
     model.id === currentModelId
-    && (!currentProvider || model.provider === currentProvider)
+    && (currentProvider === undefined || model.provider === currentProvider)
   ))
+  const options = useMemo(() => {
+    const options: PionSelectOption[] = groupByProvider(models).flatMap((group) => group.map((model) => ({
+      value: modelValue(model),
+      label: model.id,
+      title: `${model.provider}/${model.id}`,
+      group: model.provider,
+      render: <>
+        <span className="picker-option-label">
+          <span className="picker-option-name">{model.id}</span>
+          {model.reasoning && <Brain size={11} className="picker-reasoning" aria-hidden="true" />}
+        </span>
+        {model.contextWindow !== undefined && (
+          <span className="picker-option-meta">{(model.contextWindow / 1000).toFixed(0)}k</span>
+        )}
+      </>
+    })))
+    if (options.length === 0) options.push({ value: 'loading', label: '模型加载中…', disabled: true })
+    return options
+  }, [models])
 
   return (
-    <div className={`picker${compact ? ' picker-compact' : ''}`} ref={ref}>
-      <button
-        type="button"
-        className="picker-trigger"
-        aria-expanded={open}
+    <div className={`picker${compact ? ' picker-compact' : ''}`}>
+      <PionSelect
+        value={current ? modelValue(current) : ''}
+        options={options}
+        notifyOnReselect
         disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
+        ariaLabel="切换模型"
+        className="picker-trigger"
+        popupClassName="model-picker-popup"
         title={current ? `${current.provider}/${current.id}` : '切换模型'}
+        onValueChange={(value) => {
+          const model = models.find((model) => modelValue(model) === value)
+          if (model) onSelect(model.provider, model.id)
+        }}
       >
         <span className="picker-value">{current?.id ?? currentModelId ?? '模型'}</span>
-        <ChevronDown size={13} />
-      </button>
-      {open && (
-        <div className="picker-menu">
-          {models.length === 0 && (
-            <div className="picker-empty">模型加载中…</div>
-          )}
-          {Object.entries(groupByProvider(models)).map(([provider, group]) => (
-            <div key={provider} className="picker-group">
-              <div className="picker-group-title">{provider}</div>
-              {group.map((model) => (
-                <button
-                  type="button"
-                  key={`${model.provider}/${model.id}`}
-                  className={`picker-option${
-                    model.id === currentModelId
-                    && (!currentProvider || model.provider === currentProvider)
-                      ? ' selected'
-                      : ''
-                  }`}
-                  title={`${model.provider}/${model.id}`}
-                  onClick={() => {
-                    onSelect(model.provider, model.id)
-                    setOpen(false)
-                  }}
-                >
-                  <span className="picker-option-label">
-                    <span className="picker-option-name">{model.id}</span>
-                    {model.reasoning && <Brain size={11} className="picker-reasoning" />}
-                  </span>
-                  {model.contextWindow !== undefined && (
-                    <span className="picker-option-meta">
-                      {(model.contextWindow / 1000).toFixed(0)}k
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
+      </PionSelect>
     </div>
   )
 }
@@ -104,55 +81,36 @@ export function ThinkingPicker({
   onSelect: (level: string) => void
   disabled?: boolean
 }): ReactElement | null {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  useOutsideClose(ref, () => setOpen(false))
-
+  const options = useMemo(() => levels.map((level) => ({ value: level, label: level })), [levels])
   if (levels.length === 0) return null
   const selected = current && levels.includes(current) ? current : levels[0]
 
   return (
-    <div className="thinking-picker picker" ref={ref}>
-      <button
-        type="button"
-        className="thinking-trigger"
-        aria-haspopup="listbox"
-        aria-expanded={open}
+    <div className="thinking-picker picker">
+      <PionSelect
+        value={selected}
+        options={options}
+        notifyOnReselect
         disabled={disabled}
+        ariaLabel="思考等级"
+        className="thinking-trigger"
+        popupClassName="thinking-picker-popup"
         title="切换思考等级"
-        onClick={() => setOpen((value) => !value)}
+        onValueChange={onSelect}
       >
-        <Brain size={13} />
+        <Brain size={13} aria-hidden="true" />
         <span className="thinking-value">{selected}</span>
-        <ChevronDown size={12} />
-      </button>
-      {open && (
-        <div className="thinking-menu picker-menu" role="listbox" aria-label="思考等级">
-          {levels.map((level) => (
-            <button
-              type="button"
-              key={level}
-              className={`thinking-option${level === selected ? ' selected' : ''}`}
-              role="option"
-              aria-selected={level === selected}
-              onClick={() => {
-                onSelect(level)
-                setOpen(false)
-              }}
-            >
-              {level}
-            </button>
-          ))}
-        </div>
-      )}
+      </PionSelect>
     </div>
   )
 }
 
-function groupByProvider(models: ModelOption[]): Record<string, ModelOption[]> {
-  const groups: Record<string, ModelOption[]> = {}
+function groupByProvider(models: ModelOption[]): ModelOption[][] {
+  const groups = new Map<string, ModelOption[]>()
   for (const model of models) {
-    ;(groups[model.provider] ??= []).push(model)
+    const group = groups.get(model.provider)
+    if (group) group.push(model)
+    else groups.set(model.provider, [model])
   }
-  return groups
+  return [...groups.values()]
 }

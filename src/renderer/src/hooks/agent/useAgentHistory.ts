@@ -77,6 +77,18 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   currentState.current = state
   const currentApiRef = useRef(api)
   currentApiRef.current = api
+  const intentMounted = useRef(true)
+  const windowApi = window.pion
+  const selectionIntent = useRef({ api, windowApi, revision: 0 })
+  if (selectionIntent.current.api !== api || selectionIntent.current.windowApi !== windowApi) {
+    selectionIntent.current = { api, windowApi, revision: 0 }
+  }
+  const intentOwner = selectionIntent.current
+  const captureSelectionIntent = useCallback(() => {
+    const revision = intentOwner.revision
+    return () => intentMounted.current && selectionIntent.current === intentOwner && intentOwner.revision === revision
+      && currentApiRef.current === api && window.pion === intentOwner.windowApi
+  }, [api, intentOwner])
   // A switch may finish in one React batch. Mirror only our queued status
   // until the next render acknowledges dispatch order; never pin a cwd over
   // a later authoritative status or an external project/session selection.
@@ -167,11 +179,16 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
     return { selection, isApiOwner, isSelected }
   }, [api, readSelection])
   const { ownerPath: logicalOwnerPath, sessionId: logicalSessionId } = readSelection()
-  useEffect(() => () => {
-    selectionRef.current = { ...selectionRef.current, generation: selectionRef.current.generation + 1 }
-    ++timelineLoadId.current
-    ++historyIndexLoadId.current
-    historyIndexInFlight.current = null
+  useEffect(() => {
+    intentMounted.current = true
+    return () => {
+      intentMounted.current = false
+      selectionIntent.current.revision++
+      selectionRef.current = { ...selectionRef.current, generation: selectionRef.current.generation + 1 }
+      ++timelineLoadId.current
+      ++historyIndexLoadId.current
+      historyIndexInFlight.current = null
+    }
   }, [])
 
   // A mutation keeps the old view paintable, but no reader may publish a
@@ -196,6 +213,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   // Explicit intent matters even when a switch is cancelled, or A -> B -> A
   // happens before React commits a different session snapshot.
   const invalidateSelection = useCallback((): void => {
+    selectionIntent.current.revision++
     const selection = readSelection()
     invalidatedOwnerSnapshot.current = currentState.current.session
     selectionRef.current = { ...selection, generation: selection.generation + 1 }
@@ -518,7 +536,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       // Release only this reader's shell, never a newer reader or clear scope.
       if (loadId === timelineLoadId.current && revision === scopeRevision.current) {
         if (historyCursor.current?.loadId === loadId) historyCursor.current.loading = false
-        if (isOwnedCleanup()) dispatch({ type: 'timelineLoading', loading: false })
+        if (currentApiRef.current === api && readingOwner?.isApiOwner() !== false) {
+          dispatch({ type: 'timelineLoading', loading: false })
+        }
       }
       // The UI watchdog may finish first; deletion retains its real read slot.
       if (waitForActualReads) await Promise.allSettled([...actualReads])
@@ -787,19 +807,18 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
   /** Fork before a user message; resolves with the message text for prefill. */
   const forkAt = useCallback(
     async (entryId: string): Promise<string> => {
-      if (!api) return ''
+      if (!api || !captureSelectionIntent()()) return ''
       invalidateSelection()
+      const isSelected = captureSelectionIntent()
       const result = await api.forkAt(entryId)
-      if (!result.cancelled) {
-        clearTimeline()
-        timelineOwnerPath.current = undefined
-        historyCursor.current = null
-        await reloadTimeline()
-        return result.text
-      }
-      return ''
+      if (result.cancelled || !isSelected()) return ''
+      clearTimeline()
+      timelineOwnerPath.current = undefined
+      historyCursor.current = null
+      await reloadTimeline()
+      return isSelected() ? result.text : ''
     },
-    [api, clearTimeline, dispatch, invalidateSelection, reloadTimeline]
+    [api, captureSelectionIntent, clearTimeline, invalidateSelection, reloadTimeline]
   )
 
   const switchSession = useCallback(
@@ -1055,7 +1074,9 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       // Reset/retired display intent leaves the real reader's cleanup fence intact.
       if (loadId === timelineLoadId.current && revision === scopeRevision.current) {
         if (historyCursor.current?.loadId === loadId) historyCursor.current.loading = false
-        if (isOwnedCleanup()) dispatch({ type: 'timelineLoading', loading: false })
+        if (currentApiRef.current === api && readingOwner?.isApiOwner() !== false) {
+          dispatch({ type: 'timelineLoading', loading: false })
+        }
       }
     }
     return false
@@ -1183,6 +1204,7 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
 
   return {
     selectionRef,
+    captureSelectionIntent,
     clearTimeline,
     invalidateSelection,
     revertMessage,

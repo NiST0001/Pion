@@ -339,41 +339,65 @@ export function diffStats(diff: string): { additions: number; deletions: number 
   return { additions, deletions }
 }
 
+interface ChangeProjection {
+  change: FileChange
+  displayDiff?: string
+}
+
+// At most one revision per real tool object, released with that object. Keep
+// private projections: callers receive copies and cannot alter cached stats.
+const toolChangeCache = new WeakMap<ToolItem, ChangeProjection &
+  Pick<ToolItem, 'name' | 'path' | 'diff' | 'writeContent'>>()
+
+function projectToolChange(tool: ToolItem): ChangeProjection | undefined {
+  if (tool.status !== 'done' || tool.isError || tool.resultReceived !== true
+    || !tool.path || (tool.name !== 'edit' && tool.name !== 'write')
+    || (tool.name === 'edit' && !tool.diff)) {
+    toolChangeCache.delete(tool)
+    return undefined
+  }
+  const { name, path, diff, writeContent } = tool
+  const cached = toolChangeCache.get(tool)
+  // ToolItem is mutable at the public boundary; object identity alone does
+  // not establish that its result/argument projection is still current.
+  if (cached && cached.name === name && cached.path === path
+    && cached.diff === diff && cached.writeContent === writeContent) return cached
+  const content = writeContent ?? ''
+  const change: FileChange = name === 'edit'
+    ? { path, kind: 'edit', diff, ...diffStats(diff!) }
+    : { path, kind: 'write', content, additions: content ? content.split('\n').length : 0, deletions: 0 }
+  const projection = { name, path, diff, writeContent, change }
+  toolChangeCache.set(tool, projection)
+  return projection
+}
+
+function changeDisplayDiff(projection: ChangeProjection): string {
+  return projection.displayDiff ??= projection.change.diff ?? (projection.change.content
+    ? projection.change.content.split('\n').map((line, index) => `+${index + 1} ${line}`).join('\n')
+    : '')
+}
+
 /** Successful tool records, not a Git net diff; repeated paths share one entry. */
 export function deriveChanges(timeline: TimelineItem[]): FileChange[] {
-  const byPath = new Map<string, FileChange>()
+  const byPath = new Map<string, ChangeProjection>()
   const seenTools = new Set<string>()
-  const displayDiff = (change: FileChange): string => change.diff ?? (change.content
-    ? change.content.split('\n').map((line, index) => `+${index + 1} ${line}`).join('\n')
-    : '')
   for (const item of timeline) {
-    if (item.kind !== 'tool') continue
+    if (item.kind !== 'tool' || seenTools.has(item.tool.id)) continue
     const { tool } = item
-    if (tool.status !== 'done' || tool.isError || tool.resultReceived !== true || seenTools.has(tool.id)) continue
-    let change: FileChange
-    if (tool.name === 'edit' && tool.path && tool.diff) {
-      change = { path: tool.path, kind: 'edit', diff: tool.diff, ...diffStats(tool.diff) }
-    } else if (tool.name === 'write' && tool.path) {
-      const content = tool.writeContent ?? ''
-      change = {
-        path: tool.path,
-        kind: 'write',
-        content,
-        additions: content ? content.split('\n').length : 0,
-        deletions: 0
-      }
-    } else continue
+    const projection = projectToolChange(tool)
+    if (!projection) continue
     seenTools.add(tool.id)
+    const { change } = projection
     const existing = byPath.get(change.path)
-    byPath.set(change.path, existing ? {
+    byPath.set(change.path, existing ? { change: {
       path: change.path,
       kind: 'edit',
-      diff: [displayDiff(existing), displayDiff(change)].filter(Boolean).join('\n  ...\n'),
-      additions: existing.additions + change.additions,
-      deletions: existing.deletions + change.deletions
-    } : change)
+      diff: [changeDisplayDiff(existing), changeDisplayDiff(projection)].filter(Boolean).join('\n  ...\n'),
+      additions: existing.change.additions + change.additions,
+      deletions: existing.change.deletions + change.deletions
+    } } : projection)
   }
-  return [...byPath.values()]
+  return [...byPath.values()].map(({ change }) => ({ ...change }))
 }
 
 export interface TurnChanges {

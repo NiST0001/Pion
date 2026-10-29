@@ -1,6 +1,7 @@
 import { resolve } from 'node:path'
 import type { ToolPermissionCategory, ToolPermissionRequest } from '../../shared/types'
-import { TOOL_PERMISSION_MARKER } from '../tool-permissions'
+import { TOOL_PERMISSION_MARKER, computerUsePolicyCategories } from '../tool-permissions'
+import { COMPUTER_USE_ACT_TOOL, COMPUTER_USE_OBSERVE_TOOL } from '../../shared/computer-use-agent'
 
 export interface ParsedToolPermission {
   cwd: string
@@ -53,6 +54,8 @@ export function parseToolPermissionMetadata(title: string): ParsedToolPermission
       || !CATEGORIES.has(category)
     ) return null
 
+    const computerUse = metadata.toolName === COMPUTER_USE_OBSERVE_TOOL || metadata.toolName === COMPUTER_USE_ACT_TOOL
+    if (computerUse && computerUsePolicyCategories(metadata.toolName === COMPUTER_USE_ACT_TOOL ? 'act' : 'observe').some(value => !categories.includes(value))) return null
     return {
       cwd: resolve(metadata.cwd),
       sessionPath: typeof metadata.sessionPath === 'string' ? metadata.sessionPath : undefined,
@@ -67,7 +70,7 @@ export function parseToolPermissionMetadata(title: string): ParsedToolPermission
             || value === 'destructive-command'
           ))
         : [],
-      canRemember: metadata.canRemember === true,
+      canRemember: !computerUse && metadata.canRemember === true,
       ...(metadata.subagent === true ? { subagent: true } : {})
     }
   } catch {

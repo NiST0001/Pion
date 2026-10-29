@@ -6,7 +6,7 @@ import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import type { SessionEntry } from '@earendil-works/pi-coding-agent'
 import type { BackendRecord } from '../../src/main/agent/types'
 import type { RunOperation } from '../../src/shared/operations'
-import type { ImageContent, SessionEntriesPage, SessionHistoryIndex, SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
+import type { ImageContent, QueuedMessageEditRequest, QueuedMessageEditResult, SessionEntriesPage, SessionHistoryIndex, SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
 import { RunStore } from '../../src/main/run-store'
 import { SessionListCache } from '../../src/main/agent/session-list-cache'
 import { PendingRequestStore } from '../../src/main/agent/pending-requests'
@@ -24,12 +24,14 @@ interface BridgeHarness {
   queue(message: string, images?: ImageContent[]): Promise<void>
   resumeRun(runId: string): Promise<RunOperation>
   startVerificationRepair(sessionPath: string, cwd: string, message: string): Promise<RunOperation | null>
-  sendQueuedMessage(kind: 'followUp', index: number): Promise<void>
-  editQueuedMessage(request: import('../../src/shared/types').QueuedMessageEditRequest, ownerId: number): import('../../src/shared/types').QueuedMessageEditResult
+  sendQueuedMessage(request: QueuedMessageEditRequest, ownerId: number): Promise<void>
+  removeQueuedMessage(request: QueuedMessageEditRequest, ownerId: number): Promise<void>
+  editQueuedMessage(request: QueuedMessageEditRequest, ownerId: number): QueuedMessageEditResult
   dispatchNextLocalFollowUp(backend: BackendRecord): void
   restoreQueuedRuns(backend: BackendRecord): void
   createRun(backend: BackendRecord, state: null, message: string, images: [], kind: 'follow-up', phase: 'queued'): RunOperation
   activeKey: string
+  activeSessionPath?: string
   sessionSelectionGeneration: number
   historyRevision: number
   getSessionInfo(): Promise<SessionInfo | null>
@@ -60,13 +62,14 @@ async function harness() {
   } as unknown as BackendRecord
   const pool = new Map([[backend.key, backend]])
   const wireSend = vi.fn()
+  const ensureActiveBackend = vi.fn(async () => backend)
   const bridge = Object.assign(Object.create(AgentBridge.prototype), {
     activeKey: backend.key, activeCwd: root, runStore,
     sessionSelectionGeneration: 0, historyRevision: 0, yoloSessions: new Set(),
     win: { webContents: { id: 7, send: wireSend } },
     backendPool: pool, desiredModes: new Map([[backend.key, 'build']]),
     sessionCompletedListeners: new Set(), runCompletedListeners: new Set(), unreadSessionPaths: new Set(),
-    ensureActiveBackend: vi.fn(async () => backend),
+    ensureActiveBackend,
     syncBackendSession: vi.fn(async () => undefined), pushSessionInfo: vi.fn(async () => undefined),
     refreshSidebarSessions: vi.fn(async () => undefined), pushRunCheckpoint: vi.fn(),
     refreshRunCheckpoint: vi.fn(async () => undefined), pushRunningSessionPaths: vi.fn(),
@@ -81,7 +84,7 @@ async function harness() {
   }
   const emit = (type: string, fields: Record<string, unknown> = {}) => listener({ type, ...fields })
   const runs = () => runStore.list({ limit: 100 })
-  return { bridge: api, backend, pool, state, runStore, getState, prompt, steer, emit, addQueued, runs, wireSend }
+  return { bridge: api, backend, pool, state, runStore, getState, prompt, steer, emit, addQueued, runs, wireSend, ensureActiveBackend }
 }
 
 function deferred<T>() {
@@ -148,6 +151,109 @@ describe('AgentBridge queue draft retrieval', () => {
     expect(() => h.bridge.editQueuedMessage(request, 7)).toThrow()
     expect(h.backend.localFollowUps).toHaveLength(1)
     expect(h.prompt).not.toHaveBeenCalled()
+  })
+})
+
+describe.each(['sendQueuedMessage', 'removeQueuedMessage'] as const)('AgentBridge %s identity', action => {
+  it.each(['owner', 'cwd', 'session', 'active session'] as const)('rejects a wrong %s without changing any queued run', async mismatch => {
+    const h = await harness()
+    h.backend.sessionPath = join(h.backend.cwd, 'session.jsonl')
+    h.bridge.activeSessionPath = h.backend.sessionPath
+    const run = h.addQueued('same')
+    const request = { runId: run.id, cwd: run.cwd, sessionFile: run.sessionPath }
+    if (mismatch === 'cwd') request.cwd = join(h.backend.cwd, 'other')
+    if (mismatch === 'session') request.sessionFile = join(h.backend.cwd, 'other.jsonl')
+    if (mismatch === 'active session') h.bridge.activeSessionPath = join(h.backend.cwd, 'other.jsonl')
+    const before = h.runs()
+    const pending = [...h.backend.pendingRunIds]
+    await expect(h.bridge[action](request, mismatch === 'owner' ? 8 : 7)).rejects.toThrow()
+    expect(h.runs()).toEqual(before)
+    expect(h.backend.pendingRunIds).toEqual(pending)
+    expect(h.backend.localFollowUps?.map(item => item.runId)).toEqual([run.id])
+    expect(h.ensureActiveBackend).not.toHaveBeenCalled()
+    expect(h.getState).not.toHaveBeenCalled()
+    expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.steer).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
+  it('keeps the captured B identity after A leaves its earlier queue position', async () => {
+    const h = await harness()
+    h.backend.queueAutoReady = false
+    const a = h.addQueued('A')
+    const b = h.addQueued('B')
+    const c = h.addQueued('C')
+    const requestA = { runId: a.id, cwd: a.cwd, sessionFile: a.sessionPath }
+    const requestB = { runId: b.id, cwd: b.cwd, sessionFile: b.sessionPath }
+    await h.bridge.removeQueuedMessage(requestA, 7)
+    expect(h.backend.localFollowUps?.map(item => item.runId)).toEqual([b.id, c.id])
+    await h.bridge[action](requestB, 7)
+    expect(h.backend.localFollowUps?.map(item => item.runId)).toEqual([c.id])
+    expect(h.runStore.get(a.id)?.state).toBe('discarded')
+    expect(h.runStore.get(b.id)?.state).toBe(action === 'sendQueuedMessage' ? 'dispatching' : 'discarded')
+    expect(h.runStore.get(c.id)?.state).toBe('queued')
+    if (action === 'sendQueuedMessage') {
+      expect(h.backend.activeRunId).toBe(b.id)
+      expect(h.prompt).toHaveBeenCalledExactlyOnceWith('B', [])
+    } else expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.steer).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
+  it('rejects an already sent B request while preserving the new C at that position', async () => {
+    const h = await harness()
+    h.backend.queueAutoReady = false
+    const a = h.addQueued('A')
+    const b = h.addQueued('B')
+    const c = h.addQueued('C')
+    const requestB = { runId: b.id, cwd: b.cwd, sessionFile: b.sessionPath }
+    await h.bridge.removeQueuedMessage({ runId: a.id, cwd: a.cwd, sessionFile: a.sessionPath }, 7)
+    await h.bridge.sendQueuedMessage(requestB, 7)
+    const before = h.runs()
+    const pending = [...h.backend.pendingRunIds]
+    await expect(h.bridge[action](requestB, 7)).rejects.toThrow('排队消息已被发送或移除')
+    expect(h.runs()).toEqual(before)
+    expect(h.backend.pendingRunIds).toEqual(pending)
+    expect(h.backend.localFollowUps?.map(item => item.runId)).toEqual([c.id])
+    expect(h.runStore.get(c.id)?.state).toBe('queued')
+    expect(h.backend.activeRunId).toBe(b.id)
+    expect(h.prompt).toHaveBeenCalledExactlyOnceWith('B', [])
+    expect(h.getState).toHaveBeenCalledTimes(1)
+    expect(h.steer).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
+  it('selects the second real run when both messages have identical text', async () => {
+    const h = await harness()
+    h.backend.queueAutoReady = false
+    const first = h.addQueued('same')
+    const second = h.addQueued('same')
+    await h.bridge[action]({ runId: second.id, cwd: second.cwd, sessionFile: second.sessionPath }, 7)
+    expect(h.runStore.get(first.id)).toEqual(first)
+    expect(h.backend.localFollowUps?.map(item => item.runId)).toEqual([first.id])
+    expect(h.runStore.get(second.id)?.state).toBe(action === 'sendQueuedMessage' ? 'dispatching' : 'discarded')
+    if (action === 'sendQueuedMessage') {
+      expect(h.backend.activeRunId).toBe(second.id)
+      expect(h.prompt).toHaveBeenCalledExactlyOnceWith('same', [])
+    } else expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.steer).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
+  it('rejects a missing backend without starting one or consuming the local draft', async () => {
+    const h = await harness()
+    const run = h.addQueued('unsent')
+    const request = { runId: run.id, cwd: run.cwd, sessionFile: run.sessionPath }
+    h.pool.clear()
+    await expect(h.bridge[action](request, 7)).rejects.toThrow('会话已切换')
+    expect(h.ensureActiveBackend).not.toHaveBeenCalled()
+    expect(h.pool.size).toBe(0)
+    expect(h.runStore.get(run.id)).toEqual(run)
+    expect(h.backend.localFollowUps?.map(item => item.runId)).toEqual([run.id])
+    expect(h.getState).not.toHaveBeenCalled()
+    expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.steer).not.toHaveBeenCalled()
+    await h.runStore.flush()
   })
 })
 
@@ -1180,7 +1286,7 @@ describe('AgentBridge send and local queue', () => {
     h.backend.queueAutoReady = false
     const selected = h.addQueued('selected')
     const remaining = h.addQueued('remaining')
-    await h.bridge.sendQueuedMessage('followUp', 0)
+    await h.bridge.sendQueuedMessage({ runId: selected.id, cwd: selected.cwd, sessionFile: selected.sessionPath }, 7)
     expect(h.prompt).toHaveBeenCalledWith('selected', [])
     h.emit('agent_start')
     h.emit('agent_end', { messages: [{ role: 'assistant', stopReason: 'stop' }] })
@@ -1319,7 +1425,7 @@ describe('AgentBridge send and local queue', () => {
     if (path === 'auto') {
       h.bridge.dispatchNextLocalFollowUp(h.backend)
       await h.backend.localQueueDispatchPromise
-    } else await expect(h.bridge.sendQueuedMessage('followUp', 0)).rejects.toThrow('network disconnected')
+    } else await expect(h.bridge.sendQueuedMessage({ runId: queued.id, cwd: queued.cwd, sessionFile: queued.sessionPath }, 7)).rejects.toThrow('network disconnected')
     expect(h.backend.activeRunId).toBe(queued.id)
     expect(h.backend.busy).toBe(true)
     expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual([remaining.id])
@@ -1346,7 +1452,7 @@ describe('AgentBridge send and local queue', () => {
     const h = await harness()
     const queued = h.addQueued('/handled')
     h.prompt.mockResolvedValue('handled')
-    await h.bridge.sendQueuedMessage('followUp', 0)
+    await h.bridge.sendQueuedMessage({ runId: queued.id, cwd: queued.cwd, sessionFile: queued.sessionPath }, 7)
     expect(h.runStore.get(queued.id)?.state).toBe('discarded')
     expect(h.backend.pendingRunIds).toEqual([])
     expect(h.backend.busy).toBe(false)
@@ -1361,7 +1467,7 @@ describe('AgentBridge send and local queue', () => {
     h.state.isStreaming = true
     h.steer.mockResolvedValue('handled')
     const queued = path === 'promoted' ? h.addQueued('steer') : undefined
-    if (queued) await h.bridge.sendQueuedMessage('followUp', 0)
+    if (queued) await h.bridge.sendQueuedMessage({ runId: queued.id, cwd: queued.cwd, sessionFile: queued.sessionPath }, 7)
     else await h.bridge.send('steer')
     expect(h.backend.busy).toBe(true)
     expect(h.backend.activeRunId).toBe(activeId)
@@ -1444,7 +1550,7 @@ describe('AgentBridge send and local queue', () => {
       if (path === 'auto') {
         h.bridge.dispatchNextLocalFollowUp(h.backend)
         sending = h.backend.localQueueDispatchPromise!
-      } else if (path === 'promoted') sending = h.bridge.sendQueuedMessage('followUp', 0)
+      } else if (path === 'promoted') sending = h.bridge.sendQueuedMessage({ runId: queued!.id, cwd: queued!.cwd, sessionFile: queued!.sessionPath }, 7)
       else sending = h.bridge[path]('/extension')
       // Attach rejection handling before deliberately rejecting the RPC.
       const observed = sending.catch((error: unknown) => error)
@@ -1474,8 +1580,13 @@ describe('AgentBridge send and local queue', () => {
       sending = h.bridge.resumeRun(source.id)
     } else {
       const sessionPath = join(h.backend.cwd, 'session.jsonl')
+      h.backend.sessionPath = sessionPath
+      h.bridge.activeSessionPath = sessionPath
+      const repairState = { ...h.state, sessionFile: sessionPath }
+      h.getState.mockResolvedValueOnce(repairState)
       Object.assign(h.bridge, {
         backendKeysBySessionPath: new Map([[sessionPath, h.backend.key]]),
+        pendingRequests: new PendingRequestStore({ pushToolPermissionRequests: vi.fn(), pushExtensionUiRequests: vi.fn() }),
         assertSessionNotQuarantined: vi.fn()
       })
       sending = h.bridge.startVerificationRepair(sessionPath, h.backend.cwd, 'repair')
@@ -1543,7 +1654,7 @@ describe('AgentBridge send and local queue', () => {
       if (path === 'auto') {
         h.bridge.dispatchNextLocalFollowUp(h.backend)
         sending = h.backend.localQueueDispatchPromise!
-      } else if (path === 'promoted') sending = h.bridge.sendQueuedMessage('followUp', 0)
+      } else if (path === 'promoted') sending = h.bridge.sendQueuedMessage({ runId: queued!.id, cwd: queued!.cwd, sessionFile: queued!.sessionPath }, 7)
       else sending = h.bridge[path]('stale input')
       const observed = sending.catch((error: unknown) => error)
       await dispatchGap()
@@ -1585,7 +1696,7 @@ describe('AgentBridge send and local queue', () => {
       if (path === 'auto') {
         h.bridge.dispatchNextLocalFollowUp(h.backend)
         sending = h.backend.localQueueDispatchPromise!
-      } else sending = h.bridge.sendQueuedMessage('followUp', 0)
+      } else sending = h.bridge.sendQueuedMessage({ runId: queued.id, cwd: queued.cwd, sessionFile: queued.sessionPath }, 7)
       const observed = sending.catch((error: unknown) => error)
       await dispatchGap()
       expect(h.runStore.get(queued.id)?.state).toBe('dispatching')
@@ -1647,9 +1758,9 @@ describe('AgentBridge send and local queue', () => {
     h.state.isStreaming = true
     const receipt = deferred<'queued' | 'handled'>()
     h.steer.mockImplementationOnce(() => receipt.promise)
-    if (path === 'promoted') h.addQueued('inserted')
+    const queued = path === 'promoted' ? h.addQueued('inserted') : undefined
     const sending = (path === 'direct' ? h.bridge.send('inserted')
-      : h.bridge.sendQueuedMessage('followUp', 0)).catch((error: unknown) => error)
+      : h.bridge.sendQueuedMessage({ runId: queued!.id, cwd: queued!.cwd, sessionFile: queued!.sessionPath }, 7)).catch((error: unknown) => error)
     await dispatchGap()
     const remaining = h.addQueued('remaining')
     h.state.isStreaming = false
@@ -1716,7 +1827,7 @@ describe('AgentBridge send and local queue', () => {
     const queued = h.addQueued('same')
     const result = deferred<'queued' | 'handled'>()
     h.steer.mockImplementationOnce(() => result.promise)
-    const promoted = h.bridge.sendQueuedMessage('followUp', 0).catch((error: unknown) => error)
+    const promoted = h.bridge.sendQueuedMessage({ runId: queued.id, cwd: queued.cwd, sessionFile: queued.sessionPath }, 7).catch((error: unknown) => error)
     await dispatchGap()
     h.emit('queue_update', { steering: [], followUp: [] })
     await h.bridge.send('same')
@@ -1742,7 +1853,7 @@ describe('AgentBridge send and local queue', () => {
       run.tools.push({ toolCallId: 'tool', name: 'read', state: 'completed', startedAt: 1 })
     })
     const before = h.runStore.get(queued.id)
-    await expect(h.bridge.sendQueuedMessage('followUp', 0)).rejects.toThrow('不能作为未发送消息重发')
+    await expect(h.bridge.sendQueuedMessage({ runId: queued.id, cwd: queued.cwd, sessionFile: queued.sessionPath }, 7)).rejects.toThrow('排队消息已被发送或移除')
     expect(h.runStore.get(queued.id)).toEqual(before)
     expect(h.steer).not.toHaveBeenCalled()
     await h.runStore.flush()
@@ -1756,7 +1867,7 @@ describe('AgentBridge send and local queue', () => {
     const first = h.addQueued('same')
     const second = h.addQueued('same')
     h.steer.mockRejectedValueOnce(new Error('network disconnected'))
-    await expect(h.bridge.sendQueuedMessage('followUp', 0)).rejects.toThrow('network disconnected')
+    await expect(h.bridge.sendQueuedMessage({ runId: first.id, cwd: first.cwd, sessionFile: first.sessionPath }, 7)).rejects.toThrow('network disconnected')
     expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual([second.id])
     expect(h.backend.pendingRunIds).not.toContain(first.id)
     expect(h.backend.companionRunIds).toContain(first.id)
@@ -1781,7 +1892,7 @@ describe('AgentBridge send and local queue', () => {
     if (path === 'auto') {
       h.bridge.dispatchNextLocalFollowUp(h.backend)
       await h.backend.localQueueDispatchPromise
-    } else await expect(h.bridge.sendQueuedMessage('followUp', 0)).rejects.toThrow()
+    } else await expect(h.bridge.sendQueuedMessage({ runId: queued.id, cwd: queued.cwd, sessionFile: queued.sessionPath }, 7)).rejects.toThrow()
     expect(h.prompt).not.toHaveBeenCalled()
     expect(h.runStore.get(queued.id)?.state).toBe('queued')
     expect(h.runStore.get(queued.id)?.dispatchedAt).toBeUndefined()
@@ -1800,7 +1911,7 @@ describe('AgentBridge send and local queue', () => {
     if (path === 'auto') {
       h.bridge.dispatchNextLocalFollowUp(h.backend)
       sending = h.backend.localQueueDispatchPromise!
-    } else sending = h.bridge.sendQueuedMessage('followUp', 0)
+    } else sending = h.bridge.sendQueuedMessage({ runId: first.id, cwd: first.cwd, sessionFile: first.sessionPath }, 7)
     const observed = sending.catch((error: unknown) => error)
     await dispatchGap()
     const replacement = { ...h.backend, activeRunId: 'new-owner', busy: true }
@@ -1851,8 +1962,8 @@ describe('AgentBridge send and local queue', () => {
     h.prompt.mockImplementationOnce(() => receipt.promise)
     let sending: Promise<void>
     if (path === 'promoted') {
-      h.addQueued('first')
-      sending = h.bridge.sendQueuedMessage('followUp', 0)
+      const queued = h.addQueued('first')
+      sending = h.bridge.sendQueuedMessage({ runId: queued.id, cwd: queued.cwd, sessionFile: queued.sessionPath }, 7)
     } else sending = path === 'send' ? h.bridge.send('first') : h.bridge.queue('first')
     await dispatchGap()
     await h.bridge.queue('second')

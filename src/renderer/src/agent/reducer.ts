@@ -27,18 +27,28 @@ import {
   reconcileCompletedAssistantRows,
   reconcileNewerTimelineItems,
   reconcileOlderTimelineItems,
-  resultText,
   toolResultMatches,
-  truncate,
   wireMessageTimestamp
 } from './timeline'
 import type { Action, AgentState, TimelineItem, ToolItem } from './types'
 
-/** Keep a just-sent empty session visible until Pi's JSONL index catches up. */
+/** Keep optimistic rows and accept totals only for the same discovery snapshot. */
 function reconcileSessionProjection(incoming: AgentState['sessions'], previous: AgentState['sessions']): AgentState['sessions'] {
-  const persistedIds = new Set(incoming.map((session) => session.id))
+  const revision = incoming[0]?.sidebarRevision
+  if (revision !== undefined && previous.some((session) => (session.sidebarRevision ?? 0) > revision)) return previous
+  const previousByPath = new Map(previous.map((session) => [session.path, session]))
+  const sessions = incoming.map((session) => {
+    const before = previousByPath.get(session.path)
+    // A slow bootstrap/STATE refresh can arrive after this snapshot's totals.
+    // A newer scan, even with unchanged file metadata, starts unknown again.
+    return before !== undefined && session.sidebarRevision !== undefined && session.sidebarRevision === before.sidebarRevision
+      && session.id === before.id && session.totalTokens === undefined && before.totalTokens !== undefined
+      ? { ...session, totalTokens: before.totalTokens }
+      : session
+  })
+  const persistedIds = new Set(sessions.map((session) => session.id))
   const pending = previous.filter((session) => session.optimistic && !persistedIds.has(session.id))
-  return orderSessions([...incoming, ...pending], previous)
+  return orderSessions([...sessions, ...pending], previous)
 }
 
 export function reducer(state: AgentState, action: Action): AgentState {
@@ -1157,8 +1167,7 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
       const timeline = state.timeline.map((item) => {
         if (item.kind !== 'tool' || item.tool.id !== event.toolCallId || item.tool.status !== 'running') return item
         // No image decoding or task/usage recovery in this streaming path.
-        const tool = item.tool.name === 'pion_subagents' ? applyPartialToolResult(item.tool, event.partialResult)
-          : { ...item.tool, outputText: truncate(resultText(event.partialResult as ToolResultPayload), 2000) }
+        const tool = applyPartialToolResult(item.tool, event.partialResult)
         if (tool === item.tool) return item
         changed = true
         return { ...item, tool }

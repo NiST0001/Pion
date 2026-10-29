@@ -27,7 +27,8 @@ describe('branch deletion isolated mock fixtures', () => {
   })
 
   const root = resolve('/pion-tests/project')
-  const target = resolve('/pion-tests/branches/space and\nnewline')
+  const legacyTarget = resolve('/pion-tests/branches/space and\nnewline')
+  let target: string
   const common = join(root, '.git')
   const sha = 'a'.repeat(40)
   const changedSha = 'b'.repeat(40)
@@ -70,6 +71,7 @@ describe('branch deletion isolated mock fixtures', () => {
   beforeEach(() => {
     // Reset only this suite's fixtures, never another coverage-imported suite's mocks.
     for (const mock of Object.values(mocks)) mock.mockReset()
+    target = legacyTarget
     removed = false; deleted = false; dirty = ''; targetBranch = 'feature'; targetTip = sha; mainTip = sha
     targetFlags = []; mainPath = root; targetPath = target; targetTop = target; targetCommon = common
     superproject = ''; dotGitDirectory = false; inodeChanged = undefined; recreated = false
@@ -181,6 +183,40 @@ describe('branch deletion isolated mock fixtures', () => {
     })
   })
 
+  describe('project-local worktrees', () => {
+    beforeEach(() => {
+      target = join(root, '.pion-worktrees', 'feature')
+      targetPath = target; targetTop = target
+    })
+
+    it('removes only a registered direct child, retaining managed-parent identity and non-force operations', async () => {
+      const idle = vi.fn()
+      const commit = await prepareWorktreeBranchDeletion(root, target, 'feature', idle)
+      expect(sideEffects()).toEqual([])
+      expect(mocks.lstat).toHaveBeenCalledWith(dirname(target), { bigint: true })
+      await expect(commit()).resolves.toEqual({ worktreeRemoved: true, branchDeleted: true })
+      expect(idle).toHaveBeenCalledTimes(3)
+      expect(sideEffects()).toEqual([['worktree', 'remove', '--', target], ['branch', '-d', '--', 'feature']])
+      expect(mocks.git).toHaveBeenCalledWith(root, ['merge-base', '--is-ancestor', sha, sha], expect.any(Object))
+      expect(mocks.git).toHaveBeenCalledWith(target, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching'], expect.any(Object))
+    })
+
+    it.each(['parent-symlink', 'parent-inode', 'ignored', 'nested-checkout', 'ancestor-checkout'])('rechecks project-local %s after backend shutdown', async (kind) => {
+      const idle = idleWith((count) => {
+        if (count !== 2) return
+        if (kind === 'parent-symlink') mocks.realpath.mockImplementation(async (path: string) => path === dirname(target) ? resolve('/alias') : path)
+        if (kind === 'parent-inode') inodeChanged = dirname(target)
+        if (kind === 'ignored') dirty = '!! late ignored\0'
+        if (kind === 'nested-checkout') extraRecords = record(join(target, 'nested'), sha, 'nested')
+        if (kind === 'ancestor-checkout') extraRecords = record(dirname(target), sha, 'container')
+      })
+      await expect(remove(idle)).rejects.toThrow()
+      expect(sideEffects()).toEqual([])
+      expect(removed).toBe(false)
+      expect(deleted).toBe(false)
+    })
+  })
+
   describe('deleteWorktreeBranch: mock-only safety boundaries', () => {
     it('uses no shell, force, filesystem deletion, or upstream-only merge inference', async () => {
       const idle = vi.fn()
@@ -208,8 +244,12 @@ describe('branch deletion isolated mock fixtures', () => {
       await expect(deleteWorktreeBranch(root, target, 'feature', undefined as never)).rejects.toThrow()
       expect(sideEffects()).toEqual([])
     })
-    it.each([root, join(root, 'nested'), dirname(root)])('rejects main and nested/ancestor targets %s', async (path) => {
-      await expect(deleteWorktreeBranch(root, path, 'feature', vi.fn())).rejects.toThrow()
+    it.each([root, join(root, 'nested'), dirname(root), join(root, '.pion-worktrees'),
+      join(root, '.pion-worktrees', 'feature', 'nested'), join(root, 'other', '.pion-worktrees', 'feature')])('rejects main, management and other nested/ancestor targets %s', async (path) => {
+      const idle = vi.fn()
+      await expect(deleteWorktreeBranch(root, path, 'feature', idle)).rejects.toThrow()
+      expect(idle).not.toHaveBeenCalled()
+      expect(mocks.git).not.toHaveBeenCalled()
       expect(sideEffects()).toEqual([])
     })
     it.each(['detached', 'locked', 'locked user reason', 'prunable', 'prunable missing path'])('rejects flagged targets %s', async (flag) => {

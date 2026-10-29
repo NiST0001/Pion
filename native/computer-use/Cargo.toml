@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 publish = false
 
-# Native capture only; no RemoteDesktop/input connection.
+# Native capture and explicitly opened, dedicated Wayland virtual input.
 [dependencies]
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 tokio = { version = "=1.52.3", features = ["rt", "macros", "sync", "time", "signal"] }
@@ -15,3 +15,8 @@ futures-util = "=0.3.32"
 png = "=0.17.16"
 base64 = "=0.22.1"
 pipewire = "=0.9.2"
+wayland-client = "=0.31.14"
+wayland-protocols = { version = "=0.32.13", features = ["client", "unstable"] }
+wayland-protocols-misc = { version = "=0.3.12", features = ["client"] }
+wayland-protocols-wlr = { version = "=0.3.12", features = ["client"] }
+libc = "=0.2.190"

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -6,6 +6,7 @@ import { Type } from 'typebox'
 import { DefaultResourceLoader, SettingsManager, type ExtensionAPI, type ExtensionToolContext, type ToolDefinition, type ToolResultEvent, type ToolResultEventResult, type ResourceLoader } from '@earendil-works/pi-coding-agent'
 import { createPionNativeExtensions, createPionNativeLoadoutBoundary, NATIVE_SCRIPT_DEADLINE_MS, NATIVE_SCRIPT_MAX_MODEL_CALLS } from '../../src/main/agent/native-extensions'
 import { loadAgentCapabilities } from '../../src/main/agent/capabilities'
+import { DEFAULT_CAPABILITY_PREFERENCES, type CapabilityItem } from '../../src/shared/capability-settings'
 
 const mocks = vi.hoisted(() => ({
   codemode: vi.fn(), search: vi.fn(), mcp: vi.fn(), start: vi.fn(), shutdown: vi.fn(),
@@ -24,7 +25,8 @@ vi.mock('@earendil-works/pi-coding-agent', async (original) => {
     createToolSearchExtension: mocks.search,
     createMcpExtension: mocks.mcp,
     getAgentDir: () => mocks.agentDir,
-    SettingsManager: { ...sdk.SettingsManager, create: mocks.settings, inMemory: sdk.SettingsManager.inMemory },
+    SettingsManager: { ...sdk.SettingsManager, create: mocks.settings,
+      inMemory: sdk.SettingsManager.inMemory, fromStorage: sdk.SettingsManager.fromStorage },
     DefaultResourceLoader: class extends sdk.DefaultResourceLoader {
       constructor(options: ConstructorParameters<typeof sdk.DefaultResourceLoader>[0]) {
         // Exercise the real SDK replacement loader without discovering the
@@ -40,6 +42,8 @@ beforeEach(async () => {
   vi.clearAllMocks()
   root = await mkdtemp(join(tmpdir(), 'pion-native-extensions-'))
   mocks.agentDir = join(root, 'agent')
+  vi.stubEnv('HOME', join(root, 'home'))
+  await mkdir(join(root, '.git')) // bound trusted ancestor discovery to the fixture
   mocks.codemode.mockImplementation(() => (pi: ExtensionAPI) => pi.registerTool({ ...definition('codemode'), defaultActive: false }))
   mocks.search.mockImplementation(() => (pi: ExtensionAPI) => pi.registerTool({ ...definition('tool_search'), defaultActive: false }))
   mocks.mcp.mockImplementation(() => (pi: ExtensionAPI) => {
@@ -49,7 +53,7 @@ beforeEach(async () => {
   })
   mocks.settings.mockImplementation((_cwd, _agentDir, options) => SettingsManager.inMemory({}, { projectTrusted: options.projectTrusted }))
 })
-afterEach(async () => { await rm(root, { recursive: true, force: true }) })
+afterEach(async () => { vi.unstubAllEnvs(); await rm(root, { recursive: true, force: true }) })
 
 it('creates fresh named, replaceable CLI builtins for every backend with models explicitly enabled', () => {
   const first = createPionNativeExtensions()
@@ -151,25 +155,32 @@ it.each([
   expect(overrides).not.toHaveBeenCalled()
 })
 
-it.each([false, true])('capability reload uses the same builtin registry without binding/connecting (trusted=%s)', async (projectTrusted) => {
-  const result = await loadAgentCapabilities(root, projectTrusted)
-  expect(mocks.settings).toHaveBeenCalledWith(root, mocks.agentDir, { projectTrusted })
-  expect(mocks.loaders).toHaveBeenCalledWith(expect.objectContaining({ extensionFactories: [
-    expect.objectContaining({ name: 'codemode', builtin: true, replaceable: true }),
-    expect.objectContaining({ name: 'tool-search', builtin: true, replaceable: true }),
-    expect.objectContaining({ name: 'mcp', builtin: true, replaceable: true })
-  ] }))
-  expect(result.tools.map((tool) => tool.name).sort()).toEqual(['codemode', 'tool_search'])
-  expect(result.tools.every((tool) => tool.source === 'builtin')).toBe(true)
-  expect(Object.keys(result).sort()).toEqual(['skills', 'tools'])
-  expect(mocks.start).not.toHaveBeenCalled()
-  expect(mocks.shutdown).not.toHaveBeenCalled()
+it.each([false, true])('reads capabilities without a loader, native factories or connections (trusted=%s)', async (projectTrusted) => {
+  const options = { agentDir: mocks.agentDir, preferences: DEFAULT_CAPABILITY_PREFERENCES }
+  expect(await loadAgentCapabilities(root, projectTrusted, options)).toEqual({ skills: [], tools: [] })
+  // A catalogue slot alone is never a registered tool. Metadata can only come
+  // from the caller's already-verified runtime, with no factory invocation here.
+  const runtime: CapabilityItem = { id: 'tool:codemode', kind: 'tool', name: 'codemode', label: 'Codemode',
+    description: 'Verified runtime tool', origin: 'extension', enabled: true, available: true }
+  const result = await loadAgentCapabilities(root, projectTrusted, { ...options, runtimeItems: [runtime] })
+  expect(result).toEqual({ skills: [], tools: [{ name: runtime.name, label: runtime.label,
+    description: runtime.description, source: runtime.id }] })
+  for (const operation of [mocks.settings, mocks.loaders, mocks.codemode, mocks.search, mocks.mcp, mocks.start, mocks.shutdown]) {
+    expect(operation).not.toHaveBeenCalled()
+  }
 })
 
-it('capabilities list only surviving registered tools, not disabled tools or imaginary MCP services', async () => {
-  mocks.settings.mockImplementation(() => SettingsManager.inMemory({ extensions: ['-builtin:codemode', '-builtin:tool-search', '-builtin:mcp'] }))
-  expect(await loadAgentCapabilities(root, false)).toEqual({ skills: [], tools: [] })
-  expect(mocks.start).not.toHaveBeenCalled()
+it('retains disabled settings and runtime tools without inventing registrations during capability reads', async () => {
+  await mkdir(mocks.agentDir, { recursive: true })
+  await writeFile(join(mocks.agentDir, 'settings.json'), JSON.stringify({ defaultTools: ['read'],
+    extensions: ['-builtin:codemode', '-builtin:tool-search', '-builtin:mcp'] }))
+  const runtime: CapabilityItem = { id: 'tool:codemode', kind: 'tool', name: 'codemode', label: 'Codemode',
+    description: 'Earlier runtime metadata', origin: 'extension', enabled: true, available: true }
+  expect(await loadAgentCapabilities(root, false, { agentDir: mocks.agentDir,
+    preferences: DEFAULT_CAPABILITY_PREFERENCES, runtimeItems: [runtime] })).toEqual({ skills: [], tools: [] })
+  for (const operation of [mocks.settings, mocks.loaders, mocks.codemode, mocks.search, mocks.mcp, mocks.start, mocks.shutdown]) {
+    expect(operation).not.toHaveBeenCalled()
+  }
 })
 
 async function guardedTool(execute: ToolDefinition['execute']) {
@@ -218,6 +229,110 @@ it('binds public methods and model dispatch to private-field registry receivers'
   })
   await tool.execute('run', {}, undefined, undefined, contextWith(registry))
   expect(registry.getError()).toBe('private')
+})
+
+it('supports SDK defineProperties tool contexts without reading guarded getters eagerly', async () => {
+  const registry = { classify: vi.fn(async () => ({})) }
+  const callable: ExtensionToolContext['tools'] = []
+  let active = true
+  let cwd = 'before'
+  const assertActive = () => { if (!active) throw new Error('retired runtime') }
+  const readRegistry = vi.fn()
+  const readTools = vi.fn()
+  const outcome = { toolCall: { type: 'toolCall' as const, id: 'outer/1', name: 'read', arguments: {} },
+    result: { content: [], details: undefined }, isError: false }
+  const executeTool = vi.fn(async function (this: ExtensionToolContext) {
+    expect(this).toBe(context)
+    assertActive()
+    return outcome
+  })
+  // SDK runner.createToolContext adds non-enumerable, non-configurable slots;
+  // executeTool is also non-writable. The base context getters remain live.
+  const context = Object.defineProperties({
+    get modelRegistry() {
+      expect(this).toBe(context)
+      readRegistry()
+      assertActive()
+      return registry
+    },
+    get cwd() { expect(this).toBe(context); assertActive(); return cwd },
+    isIdle() { expect(this).toBe(context); assertActive(); return true }
+  }, {
+    tools: { get() { expect(this).toBe(context); readTools(); assertActive(); return callable } },
+    executeTool: { value: executeTool }
+  }) as unknown as ExtensionToolContext
+  const descriptors = Object.getOwnPropertyDescriptors(context)
+  expect(descriptors.executeTool).toMatchObject({ value: executeTool, writable: false, configurable: false, enumerable: false })
+  expect(descriptors.tools).toMatchObject({ get: expect.any(Function), configurable: false, enumerable: false })
+  const tool = await guardedTool(async (_id, _params, _signal, _update, ctx) => {
+    expect(readRegistry).not.toHaveBeenCalled()
+    expect(readTools).not.toHaveBeenCalled()
+    expect(Reflect.ownKeys(ctx)).toEqual(Reflect.ownKeys(context))
+    expect(ctx.isIdle()).toBe(true)
+    expect(ctx.cwd).toBe('before')
+    cwd = 'after'
+    expect(ctx.cwd).toBe('after')
+    expect(ctx.tools).toBe(callable)
+    expect(await ctx.executeTool('read', {})).toBe(outcome)
+    const scoped = ctx.modelRegistry
+    expect(scoped).not.toBe(registry)
+    expect(ctx.modelRegistry).toBe(scoped)
+    expect(readRegistry).toHaveBeenCalledTimes(2)
+    active = false
+    expect(() => ctx.modelRegistry).toThrow('retired runtime')
+    expect(() => ctx.tools).toThrow('retired runtime')
+    return { content: [], details: undefined }
+  })
+  await tool.execute('outer', {}, undefined, undefined, context)
+  expect(executeTool).toHaveBeenCalledTimes(1)
+  expect(Object.getOwnPropertyDescriptors(context)).toEqual(descriptors)
+})
+
+it('scopes frozen own registry methods without changing source descriptors or bypassing the shared budget', async () => {
+  const readStatus = vi.fn()
+  class Registry {
+    #value = 'private'
+    get status() { readStatus(); return this.#value }
+    getError() { return this.#value }
+    async classify(_model: unknown, _context: unknown, options: { signal: AbortSignal }) {
+      expect(options.signal).toBeInstanceOf(AbortSignal)
+      return this.#value
+    }
+    async generateImages(_model: unknown, _context: unknown, options: { signal: AbortSignal }) {
+      expect(options.signal).toBeInstanceOf(AbortSignal)
+      return this.#value
+    }
+  }
+  const classify = vi.fn(Registry.prototype.classify)
+  const generateImages = vi.fn(Registry.prototype.generateImages)
+  const registry = Object.freeze(Object.defineProperties(new Registry(), {
+    classify: { value: classify },
+    generateImages: { value: generateImages },
+    getError: { value: Registry.prototype.getError },
+    status: { get: Object.getOwnPropertyDescriptor(Registry.prototype, 'status')!.get }
+  }))
+  const descriptors = Object.getOwnPropertyDescriptors(registry)
+  const context = Object.freeze(Object.defineProperties({}, { modelRegistry: { value: registry } })) as ExtensionToolContext
+  const tool = await guardedTool(async (_id, _params, _signal, _update, ctx) => {
+    expect(readStatus).not.toHaveBeenCalled()
+    expect(ctx.modelRegistry.getError()).toBe('private')
+    expect(Reflect.get(ctx.modelRegistry, 'status')).toBe('private')
+    expect(readStatus).toHaveBeenCalledTimes(1)
+    for (let n = 0; n < NATIVE_SCRIPT_MAX_MODEL_CALLS; n++) {
+      const result = n % 2
+        ? await ctx.modelRegistry.generateImages({} as never, {} as never)
+        : await ctx.modelRegistry.classify({} as never, {} as never)
+      expect(result).toBe('private')
+    }
+    expect(() => ctx.modelRegistry.classify({} as never, {} as never)).toThrow('budget')
+    return { content: [], details: undefined }
+  })
+  await tool.execute('run', {}, undefined, undefined, context)
+  expect(classify).toHaveBeenCalledTimes(4)
+  expect(generateImages).toHaveBeenCalledTimes(4)
+  expect(Object.getOwnPropertyDescriptors(registry)).toEqual(descriptors)
+  expect(Object.isFrozen(registry)).toBe(true)
+  expect(Object.getOwnPropertyDescriptor(context, 'modelRegistry')).toMatchObject({ value: registry, writable: false, configurable: false })
 })
 
 it('has a hard host deadline regardless of script timeout options, while late calls remain blocked', async () => {

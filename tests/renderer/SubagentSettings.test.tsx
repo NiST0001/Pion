@@ -156,34 +156,113 @@ it('ignores a previous owner load after the new owner has loaded and edited its 
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 })
 
-it.each(['resolve', 'reject'] as const)('keeps the real save slot until stale owner save %s settles', async (outcome) => {
+it.each(['resolve', 'reject'] as const)('waits across repeated remounts for a real save to %s before reading fresh settings', async (outcome) => {
   let resolve!: (value: typeof DEFAULT_SUBAGENT_SETTINGS) => void
   let reject!: (reason: Error) => void
   const pending = new Promise<typeof DEFAULT_SUBAGENT_SETTINGS>((done, fail) => { resolve = done; reject = fail })
-  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(DEFAULT_SUBAGENT_SETTINGS), setSubagentSettings: vi.fn().mockReturnValue(pending) } as unknown as PionApi
+  const initial = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'saved', id: 'exact/model' } }
+  const draft = { ...initial, maxParallel: 8 }
+  let stored = initial
+  const load = vi.fn(async () => stored)
+  const save = vi.fn().mockReturnValueOnce(pending).mockImplementation(async (value) => value)
+  window.pion = { getSubagentSettings: load, setSubagentSettings: save } as unknown as PionApi
+  const first = render(<SubagentSettings />)
+  await waitFor(() => expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toBeEnabled())
+  fireEvent.change(screen.getByRole('spinbutton', { name: '每批最大子代理数' }), { target: { value: '8' } })
+  fireEvent.submit(first.container.querySelector('form')!)
+  expect(save).toHaveBeenCalledExactlyOnceWith(draft)
+  first.unmount()
+  const waiting = render(<SubagentSettings />)
+  await act(async () => { await Promise.resolve() })
+  expect(load).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole('button', { name: '等待上次保存结束…' })).toBeDisabled()
+  fireEvent.submit(waiting.container.querySelector('form')!)
+  expect(save).toHaveBeenCalledTimes(1)
+  waiting.unmount()
+  const reopened = render(<SubagentSettings />)
+  await act(async () => { await Promise.resolve() })
+  expect(load).toHaveBeenCalledTimes(1)
+  const count = screen.getByRole('spinbutton', { name: '每批最大子代理数' })
+  expect(count).toBeDisabled()
+  await act(async () => {
+    if (outcome === 'resolve') { stored = draft; resolve(draft) }
+    else reject(new Error('disk write failed'))
+  })
+  await waitFor(() => expect(count).toBeEnabled())
+  expect(load).toHaveBeenCalledTimes(2)
+  expect(count).toHaveValue(8)
+  expect(screen.getByRole('combobox', { name: '默认子代理模型' })).toHaveTextContent('saved/exact/model（当前列表未显示）')
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  if (outcome === 'reject') expect(screen.getByRole('alert')).toHaveTextContent('保存失败：Error: disk write failed')
+  else expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(save).toHaveBeenCalledTimes(1)
+  reopened.unmount()
+  const returned = render(<SubagentSettings />)
+  await waitFor(() => expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toBeEnabled())
+  expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toHaveValue(8)
+  expect(load).toHaveBeenCalledTimes(3)
+  if (outcome === 'reject') expect(screen.getByRole('alert')).toHaveTextContent('disk write failed')
+  fireEvent.submit(returned.container.querySelector('form')!)
+  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('下一批'))
+  expect(save).toHaveBeenLastCalledWith(draft)
+  expect(save).toHaveBeenCalledTimes(2)
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+
+it.each(['resolve', 'reject'] as const)('isolates API replacement while an old owner save %s settles', async (outcome) => {
+  let resolve!: (value: typeof DEFAULT_SUBAGENT_SETTINGS) => void
+  let reject!: (reason: Error) => void
+  const pending = new Promise<typeof DEFAULT_SUBAGENT_SETTINGS>((done, fail) => { resolve = done; reject = fail })
+  const oldSave = vi.fn().mockReturnValue(pending)
+  const oldLoad = vi.fn().mockResolvedValue(DEFAULT_SUBAGENT_SETTINGS)
+  const oldApi = { getSubagentSettings: oldLoad, setSubagentSettings: oldSave } as unknown as PionApi
+  window.pion = oldApi
   const { container, rerender } = render(<SubagentSettings />)
   const count = screen.getByRole('spinbutton', { name: '每批最大子代理数' })
   await waitFor(() => expect(count).toBeEnabled())
   fireEvent.change(count, { target: { value: '8' } })
   fireEvent.submit(container.querySelector('form')!)
-  const save = vi.fn().mockImplementation(async (settings) => settings)
-  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 4 }), setSubagentSettings: save } as unknown as PionApi
+  let resolveNew!: (value: typeof DEFAULT_SUBAGENT_SETTINGS) => void
+  const save = vi.fn(() => new Promise<typeof DEFAULT_SUBAGENT_SETTINGS>((done) => { resolveNew = done }))
+  let storedNew = { ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 4 }
+  const newLoad = vi.fn(async () => storedNew)
+  const newApi = { getSubagentSettings: newLoad, setSubagentSettings: save } as unknown as PionApi
+  window.pion = newApi
   rerender(<SubagentSettings />)
-  await waitFor(() => expect(count).toHaveValue(4))
-  expect(count).toBeDisabled()
+  await waitFor(() => expect(count).toBeEnabled())
+  expect(count).toHaveValue(4)
+  fireEvent.change(count, { target: { value: '5' } })
   fireEvent.submit(container.querySelector('form')!)
-  expect(save).not.toHaveBeenCalled()
+  expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 5 })
+  expect(count).toBeDisabled()
+  window.pion = oldApi
+  rerender(<SubagentSettings />)
+  expect(count).toHaveValue(8)
+  expect(count).toBeDisabled()
+  expect(oldLoad).toHaveBeenCalledTimes(1)
+  window.pion = newApi
+  rerender(<SubagentSettings />)
+  expect(count).toHaveValue(5)
+  expect(count).toBeDisabled()
+  expect(newLoad).toHaveBeenCalledTimes(1)
   await act(async () => {
     if (outcome === 'resolve') resolve({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 8 })
     else reject(new Error('old owner failure'))
   })
-  expect(count).toHaveValue(4)
-  expect(count).toBeEnabled()
+  expect(count).toHaveValue(5)
+  expect(count).toBeDisabled()
   expect(screen.queryByRole('status')).not.toBeInTheDocument()
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   fireEvent.submit(container.querySelector('form')!)
-  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('下一批'))
-  expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 4 })
+  expect(save).toHaveBeenCalledTimes(1)
+  await act(async () => { storedNew = { ...storedNew, maxParallel: 5 }; resolveNew(storedNew) })
+  await waitFor(() => expect(count).toBeEnabled())
+  expect(count).toHaveValue(5)
+  expect(newLoad).toHaveBeenCalledTimes(2)
+  expect(oldLoad).toHaveBeenCalledTimes(1)
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(oldSave).toHaveBeenCalledTimes(1)
 })
 
 it('uses the independent SDK directory with empty or stale parent candidates', async () => {

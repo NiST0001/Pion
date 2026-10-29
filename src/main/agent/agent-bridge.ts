@@ -5,11 +5,11 @@ import { BrowserWindow, clipboard } from 'electron'
 import { subagentSettingsFilePath } from '../subagent-settings'
 import { questionSettingsFilePath } from '../question-settings'
 import type { UsageLedgerCollector } from '../../shared/usage-overview'
-import { encodeQuestionCustomAnswer, supportsCustomQuestionAnswer } from '../../shared/question-answer'
-import { capabilityEnabled, CAPABILITY_RUNTIME_COMMAND, type CapabilitySettingsSnapshot, type CapabilitySettingsUpdate } from '../../shared/capability-settings'
+import { capabilityEnabled, CAPABILITY_RUNTIME_COMMAND, DEFAULT_CAPABILITY_PREFERENCES, type CapabilitySettingsSnapshot, type CapabilitySettingsUpdate } from '../../shared/capability-settings'
 import type { CapabilitySettingsStore } from '../capability-settings'
 import { readCapabilityResources } from '../capability-catalogue'
 import { capabilityApplication, capabilityBackendIdle, capabilityCommandFrom, capabilityNeedsApplication, knownCapabilityRpcRejection, newBackendCapabilityState, observeCapabilityRpcRejections, readCapabilityRuntimeNotice, rememberCapabilityRuntimeItems, type CapabilityCommands, type CapabilityRpcRejection } from './capability-state'
+import { encodeQuestionCustomAnswer, supportsCustomQuestionAnswer } from '../../shared/question-answer'
 import { QUESTION_WAIT_WIDGET_KEY, parseQuestionWaitMetadata, type QuestionWaitMetadata } from '../../shared/question-settings'
 import { DEFAULT_SUBAGENTS_ENABLED, SUBAGENT_LIMITS } from '../../shared/subagents'
 import { IPC_EVENTS } from '../../shared/ipc'
@@ -29,6 +29,7 @@ import {
   RpcClient,
   SessionManager,
   SettingsManager,
+  VERSION,
   getAgentDir,
   hasTrustRequiringProjectResources
 } from '@earendil-works/pi-coding-agent'
@@ -95,6 +96,10 @@ import {
   ToolPermissionStore
 } from '../tool-permissions'
 import { parseToolPermissionMetadata } from './tool-permission-request'
+import { computerUsePolicyCategories } from '../tool-permissions'
+import { ComputerUseAgentBridge, ComputerUseAgentProtocolError, type ComputerUseAgentAdmission, type ComputerUseAgentBridgeOptions } from './computer-use-bridge'
+import { COMPUTER_USE_ACT_TOOL, COMPUTER_USE_OBSERVE_TOOL, COMPUTER_USE_AGENT_LIMITS, COMPUTER_USE_AGENT_SOURCE_FIELD, isComputerUseAgentTitle, parseComputerUseAgentSource, stripComputerUseAgentImages, type ComputerUseAgentRequest, type ComputerUseAgentSource } from '../../shared/computer-use-agent'
+import type { ComputerUseOwner } from '../../shared/computer-use'
 import { ensureNativeTaskExtension } from './task-planning'
 import { ensureNativePlanModeExtension } from './plan-mode'
 import { BackendPool } from './backend-pool'
@@ -102,6 +107,7 @@ import { SessionListCache } from './session-list-cache'
 import { readSessionTokenTotal } from './session-token-total'
 import { revertSessionMessage } from './message-revert'
 import { stopForHistory } from './stop-for-history'
+import { stopWithProcessExit } from '../process-exit'
 import { prepareWorktreeBranchDeletion } from '../git/branch-delete'
 import type { BranchDeleteRequest, BranchDeleteResult } from '../../shared/branches'
 import { applyBackendEvent } from './backend-events'
@@ -180,6 +186,10 @@ import {
   promptPreview
 } from './utils'
 
+// Reviewed with the pinned 1.4.0 adapter: spawn and process assignment precede
+// the first await. Only that exact entry can attest a null, never-created child.
+const PINNED_RPC_START = RpcClient.prototype.start
+
 /**
  * Owns the per-session pi agent RPC subprocesses.
  *
@@ -190,7 +200,16 @@ import {
  * worktrees; the oldest is evicted before loading an eleventh. Only the active
  * backend's events are forwarded.
  */
+export interface ComputerUseAgentHostOptions extends Omit<ComputerUseAgentBridgeOptions, 'authorize' | 'assertPolicy' | 'onRevoked'> {
+  /** Actual live main-frame/document incarnation, supplied by main/index only. */
+  document(): { windowId: number; generation: number; frame: object }
+}
+
 export class AgentBridge {
+  private computerUseAgent?: ComputerUseAgentBridge
+  private computerUseAgentHost?: ComputerUseAgentHostOptions
+  private computerUseSessionIdentities?: WeakMap<BackendRecord, { client: RpcClient; runtimeId: string; sessionPath: string; sessionId: string; identity: object }>
+  private computerUseWatchAdmissions?: WeakMap<BackendRecord, Map<string, { client: RpcClient; request: ComputerUseAgentRequest; admission: ComputerUseAgentAdmission }>>
   private readonly backendPool = new BackendPool()
   private subagentSessionStore?: SubagentSessionStore
   private hiddenSubagentBackends?: Set<string>
@@ -271,7 +290,10 @@ export class AgentBridge {
     if (!id) return
     // Capture the incarnation, not pool key/current client: eviction/replacement
     // cannot transfer a late exit observation to a new backend.
-    const exited = () => this.subagentSessionStore?.markBackendGone(id, true)
+    const exited = () => {
+      if (backend.usageBackendId) this.computerUseAgent?.revokeBackend(backend.usageBackendId)
+      this.subagentSessionStore?.markBackendGone(id, true)
+    }
     process.once('exit', exited)
     if (process.exitCode != null || process.signalCode != null) {
       process.removeListener('exit', exited)
@@ -285,6 +307,7 @@ export class AgentBridge {
   private capabilitySettings?: CapabilitySettingsStore
   private capabilityScheduleQueued = false
   private capabilityQuarantinedCwds?: Set<string>
+  private startupQuarantinedCwds?: Set<string>
   private readonly backendKeysBySessionPath = new Map<string, string>()
   /** Only failed paths, latched for this bridge's lifetime; pool eviction/stop is not exit proof. */
   private quarantinedSessionPaths?: Set<string>
@@ -295,6 +318,8 @@ export class AgentBridge {
   private readonly yoloSessions = new Set<string>()
   private readonly sessionManagers = new Map<string, SessionManager>()
   private sessionListCache?: SessionListCache
+  private sessionListRevision = 0
+  private sessionListWindowEpoch = {}
   private readonly sessionManagerSignatures = new Map<string, string>()
   private readonly sessionCompletedListeners = new Set<SessionCompletedListener>()
   private readonly toolPermissionRequestedListeners = new Set<ToolPermissionRequestedListener>()
@@ -544,7 +569,7 @@ export class AgentBridge {
       getOperationId: () => this.providerAuthOperation?.id,
       pushState: () => this.pushModelProviderAuthState()
     })
-    this.runStore.onChanged((run) => this.scheduleRunTelemetry(run))
+    this.runStore.onChanged((run) => { this.computerUseAgent?.recheck(); this.scheduleRunTelemetry(run) })
   }
 
   private getActiveBackend(): BackendRecord | null {
@@ -631,6 +656,7 @@ export class AgentBridge {
       const desired = this.capabilitySettings?.getSnapshot()
       if (!desired || notice.revision > desired.revision || (replacement && revision !== undefined && notice.revision < revision)) throw new Error('能力运行时修订尚未确认')
       state.notice = notice
+      backend.capabilityNoticeEpoch = epoch
       state.noticeClient = client
       state.noticeTrust = trust
       rememberCapabilityRuntimeItems(state, client, notice, trust)
@@ -748,7 +774,8 @@ export class AgentBridge {
 
   /** Native mutation RPCs have no run receipt. A timeout cannot make a later
    * factory safe; retain their actual Promise and isolate unknown failures. */
-  private async capabilityControl<T>(backend: BackendRecord, operation: () => Promise<T>, negative?: CapabilityRpcRejection): Promise<T> {
+  private async capabilityControl<T>(backend: BackendRecord, operation: () => Promise<T>, negative?: CapabilityRpcRejection, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted()
     if (!backend.capability) return operation()
     if (backend.capability.quarantined || backend.capability.applyPromise) throw new Error('能力运行时正在应用或收尾未知')
     const client = backend.client
@@ -756,6 +783,7 @@ export class AgentBridge {
     let invoked = false
     const pending = Promise.resolve().then(() => {
       if (!this.backendStillOwned(backend) || backend.client !== client) throw new Error('原生命令所属后端已改变')
+      signal?.throwIfAborted()
       invoked = true
       return operation()
     })
@@ -803,7 +831,9 @@ export class AgentBridge {
         }).finally(() => {
           if (state.applyPromise !== operation) return
           state.applyPromise = undefined
+          const verifiedEpoch = backend.capabilityNoticeEpoch === state.epoch && !state.quarantined
           state.epoch = {}
+          if (verifiedEpoch) backend.capabilityNoticeEpoch = state.epoch
           if (!this.backendStillOwned(backend)) return
           this.scheduleCapabilityApplications()
           if (!capabilityNeedsApplication(backend)) {
@@ -874,6 +904,8 @@ export class AgentBridge {
       assertOwned()
       const previousRuntime = capability.notice?.runtimeId
       if (previousRuntime && capability.retiredRuntimeIds.length >= 64) throw new Error('能力运行时来源替换已达安全上限')
+      if (backend.usageBackendId) this.computerUseAgent?.revokeBackend(backend.usageBackendId)
+      this.computerUseAgent?.recheck()
       invoked = true
       // Public RPC awaits shutdown and recreates the runtime even for the SAME path.
       // No private command, /reload, prompt, stop or replacement transport is used.
@@ -892,6 +924,19 @@ export class AgentBridge {
       if (after.isStreaming !== false || after.isCompacting !== false || after.pendingMessageCount !== 0
         || (persisted && (after.sessionFile !== originalPath || after.sessionId !== before.sessionId))
         || (!persisted && after.messageCount !== 0)) throw new Error('替代运行时会话身份未确认')
+      // Keep the original ComputerUse unwatch cleanup identity until the real
+      // replacement RPC closes. Never authenticate a new capture source from
+      // the capability receipt; future tools still need their own factory proof.
+      const computerRuntime = backend.computerUseRuntimeId
+      if (computerRuntime) {
+        const retired = backend.computerUseRetiredRuntimeIds ??= []
+        if (!retired.includes(computerRuntime)) {
+          if (retired.length >= 32) throw new Error('ComputerUse 运行时来源替换已达安全上限')
+          retired.push(computerRuntime)
+        }
+        backend.computerUseRuntimeId = undefined
+        this.computerUseSessionIdentities?.delete(backend)
+      }
       if (!persisted && after.sessionFile !== originalPath) {
         if (after.sessionFile && (!isAbsolute(after.sessionFile) || resolve(after.sessionFile) !== after.sessionFile)) throw new Error('替代运行时路径无效')
         if (originalPath && this.backendKeysBySessionPath.get(originalPath) === backend.key) this.backendKeysBySessionPath.delete(originalPath)
@@ -969,6 +1014,207 @@ export class AgentBridge {
     }
   }
 
+  configureComputerUseAgent(host: ComputerUseAgentHostOptions): void {
+    if (this.computerUseAgent) throw new Error('ComputerUse Agent already configured')
+    this.computerUseAgentHost = host
+    this.computerUseAgent = new ComputerUseAgentBridge({ ...host,
+      authorize: (scope, operation) => this.requestComputerUseApproval(scope, operation),
+      onRevoked: scope => {
+        for (const request of this.pendingRequests.getToolPermissionRequests()) {
+          const pending = this.pendingRequests.getToolPermission(request.id)
+          if (pending?.resolveApproval && pending.scope?.backend.usageBackendId === scope.owner.backendId && pending.scope.runId === scope.owner.runId) this.clearToolPermissionRequest(request.id)
+        }
+      },
+      assertPolicy: (scope, operation) => {
+        const policy = this.toolPermissionStore.getPolicySnapshot(scope.cwd)
+        if (computerUsePolicyCategories(operation).some(category => policy.rules[category] === 'deny')) throw new ComputerUseAgentProtocolError('permission-denied')
+      }
+    })
+    this.toolPermissionStore.onChanged(() => this.computerUseAgent?.recheck())
+  }
+
+  assertComputerUseAgentOwned(owner: Readonly<ComputerUseOwner>, operation: 'start' | 'capture' | 'act'): void {
+    if (!this.computerUseAgent) throw new ComputerUseAgentProtocolError('unavailable')
+    this.computerUseAgent.assertOwned(owner, operation)
+  }
+
+  revokeComputerUseAgent(): void { this.computerUseAgent?.revoke() }
+  onComputerUseState(state: import('../../shared/computer-use').ComputerUseStatus): void { this.computerUseAgent?.onServiceState(state) }
+
+  /** The source field is stamped by the actual runtime factory event adapter,
+   * after checking its tool definition/execute incarnation. SDK's ordinary
+   * tool_execution_start has only a name and is deliberately insufficient. */
+  private computerUseSource(backend: BackendRecord, event: unknown, toolCallId?: string): ComputerUseAgentSource | undefined {
+    try {
+      const source = parseComputerUseAgentSource((event as Record<string, unknown>)[COMPUTER_USE_AGENT_SOURCE_FIELD])
+      if (!backend.computerUseAgentNonce || source.runtimeNonce !== backend.computerUseAgentNonce || source.toolCallId !== toolCallId
+        || backend.computerUseRetiredRuntimeIds?.includes(source.runtimeId)) return undefined
+      if (backend.computerUseRuntimeId !== source.runtimeId) {
+        if (backend.computerUseRuntimeId) {
+          const retired = backend.computerUseRetiredRuntimeIds ??= []
+          if (retired.length >= 32) return undefined
+          retired.push(backend.computerUseRuntimeId)
+          this.computerUseAgent?.recheck()
+        }
+        backend.computerUseRuntimeId = source.runtimeId
+        this.computerUseAgent?.recheck()
+      }
+      return source
+    } catch { return undefined }
+  }
+
+  private async admitComputerUseRequest(backend: BackendRecord, client: RpcClient, request: ComputerUseAgentRequest): Promise<ComputerUseAgentAdmission> {
+    const host = this.computerUseAgentHost
+    if (!host?.enabled) throw new ComputerUseAgentProtocolError('unavailable')
+    if (request.operation === 'unwatch') {
+      const watch = request.watchRequestId && this.computerUseWatchAdmissions?.get(backend)?.get(request.watchRequestId)
+      if (!watch || watch.client !== client || watch.request.runtimeId !== request.runtimeId
+        || watch.request.runtimeNonce !== request.runtimeNonce || watch.request.provider !== request.provider || watch.request.modelId !== request.modelId) throw new ComputerUseAgentProtocolError('source-unverified')
+      // Reuse the ORIGINAL captured admission, never a new active run inferred
+      // from cleanup payload IDs. This route removes only that registration.
+      watch.admission.assertCleanupCurrent()
+      return watch.admission
+    }
+    // RPC ui.input emits no sourceInfo. Observe/act bind the actual running
+    // factory ROOT receipt; retained binds that exact now-ended observe receipt.
+    // Egress/watch use only a runtime previously proven by such a real receipt;
+    // an unregistered restarted/tainted runtime cannot self-register via nonce.
+    const receiptSource = request.toolCallId ? backend.nativeToolReceipts?.get(request.toolCallId)?.computerUseSource : undefined
+    const source: ComputerUseAgentSource | undefined = receiptSource ?? (!request.toolCallId && backend.computerUseRuntimeId === request.runtimeId && backend.computerUseAgentNonce === request.runtimeNonce
+      ? { version: 1, runtimeId: request.runtimeId, runtimeNonce: request.runtimeNonce } : undefined)
+    if (!source || source.runtimeId !== request.runtimeId || source.runtimeNonce !== request.runtimeNonce) throw new ComputerUseAgentProtocolError('source-unverified')
+    const pending = this.capturePendingScope(backend)
+    const selection = this.sessionSelectionGeneration
+    const cwd = backend.cwd
+    const sessionPath = backend.sessionPath
+    const backendId = backend.usageBackendId
+    const runId = backend.activeRunId
+    const document = host.document()
+    let sessionIdentity: object | undefined
+    const assertCurrent = (): void => {
+      const currentDocument = host.document()
+      const run = runId && this.runStore.get(runId)
+      if (!this.pendingScopeOwned(pending, backend) || backend.client !== client || !runId || !backendId
+        || backend.phase !== 'running' || !backend.busy || backend.compacting || backend.controlDispatchPromises?.size
+        || backend.capability?.applyPromise || backend.capability?.quarantined
+        || this.activeKey !== backend.key || this.activeCwd !== cwd || backend.cwd !== cwd || backend.sessionPath !== sessionPath
+        || selection !== this.sessionSelectionGeneration || backend.computerUseRuntimeId !== request.runtimeId
+        || backend.computerUseAgentNonce !== request.runtimeNonce || backend.usageBackendId !== backendId
+        || (sessionIdentity !== undefined && this.computerUseSessionIdentities?.get(backend)?.identity !== sessionIdentity)
+        || this.yoloSessions.has(backend.key) || (this.desiredModes.get(backend.key) ?? backend.modePrimed ?? 'build') !== 'build'
+        || !run || run.id !== backend.activeRunId || run.usageBackendId !== backendId || run.cwd !== cwd
+        || (run.state !== 'dispatching' && run.state !== 'running' && run.state !== 'ending')
+        || (sessionPath !== undefined && run.sessionPath !== sessionPath)
+        || currentDocument.windowId !== document.windowId || currentDocument.generation !== document.generation || currentDocument.frame !== document.frame
+        || !this.win || this.win.isDestroyed?.() || this.win.webContents.isDestroyed?.() || this.win.webContents.id !== document.windowId) throw new ComputerUseAgentProtocolError('scope-revoked')
+    }
+    const assertRequestCurrent = (): void => {
+      assertCurrent()
+      if (request.operation !== 'observe' && request.operation !== 'act') {
+        // A normal root model request happens between tool batches. A stream
+        // requested while codemode/subagents/another root tool is still running
+        // is not admitted as the parent's screenshot egress channel.
+        if ([...(backend.nativeToolReceipts?.values() ?? [])].some(receipt => receipt.state === 'running'
+          && receipt.runId === runId && receipt.backendId === backendId && !receipt.parentId)) throw new ComputerUseAgentProtocolError('source-unverified')
+        if (request.operation !== 'retained') return
+      }
+      const receipt = request.toolCallId && backend.nativeToolReceipts?.get(request.toolCallId)
+      const name = request.operation === 'act' ? COMPUTER_USE_ACT_TOOL : COMPUTER_USE_OBSERVE_TOOL
+      if (!receipt || receipt.state !== (request.operation === 'retained' ? 'ended' : 'running') || receipt.parentId || receipt.rootId !== request.toolCallId
+        || receipt.name !== name || receipt.backendId !== backendId || receipt.runId !== runId
+        || receipt.computerUseSource?.runtimeId !== source.runtimeId || receipt.computerUseSource.runtimeNonce !== source.runtimeNonce
+        || receipt.computerUseSource.toolCallId !== request.toolCallId) throw new ComputerUseAgentProtocolError('source-unverified')
+    }
+    assertRequestCurrent()
+    // Pure state RPC on the already captured client; no backend/auth/model start.
+    const state = await client.getState()
+    assertRequestCurrent()
+    const model = state.model
+    if (!model || model.provider !== request.provider || model.id !== request.modelId || !model.input?.includes('image')) throw new ComputerUseAgentProtocolError('model-unavailable')
+    if (!sessionPath || !isAbsolute(sessionPath) || resolve(sessionPath) !== sessionPath || state.sessionFile !== sessionPath
+      || typeof state.sessionId !== 'string' || !state.sessionId || state.sessionId.length > 256) throw new ComputerUseAgentProtocolError('source-unverified')
+    const identities = this.computerUseSessionIdentities ??= new WeakMap()
+    let identity = identities.get(backend)
+    if (request.operation === 'retained' && (!request.retained || request.retained.sessionFile !== sessionPath || request.retained.sessionId !== state.sessionId
+      || !identity || identity.client !== client || identity.runtimeId !== source.runtimeId || identity.sessionPath !== sessionPath || identity.sessionId !== state.sessionId)) throw new ComputerUseAgentProtocolError('source-unverified')
+    if (!identity || identity.client !== client || identity.runtimeId !== source.runtimeId || identity.sessionPath !== sessionPath || identity.sessionId !== state.sessionId) {
+      identity = { client, runtimeId: source.runtimeId, sessionPath, sessionId: state.sessionId, identity: Object.freeze({}) }
+      identities.set(backend, identity)
+    }
+    sessionIdentity = identity.identity
+    const assertCleanupCurrent = (): void => {
+      // Cleanup remains available after provider completion/abort/permission
+      // withdrawal. It can never move to a replacement backend/client/runtime.
+      if (this.backendPool.get(backend.key) !== backend || backend.client !== client || backend.cwd !== cwd || backend.sessionPath !== sessionPath
+        || backend.usageBackendId !== backendId || backend.computerUseRuntimeId !== source.runtimeId || backend.computerUseAgentNonce !== source.runtimeNonce
+        || identities.get(backend)?.identity !== sessionIdentity) throw new ComputerUseAgentProtocolError('source-unverified')
+    }
+    const admission: ComputerUseAgentAdmission = { owner: Object.freeze({ ownerWindowId: document.windowId, backendId: backendId!, runtimeId: source.runtimeId, runId: runId!, generation: pending.generation }),
+      cwd, sessionPath, sessionId: state.sessionId, sessionIdentity, provider: model.provider, modelId: model.id, imageSupported: true, assertCurrent, assertRequestCurrent, assertCleanupCurrent }
+    if (request.operation === 'watch') {
+      const registrations = this.computerUseWatchAdmissions ??= new WeakMap()
+      let watches = registrations.get(backend)
+      if (!watches) { watches = new Map(); registrations.set(backend, watches) }
+      if (watches.size >= COMPUTER_USE_AGENT_LIMITS.maxRequests || watches.has(request.requestId)) throw new ComputerUseAgentProtocolError('busy')
+      watches.set(request.requestId, { client, request, admission })
+    }
+    return admission
+  }
+
+  private recordComputerUseScreenshotEntry(backend: BackendRecord, event: unknown): void {
+    const entry = (event as { entry?: { message?: { toolCallId?: unknown } } }).entry
+    const toolCallId = entry?.message?.toolCallId
+    const receipt = typeof toolCallId === 'string' && backend.nativeToolReceipts?.get(toolCallId)
+    const source = receipt && receipt.computerUseSource
+    const identity = this.computerUseSessionIdentities?.get(backend)
+    if (!identity || this.backendPool.get(backend.key) !== backend || identity.client !== backend.client || identity.runtimeId !== backend.computerUseRuntimeId
+      || identity.sessionPath !== backend.sessionPath || !receipt || !source || receipt.parentId || receipt.rootId !== toolCallId || receipt.name !== COMPUTER_USE_OBSERVE_TOOL
+      || receipt.backendId !== backend.usageBackendId || source.runtimeId !== identity.runtimeId || source.runtimeNonce !== backend.computerUseAgentNonce
+      || source.toolCallId !== toolCallId) return
+    this.computerUseAgent?.recordScreenshotEntry(identity.identity, { backendId: receipt.backendId, runtimeId: source.runtimeId, runId: receipt.runId, toolCallId }, entry)
+  }
+
+  private requestComputerUseApproval(admission: ComputerUseAgentAdmission, operation: 'observe' | 'act' | 'egress'): Promise<boolean> {
+    admission.assertCurrent()
+    const backend = this.getActiveBackend()
+    if (!backend) return Promise.resolve(false)
+    const scope = this.capturePendingScope(backend)
+    const id = randomUUID()
+    const createdAt = Date.now()
+    const policyCategories = computerUsePolicyCategories(operation)
+    if (policyCategories.some(category => this.toolPermissionStore.getPolicySnapshot(admission.cwd).rules[category] === 'deny')) return Promise.resolve(false)
+    return new Promise<boolean>(resolveApproval => {
+      const request: ToolPermissionRequest = { id, cwd: admission.cwd, sessionPath: admission.sessionPath,
+        toolName: operation === 'act' ? COMPUTER_USE_ACT_TOOL : COMPUTER_USE_OBSERVE_TOOL,
+        category: 'external', policyCategories, canRemember: false, risks: ['outside-workspace', 'sensitive-path'],
+        summary: operation === 'act' ? 'ComputerUse · 单次真实桌面输入' : operation === 'egress' ? 'ComputerUse · 再次上传会话截图' : 'ComputerUse · 捕获并上传所选窗口',
+        detail: (operation === 'act'
+          ? '仅允许本次键鼠动作；必须已有独立屏幕/控制许可与可信目标/人工接管检查，不是窗口沙箱。'
+          : operation === 'egress'
+            ? '允许本轮将 SDK 会话中已有的桌面截图再次上传；这不是新捕获许可。'
+            : '允许本次通过 Portal 选择窗口并捕获截图、上传原图的有界模型投影，并在 SDK 会话中保留截图。窗口图像可能包含敏感信息。')
+          + `\n精确目标：${admission.provider}/${admission.modelId}。`
+          + '\n只限当前主会话、运行与活文档；撤权阻止后续外发并停止本 scope，但不删除 SDK 历史，也不保证已发远端请求或收费停止。',
+        createdAt, timeoutAt: createdAt + TOOL_PERMISSION_TIMEOUT_MS }
+      const timeout = setTimeout(() => { this.clearToolPermissionRequest(id) }, TOOL_PERMISSION_TIMEOUT_MS)
+      this.pendingRequests.addToolPermission(id, { request, backendKey: backend.key, extensionRequestId: '', scope, timeout, resolveApproval })
+      this.notifyToolPermissionRequested(request)
+      this.pushToolPermissionRequests()
+    })
+  }
+
+  private handleComputerUseAgentRequest(backend: BackendRecord, client: RpcClient, event: unknown): boolean {
+    if (!isComputerUseAgentTitle((event as { title?: unknown }).title)) return false
+    if (this.computerUseAgent) return this.computerUseAgent.handle(event,
+      request => this.admitComputerUseRequest(backend, client, request),
+      (id, value) => this.respondToExtensionUi(client, id, { value }))
+    const id = (event as { id?: unknown }).id
+    if (typeof id === 'string' && id.length <= 256) {
+      try { this.respondToExtensionUi(client, id, { cancelled: true }) } catch { /* Reserved input stays private. */ }
+    }
+    return true
+  }
+
   /** Synchronous service guard; reservations/actual pending slots cover awaited work. */
   assertWorktreeMutationAvailable(): void {
     this.assertHistoryAvailable()
@@ -1019,6 +1265,7 @@ export class AgentBridge {
   }
 
   bind(win: BrowserWindow): void {
+    this.sessionListWindowEpoch = {}
     this.win = win
     // bring a late-bound window up to date
     this.win.webContents.send(STATUS_CHANNEL, this.status)
@@ -1034,7 +1281,11 @@ export class AgentBridge {
   }
 
   unbind(win: BrowserWindow): void {
-    if (this.win === win) this.win = null
+    if (this.win === win) {
+      this.revokeComputerUseAgent()
+      this.sessionListWindowEpoch = {}
+      this.win = null
+    }
   }
 
   getStatus(): AgentStatus {
@@ -1246,13 +1497,26 @@ export class AgentBridge {
     return this.toolPermissionStore.setPolicy(cwd, updates)
   }
 
-  private clearToolPermissionRequest(id: string): PendingToolPermission | null {
+  private clearToolPermissionRequest(id: string, approved = false): PendingToolPermission | null {
     const pending = this.pendingRequests.clearToolPermissionRequest(id)
+    pending?.resolveApproval?.(false)
+    // A rejected/cancelled/timed-out ordinary ComputerUse gate withdraws the
+    // existing screenshot permit too. Never let a background/old dialog revoke
+    // a different run's or backend's desktop lease.
+    if (pending && !approved && !pending.resolveApproval
+      && (pending.request.toolName === COMPUTER_USE_OBSERVE_TOOL || pending.request.toolName === COMPUTER_USE_ACT_TOOL)
+      && pending.scope && this.pendingScopeOwned(pending.scope, pending.scope.backend) && pending.scope.backend.usageBackendId) {
+      this.computerUseAgent?.revokeBackend(pending.scope.backend.usageBackendId)
+    }
     this.scheduleCapabilityApplications()
     return pending
   }
 
   private clearBackendToolPermissionRequests(backendKey: string): void {
+    for (const request of this.pendingRequests.getToolPermissionRequests()) {
+      const pending = this.pendingRequests.getToolPermission(request.id)
+      if (pending?.backendKey === backendKey) pending.resolveApproval?.(false)
+    }
     this.pendingRequests.clearBackendToolPermissionRequests(backendKey)
   }
 
@@ -1335,8 +1599,11 @@ export class AgentBridge {
     }
     // A denial still blocks execution; only a resulting tool error (or timeout)
     // latches the queue. It is not, by itself, an interrupted assistant turn.
-    this.respondToExtensionUi(pending.scope!.client, pending.extensionRequestId, { value: effectiveResolution })
-    this.clearToolPermissionRequest(requestId)
+    if (pending.resolveApproval) {
+      const denied = pending.request.policyCategories.some(category => this.toolPermissionStore.getPolicySnapshot(pending.request.cwd).rules[category] === 'deny')
+      pending.resolveApproval(effectiveResolution === 'allow-once' && !denied)
+    } else this.respondToExtensionUi(pending.scope!.client, pending.extensionRequestId, { value: effectiveResolution })
+    this.clearToolPermissionRequest(requestId, effectiveResolution === 'allow-once')
     return policy
   }
 
@@ -1429,7 +1696,8 @@ export class AgentBridge {
       // Yolo mode auto-approves every permission prompt for this session
       // without persisting any project rule or showing UI.
       if (this.yoloSessions.has(backend.key)) {
-        this.respondToExtensionUi(backend.client, request.id, { value: 'allow-once' })
+        const computerUse = parsed.toolName === COMPUTER_USE_OBSERVE_TOOL || parsed.toolName === COMPUTER_USE_ACT_TOOL
+        this.respondToExtensionUi(backend.client, request.id, { value: computerUse ? 'deny' : 'allow-once' })
         return true
       }
       const id = randomUUID()
@@ -1935,6 +2203,7 @@ export class AgentBridge {
       return
     }
     if (type === 'entry_appended') {
+      this.recordComputerUseScreenshotEntry(backend, event)
       this.runStore.recordUsageEntry({ cwd: backend.cwd, sessionPath: backend.sessionPath, backendId: backend.usageBackendId }, event)
       return
     }
@@ -2019,8 +2288,10 @@ export class AgentBridge {
       this.runStore.update(runId, (run) => {
         if (tool.toolCallId && !receipts.has(tool.toolCallId as string) && receipts.size < 512
           && backend.usageBackendId && run.usageBackendId === backend.usageBackendId) {
+          const computerUseSource = (tool.toolName === COMPUTER_USE_OBSERVE_TOOL || tool.toolName === COMPUTER_USE_ACT_TOOL)
+            ? this.computerUseSource(backend, event, tool.toolCallId as string) : undefined
           receipts.set(tool.toolCallId as string, { runId, backendId: backend.usageBackendId, rootId: tool.toolCallId as string,
-            name: tool.toolName as string, state: 'running', usageConsumed: false })
+            name: tool.toolName as string, state: 'running', usageConsumed: false, ...(computerUseSource ? { computerUseSource } : {}) })
         }
         const existing = run.tools.find((candidate) => candidate.toolCallId === tool.toolCallId)
         if (existing) {
@@ -2346,6 +2617,7 @@ export class AgentBridge {
   async start(cwd: string): Promise<void> {
     this.assertHistoryAvailable()
     this.stopping = false
+    this.revokeComputerUseAgent()
     this.sessionSelectionGeneration += 1
     const normalizedCwd = resolve(cwd)
     if (this.activeCwd === normalizedCwd && this.activeKey) {
@@ -2467,6 +2739,7 @@ export class AgentBridge {
       assertOwner()
       if (backend) {
         backend.historyMutation = true
+        this.computerUseAgent?.recheck()
         backend.busy = true
         stopAttempted = true
         this.markSubagentBackendGone(backend, false)
@@ -2700,7 +2973,8 @@ export class AgentBridge {
         return
       }
       this.pushQueueSnapshot(backend)
-      const state = await backend.client.getState().catch(() => null)
+      let stateError: unknown
+      const state = await backend.client.getState().catch((error: unknown) => { stateError = error; return null })
       if (!lease.owns() || backend.compacting || backend.controlDispatchPromises?.size
         || backend.queueAutoReady !== true || !state || state.isStreaming || state.isCompacting) {
         if (!lease.ownsReservation()) return
@@ -2713,6 +2987,11 @@ export class AgentBridge {
           backend.busy = Boolean(backend.controlDispatchPromises?.size)
           // A failed state read must not spin the dispatcher indefinitely.
           backend.queueAutoReady = false
+          this.runStore.update(item.runId, (run) => {
+            if (run.state === 'queued' && !this.hasRunDispatchEvidence(run)) {
+              run.error = stateError instanceof Error ? stateError.message : '读取 Agent 状态失败，排队消息保持未发送'
+            }
+          })
         }
         backend.localQueueDispatching = false
         this.pushQueueSnapshot(backend)
@@ -2740,7 +3019,10 @@ export class AgentBridge {
           this.runStore.update(item.runId, (run) => {
             // Preparation can yield before prompt is invoked. No event was
             // allowed to adopt this still-local item, so undo only its ledger.
-            if (run.state === 'dispatching' && !this.hasRunDispatchEvidence(run)) run.state = 'queued'
+            if ((run.state === 'dispatching' || run.state === 'queued') && !this.hasRunDispatchEvidence(run)) {
+              run.state = 'queued'
+              run.error = error instanceof Error ? error.message : String(error)
+            }
           })
           this.pushQueueSnapshot(backend)
           return
@@ -2753,7 +3035,7 @@ export class AgentBridge {
         backend.localQueueDispatching = false
         backend.queueAutoReady = false
         this.runStore.update(item.runId, (run) => {
-          if (run.state !== 'dispatching' || this.hasRunDispatchEvidence(run)) return
+          if ((run.state !== 'dispatching' && run.state !== 'queued') || this.hasRunDispatchEvidence(run)) return
           run.state = 'queued'
           run.error = error instanceof Error ? error.message : String(error)
         })
@@ -2883,12 +3165,11 @@ export class AgentBridge {
     }
   }
 
-  /** No await or SDK call: validate actual ownership and take the original payload
-      in one main-process turn. Queue positions and display text are not identities. */
-  editQueuedMessage(
-    request: import('../../shared/types').QueuedMessageEditRequest, ownerId: number
-  ): import('../../shared/types').QueuedMessageEditResult {
-    if (!this.win || this.win.webContents.id !== ownerId) throw new Error('只允许所属主窗口编辑排队消息')
+  private queuedMessageTarget(
+    request: import('../../shared/types').QueuedMessageEditRequest, ownerId: number, allowRetainedEdit = false
+  ) {
+    if (!this.win || this.win.webContents.id !== ownerId || this.win.isDestroyed?.()
+      || this.win.webContents.isDestroyed?.()) throw new Error('只允许所属主窗口操作排队消息')
     if (!request || typeof request.runId !== 'string' || !request.runId || request.runId.length > 256
       || typeof request.cwd !== 'string' || !request.cwd || request.cwd.length > 16_000
       || (request.sessionFile !== undefined && (typeof request.sessionFile !== 'string'
@@ -2905,12 +3186,20 @@ export class AgentBridge {
     const items = backend.localFollowUps ?? []
     const index = items.findIndex((item) => item.runId === request.runId)
     const run = this.runStore.get(request.runId)
-    const retainedEdit = index < 0 && run?.state === 'discarded' && run.stopReason === 'queue-edited'
+    const retainedEdit = allowRetainedEdit && index < 0 && run?.state === 'discarded' && run.stopReason === 'queue-edited'
     if (!run || (!retainedEdit && (index < 0 || run.state !== 'queued')) || this.hasRunDispatchEvidence(run)
       || run.cwd !== backend.cwd || run.sessionPath !== backend.sessionPath
       || backend.activeRunId === run.id || backend.promptDispatch?.runId === run.id) {
-      throw new Error('排队消息已开始发送或移除，无法编辑')
+      throw new Error('排队消息已被发送或移除')
     }
+    return { backend, items, index, run, retainedEdit }
+  }
+
+  /** No await or SDK call: take the original payload under its real run identity. */
+  editQueuedMessage(
+    request: import('../../shared/types').QueuedMessageEditRequest, ownerId: number
+  ): import('../../shared/types').QueuedMessageEditResult {
+    const { backend, items, index, run, retainedEdit } = this.queuedMessageTarget(request, ownerId, true)
     // Reject before removing: retained editor drafts have a bounded footprint.
     if (run.prompt.images.length > 32
       || run.prompt.images.reduce((bytes, image) => bytes + image.data.length, run.prompt.message.length) > 24 * 1024 * 1024) {
@@ -2932,53 +3221,26 @@ export class AgentBridge {
     return result
   }
 
-  /** Remove a Pion-owned local follow-up from the queue; native Pi queue items
-      cannot be removed over RPC and are rejected with a clear error. */
-  async removeQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void> {
-    if (kind !== 'steering' && kind !== 'followUp') throw new Error('无效的排队消息类型')
-    if (!Number.isInteger(index) || index < 0) throw new Error('无效的排队消息位置')
-    const backend = await this.ensureActiveBackend()
-    if (kind === 'steering') throw new Error('Pi 原生插入消息暂不支持移除')
-
-    const nativeFollowUpCount = backend.rawQueue?.followUp.length ?? 0
-    const localIndex = index - nativeFollowUpCount
-    if (localIndex < 0) throw new Error('这条 Pi 原生排队消息暂不支持移除')
-    const item = backend.localFollowUps?.[localIndex]
-    if (!item) throw new Error('排队消息已被发送或移除')
-    backend.localFollowUps?.splice(localIndex, 1)
-    this.runStore.update(item.runId, (run) => {
-      if (run.state === 'queued') {
-        run.state = 'discarded'
-        run.settledAt = Date.now()
-      }
+  /** Local queue mutations never start a backend or interpret a stale row index. */
+  async removeQueuedMessage(
+    request: import('../../shared/types').QueuedMessageEditRequest, ownerId: number
+  ): Promise<void> {
+    const { backend, items, index, run } = this.queuedMessageTarget(request, ownerId)
+    items.splice(index, 1)
+    backend.pendingRunIds = backend.pendingRunIds.filter(id => id !== run.id)
+    this.runStore.update(run.id, current => {
+      current.state = 'discarded'
+      current.settledAt = Date.now()
     })
     this.pushQueueSnapshot(backend)
   }
 
-  /** Promote one Pion queue-card item without duplicating it in Pi's queue. */
-  async sendQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void> {
-    if (kind !== 'steering' && kind !== 'followUp') throw new Error('无效的排队消息类型')
-    if (!Number.isInteger(index) || index < 0) throw new Error('无效的排队消息位置')
-    const backend = await this.ensureActiveBackend()
-
-    if (kind === 'followUp') {
-      const nativeFollowUpCount = backend.rawQueue?.followUp.length ?? 0
-      const localIndex = index - nativeFollowUpCount
-      if (localIndex < 0) {
-        throw new Error('这条 Pi 原生排队消息无法在当前 RPC 中直接提升')
-      }
-      await this.promoteLocalFollowUp(backend, localIndex)
-      await this.syncBackendSession(backend)
-      return
-    }
-
-    const message = this.projectedQueueSnapshot(backend).steering[index]
-    if (!message) throw new Error('排队消息已被发送或移除')
-    // Steering is already the immediate-delivery path (used by Enter). Hide
-    // the raw Pi item rather than sending a duplicate copy.
-    backend.directSteering ??= []
-    backend.directSteering.push(message)
-    this.pushQueueSnapshot(backend)
+  async sendQueuedMessage(
+    request: import('../../shared/types').QueuedMessageEditRequest, ownerId: number
+  ): Promise<void> {
+    const { backend, index } = this.queuedMessageTarget(request, ownerId)
+    await this.promoteLocalFollowUp(backend, index)
+    if (this.backendStillOwned(backend)) await this.syncBackendSession(backend)
   }
 
   private hasSubagentSourceReceipt(backend: BackendRecord, parentToolCallId: string, running = true): boolean {
@@ -3027,6 +3289,7 @@ export class AgentBridge {
     client.onEvent((event) => {
       if (this.stopping || backend.historyMutation || backend.historyStopFailed
         || backend.client !== client || this.backendPool.get(backend.key) !== backend) return
+      if (this.handleComputerUseAgentRequest(backend, client, event)) return
       if ((event as { title?: unknown }).title === SUBAGENT_SESSION_ADMISSION_TITLE) {
         this.handleSubagentAdmission(backend, client, event)
         return // Always private, including malformed method/type and nested packets.
@@ -3093,7 +3356,7 @@ export class AgentBridge {
         this.usageLedger?.scheduleSession(backend.sessionPath)
       }
       const liveState = backend.liveState ??= new LiveSessionProjection()
-      liveState.record(event)
+      liveState.record(stripComputerUseAgentImages(event))
       // Observe only admitted root events, after all private/nested consumers.
       this.notificationTurns ??= new WeakMap()
       let notificationTurn = this.notificationTurns.get(backend)
@@ -3107,6 +3370,7 @@ export class AgentBridge {
       if (type === 'agent_start' || type === 'agent_settled'
         || type === 'compaction_start' || type === 'compaction_end') {
         this.dispatchLifecycle(backend).generation += 1
+        this.computerUseAgent?.recheck()
       }
       if (type === 'agent_start') {
         if (backend.capability) backend.capability.runPending = true
@@ -3119,7 +3383,7 @@ export class AgentBridge {
       if (type === 'tool_execution_end' && (event as { toolName?: string }).toolName === 'pion_subagents') {
         this.clearSubagentPermissions(backend)
       }
-      let forwardedEvent = event
+      let forwardedEvent = stripComputerUseAgentImages(event)
       if (type === 'queue_update') {
         const queue = event as { steering?: unknown; followUp?: unknown }
         const steering = Array.isArray(queue.steering)
@@ -3137,6 +3401,7 @@ export class AgentBridge {
         event,
         this.desiredModes
       )
+      if (type === 'entry_appended' && (event as { entry?: { customType?: string } }).entry?.customType === 'plan-mode-state') this.computerUseAgent?.recheck()
       let { runningStateChanged, sessionCompleted } = backendEffect
       // A local follow-up is about to start another turn, so completion
       // notifications should wait until that local queue is empty.
@@ -3243,17 +3508,26 @@ export class AgentBridge {
     cwd: string,
     sessionPath?: string
   ): Promise<BackendRecord> {
-    this.assertSessionLoadAllowed(sessionPath)
-    if (this.capabilityQuarantinedCwds?.has(resolve(cwd))) throw new Error('此项目仍有能力应用收尾未知的后端，未新建替代连接')
+    const assertStartOwnership = () => {
+      this.assertSessionLoadAllowed(sessionPath)
+      if (this.startupQuarantinedCwds?.has(resolve(cwd)) || [...this.backendPool.values()].some(backend =>
+        backend.key === key || (sessionPath && backend.sessionPath === sessionPath)
+        || (backend.historyStopFailed && resolve(backend.cwd) === resolve(cwd)))) {
+        throw new Error('所属会话或项目仍有 Agent writer 保留，未新建替代后端')
+      }
+      if (this.capabilityQuarantinedCwds?.has(resolve(cwd))) throw new Error('此项目仍有能力应用收尾未知的后端，未新建替代连接')
+    }
+    assertStartOwnership()
     const cliPath = pionRuntimePath()
     const args = await this.backendArgs(cwd, sessionPath)
     // Read failure must reject BEFORE spawning, never silently use default switches.
     const capabilityStore = this.capabilitySettings
     const capabilityPreferences = await capabilityStore?.get()
     this.assertHistoryAvailable()
-    this.assertSessionLoadAllowed(sessionPath)
+    assertStartOwnership()
     const subagentViewNonce = randomUUID()
     const questionUiNonce = randomUUID()
+    const computerUseAgentNonce = randomUUID()
     const client = new RpcClient({
       cliPath,
       cwd,
@@ -3263,6 +3537,8 @@ export class AgentBridge {
         PION_SUBAGENT_VIEW_NONCE: subagentViewNonce,
         PION_QUESTION_SETTINGS_FILE: questionSettingsFilePath(),
         PION_QUESTION_UI_NONCE: questionUiNonce,
+        PION_COMPUTER_USE_AGENT_NONCE: computerUseAgentNonce,
+        PION_COMPUTER_USE_AGENT_DEVELOPMENT: this.computerUseAgentHost?.enabled ? '1' : '0',
         ...(capabilityStore ? { PION_CAPABILITY_SETTINGS_FILE: capabilityStore.filePath } : {}) }
     })
     const backend: BackendRecord = {
@@ -3275,6 +3551,7 @@ export class AgentBridge {
       liveState: new LiveSessionProjection(),
       subagentViewNonce,
       questionUiNonce,
+      computerUseAgentNonce,
       phase: 'starting' as BackendPhase,
       busy: false,
       compacting: false,
@@ -3291,24 +3568,44 @@ export class AgentBridge {
     this.attachBackendEvents(backend)
     if (this.activeKey === key) this.setActiveBackendStatus()
 
-    const startPromise = client.start()
-      .then(async () => {
+    const assertInitializationOwned = () => {
+      if (this.stopping || this.backendPool.get(key) !== backend || backend.client !== client
+        || backend.cwd !== cwd || backend.historyStopFailed) throw new Error('Agent 初始化所属后端已改变')
+    }
+    let startSucceeded = false
+    let noProcessCreated = false
+    const startPromise = Promise.resolve().then(() => {
+      const ownsHandle = Object.prototype.hasOwnProperty.call(client, 'process')
+      const nativeStart = VERSION === '1.4.0' && client.start === PINNED_RPC_START
+      const before = ownsHandle ? (client as unknown as { process: unknown }).process : undefined
+      try { return client.start() }
+      finally {
+        backend.startupProcess = Object.prototype.hasOwnProperty.call(client, 'process')
+          ? (client as unknown as { process: unknown }).process : undefined
+        noProcessCreated = nativeStart && before === null && backend.startupProcess === null
+      }
+    }).then(async () => {
+        startSucceeded = true
+        assertInitializationOwned()
         this.observeSubagentProcessExit(backend)
         // RpcClient.start() only waits 100 ms. The permission and plan
         // extensions can make cold startup longer, so require one successful
         // RPC round trip before exposing this backend as ready.
         const initialState = await client.getState()
+        assertInitializationOwned()
+        if (initialState.sessionFile && isAbsolute(initialState.sessionFile) && resolve(initialState.sessionFile) === initialState.sessionFile) {
+          backend.sessionPath = initialState.sessionFile
+          this.backendKeysBySessionPath.set(initialState.sessionFile, key)
+          if (!sessionPath && this.activeKey === key) this.activeSessionPath = initialState.sessionFile
+        }
+        if (sessionPath && initialState.sessionFile !== sessionPath) throw new Error('Agent 初始化返回的会话路径与请求归属不匹配')
         await restoreSessionModelPreference(client, initialState, sessionPath, this.sessionModelPreferences)
+        assertInitializationOwned()
         if (backend.capability) {
           const policy = backend.capability
           const latest = await capabilityStore!.get()
+          assertInitializationOwned()
           policy.requestedRevision = latest.revision
-          if (initialState.sessionFile && isAbsolute(initialState.sessionFile) && resolve(initialState.sessionFile) === initialState.sessionFile
-            && (!sessionPath || sessionPath === initialState.sessionFile)) {
-            backend.sessionPath = initialState.sessionFile
-            this.backendKeysBySessionPath.set(initialState.sessionFile, key)
-            if (this.activeKey === key) this.activeSessionPath = initialState.sessionFile
-          }
           try {
             await this.readCapabilityCommands(backend)
             if (!policy.notice || policy.notice.revision > latest.revision) throw new Error('能力运行时初始回执未确认')
@@ -3319,25 +3616,44 @@ export class AgentBridge {
             policy.quarantined = true
           }
         }
+        assertInitializationOwned()
+        backend.startupProcess = undefined
         backend.phase = 'running'
         console.log('[pion] agent subprocess running, session:', sessionPath ?? key)
         if (this.activeKey === key) this.setActiveBackendStatus()
         void this.pushSessionInfo()
         void this.refreshSidebarSessions(false)
       })
-      .catch((error: unknown) => {
-        // Startup failure can discard a live child handle without exit proof.
-        this.unconfirmedStoppedWorktreeCwds ??= new Set<string>()
-        this.unconfirmedStoppedWorktreeCwds.add(resolve(cwd))
+      .catch(async (error: unknown) => {
         backend.phase = 'error'
+        backend.historyStopFailed = true
         this.markSubagentBackendGone(backend, false)
         this.clearBackendToolPermissionRequests(key)
         this.clearBackendExtensionUiRequests(key)
-        this.backendPool.delete(key)
-        this.pushRunningSessionPaths()
-        if (sessionPath && this.backendKeysBySessionPath.get(resolve(sessionPath)) === key) {
-          this.backendKeysBySessionPath.delete(resolve(sessionPath))
+        let exitConfirmed = false
+        try {
+          // The SDK may clear its handle during stop. Keep the child captured
+          // at invocation, including after a rejected start or a late timeout.
+          await stopWithProcessExit({ process: backend.startupProcess, stop: () => client.stop() } as unknown as RpcClient,
+            startSucceeded || !noProcessCreated)
+          exitConfirmed = true
+        } catch {
+          this.startupQuarantinedCwds ??= new Set()
+          this.startupQuarantinedCwds.add(resolve(cwd))
+          this.unconfirmedStoppedWorktreeCwds ??= new Set()
+          this.unconfirmedStoppedWorktreeCwds.add(resolve(cwd))
+          this.quarantinedSessionPaths ??= new Set()
+          for (const path of [sessionPath, backend.sessionPath]) if (path) this.quarantinedSessionPaths.add(resolve(path))
         }
+        if (exitConfirmed) {
+          this.markSubagentBackendGone(backend, true)
+          if (this.backendPool.get(key) === backend) this.backendPool.delete(key)
+          for (const path of [sessionPath, backend.sessionPath]) {
+            if (path && this.backendKeysBySessionPath.get(resolve(path)) === key) this.backendKeysBySessionPath.delete(resolve(path))
+          }
+          backend.startupProcess = undefined
+        }
+        this.pushRunningSessionPaths()
         if (this.activeKey === key) {
           const message = error instanceof Error ? error.message : String(error)
           this.setStatus({ phase: 'error', error: message, cwd })
@@ -3508,6 +3824,8 @@ export class AgentBridge {
   }
 
   private async stopBackends(): Promise<void> {
+    this.revokeComputerUseAgent()
+    for (const request of this.pendingRequests.getToolPermissionRequests()) this.pendingRequests.getToolPermission(request.id)?.resolveApproval?.(false)
     this.stopping = true
     // Logical stop cannot retire an in-flight replacement or release its pool slot.
     await Promise.allSettled([...this.backendPool.values()].flatMap(backend => backend.capability?.applyPromise ? [backend.capability.applyPromise] : []))
@@ -3680,42 +3998,74 @@ export class AgentBridge {
   async startVerificationRepair(
     sessionPath: string | undefined,
     cwd: string,
-    message: string
+    message: string,
+    signal?: AbortSignal
   ): Promise<RunOperation | null> {
+    const assertNotCancelled = () => {
+      if (!signal?.aborted) return
+      const error = new Error('验证修复已取消')
+      error.name = 'AbortError'
+      throw error
+    }
+    assertNotCancelled()
     this.assertHistoryAvailable()
     if (this.providerMutationInFlight || this.messageRevertInFlight) return null
     if (!sessionPath) return null
     const target = resolve(sessionPath)
+    const root = resolve(cwd)
     this.assertSessionNotQuarantined(target)
-    let key = this.backendKeysBySessionPath.get(target) ?? target
+    const key = this.backendKeysBySessionPath.get(target) ?? target
     let backend = this.backendPool.get(key)
     if (!backend) {
       const pending = this.backendPool.getStart(key)
-      if (pending) {
-        backend = await pending
-      } else {
-        const start = this.startBackendWithLimit(key, resolve(cwd), target)
-        backend = await start
-        key = backend.key
-      }
+      assertNotCancelled()
+      backend = await (pending ?? this.startBackendWithLimit(key, root, target))
     } else {
       await backend.startPromise
     }
+    assertNotCancelled()
+    this.assertHistoryAvailable()
+    if (backend.cwd !== root || backend.sessionPath !== target || !this.backendStillOwned(backend)
+      || !capabilityBackendIdle(backend) || backend.pendingRunIds.length || backend.localFollowUps?.length
+      || this.capabilityHasPendingInteraction(backend) || this.providerMutationInFlight) return null
+    const client = backend.client
     const lease = this.reserveDispatch(backend)
-    const state = await backend.client.getState()
-    if (!lease.owns() || this.branchDeletionInFlight || this.messageRevertInFlight || backend.historyStopFailed
-      || state.isStreaming || state.isCompacting || backend.busy || backend.compacting) return null
-    // Reserve the backend while preparing the checkpoint and sending the
-    // repair prompt; verification callbacks may otherwise race each other.
+    const assertOwner = () => {
+      assertNotCancelled()
+      this.assertHistoryAvailable()
+      this.assertDispatchLease(lease)
+      if (backend.client !== client || backend.cwd !== root || backend.sessionPath !== target
+        || this.providerMutationInFlight) throw new Error('验证修复所属后端已改变')
+    }
+    const state = await client.getState()
+    assertOwner()
+    if (!capabilityBackendIdle(backend) || backend.pendingRunIds.length || backend.localFollowUps?.length
+      || this.capabilityHasPendingInteraction(backend) || state.sessionFile !== target
+      || state.isStreaming !== false || state.isCompacting !== false || state.pendingMessageCount !== 0) return null
+    // Reserve through preparation and the actual prompt Promise. Cancellation
+    // stops admission; it never releases an invoked RPC's receipt early.
     backend.busy = true
     let run: RunOperation | undefined
     try {
+      assertOwner()
       this.resetRunCheckpoint(backend)
-      await this.applyDesiredMode(backend, lease)
-      this.assertDispatchLease(lease)
+      assertOwner()
+      await this.applyDesiredMode(backend, lease, signal)
+      assertOwner()
       run = this.createRun(backend, state, message, [], 'verification-repair', 'dispatching')
+      assertOwner()
       await this.dispatchPrompt(backend, run.id, message, [], lease)
+      // Preserve the real repair identity for VerificationService even when
+      // cancellation arrived after invocation; its signal prevents re-verification.
+      if (signal?.aborted) return this.runStore.get(run.id) ?? run
+      if (!lease.ownsReservation() || backend.client !== client || backend.cwd !== root || backend.sessionPath !== target) {
+        throw new Error('验证修复所属后端已改变')
+      }
       await this.syncBackendSession(backend)
+      if (signal?.aborted) return this.runStore.get(run.id) ?? run
+      if (!lease.ownsReservation() || backend.client !== client || backend.cwd !== root || backend.sessionPath !== target) {
+        throw new Error('验证修复所属后端已改变')
+      }
       return this.runStore.get(run.id) ?? run
     } catch (error) {
       this.recoverPromptFailure(backend, lease, run, error)
@@ -3723,16 +4073,18 @@ export class AgentBridge {
     }
   }
 
-  private async applyDesiredMode(backend: BackendRecord, lease = this.reserveDispatch(backend)): Promise<void> {
+  private async applyDesiredMode(backend: BackendRecord, lease = this.reserveDispatch(backend), signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
     this.assertDispatchLease(lease)
     const desired = this.desiredModes.get(backend.key) ?? 'build'
     if (backend.modePrimed === desired) return
     if (backend.capability) {
       const commands = await this.readCapabilityCommands(backend)
+      signal?.throwIfAborted()
       this.assertDispatchLease(lease)
       if (!backend.capability.planCommandPath || !capabilityCommandFrom(commands, 'plan', backend.capability.planCommandPath)) throw new Error('Pion 计划模式命令来源未确认，未发送命令')
     }
-    await this.capabilityControl(backend, () => backend.client.prompt(desired === 'plan' ? '/plan start' : '/plan exit'))
+    await this.capabilityControl(backend, () => backend.client.prompt(desired === 'plan' ? '/plan start' : '/plan exit'), undefined, signal)
     this.assertDispatchLease(lease)
     backend.modePrimed = desired
   }
@@ -3752,6 +4104,7 @@ export class AgentBridge {
   }
 
   async abort(): Promise<void> {
+    this.revokeComputerUseAgent()
     const client = this.client
     const backend = this.getActiveBackend()
     if (!client || !backend) return
@@ -3801,6 +4154,7 @@ export class AgentBridge {
   }
 
   private async createNewSession(): Promise<void> {
+    this.revokeComputerUseAgent()
     this.sessionSelectionGeneration += 1
     const cwd = this.activeCwd ?? this.status.cwd
     if (!cwd) throw new Error('没有活动工作目录')
@@ -3865,6 +4219,7 @@ export class AgentBridge {
   }
 
   private activateLogicalSession(sessionPath: string, cwd?: string): void {
+    this.revokeComputerUseAgent()
     const target = resolve(sessionPath)
     this.assertSessionLoadAllowed(target)
     this.activeSessionPath = target
@@ -4070,6 +4425,7 @@ export class AgentBridge {
         this.assertSessionNotQuarantined(backend.sessionPath)
         reserved.add(backend)
         backend.historyMutation = true
+        this.computerUseAgent?.recheck()
         backend.busy = true
       }
       for (const backend of targets) {
@@ -4162,6 +4518,7 @@ export class AgentBridge {
     this.messageRevertInFlight = true
     this.historyRevision += 1
     backend.historyMutation = true
+    this.computerUseAgent?.recheck()
     backend.busy = true // reserve against pool eviction; never mark this as an Agent run
     let writerStopped = false
     let stoppingWriter = false
@@ -4298,6 +4655,7 @@ export class AgentBridge {
   }
 
   private async interruptBackendRuns(backend: BackendRecord, message: string): Promise<void> {
+    if (backend.usageBackendId) this.computerUseAgent?.revokeBackend(backend.usageBackendId)
     const runIds = new Set([
       backend.activeRunId,
       ...backend.pendingRunIds,
@@ -4327,6 +4685,7 @@ export class AgentBridge {
     this.assertSessionNotQuarantined(backend.sessionPath)
     if (backend.historyStopFailed) throw new Error('旧 Agent 退出状态未知，请重启 Pion 后再操作此会话')
     if (backend.capability?.applyPromise || backend.capability?.quarantined) throw new Error('能力应用仍在收尾或状态未知，未停止或重启后端')
+    this.computerUseAgent?.recheck()
     await this.interruptBackendRuns(
       backend,
       'Agent 后端已停止；本轮及未发送的排队消息未自动重放。'
@@ -4481,7 +4840,7 @@ export class AgentBridge {
     let branch: SessionEntry[] = []
     try { branch = sessionBranch(result.entries, result.leafId) } catch { /* Legacy full-tree reads retain unknown timing when ancestry is incomplete. */ }
     const timings = sessionTurnTimings(branch)
-    return { entries: result.entries.map(entry => toWireEntry(entry, timings.get(entry.id))), leafId: result.leafId }
+    return { entries: result.entries.map(entry => toWireEntry(stripComputerUseAgentImages(entry), timings.get(entry.id))), leafId: result.leafId }
   }
 
   async getHistoryIndex(sessionPath?: string): Promise<SessionHistoryIndex | null> {
@@ -4611,8 +4970,8 @@ export class AgentBridge {
     const toolResults = filterToolResults(result.entries, toolCallIds(entries))
 
     return {
-      entries: entries.map(entry => toWireEntry(entry, timings.get(entry.id))),
-      toolResults: toolResults.map(entry => toWireEntry(entry)),
+      entries: entries.map(entry => toWireEntry(stripComputerUseAgentImages(entry), timings.get(entry.id))),
+      toolResults: toolResults.map(entry => toWireEntry(stripComputerUseAgentImages(entry))),
       start,
       end,
       total,
@@ -4658,6 +5017,7 @@ export class AgentBridge {
   }
 
   async setYoloMode(enabled: boolean): Promise<void> {
+    if (enabled) this.revokeComputerUseAgent()
     const key = this.activeKey
     if (!key) throw new Error('没有活动会话')
     if (enabled) this.yoloSessions.add(key)
@@ -4715,6 +5075,7 @@ export class AgentBridge {
   }
 
   async setMode(mode: AgentMode): Promise<void> {
+    if (mode === 'plan') this.revokeComputerUseAgent()
     this.assertHistoryAvailable()
     const key = this.activeKey
     if (!key) throw new Error('没有活动会话')
@@ -4853,10 +5214,12 @@ export class AgentBridge {
       throw new Error('已有提供商配置或认证操作正在进行')
     }
     const reloadBlocked = this.backendPool.pendingStartCount > 0 || [...this.backendPool.values()].some((backend) => (
-      backend.phase === 'starting'
-      || backend.busy
-      || backend.compacting
+      !capabilityBackendIdle(backend)
+      || backend.capability?.applyPromise
+      || backend.capability?.quarantined
       || backend.pendingRunIds.length > 0
+      || (backend.localFollowUps?.length ?? 0) > 0
+      || this.capabilityHasPendingInteraction(backend)
     ))
     if (reloadBlocked) {
       throw new Error('仍有会话正在运行，请等待所有后台会话完成后再修改提供商')
@@ -4999,6 +5362,7 @@ export class AgentBridge {
       }
     }
     assertOwner()
+    this.revokeComputerUseAgent()
     await this.capabilityControl(backend, () => client.setModel(provider, modelId), { command: 'set_model', provider, modelId })
     assertOwner()
     if (this.sessionModelPreferences) {
@@ -5030,12 +5394,46 @@ export class AgentBridge {
     }
   }
 
-  /** Discover skills and extension tools from the same package loader Pi uses. */
+  /** Read-only catalogue projection; dynamic metadata needs an existing verified receipt. */
   async getCapabilities(): Promise<AgentCapabilities> {
     const cwd = this.activeCwd ?? this.status.cwd
     if (!cwd) return { skills: [], tools: [] }
+    const store = this.capabilitySettings
+    const win = this.win
+    const frame = win?.webContents.mainFrame
+    const key = this.activeKey
+    const path = this.activeSessionPath
+    const generation = this.sessionSelectionGeneration
     const trust = this.getProjectTrust(cwd)
-    return loadAgentCapabilities(cwd, trust.decision === 'trusted')
+    const trustKey = JSON.stringify(trust)
+    const backend = this.getActiveBackend()
+    const client = backend?.client
+    const state = backend?.capability
+    const epoch = state?.epoch
+    const assertOwned = () => {
+      if (this.capabilitySettings !== store || this.win !== win || win?.isDestroyed?.() || win?.webContents.isDestroyed?.()
+        || win?.webContents.mainFrame !== frame || frame?.detached || this.activeKey !== key || this.activeSessionPath !== path
+        || this.sessionSelectionGeneration !== generation || (this.activeCwd ?? this.status.cwd) !== cwd
+        || JSON.stringify(this.getProjectTrust(cwd)) !== trustKey || this.getActiveBackend() !== backend
+        || (backend && (this.backendPool.get(backend.key) !== backend || backend.client !== client || backend.cwd !== cwd
+          || backend.sessionPath !== path || backend.capability !== state || state?.epoch !== epoch))) {
+        throw new Error('能力目录所属窗口、会话或信任状态已改变')
+      }
+    }
+    const preferences = await store?.get() ?? DEFAULT_CAPABILITY_PREFERENCES
+    assertOwned()
+    let runtimeItems: Parameters<typeof loadAgentCapabilities>[2]['runtimeItems']
+    if (backend?.phase === 'running' && this.backendStillOwned(backend) && state?.notice && state.commands && state.noticeClient === client
+      && backend.capabilityNoticeEpoch === epoch && state.noticeTrust === trustKey && !state.applyPromise && !state.quarantined) {
+      try {
+        runtimeItems = readCapabilityRuntimeNotice(state.commands, { cwd, sessionPath: path,
+          revision: state.appliedRevision, runtimeId: state.notice.runtimeId, retiredRuntimeIds: state.retiredRuntimeIds }).items
+      } catch { /* Unknown dynamic metadata stays absent; never query/start the runtime here. */ }
+    }
+    const capabilities = await loadAgentCapabilities(cwd, trust.decision === 'trusted', { preferences, runtimeItems })
+    assertOwned()
+    if (store && store.getSnapshot()?.revision !== preferences.revision) throw new Error('能力偏好已改变，请刷新目录')
+    return capabilities
   }
 
   async getThinkingLevels(): Promise<string[]> {
@@ -5435,11 +5833,12 @@ export class AgentBridge {
     if (!dir) return []
     this.sessionListCache ??= new SessionListCache(async (directory) => {
       const infos = await SessionManager.list(directory)
+      const sidebarRevision = this.sessionListRevision = (this.sessionListRevision ?? 0) + 1
       const dir = directory
       // SDK session-directory encoding can collide (for example a-b vs a/b).
       // The persisted header, not the queried bucket or project group, owns a
       // session. Never relabel another worktree's history as this directory.
-      const sessions: SessionMeta[] = infos.filter((info) => typeof info.cwd === 'string' && info.cwd.length > 0 && resolve(info.cwd) === resolve(dir)).map((info) => ({
+      return infos.filter((info) => typeof info.cwd === 'string' && info.cwd.length > 0 && resolve(info.cwd) === resolve(dir)).map((info) => ({
         projectCwd: resolve(dir),
         path: info.path,
         id: info.id,
@@ -5447,19 +5846,25 @@ export class AgentBridge {
         timestamp: info.created instanceof Date ? info.created.toISOString() : String(info.created),
         mtime: info.modified instanceof Date ? info.modified.getTime() : Date.parse(String(info.modified)) || 0,
         preview: (info.firstMessage ?? '').slice(0, 120),
-        messageCount: info.messageCount
+        messageCount: info.messageCount,
+        sidebarRevision
       }))
-      // Within the existing exact-cwd scan cache, never on the token hot path.
-      // Bound per-directory disk readers; malformed/large/growing files are unknown.
-      let next = 0
-      await Promise.all(Array.from({ length: Math.min(4, sessions.length) }, async () => {
-        while (next < sessions.length) {
-          const session = sessions[next++]!
-          const total = await readSessionTokenTotal(session.path, { id: session.id, cwd: dir })
-          if (total !== undefined) session.totalTokens = total
+    }, undefined, undefined, undefined, {
+      // Optional statistics must not delay the first usable session rows.
+      read: (session, directory) => readSessionTokenTotal(session.path, { id: session.id, cwd: directory }),
+      capturePublish: (directory) => {
+        const win = this.win
+        const epoch = this.sessionListWindowEpoch
+        if (!win) return undefined
+        return (sessions) => {
+          if (this.win !== win || this.sessionListWindowEpoch !== epoch
+            || win.isDestroyed?.() || win.webContents.isDestroyed?.()) return
+          // The existing push protocol scopes nonempty lists by header cwd.
+          // Never send an ambiguous empty list or relabel another worktree.
+          if (!sessions.length || sessions.some((session) => session.projectCwd !== directory)) return
+          win.webContents.send(SESSIONS_CHANNEL, sessions)
         }
-      }))
-      return sessions
+      }
     })
     return this.sessionListCache.list(dir)
   }

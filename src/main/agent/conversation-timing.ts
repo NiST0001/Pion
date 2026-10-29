@@ -1,5 +1,21 @@
-import type { AgentSession, ExtensionFactory, ExtensionContext } from '@earendil-works/pi-coding-agent'
+import type { AgentSession, ExtensionFactory, ExtensionContext, SessionEntry } from '@earendil-works/pi-coding-agent'
 import { PION_TURN_TIMING_TYPE, parseTurnTiming, turnTimingFromEntry, type TurnTiming } from '../../shared/conversation-timing'
+
+function indexBranch(branch: SessionEntry[]) {
+  const entries = new Map<string, SessionEntry | null>()
+  const messages = new Map<object, { entry: Extract<SessionEntry, { type: 'message' }>; index: number } | null>()
+  const recorded = new Set<string>()
+  for (const [index, entry] of branch.entries()) {
+    // Null retires every occurrence, including repeated references to one entry.
+    entries.set(entry.id, entries.has(entry.id) ? null : entry)
+    if (entry.type === 'message') {
+      messages.set(entry.message, messages.has(entry.message) ? null : { entry, index })
+    }
+    const timing = turnTimingFromEntry(entry)
+    if (timing) recorded.add(timing.userEntryId)
+  }
+  return { branch, entries, messages, recorded }
+}
 
 /** One helper per actual SDK runtime; no model, tool, credential or startup I/O. */
 export function createConversationTiming(runtimeId: string): { extension: ExtensionFactory; attach(session: AgentSession): void } {
@@ -37,16 +53,19 @@ export function createConversationTiming(runtimeId: string): { extension: Extens
       const capturedGeneration = generation
       try {
         const manager = ctx.sessionManager
-        const branch = manager.getBranch()
+        let leafId = manager.getLeafId()
+        let snapshot = indexBranch(manager.getBranch())
+        let appended = false
+        const { branch } = snapshot
         const matched = inputs.flatMap(([message, input]) => {
           const receipt = inputReceipts.get(message)
           if (!receipt || input.manager !== manager || receipt.manager !== manager || input.generation !== capturedGeneration
             || receipt.generation !== capturedGeneration || input.sessionId !== manager.getSessionId() || receipt.sessionId !== input.sessionId
             || input.sessionFile !== manager.getSessionFile() || receipt.sessionFile !== input.sessionFile) return []
-          const matches = branch.flatMap((entry, index) => entry.type === 'message' && entry.message === message ? [{ entry, index }] : [])
-          return matches.length === 1 && matches[0].entry === receipt.entry && receipt.entry.id === receipt.entryId
-            && manager.getEntry(receipt.entryId) === receipt.entry && branch.filter(entry => entry.id === receipt.entryId).length === 1
-            ? [{ ...matches[0], input, receipt }] : []
+          const match = snapshot.messages.get(message)
+          return match && match.entry === receipt.entry && receipt.entry.id === receipt.entryId
+            && manager.getEntry(receipt.entryId) === receipt.entry && snapshot.entries.get(receipt.entryId) === receipt.entry
+            ? [{ ...match, message, input, receipt }] : []
         })
         if (!matched.length) return
         // Earlier retries/assistants may precede a steering input. Only a real
@@ -58,15 +77,19 @@ export function createConversationTiming(runtimeId: string): { extension: Extens
           ? lastAssistant.message.stopReason : undefined
         const outcome: TurnTiming['outcome'] = event.aborted || reason === 'aborted' ? 'aborted'
           : reason === 'stop' ? 'completed' : reason === 'error' ? 'failed' : 'ended'
-        const recorded = new Set(branch.map(turnTimingFromEntry).filter(record => record !== undefined).map(record => record.userEntryId))
-        for (const { entry, input, receipt } of matched) {
-          if (!active || capturedGeneration !== generation || input.sessionId !== manager.getSessionId()
+        for (const { entry, message, input, receipt } of matched) {
+          if (!active || capturedGeneration !== generation || ctx.sessionManager !== manager || input.sessionId !== manager.getSessionId()
             || input.sessionFile !== manager.getSessionFile()) return
-          const currentBranch = manager.getBranch()
-          if (entry.id !== receipt.entryId || manager.getEntry(receipt.entryId) !== entry || !currentBranch.includes(entry)
-            || currentBranch.filter(value => value.id === receipt.entryId).length !== 1
-            || currentBranch.filter(value => value.type === 'message' && value.message === entry.message).length !== 1
-            || recorded.has(entry.id) || entry.message.role !== 'user') continue
+          // An append listener can replace/duplicate a leaf with the same ID.
+          // Reindex after every append attempt as well as branch navigation.
+          const currentLeafId = manager.getLeafId()
+          if (appended || currentLeafId !== leafId) {
+            snapshot = indexBranch(manager.getBranch())
+            leafId = currentLeafId
+            appended = false
+          }
+          if (entry.message !== message || entry.id !== receipt.entryId || manager.getEntry(receipt.entryId) !== entry || snapshot.entries.get(receipt.entryId) !== entry
+            || snapshot.messages.get(entry.message)?.entry !== entry || snapshot.recorded.has(entry.id) || entry.message.role !== 'user') continue
           const startedAt = entry.message.timestamp
           const difference = finishedAt - startedAt
           const timing = parseTurnTiming({ startedAt, finishedAt, outcome,
@@ -78,8 +101,8 @@ export function createConversationTiming(runtimeId: string): { extension: Extens
             // SDK synchronously persists this custom entry before emitting its
             // real entry_appended event. Custom entries stay out of model context.
             pi.appendEntry(PION_TURN_TIMING_TYPE, data)
-            recorded.add(entry.id)
           } catch { /* Display metadata failure leaves this input unknown. */ }
+          finally { appended = true }
         }
       } catch { /* Missing/failed SDK evidence never gets a synthetic fallback. */ }
     })

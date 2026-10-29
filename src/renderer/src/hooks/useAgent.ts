@@ -24,6 +24,7 @@ export function useAgent() {
   const optimisticSessionTimers = useRef(new Map<string, number>())
   const {
     selectionRef,
+    captureSelectionIntent,
     clearTimeline,
     invalidateSelection: invalidateHistorySelection,
     revertMessage: revertHistoryMessage,
@@ -241,7 +242,8 @@ export function useAgent() {
     clearTimeline,
     reloadTimeline,
     reloadTimelineAfterDelete,
-    captureSelection: captureDeletionSelection
+    captureSelection: captureDeletionSelection,
+    captureSelectionIntent
   })
   const {
     addProject,

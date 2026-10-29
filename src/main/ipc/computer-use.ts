@@ -1,6 +1,6 @@
 import type { IpcMain, IpcMainInvokeEvent } from 'electron'
 import { IPC } from '../../shared/ipc'
-import { validateComputerUseConsent, validateComputerUseStatus, type ComputerUseOwner, type ComputerUseStatus } from '../../shared/computer-use'
+import { validateComputerUseActRequest, validateComputerUseConsent, validateComputerUseStatus, type ComputerUseOwner, type ComputerUseStatus } from '../../shared/computer-use'
 import type { ComputerUseService } from '../computer-use/service'
 
 /** Each invocation, including completion, must still belong to the live main frame. */
@@ -19,7 +19,7 @@ export function projectComputerUseState(state: ComputerUseStatus): ComputerUseSt
 
 interface ComputerUseIpcDependencies {
   ipcMain: Pick<IpcMain, 'handle'>
-  service: Pick<ComputerUseService, 'getState' | 'start' | 'capture' | 'stop'>
+  service: Pick<ComputerUseService, 'getState' | 'start' | 'capture' | 'act' | 'stop'>
   getMainWindowId: () => number | undefined
   createLocalOwner: (windowId: number) => ComputerUseOwner
   getLocalOwner: (windowId: number) => ComputerUseOwner
@@ -40,10 +40,13 @@ export function registerComputerUseIpc({ ipcMain, service, getMainWindowId, crea
     const id = check(event)
     if (args.length !== 1) throw new Error('ComputerUse consent required')
     const consent = validateComputerUseConsent(args[0])
-    if (!consent.capture || consent.upload || consent.control) throw new Error('ComputerUse local capture consent required')
+    if (!consent.capture || consent.upload || (consent.control ? consent.captureScope !== 'display' : consent.captureScope === 'display')) throw new Error('ComputerUse local capture consent required')
     const owner = createLocalOwner(id)
-    const state = await service.start(owner, consent)
+    const starting = service.start(owner, consent)
+    const revision = service.getState().scopeRevision
+    const state = await starting
     check(event)
+    if (state.scopeRevision !== revision || service.getState().scopeRevision !== revision) throw new Error('ComputerUse stale scope')
     return projectComputerUseState(state)
   })
   ipcMain.handle(IPC.ComputerUseCapture, async (event, ...args: unknown[]) => {
@@ -68,6 +71,27 @@ export function registerComputerUseIpc({ ipcMain, service, getMainWindowId, crea
     const width = png.readUInt32BE(16), height = png.readUInt32BE(20)
     if (width < 1 || height < 1 || width > 512 || height > 512) throw new Error('ComputerUse preview unavailable')
     return { state: projectComputerUseState(result.state), preview: `data:image/png;base64,${png.toString('base64')}` }
+  })
+  ipcMain.handle(IPC.ComputerUseAct, async (event, ...args: unknown[]) => {
+    const id = check(event)
+    const request = args[0]
+    const fields = ['scopeRevision', 'frameId', 'action']
+    if (args.length !== 1 || !request || typeof request !== 'object' || Array.isArray(request) || Object.getPrototypeOf(request) !== Object.prototype || Reflect.ownKeys(request).length !== fields.length) throw new Error('ComputerUse input request required')
+    const copy: Record<string, unknown> = {}
+    for (const field of fields) {
+      const descriptor = Object.getOwnPropertyDescriptor(request, field)
+      if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) throw new Error('ComputerUse input request required')
+      copy[field] = descriptor.value
+    }
+    const current = service.getState()
+    const revision = copy.scopeRevision
+    if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0 || revision !== current.scopeRevision || !current.frame) throw new Error('ComputerUse stale scope or frame')
+    const action = validateComputerUseActRequest({ frameId: copy.frameId, action: copy.action }, current.frame)
+    const owner = getLocalOwner(id)
+    const state = await service.act(owner, action)
+    check(event)
+    if (state.scopeRevision !== revision || service.getState().scopeRevision !== revision) throw new Error('ComputerUse stale scope')
+    return projectComputerUseState(state)
   })
   ipcMain.handle(IPC.ComputerUseStop, async (event, ...args: unknown[]) => {
     check(event); noArgs(args)

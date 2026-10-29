@@ -1,4 +1,5 @@
 import type { IpcMain } from 'electron'
+import { captureIpcOwner } from './owner'
 import type { GitService } from '../git-service'
 import { IPC } from '../../shared/ipc'
 import type { GitDiffScope, GitSelectionRequest } from '../../shared/types'
@@ -10,23 +11,21 @@ interface GitIpcDependencies {
   getMainWindowId: () => number | undefined
 }
 
-export function registerGitIpc({ ipcMain, git, getMainWindowId }: GitIpcDependencies): void {
-  ipcMain.handle(IPC.GitCommitTree, (event, cwd: string, cursor?: GitCommitTreeCursor) => {
-    const owner = getMainWindowId()
-    const sender = event.sender
-    const frame = event.senderFrame
-    const assertCurrent = (): void => {
-      if (owner === undefined || getMainWindowId() !== owner || sender.id !== owner
-        || sender.isDestroyed() || !frame || event.senderFrame !== frame || sender.mainFrame !== frame) {
-        throw new Error('只允许所属主窗口读取 Git 提交树')
-      }
-    }
-    assertCurrent()
-    return git.getCommitTree(cwd, cursor).then((page) => {
-      assertCurrent()
-      return page
+export function registerGitIpc({ ipcMain: host, git, getMainWindowId }: GitIpcDependencies): void {
+  const ipcMain: Pick<IpcMain, 'handle'> = {
+    handle: (channel, listener) => host.handle(channel, (event, ...args) => {
+      const assertCurrent = captureIpcOwner(event, getMainWindowId)
+      const result = listener(event, ...args)
+      // Includes commit-tree publication; the original owner/frame stays captured.
+      return result instanceof Promise ? result.then((value) => {
+        assertCurrent()
+        return value
+      }) : result
     })
-  })
+  }
+  ipcMain.handle(IPC.GitCommitTree, (_event, cwd: string, cursor?: GitCommitTreeCursor) =>
+    git.getCommitTree(cwd, cursor)
+  )
   ipcMain.handle(IPC.GitStatus, (_event, cwd: string) => git.getStatus(cwd))
   ipcMain.handle(IPC.GitDiff, (_event, cwd: string, path: string, scope: GitDiffScope) =>
     git.getDiff(cwd, path, scope)

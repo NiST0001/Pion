@@ -25,6 +25,36 @@ const branch: BranchInfo = {
 }
 
 describe('Sidebar selection typography', () => {
+  it('releases sidebar animation fill after entry while preserving motion and reduced-motion fallback', () => {
+    const css = readFileSync('src/renderer/src/styles/motion.css', 'utf8')
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    for (const [selector, animation] of [
+      ['.sidebar', 'pion-slide-in-left var(--motion-slow)'],
+      ['.side-section-body', 'pion-expand-in var(--motion-normal)'],
+      ['.project-folder-branches', 'pion-expand-in var(--motion-normal)'],
+      ['.project-branch-sessions', 'pion-expand-in var(--motion-normal)']
+    ]) {
+      const rule = rules.find(([, selectors, body]) => selectors.split(',').some((part) => part.trim() === selector) && /\banimation\s*:/.test(body))
+      expect(rule?.[2]).toContain(`animation: ${animation} var(--motion-ease-out) backwards`)
+      expect(rule?.[2]).not.toMatch(/\b(?:opacity|transform|will-change)\s*:/)
+      if (selector !== '.sidebar') expect(rule?.[2]).toContain('transform-origin: top center')
+    }
+    expect(css).toContain('--motion-normal: 180ms')
+    expect(css).toContain('--motion-slow: 260ms')
+    expect(css).toContain('--motion-ease-out: cubic-bezier(0.22, 1, 0.36, 1)')
+    expect(css).toMatch(/@keyframes pion-slide-in-left\s*\{\s*from\s*\{\s*opacity: 0;\s*transform: translateX\(-10px\);\s*\}\s*to\s*\{\s*opacity: 1;\s*transform: none;\s*\}\s*\}/)
+    expect(css).toMatch(/@keyframes pion-expand-in\s*\{\s*from\s*\{\s*opacity: 0;\s*transform: translateY\(-3px\) scaleY\(0\.975\);\s*\}\s*to\s*\{\s*opacity: 1;\s*transform: none;\s*\}\s*\}/)
+    for (const selector of ['.tool-body', '.composer-attachments', '.message-images']) {
+      const rule = rules.find(([, selectors]) => selectors.split(',').some((part) => part.trim() === selector))
+      expect(rule?.[2]).toContain('animation: pion-expand-in var(--motion-normal) var(--motion-ease-out) both')
+    }
+    const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'))
+    expect(reduced).toMatch(/\*,\s*\*::before,\s*\*::after\s*\{/)
+    expect(reduced).toContain('animation-duration: 0.01ms !important')
+    expect(reduced).toContain('animation-delay: 0ms !important')
+    expect(reduced).toContain('animation-iteration-count: 1 !important')
+  })
+
   it('keeps running names readable while the complete rounded halo breathes together', () => {
     const css = readFileSync('src/renderer/src/styles/refinements/project.css', 'utf8')
     const indicator = css.match(/\.side-session\.running::before\s*\{([^}]+)\}/)?.[1]
@@ -141,6 +171,61 @@ function openBranchDelete() {
 }
 
 describe('ProjectList session view controls', () => {
+  it('shows rows arriving after an empty list and preserves their DOM through token backfill and sorting without hover', () => {
+    const sessions = [
+      { path: '/a.jsonl', id: 'a', projectCwd: worktreeBranch.cwd, timestamp: '2026-01-01', mtime: 10, name: '首次加载会话 A', preview: '', messageCount: 1 },
+      { path: '/b.jsonl', id: 'b', projectCwd: worktreeBranch.cwd, timestamp: '2026-01-01', mtime: 20, name: '首次加载会话 B', preview: '', messageCount: 2 }
+    ]
+    const view = renderBranches()
+    const sectionBody = view.container.querySelector('.side-section-body')
+    const folderBranches = view.container.querySelector('.project-folder-branches')
+    const branchSessions = view.container.querySelector('.project-branch-sessions')
+    const paths = () => Array.from(view.container.querySelectorAll('.side-session'), row => row.getAttribute('data-session-path'))
+    const expectCounts = (count: number) => {
+      expect(view.container.querySelectorAll('.side-session')).toHaveLength(count)
+      expect(view.container.querySelector('.project-branch-count')).toHaveTextContent(String(count))
+      expect(view.container.querySelector('.project-folder-count')).toHaveTextContent('1')
+      expect(view.container.querySelector('.side-count')).toHaveTextContent('1')
+    }
+    expect(screen.getByText('暂无会话')).toBeVisible()
+    expectCounts(0)
+
+    view.rerender(branchTree({ sessionsByProject: { [worktreeBranch.cwd]: sessions } }))
+    expect(screen.queryByText('暂无会话')).not.toBeInTheDocument()
+    const names = sessions.map(session => screen.getByText(session.name))
+    const rows = names.map(name => name.closest('.side-session'))
+    const expectExistingRows = () => {
+      for (const [index, session] of sessions.entries()) {
+        expect(screen.getByText(session.name)).toBe(names[index])
+        expect(names[index]).toBeVisible()
+        expect(names[index].closest('.side-session')).toBe(rows[index])
+      }
+      expect(view.container.querySelector('.side-section-body')).toBe(sectionBody)
+      expect(view.container.querySelector('.project-folder-branches')).toBe(folderBranches)
+      expect(view.container.querySelector('.project-branch-sessions')).toBe(branchSessions)
+    }
+    expectExistingRows()
+    expectCounts(2)
+    expect(paths()).toEqual(['/a.jsonl', '/b.jsonl'])
+
+    fireEvent.click(screen.getByRole('button', { name: '排序会话' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '累计 Token 多到少' }))
+    expectExistingRows()
+    expect(paths()).toEqual(['/a.jsonl', '/b.jsonl']) // Unknown token totals stay in their existing order.
+    const withTokens = sessions.map(session => ({ ...session, totalTokens: session.id === 'a' ? 10 : 100 }))
+    view.rerender(branchTree({ sessionsByProject: { [worktreeBranch.cwd]: withTokens } }))
+    expectExistingRows()
+    expectCounts(2)
+    expect(paths()).toEqual(['/b.jsonl', '/a.jsonl'])
+
+    const appended = { ...sessions[0], path: '/c.jsonl', id: 'c', name: '后续加载会话 C', totalTokens: 50 }
+    view.rerender(branchTree({ sessionsByProject: { [worktreeBranch.cwd]: [...withTokens, appended] } }))
+    expectExistingRows()
+    expect(screen.getByText(appended.name)).toBeVisible()
+    expectCounts(3)
+    expect(paths()).toEqual(['/b.jsonl', '/c.jsonl', '/a.jsonl'])
+  })
+
   it('combines scoped running filters and token sorting without changing stored order, selection or deletion gates', () => {
     const sessions = [
       { path: '/a.jsonl', id: 'a', projectCwd: worktreeBranch.cwd, timestamp: '2026-01-01', mtime: 10, name: 'A', preview: '', messageCount: 1, totalTokens: 10 },

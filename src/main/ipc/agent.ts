@@ -1,4 +1,5 @@
-import type { IpcMain, IpcMainInvokeEvent } from 'electron'
+import type { IpcMain } from 'electron'
+import { captureIpcOwner } from './owner'
 import type { AgentBridge } from '../agent/agent-bridge'
 import type { ProjectStore } from '../projects'
 import { IPC } from '../../shared/ipc'
@@ -24,7 +25,7 @@ interface AgentIpcDependencies {
   projects: Pick<ProjectStore, 'touchCanonical'>
   pushProjects: () => Promise<void>
   assertWorktreeDeletionIdle?: (cwd: string) => void | Promise<void>
-  getMainWindowId?: () => number | undefined
+  getMainWindowId: () => number | undefined
 }
 
 // Reserve asynchronous mutations from IPC entry, including the gap before a
@@ -43,40 +44,55 @@ const SESSION_OPERATIONS = new Set<string>([
 ])
 
 export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects, assertWorktreeDeletionIdle, getMainWindowId }: AgentIpcDependencies): void {
-  // A destructive operation uses its own exclusive gate, not its own reservation count.
-  host.handle(IPC.BranchDelete, (event, request: BranchDeleteRequest) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口删除分支')
-    if (!assertWorktreeDeletionIdle) throw new Error('工作树删除安全检查未接入')
-    return bridge.deleteBranch(request, event.sender.id, () => assertWorktreeDeletionIdle(request.cwd))
-  })
   const ipcMain: Pick<IpcMain, 'handle'> = {
-    handle: (channel, listener) => host.handle(channel, SESSION_OPERATIONS.has(channel)
-      ? (event, ...args) => channel === IPC.ToolPermissionResolve || channel === IPC.ExtensionUiResolve
-        // Replacement hooks can still need their original approval/close response.
-        ? bridge.withSessionOperation(() => listener(event, ...args), true)
-        : bridge.withSessionOperation(() => listener(event, ...args))
-      : listener)
+    handle: (channel, listener) => host.handle(channel, (event, ...args) => {
+      const assertCurrent = captureIpcOwner(event, getMainWindowId)
+      const invoke = () => {
+        assertCurrent()
+        return listener(event, ...args)
+      }
+      const result = SESSION_OPERATIONS.has(channel)
+        ? channel === IPC.ToolPermissionResolve || channel === IPC.ExtensionUiResolve
+          // Replacement hooks can still need their original approval/close response.
+          ? bridge.withSessionOperation(invoke, true)
+          : bridge.withSessionOperation(invoke)
+        : invoke()
+      return result instanceof Promise ? result.then((value) => {
+        assertCurrent()
+        return value
+      }) : result
+    })
   }
+  // A destructive operation uses its own exclusive gate, not its own reservation count.
+  ipcMain.handle(IPC.BranchDelete, (event, request: BranchDeleteRequest) => {
+    if (!assertWorktreeDeletionIdle) throw new Error('工作树删除安全检查未接入')
+    const assertCurrent = captureIpcOwner(event, getMainWindowId)
+    return bridge.deleteBranch(request, event.sender.id, async () => {
+      assertCurrent()
+      await assertWorktreeDeletionIdle(request.cwd)
+      assertCurrent()
+    })
+  })
   // agent lifecycle -----------------------------------------------------------
-  ipcMain.handle(IPC.AgentStart, async (_event, cwd: string) => {
+  ipcMain.handle(IPC.AgentStart, async (event, cwd: string) => {
+    const assertCurrent = captureIpcOwner(event, getMainWindowId)
     const result = await bridge.start(cwd)
+    assertCurrent()
     await projects.touchCanonical(cwd)
+    assertCurrent()
     await pushProjects()
     return result
   })
   ipcMain.handle(IPC.AgentStop, () => bridge.stop())
   ipcMain.handle(IPC.AgentSend, (_event, message: string, images?: ImageContent[]) => bridge.send(message, images))
   ipcMain.handle(IPC.AgentQueue, (_event, message: string, images?: ImageContent[]) => bridge.queue(message, images))
-  ipcMain.handle(
-    IPC.AgentSendQueued,
-    (_event, kind: 'steering' | 'followUp', index: number) => bridge.sendQueuedMessage(kind, index)
-  )
-  ipcMain.handle(
-    IPC.AgentRemoveQueued,
-    (_event, kind: 'steering' | 'followUp', index: number) => bridge.removeQueuedMessage(kind, index)
-  )
+  ipcMain.handle(IPC.AgentSendQueued, (event, request: QueuedMessageEditRequest) => {
+    return bridge.sendQueuedMessage(request, event.sender.id)
+  })
+  ipcMain.handle(IPC.AgentRemoveQueued, (event, request: QueuedMessageEditRequest) => {
+    return bridge.removeQueuedMessage(request, event.sender.id)
+  })
   ipcMain.handle(IPC.AgentEditQueued, (event, request: QueuedMessageEditRequest) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口编辑排队消息')
     return bridge.editQueuedMessage(request, event.sender.id)
   })
   ipcMain.handle(IPC.AgentMigrateProject, (_event, cwd: string) => bridge.migrateSessionToProject(cwd))
@@ -101,25 +117,20 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
 
   // session management ----------------------------------------------------------
   ipcMain.handle(IPC.AgentSessionCommandInfo, (event, target: SessionCommandTarget) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取会话命令信息')
     return bridge.getSessionCommandInfo(target, event.sender.id)
   })
   ipcMain.handle(IPC.AgentCopyLastAssistantText, (event, target: SessionCommandTarget) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口复制助手正文')
     return bridge.copyLastAssistantText(target, event.sender.id)
   })
   ipcMain.handle(IPC.AgentPiChangelog, (event) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取 Pi 更新日志')
     return bridge.getPiChangelog(event.sender.id)
   })
   ipcMain.handle(IPC.AgentExportForCommand, (event, target: SessionCommandTarget, outputPath?: string) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口导出会话')
     return bridge.exportSessionForCommand(target, outputPath, event.sender.id)
   })
   ipcMain.handle(IPC.AgentNewSession, () => bridge.newSession())
   ipcMain.handle(IPC.AgentFork, (_event, entryId: string) => bridge.forkAt(entryId))
   ipcMain.handle(IPC.AgentRevertMessage, (event, request: MessageRevertRequest) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口撤销消息')
     return bridge.revertMessage(request, event.sender.id)
   })
   ipcMain.handle(IPC.AgentSwitchSession, (_event, sessionPath: string) =>
@@ -145,11 +156,9 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
     bridge.getSessionTaskHistory(sessionPath)
   )
   ipcMain.handle(IPC.AgentSubagentSessions, (event) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取子会话')
     return bridge.getSubagentSessions(event.sender.id)
   })
   ipcMain.handle(IPC.AgentSubagentSession, (event, id: string, backendId: string) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取子会话')
     return bridge.getSubagentSession(id, backendId, event.sender.id)
   })
   ipcMain.handle(IPC.AgentRunningSessions, () => bridge.getRunningSessionPaths())
@@ -167,18 +176,15 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   ipcMain.handle(IPC.AgentSetMode, (_event, mode: 'build' | 'plan') => bridge.setMode(mode))
   ipcMain.handle(IPC.AgentSetYolo, (_event, enabled: boolean) => bridge.setYoloMode(enabled === true))
   ipcMain.handle(IPC.AgentSetSubagents, (event, enabled: boolean, sessionId: string) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口切换子代理')
     return bridge.setSubagentsMode(enabled, sessionId, event.sender.id)
   })
   ipcMain.handle(IPC.AgentModels, () => bridge.getModels())
   ipcMain.handle(IPC.AgentSubagentModels, (event) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取子代理模型目录')
     return bridge.getSubagentModels(event.sender.id)
   })
   ipcMain.handle(IPC.AgentModelProviders, () => bridge.getModelProviders())
   // Shell display preference only; never a backend/provider-auth mutation.
   ipcMain.handle(IPC.AgentSetModelProviderEnabled, (event, providerId: string, enabled: boolean) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口设置提供商显示')
     return bridge.setModelProviderEnabled(providerId, enabled, event.sender.id)
   })
   ipcMain.handle(
@@ -200,7 +206,6 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   ipcMain.handle(IPC.AgentSkills, () => bridge.getSkills())
   ipcMain.handle(IPC.AgentCapabilities, () => bridge.getCapabilities())
   ipcMain.handle(IPC.AgentMcpStatus, (event, target: McpStatusTarget = {}) => {
-    if (event.senderFrame !== event.sender.mainFrame) throw new Error('只允许主窗口读取 MCP 状态')
     return bridge.getMcpStatus(target, event.sender.id)
   })
   ipcMain.handle(IPC.AgentSetModel, (_event, provider: string, modelId: string) =>
@@ -234,23 +239,10 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   )
 
   // agent settings ------------------------------------------------------------
-  const capabilityOwner = (event: IpcMainInvokeEvent): (() => void) => {
-    const owner = getMainWindowId?.()
-    const sender = event.sender
-    const frame = event.senderFrame
-    const assertCurrent = (): void => {
-      if (owner === undefined || getMainWindowId?.() !== owner || sender.id !== owner || sender.isDestroyed()
-        || !frame || frame.detached || event.senderFrame !== frame || sender.mainFrame !== frame) {
-        throw new Error('只允许所属主窗口管理工具与能力')
-      }
-    }
-    assertCurrent()
-    return assertCurrent
-  }
   ipcMain.handle(IPC.GetCapabilitySettings, (event, cwd?: string) =>
-    bridge.getCapabilitySettings(cwd, capabilityOwner(event)))
+    bridge.getCapabilitySettings(cwd, captureIpcOwner(event, getMainWindowId)))
   ipcMain.handle(IPC.UpdateCapabilitySettings, (event, request: CapabilitySettingsUpdate) =>
-    bridge.updateCapabilitySettings(request, capabilityOwner(event)))
+    bridge.updateCapabilitySettings(request, captureIpcOwner(event, getMainWindowId)))
   ipcMain.handle(IPC.AgentSetAutoCompaction, (_event, enabled: boolean) =>
     bridge.setAutoCompaction(enabled)
   )

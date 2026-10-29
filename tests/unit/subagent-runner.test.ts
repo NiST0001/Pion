@@ -1,4 +1,6 @@
 import { beforeEach, expect, it, vi } from 'vitest'
+import { runToolCall } from '@earendil-works/pi-agent-core'
+import { Type } from 'typebox'
 import { SettingsManager, type AgentSession, type AgentSessionEvent, type ModelRuntime, type SessionEntry, type ExtensionToolContext } from '@earendil-works/pi-coding-agent'
 import { createSubagentControl, createSubagentRunner } from '../../src/main/agent/subagents'
 import { DEFAULT_SUBAGENT_SETTINGS } from '../../src/shared/subagents'
@@ -15,19 +17,23 @@ vi.mock('@earendil-works/pi-coding-agent', async (original) => ({
 }))
 beforeEach(() => { vi.clearAllMocks(); mocks.reload.mockReset() })
 
-function setup(block = false, cacheWarming: 'off' | 'streaming' | 'idle' = 'off', models = {} as ModelRuntime) {
+function setup(block = false, cacheWarming: 'off' | 'streaming' | 'idle' = 'off', models = {} as ModelRuntime, toolNames = ['write']) {
   const execute = vi.fn(async (_id: string, ..._args: unknown[]) => ({ content: [{ type: 'text', text: 'ok' }], details: {} }))
-  const before = vi.fn(async () => block ? { block: true, reason: 'denied' } : undefined)
-  const after = vi.fn(async () => undefined)
+  const before = vi.fn<NonNullable<AgentSession['agent']['beforeToolCall']>>(async () => block ? { block: true, reason: 'denied' } : undefined)
+  const after = vi.fn<NonNullable<AgentSession['agent']['afterToolCall']>>(async () => undefined)
   const dispose = vi.fn()
-  const active = ['write', 'pion_subagents', 'pion_ask_user', 'plugin_tool']
+  const prepared = vi.fn()
+  const results: Awaited<ReturnType<typeof runToolCall>>[] = []
+  const args: Parameters<typeof runToolCall>[0]['arguments'] = { path: 'a.ts', content: 'test' }
+  const active = [...toolNames, 'pion_subagents', 'pion_ask_user', 'plugin_tool']
   const parent = {
     model: { provider: 'fixture', id: 'fixture' }, thinkingLevel: 'off', messages: [],
     systemPrompt: 'Inherited project rules',
     settingsManager: SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: false }, cacheWarming }),
-    agent: { state: { systemPrompt: '', tools: active.map((name) => ({ name, label: name, description: name, parameters: {}, execute })) }, beforeToolCall: before, afterToolCall: after },
+    agent: { state: { systemPrompt: '', tools: active.map((name) => ({ name, label: name, description: name,
+      parameters: Type.Object({ path: Type.String(), content: Type.Optional(Type.String()) }), execute })) }, beforeToolCall: before, afterToolCall: after },
     getActiveToolNames: () => active,
-    getAllTools: () => active.map((name) => ({ name, sourceInfo: { source: name === 'write' ? 'builtin' : 'extension' } }))
+    getAllTools: () => active.map((name) => ({ name, sourceInfo: { source: toolNames.includes(name) ? 'builtin' : 'extension' } }))
   } as unknown as AgentSession
   mocks.create.mockImplementation(async (options) => {
     const session = {
@@ -35,17 +41,27 @@ function setup(block = false, cacheWarming: 'off' | 'streaming' | 'idle' = 'off'
       messages: [{ role: 'assistant', stopReason: 'stop' }],
       subscribe: () => () => {}, abort: vi.fn(async () => {}), dispose,
       getLastAssistantText: () => 'child result',
-      prompt: async () => {
-        const context = { toolCall: { type: 'toolCall', id: 'call-1', name: 'write', arguments: {} }, args: { path: 'a.ts', content: 'test' } } as Parameters<NonNullable<AgentSession['agent']['beforeToolCall']>>[0]
-        const decision = await session.agent.beforeToolCall!(context)
-        if (decision?.block) return
-        const result = await options.customTools[0].execute('call-1', context.args, undefined, undefined)
-        await session.agent.afterToolCall!({ ...context, result, isError: false } as Parameters<NonNullable<AgentSession['agent']['afterToolCall']>>[0])
+      prompt: async (task: string) => {
+        const toolCall = { type: 'toolCall' as const, id: 'call-1', name: task === 'read' ? 'read' : 'write', arguments: args }
+        // Use the installed SDK pipeline: validated args identity, blocked-call
+        // semantics, thrown execution errors and result-hook overrides are real.
+        results.push(await runToolCall(toolCall, {
+          assistantMessage: { role: 'assistant', content: [toolCall], api: 'anthropic-messages', provider: 'fixture', model: 'fixture',
+            usage: unitUsage(), stopReason: 'toolUse', timestamp: 1 },
+          context: { messages: [], tools: options.customTools },
+          tools: options.customTools,
+          beforeToolCall: async (context, signal) => {
+            const decision = await session.agent.beforeToolCall!(context, signal)
+            prepared(context)
+            return decision
+          },
+          afterToolCall: (context, signal) => session.agent.afterToolCall!(context, signal)
+        }))
       }
     }
     return { session }
   })
-  return { run: createSubagentRunner(() => parent, () => models, '/project', '/agent'), execute, before, after, dispose, active, parent }
+  return { run: createSubagentRunner(() => parent, () => models, '/project', '/agent'), execute, before, after, dispose, active, parent, prepared, results, args }
 }
 
 it('uses the parent model, only inherited built-ins and live permission hooks', async () => {
@@ -61,7 +77,13 @@ it('uses the parent model, only inherited built-ins and live permission hooks', 
   expect(h.before).toHaveBeenCalledOnce()
   expect(h.after).toHaveBeenCalledOnce()
   expect(h.execute).toHaveBeenCalledOnce()
-  expect(h.execute.mock.calls[0][0]).toMatch(/^subagent-.*-call-1$/)
+  const toolCallId = h.execute.mock.calls[0][0]
+  expect(toolCallId).toMatch(/^subagent-.*-call-1$/)
+  expect(h.before).toHaveBeenCalledWith(expect.objectContaining({
+    assistantMessage: expect.objectContaining({ content: [expect.objectContaining({ id: 'call-1', name: 'write' })] }),
+    toolCall: expect.objectContaining({ id: toolCallId }), args: expect.objectContaining({ path: 'a.ts', content: 'test' })
+  }), expect.any(AbortSignal))
+  expect(h.after).toHaveBeenCalledWith(expect.objectContaining({ toolCall: expect.objectContaining({ id: toolCallId }), isError: false }), undefined)
   expect(h.dispose).toHaveBeenCalledOnce()
 })
 
@@ -81,6 +103,8 @@ it('does not execute a child tool when the parent denies it', async () => {
   await h.run({ name: 'worker', task: 'edit' }, new AbortController().signal, () => {})
   expect(h.before).toHaveBeenCalledOnce()
   expect(h.execute).not.toHaveBeenCalled()
+  expect(h.after).not.toHaveBeenCalled()
+  expect(h.results[0]).toMatchObject({ isError: true, result: { content: [{ type: 'text', text: 'denied' }] } })
 })
 
 it('does not create a model request after cancellation during setup', async () => {
@@ -282,12 +306,118 @@ it('namespaces child tool IDs and serializes sibling writes', async () => {
   h.execute.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ content: [{ type: 'text', text: 'ok' }], details: {} }) }))
   const a = h.run({ name: 'a', task: 'edit a' }, new AbortController().signal, () => {})
   const b = h.run({ name: 'b', task: 'edit b' }, new AbortController().signal, () => {})
-  await vi.waitFor(() => expect(h.before).toHaveBeenCalledTimes(2))
+  await vi.waitFor(() => expect(h.prepared).toHaveBeenCalledTimes(2))
+  expect(h.before).toHaveBeenCalledOnce()
   expect(h.execute).toHaveBeenCalledTimes(1)
   release()
   await Promise.all([a, b])
+  expect(h.before).toHaveBeenCalledTimes(2)
+  expect(h.after).toHaveBeenCalledTimes(2)
   expect(h.execute).toHaveBeenCalledTimes(2)
   expect(h.execute.mock.calls[0][0]).not.toBe(h.execute.mock.calls[1][0])
+})
+
+it.each(['deny', 'abort', 'hidden'] as const)('rejects a queued sibling write after live %s without another approval', async (change) => {
+  const h = setup()
+  const sibling = new AbortController()
+  let denied = false
+  let release!: () => void
+  h.before.mockImplementation(async () => denied ? { block: true, reason: 'live deny' } : undefined)
+  h.execute.mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve({ content: [{ type: 'text', text: 'first' }], details: {} }) }))
+  const first = h.run({ name: 'a', task: 'edit a' }, new AbortController().signal, () => {})
+  await vi.waitFor(() => expect(h.execute).toHaveBeenCalledOnce())
+  const second = h.run({ name: 'b', task: 'edit b' }, sibling.signal, () => {})
+  await vi.waitFor(() => expect(h.prepared).toHaveBeenCalledTimes(2))
+  expect(h.before).toHaveBeenCalledOnce()
+  if (change === 'deny') denied = true
+  else if (change === 'abort') sibling.abort()
+  else h.active.splice(h.active.indexOf('write'), 1)
+  release()
+  await Promise.all([first, second])
+  expect(h.execute).toHaveBeenCalledOnce()
+  expect(h.after).toHaveBeenCalledOnce()
+  expect(h.before).toHaveBeenCalledTimes(change === 'deny' ? 2 : 1)
+  expect(h.results.find((result) => result.isError)?.result.content).toEqual([{ type: 'text', text: change === 'deny' ? 'live deny'
+    : change === 'abort' ? '子代理已中止' : '主会话已禁用此工具' }])
+})
+
+it.each(['abort', 'hidden'] as const)('rechecks live %s after an in-slot approval settles', async (change) => {
+  const h = setup()
+  const controller = new AbortController()
+  let approve!: () => void
+  h.before.mockImplementationOnce(() => new Promise<undefined>((resolve) => { approve = () => resolve(undefined) }))
+  const pending = h.run({ name: 'worker', task: 'edit' }, controller.signal, () => {})
+  await vi.waitFor(() => expect(approve).toBeTypeOf('function'))
+  if (change === 'abort') controller.abort()
+  else h.active.splice(h.active.indexOf('write'), 1)
+  approve()
+  await pending
+  expect(h.before).toHaveBeenCalledOnce()
+  expect(h.execute).not.toHaveBeenCalled()
+  expect(h.after).not.toHaveBeenCalled()
+  expect(h.results[0].isError).toBe(true)
+})
+
+it('keeps read-only tools parallel while sibling write admission holds the slot', async () => {
+  const h = setup(false, 'off', {} as ModelRuntime, ['write', 'read'])
+  let approve!: () => void
+  h.before.mockImplementationOnce(() => new Promise<undefined>((resolve) => { approve = () => resolve(undefined) }))
+  const writing = h.run({ name: 'writer', task: 'edit' }, new AbortController().signal, () => {})
+  await vi.waitFor(() => expect(approve).toBeTypeOf('function'))
+  await h.run({ name: 'reader', task: 'read' }, new AbortController().signal, () => {})
+  expect(h.before).toHaveBeenCalledTimes(2)
+  expect(h.execute).toHaveBeenCalledOnce()
+  expect(h.after).toHaveBeenCalledOnce()
+  approve()
+  await writing
+  expect(h.execute).toHaveBeenCalledTimes(2)
+  expect(h.after).toHaveBeenCalledTimes(2)
+})
+
+it('forwards one result hook for a thrown write and applies its SDK override', async () => {
+  const h = setup()
+  h.execute.mockRejectedValueOnce(new Error('write failed'))
+  h.after.mockResolvedValueOnce({ content: [{ type: 'text', text: 'reported failure' }], isError: true })
+  await h.run({ name: 'worker', task: 'edit' }, new AbortController().signal, () => {})
+  expect(h.before).toHaveBeenCalledOnce()
+  expect(h.after).toHaveBeenCalledOnce()
+  expect(h.after).toHaveBeenCalledWith(expect.objectContaining({ isError: true,
+    result: expect.objectContaining({ content: [{ type: 'text', text: 'write failed' }] }) }), undefined)
+  expect(h.results[0]).toMatchObject({ isError: true, result: { content: [{ type: 'text', text: 'reported failure' }] } })
+})
+
+it('executes the same validated input the live gate mutates and preserves SDK tool results and usage', async () => {
+  const h = setup()
+  h.before.mockImplementationOnce(async ({ args }) => {
+    Object.assign(args as Record<string, unknown>, { path: 'approved.ts', content: 'approved content' })
+    return undefined
+  })
+  const output = { content: [{ type: 'text', text: 'written' }], details: { original: true },
+    structuredContent: { saved: 'approved.ts' }, usage: unitUsage() }
+  h.execute.mockResolvedValueOnce(output)
+  h.after.mockResolvedValueOnce({ details: { reported: true } })
+  await h.run({ name: 'worker', task: 'edit' }, new AbortController().signal, () => {})
+  const admitted = h.before.mock.calls[0][0].args
+  expect(h.execute.mock.calls[0][1]).toBe(admitted)
+  expect(admitted).toMatchObject({ path: 'approved.ts', content: 'approved content' })
+  expect(Object.getOwnPropertyDescriptor(admitted, Symbol.for('pion.subagent.abort'))?.enumerable).toBe(false)
+  expect(h.args.path).toBe('a.ts')
+  expect(h.before).toHaveBeenCalledOnce()
+  expect(h.after).toHaveBeenCalledOnce()
+  expect(h.after.mock.calls[0][0].args).toBe(admitted)
+  expect(h.results[0]).toMatchObject({ isError: false, result: { ...output, details: { reported: true } } })
+})
+
+it.each(['missing-argument', 'invalid-preparation'] as const)('rejects %s before the parent gate or execution', async (failure) => {
+  const h = setup()
+  if (failure === 'missing-argument') delete h.args.path
+  else h.parent.agent.state.tools[0].prepareArguments = () => ({})
+  await h.run({ name: 'worker', task: 'edit' }, new AbortController().signal, () => {})
+  expect(h.prepared).not.toHaveBeenCalled()
+  expect(h.before).not.toHaveBeenCalled()
+  expect(h.execute).not.toHaveBeenCalled()
+  expect(h.after).not.toHaveBeenCalled()
+  expect(h.results[0]).toMatchObject({ isError: true, result: { content: [{ type: 'text', text: expect.stringContaining('Validation failed') }] } })
 })
 
 function modelRuntimeFixture() {

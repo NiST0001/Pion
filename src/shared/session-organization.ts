@@ -155,6 +155,13 @@ export function validateSessionOrganization(value: unknown): SessionOrganization
   return { version: 1, revision: raw.revision, folders, sessions }
 }
 
+/** Ranked entries precede unranked entries; ties retain their natural input order. */
+export function sortSessionOrganizationItems(entries: { item: SessionOrganizationItem; order?: number }[]): SessionOrganizationItem[] {
+  return entries.map((entry, index) => ({ ...entry, index }))
+    .sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity) || a.index - b.index)
+    .map((entry) => entry.item)
+}
+
 /** Projects only the caller's real sessions; stale placement records never add rows. */
 export function orderedSessionOrganizationItems(organization: SessionOrganization, cwd: string, parentId: string | undefined, sessionPaths: string[]): SessionOrganizationItem[] {
   const placements = new Map(organization.sessions.filter((entry) => entry.cwd === cwd).map((entry) => [entry.path, entry]))
@@ -167,9 +174,7 @@ export function orderedSessionOrganizationItems(organization: SessionOrganizatio
   for (const entry of organization.folders) {
     if (entry.cwd === cwd && entry.parentId === parentId) base.push({ item: { kind: 'folder', id: entry.id }, order: entry.order })
   }
-  return base.map((entry, index) => ({ ...entry, index }))
-    .sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity) || a.index - b.index)
-    .map((entry) => entry.item)
+  return sortSessionOrganizationItems(base)
 }
 
 export function validateSessionOrganizationChange(value: unknown): SessionOrganizationChange {

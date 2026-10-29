@@ -2,10 +2,27 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown } from 'lucide-react'
+import { topmostModalDialog } from '../../utils/dialogFocus'
+
+const selectTriggers = new WeakSet<HTMLElement>()
+const popupOwners = new WeakMap<HTMLElement, HTMLElement>()
+
+/** Keyboard ownership comes from mounted controls, never a popup class name. */
+export function ownsPionSelectKey(event: globalThis.KeyboardEvent, dialog: HTMLElement): boolean {
+  if (!(event.target instanceof Element)) return false
+  const direct = event.target.closest<HTMLElement>('[role="combobox"]')
+  const menu = event.target.closest<HTMLElement>('[role="listbox"]')
+  const button = direct && selectTriggers.has(direct) ? direct : menu ? popupOwners.get(menu) : undefined
+  if (!button || !button.isConnected || !dialog.contains(button) || button.matches(':disabled')) return false
+  return event.key === 'Enter' || (event.key === 'Escape' && button.getAttribute('aria-expanded') === 'true')
+}
 
 export interface PionSelectOption {
   value: string
   label: string
+  /** Decorative row content; label remains the typeahead and accessible name. */
+  render?: ReactNode
+  title?: string
   group?: string
   disabled?: boolean
 }
@@ -14,15 +31,22 @@ interface PionSelectProps {
   value: string
   options: PionSelectOption[]
   onValueChange(value: string): void
+  /** Retain explicit selection callbacks for callers that also handle reselection. */
+  notifyOnReselect?: boolean
   disabled?: boolean
   ariaLabel: string
+  title?: string
   className?: string
+  popupClassName?: string
   children?: ReactNode
   id?: string
 }
 
 /** A single-select listbox. Only its trigger participates in the tab order. */
-export function PionSelect({ value, options, onValueChange, disabled = false, ariaLabel, className, children, id }: PionSelectProps) {
+export function PionSelect({
+  value, options, onValueChange, notifyOnReselect = false, disabled = false,
+  ariaLabel, title, className, popupClassName, children, id
+}: PionSelectProps) {
   const generatedId = useId()
   const listId = `${generatedId}-listbox`
   const trigger = useRef<HTMLButtonElement>(null)
@@ -32,11 +56,22 @@ export function PionSelect({ value, options, onValueChange, disabled = false, ar
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState(-1)
   const [placement, setPlacement] = useState<CSSProperties>({ position: 'fixed', visibility: 'hidden' })
+  useLayoutEffect(() => {
+    const button = trigger.current
+    if (!button) return
+    selectTriggers.add(button)
+    return () => { selectTriggers.delete(button) }
+  }, [])
   const selected = options.findIndex(option => option.value === value)
   const enabled = options.map((option, index) => option.disabled ? -1 : index).filter(index => index >= 0)
   const activeIndex = enabled.includes(active) ? active : (enabled.includes(selected) ? selected : (enabled[0] ?? -1))
 
-  const unavailable = () => disabled || !trigger.current || trigger.current.matches(':disabled')
+  const unavailable = () => {
+    const button = trigger.current
+    if (disabled || !button || button.matches(':disabled')) return true
+    const dialog = topmostModalDialog()
+    return dialog !== null && !dialog.contains(button)
+  }
   const close = () => { setOpen(false); search.current = { text: '', time: 0 } }
   const show = (index = enabled.includes(selected) ? selected : (enabled[0] ?? -1)) => {
     if (unavailable()) return
@@ -47,7 +82,7 @@ export function PionSelect({ value, options, onValueChange, disabled = false, ar
   const choose = (index: number) => {
     if (unavailable() || !options[index] || options[index].disabled) return
     close()
-    if (options[index].value !== value) onValueChange(options[index].value)
+    if (notifyOnReselect || options[index].value !== value) onValueChange(options[index].value)
   }
 
   useEffect(() => {
@@ -59,6 +94,7 @@ export function PionSelect({ value, options, onValueChange, disabled = false, ar
     const button = trigger.current
     const menu = popup.current
     if (!button || !menu) return
+    popupOwners.set(menu, button)
     const position = () => {
       if (button.matches(':disabled') || !button.isConnected) { setOpen(false); return }
       const rect = button.getBoundingClientRect()
@@ -87,7 +123,8 @@ export function PionSelect({ value, options, onValueChange, disabled = false, ar
       setOpen(false)
     }
     const escape = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.isComposing || composing.current || event.keyCode === 229) return
+      if (event.key !== 'Escape' || event.defaultPrevented || unavailable()
+        || event.isComposing || composing.current || event.keyCode === 229) return
       // Settings listens on window in the bubble phase; consume only an open menu's Escape.
       event.preventDefault()
       event.stopPropagation()
@@ -111,6 +148,7 @@ export function PionSelect({ value, options, onValueChange, disabled = false, ar
       mutations.observe(ancestor, { attributes: true, attributeFilter: ['disabled'] })
     }
     return () => {
+      popupOwners.delete(menu)
       window.removeEventListener('resize', position)
       window.removeEventListener('blur', windowBlur)
       document.removeEventListener('scroll', scrolled, true)
@@ -182,18 +220,18 @@ export function PionSelect({ value, options, onValueChange, disabled = false, ar
   })
   const renderOption = (index: number) => {
     const option = options[index]
-    return <div key={index} id={`${listId}-option-${index}`} role="option"
+    return <div key={index} id={`${listId}-option-${index}`} role="option" aria-label={option.label} title={option.title}
       aria-selected={option.value === value} aria-disabled={option.disabled || undefined}
       data-option-index={index} data-active={index === activeIndex} className="pion-select-option"
       onPointerMove={() => { if (!option.disabled) setActive(index) }}
       onClick={event => { event.preventDefault(); event.stopPropagation(); choose(index) }}>
       <span className="pion-select-check" aria-hidden="true">{option.value === value && <Check size={14} />}</span>
-      <span className="pion-select-option-label">{option.label}</span>
+      {option.render ?? <span className="pion-select-option-label">{option.label}</span>}
     </div>
   }
 
   return <>
-    <button ref={trigger} id={id} type="button" role="combobox" aria-label={ariaLabel}
+    <button ref={trigger} id={id} type="button" role="combobox" aria-label={ariaLabel} title={title}
       aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listId : undefined}
       aria-activedescendant={open && activeIndex >= 0 ? `${listId}-option-${activeIndex}` : undefined}
       disabled={disabled} className={`pion-select pion-select-trigger${className ? ` ${className}` : ''}`}
@@ -215,7 +253,7 @@ export function PionSelect({ value, options, onValueChange, disabled = false, ar
       <ChevronDown size={14} className="pion-select-chevron" aria-hidden="true" />
     </button>
     {open && !disabled && createPortal(<div ref={popup} id={listId} role="listbox" aria-label={ariaLabel}
-      className="pion-select-popup" style={placement}
+      className={`pion-select-popup${popupClassName ? ` ${popupClassName}` : ''}`} style={placement}
       onPointerDown={event => {
         if (event.target instanceof Element && event.target.closest('[role="option"]')) event.preventDefault()
         event.stopPropagation()

@@ -27,6 +27,11 @@ interface AliasProof {
   receipt: string
   stamp: string
 }
+interface TransactionIndex {
+  data: LedgerDocument
+  sessions: Map<string, LedgerSession>
+  aliases: Map<string, { session: LedgerSession; alias: LedgerSession['aliases'][number] }>
+}
 interface Resolution {
   records: Map<string, LedgerReceipt>
   recordSessions: Map<string, string>
@@ -47,15 +52,25 @@ function snapshotProof(path: string, snapshot: SessionUsageSnapshot): AliasProof
   return { path, id: sessionHash(snapshot.id), receipt: snapshot.receipt, stamp: snapshot.stamp }
 }
 
+/** Build only inside the owning store transaction; merge keeps both maps current. */
+function indexTransaction(data: LedgerDocument): TransactionIndex {
+  const index: TransactionIndex = { data, sessions: new Map(), aliases: new Map() }
+  for (const session of data.sessions) {
+    index.sessions.set(session.id, session)
+    for (const alias of session.aliases) index.aliases.set(alias.path, { session, alias })
+  }
+  return index
+}
+
 /** Historical aliases alone cannot establish a new edge: their paths may be reused. */
-async function bindLineage(data: LedgerDocument, proofs: Map<string, AliasProof>, rejected?: (path: string) => void): Promise<AliasProof[]> {
-  const aliases = new Map(data.sessions.flatMap(session => session.aliases.map(alias => [alias.path, { id: session.id, alias }] as const)))
+async function bindLineage(index: TransactionIndex, proofs: Map<string, AliasProof>, rejected?: (path: string) => void): Promise<AliasProof[]> {
+  const { data, aliases } = index
   const needed = new Set(data.sessions.filter(session => session.parent && !session.parentId).map(session => session.parent!))
   const verified = new Map<string, AliasProof>()
   for (const parent of needed) {
     const proof = proofs.get(parent)
     const current = aliases.get(parent)
-    if (!proof || !current || current.id !== proof.id || current.alias.conflict
+    if (!proof || !current || current.session.id !== proof.id || current.alias.conflict
       || current.alias.receipt !== proof.receipt || current.alias.stamp !== proof.stamp) continue
     try {
       // Recheck this round's successful source immediately before establishing
@@ -143,14 +158,14 @@ function resolveLineage(data: LedgerDocument): Resolution {
 }
 
 /** Validate a whole snapshot before adding anything; old receipt evidence is immutable. */
-function mergeSnapshot(data: LedgerDocument, path: string, snapshot: SessionUsageSnapshot): boolean {
+function mergeSnapshot(index: TransactionIndex, path: string, snapshot: SessionUsageSnapshot): boolean {
   const id = sessionHash(snapshot.id)
   const alias = pathHash(path)
   const parent = snapshot.parentSession ? pathHash(snapshot.parentSession) : undefined
-  const existing = data.sessions.find(session => session.id === id)
-  const other = data.sessions.find(session => session.id !== id && session.aliases.some(value => value.path === alias))
-  if (other) {
-    const conflicted = other.aliases.find(value => value.path === alias)!
+  const existing = index.sessions.get(id)
+  const known = index.aliases.get(alias)
+  if (known && known.session.id !== id) {
+    const conflicted = known.alias
     const changed = !conflicted.conflict
     if (changed) conflicted.conflict = snapshot.receipt
     throw new AliasConflict(changed)
@@ -174,7 +189,7 @@ function mergeSnapshot(data: LedgerDocument, path: string, snapshot: SessionUsag
     }
     if (!old) { added.push(receipt); previous.set(receipt.entry, receipt) }
   }
-  const oldAlias = existing?.aliases.find(value => value.path === alias)
+  const oldAlias = known?.alias
   if (oldAlias?.conflict) throw unavailable()
   if (existing) {
     for (const receipt of added) existing.receipts.push(receipt)
@@ -184,11 +199,16 @@ function mergeSnapshot(data: LedgerDocument, path: string, snapshot: SessionUsag
       oldAlias.stamp = snapshot.stamp
       return changed || added.length > 0
     }
-    existing.aliases.push({ path: alias, receipt: snapshot.receipt, stamp: snapshot.stamp })
-  } else {
-    data.sessions.push({ id, createdAt: snapshot.createdAt, cwd: snapshot.cwd, ...(parent ? { parent } : {}),
-      aliases: [{ path: alias, receipt: snapshot.receipt, stamp: snapshot.stamp }], receipts: added })
   }
+  const session: LedgerSession = existing ?? { id, createdAt: snapshot.createdAt, cwd: snapshot.cwd, ...(parent ? { parent } : {}),
+    aliases: [], receipts: added }
+  if (!existing) {
+    index.data.sessions.push(session)
+    index.sessions.set(id, session)
+  }
+  const value = { path: alias, receipt: snapshot.receipt, stamp: snapshot.stamp }
+  session.aliases.push(value)
+  index.aliases.set(alias, { session, alias: value })
   return true
 }
 
@@ -477,10 +497,10 @@ export class UsageLedger implements UsageLedgerCollector {
     const shouldContinue = () => !background || this.backgroundActive() || this.foregroundRequests > 0
     let bindings: AliasProof[] = []
     const result = await this.store.transaction(async data => {
+      const transaction = indexTransaction(data)
       const scan = paths ? { paths, failed: false } : await discover(this.root, yieldWork, shouldContinue)
       const collection: Collection = { discovered: scan.paths, successful: new Set(), unavailable: 0, failed: scan.failed }
       let dirty = data.revision === 0
-      const aliases = new Map(data.sessions.flatMap(session => session.aliases.map(alias => [alias.path, { id: session.id, alias }] as const)))
       const proofs = new Map<string, AliasProof>()
       const ordered = scan.paths.slice().sort()
       for (let index = 0; index < ordered.length; index++) {
@@ -499,18 +519,18 @@ export class UsageLedger implements UsageLedgerCollector {
             if (paths && this.backgroundStopped) for (const remaining of ordered.slice(index)) this.dirty.add(remaining)
             break
           }
-          const known = aliases.get(pathHash(path))
+          const known = transaction.aliases.get(pathHash(path))
           const previous = known?.alias
           if (previous && !previous.conflict && previous.stamp === sessionUsageFileStamp(size)) {
             // Previously validated, unchanged files need only their stat checks.
             await checkDirectories(directories)
             const current = await lstat(path, { bigint: true })
             if (!current.isFile() || current.isSymbolicLink() || sessionUsageFileStamp(current) !== previous.stamp) throw unavailable()
-            proofs.set(pathHash(path), { path, id: known!.id, receipt: previous.receipt, stamp: previous.stamp })
+            proofs.set(pathHash(path), { path, id: known!.session.id, receipt: previous.receipt, stamp: previous.stamp })
           } else {
             const snapshot = await readSnapshot(path, directories, yieldWork)
             await verifySource(path, snapshot.stamp)
-            dirty = mergeSnapshot(data, path, snapshot) || dirty
+            dirty = mergeSnapshot(transaction, path, snapshot) || dirty
             proofs.set(pathHash(path), snapshotProof(path, snapshot))
           }
           collection.successful.add(path)
@@ -525,7 +545,7 @@ export class UsageLedger implements UsageLedgerCollector {
           if (!(error instanceof SessionUsageReadError)) collection.failed = true
         }
       }
-      bindings = await bindLineage(data, proofs, path => {
+      bindings = await bindLineage(transaction, proofs, path => {
         collection.successful.delete(path)
         collection.unavailable++
         collection.failed = true
@@ -572,25 +592,26 @@ export class UsageLedger implements UsageLedgerCollector {
       try {
         let bindings: AliasProof[] = []
         await this.store.transaction(async data => {
+          const transaction = indexTransaction(data)
           const snapshot = await readSnapshot(target, undefined, () => this.yieldCollection(false))
-          const changed = mergeSnapshot(data, target, snapshot)
+          const changed = mergeSnapshot(transaction, target, snapshot)
           const proofs = new Map([[pathHash(target), snapshotProof(target, snapshot)]])
-          const session = data.sessions.find(value => value.id === sessionHash(snapshot.id))!
+          const session = transaction.sessions.get(sessionHash(snapshot.id))!
           if (snapshot.parentSession && !session.parentId) {
             // Only stat-check an already-known exact alias, never chase an
             // arbitrary header path or infer a parent from another same-ID path.
             const parentPath = this.normalize(snapshot.parentSession)
-            const parent = data.sessions.find(value => value.aliases.some(alias => alias.path === session.parent && !alias.conflict))
-            const alias = parent?.aliases.find(value => value.path === session.parent)
-            if (parent && alias) {
+            const parent = transaction.aliases.get(session.parent!)
+            if (parent && !parent.alias.conflict) {
+              const { alias } = parent
               try {
                 await verifySource(parentPath, alias.stamp)
-                proofs.set(session.parent!, { path: parentPath, id: parent.id, receipt: alias.receipt, stamp: alias.stamp })
+                proofs.set(session.parent!, { path: parentPath, id: parent.session.id, receipt: alias.receipt, stamp: alias.stamp })
               } catch { /* Unknown/changed parents must not acquire a durable edge. */ }
             }
           }
           await verifySource(target, snapshot.stamp)
-          bindings = await bindLineage(data, proofs)
+          bindings = await bindLineage(transaction, proofs)
           const dirty = bindings.length > 0 || changed
           const resolution = resolveLineage(data)
           if (!resolution.resolved.has(sessionHash(snapshot.id))) throw unavailable()

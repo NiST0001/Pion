@@ -4,32 +4,48 @@ import type { PionApi } from '../../../../shared/types'
 import type { Action, AgentState } from '../../agent/types'
 import { beginBranchQuery, isCurrentBranchQuery } from '../../agent/branchListRevision'
 
-// Progressive sidebar reads: a slow worktree must not hold every other row.
-// The deadline bounds waiting, not the lifetime of the underlying IPC request.
-async function loadSidebarRows<T>(
+interface SidebarReadPool {
+  pending: number
+  resume?: () => void
+}
+
+// Branch and session discovery each retain four real IPC slots across effects.
+// The deadline only reports slow reads; settlement releases a slot and pumps
+// the latest discovery, so one slow worktree leaves the other workers free.
+function loadSidebarRows<T>(
+  pool: SidebarReadPool,
   cwds: string[], read: (cwd: string) => Promise<T>, publish: (cwd: string, value: T) => void,
   cancelled: () => boolean
-): Promise<void> {
+): void {
   let next = 0
-  await Promise.all(Array.from({ length: Math.min(4, cwds.length) }, async () => {
-    while (!cancelled() && next < cwds.length) {
+  const resume = () => {
+    while (!cancelled() && pool.pending < 4 && next < cwds.length) {
       const cwd = cwds[next++]
-      let timer: number | undefined
-      try {
-        const value = await Promise.race([
-          read(cwd),
-          new Promise<never>((_, reject) => {
-            timer = window.setTimeout(() => reject(new Error('sidebar read timed out')), 15_000)
-          })
-        ])
-        if (!cancelled()) publish(cwd, value)
-      } catch (error) {
-        if (!cancelled()) console.warn('[pion] sidebar read failed:', cwd, error)
-      } finally {
-        if (timer !== undefined) window.clearTimeout(timer)
-      }
+      pool.pending++
+      const timer = window.setTimeout(() => {
+        if (!cancelled()) console.warn('[pion] sidebar read is still pending:', cwd)
+      }, 15_000)
+      // Start immediately, including synchronous throws in the settlement path.
+      void (async () => read(cwd))()
+        .then((value) => { if (!cancelled()) publish(cwd, value) })
+        .catch((error) => {
+          if (!cancelled()) console.warn('[pion] sidebar read failed:', cwd, error)
+        })
+        .finally(() => {
+          window.clearTimeout(timer)
+          pool.pending--
+          pool.resume?.()
+        })
     }
-  }))
+  }
+  pool.resume = resume
+  resume()
+}
+
+function isVersionedSessionList(cwd: string, sessions: AgentState['sessions']): boolean {
+  const revision = sessions[0]?.sidebarRevision
+  return typeof revision === 'number' && Number.isSafeInteger(revision) && revision > 0
+    && sessions.every((session) => session.projectCwd === cwd && session.sidebarRevision === revision)
 }
 
 interface UseAgentSubscriptionsOptions {
@@ -49,7 +65,13 @@ export function useAgentSubscriptions({
   sessionsByProject,
   optimisticSessionTimers
 }: UseAgentSubscriptionsOptions): void {
-  const sessionPushRevisions = useRef(new Map<string, number>())
+  const windowApi = typeof window === 'undefined' ? undefined : window.pion
+  const apiOwner = useRef({ api, windowApi })
+  if (apiOwner.current.api !== api || apiOwner.current.windowApi !== windowApi) apiOwner.current = { api, windowApi }
+  const owner = apiOwner.current
+  const branchReadPool = useRef<SidebarReadPool>({ pending: 0 })
+  const sessionReadPool = useRef<SidebarReadPool>({ pending: 0 })
+  const sessionPushRevisions = useRef(new Map<string, { counter: number; versioned: boolean }>())
   const unknownSessionPushRevision = useRef(0)
   useEffect(() => () => {
     for (const timer of optimisticSessionTimers.current.values()) window.clearTimeout(timer)
@@ -75,46 +97,52 @@ export function useAgentSubscriptions({
     let active = true
     let runningPushed = false
     let unreadPushed = false
+    const current = () => active && apiOwner.current === owner && window.pion === owner.windowApi
+    const publish = (action: Action) => { if (current()) dispatch(action) }
     const offs = [
-      api.onStatus((status) => dispatch({ type: 'status', status })),
-      api.onRunCheckpoint((checkpoint) => dispatch({ type: 'runCheckpoint', checkpoint })),
-      api.onState((session) => dispatch({ type: 'session', session })),
+      api.onStatus((status) => publish({ type: 'status', status })),
+      api.onRunCheckpoint((checkpoint) => publish({ type: 'runCheckpoint', checkpoint })),
+      api.onState((session) => publish({ type: 'session', session })),
       api.onSessions((sessions) => {
+        if (!current()) return
         const cwd = sessions[0]?.projectCwd
-        if (cwd) sessionPushRevisions.current.set(cwd, (sessionPushRevisions.current.get(cwd) ?? 0) + 1)
+        if (cwd) sessionPushRevisions.current.set(cwd, {
+          counter: (sessionPushRevisions.current.get(cwd)?.counter ?? 0) + 1,
+          versioned: isVersionedSessionList(cwd, sessions)
+        })
         else unknownSessionPushRevision.current++
         dispatch({ type: 'sessions', sessions })
       }),
       api.onUnreadSessions((paths) => {
         unreadPushed = true
-        dispatch({ type: 'unreadSessions', paths })
+        publish({ type: 'unreadSessions', paths })
       }),
       api.onRunningSessionPaths((paths) => {
         runningPushed = true
-        dispatch({ type: 'runningSessionPaths', paths })
+        publish({ type: 'runningSessionPaths', paths })
       }),
-      api.onTree((tree) => dispatch({ type: 'tree', tree })),
-      api.onProjects((nextProjects) => dispatch({ type: 'projects', projects: nextProjects })),
-      api.onEvent((event) => dispatch({ type: 'event', event }))
+      api.onTree((tree) => publish({ type: 'tree', tree })),
+      api.onProjects((nextProjects) => publish({ type: 'projects', projects: nextProjects })),
+      api.onEvent((event) => publish({ type: 'event', event }))
     ]
     void api.getRunningSessionPaths()
-      .then((paths) => { if (active && !runningPushed) dispatch({ type: 'runningSessionPaths', paths }) })
+      .then((paths) => { if (!runningPushed) publish({ type: 'runningSessionPaths', paths }) })
       .catch(() => undefined)
     void api.getUnreadSessionPaths()
-      .then((paths) => { if (active && !unreadPushed) dispatch({ type: 'unreadSessions', paths }) })
+      .then((paths) => { if (!unreadPushed) publish({ type: 'unreadSessions', paths }) })
       .catch(() => undefined)
     return () => {
       active = false
       offs.forEach((off) => off())
     }
-  }, [api, dispatch])
+  }, [api, dispatch, owner])
 
   // Load each project's Git worktrees so the sidebar can render
   // Project -> Branch -> Session instead of a flat project list.
   useEffect(() => {
     if (!api || projects.length === 0) return
     let cancelled = false
-    void loadSidebarRows(projects.map((project) => project.cwd),
+    loadSidebarRows(branchReadPool.current, projects.map((project) => project.cwd),
       async (cwd) => {
         const token = beginBranchQuery(api, cwd)
         return { token, branches: await api.listBranches(cwd) }
@@ -122,11 +150,11 @@ export function useAgentSubscriptions({
       (cwd, { token, branches }) => {
         if (isCurrentBranchQuery(api, cwd, token)) dispatch({ type: 'branches', cwd, branches })
       },
-      () => cancelled)
+      () => cancelled || apiOwner.current !== owner || window.pion !== owner.windowApi)
     return () => {
       cancelled = true
     }
-  }, [api, dispatch, projects])
+  }, [api, dispatch, owner, projects])
 
   // Load every branch worktree's sessions so the sidebar can render a folder tree.
   useEffect(() => {
@@ -145,16 +173,19 @@ export function useAgentSubscriptions({
     const branchCwds = [...new Set(branches.map((branch) => branch.cwd))]
     const revisions = new Map(sessionPushRevisions.current)
     const unknownRevision = unknownSessionPushRevision.current
-    void loadSidebarRows(branchCwds, (cwd) => api.listSessions(cwd), (cwd, sessions) => {
-      // A persisted/live push is newer than the bootstrap snapshot. Keep it,
-      // and merge only this worktree rather than replacing the whole map.
+    loadSidebarRows(sessionReadPool.current, branchCwds, (cwd) => api.listSessions(cwd), (cwd, sessions) => {
+      const latestPush = sessionPushRevisions.current.get(cwd)
+      // Versioned snapshots are ordered by the reducer, not push arrival: a
+      // queued worktree's new scan may start after an older token-total push.
+      // Unknown/empty pushes and either unversioned side keep the old fence.
       if (unknownRevision !== unknownSessionPushRevision.current
-        || (revisions.get(cwd) ?? 0) !== (sessionPushRevisions.current.get(cwd) ?? 0)) return
+        || ((revisions.get(cwd)?.counter ?? 0) !== (latestPush?.counter ?? 0)
+          && !(latestPush?.versioned && isVersionedSessionList(cwd, sessions)))) return
       dispatch({ type: 'projectSessionsUpdate', cwd, sessions })
-    }, () => cancelled)
+    }, () => cancelled || apiOwner.current !== owner || window.pion !== owner.windowApi)
 
     return () => {
       cancelled = true
     }
-  }, [api, branchesByProject, dispatch, projects])
+  }, [api, branchesByProject, dispatch, owner, projects])
 }

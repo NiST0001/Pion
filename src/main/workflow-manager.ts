@@ -1,14 +1,17 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { BrowserWindow } from 'electron'
 import { IPC_EVENTS } from '../shared/ipc'
+import { ensureProjectWorktreeDirectory } from './git'
+import { parseDeletionWorktrees } from './git/branch-delete'
 import { PiWorkflowWorkerRunner, VerificationWorkflowRunner } from './workflow/runners'
 import { MAX_PROMPT_CONTEXT } from './workflow/constants'
 import { clip } from './workflow/utils'
 import type {
+  WorkflowVerificationResult,
   WorkflowVerificationRunner,
   WorkflowWorkerRunner
 } from './workflow/types'
@@ -34,6 +37,36 @@ export type {
 
 const execFileAsync = promisify(execFile)
 const MAX_GOAL = 8_000
+const WORKFLOW_DIRECTORY = '.pion-workflow-worktrees' as const
+const WORKFLOW_ROLES: WorkflowRole[] = ['planner', 'implementer', 'reviewer', 'tester']
+const WORKFLOW_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const GIT_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+
+interface WorkflowWorktreeLocation {
+  path: string
+  project: boolean
+  identities: Map<string, string>
+  head?: string
+}
+
+function validateWorkflowRole(id: string, role: WorkflowRole): void {
+  if (!WORKFLOW_ID.test(id) || !WORKFLOW_ROLES.includes(role)) throw new Error('工作流 ID 或角色路径无效')
+}
+
+async function pathIdentity(path: string, directory = true): Promise<string> {
+  const stat = await lstat(path, { bigint: true })
+  if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile()) || await realpath(path) !== path) {
+    throw new Error('工作流路径含符号链接、别名或非预期文件')
+  }
+  return `${stat.dev}:${stat.ino}`
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try { await lstat(path); return true } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    return false
+  }
+}
 
 interface WorkflowFile {
   version: 1
@@ -42,6 +75,7 @@ interface WorkflowFile {
 
 interface WorkflowManagerOptions {
   filePath: string
+  /** Permission metadata and existing external roles only; new roles live in the primary project. */
   worktreeRoot: string
   permissionExtensionPath: () => Promise<string>
   verification: WorkflowVerificationRunner
@@ -80,16 +114,7 @@ function permissionFor(role: WorkflowRole): WorkflowPermissionEnvelope {
   }
 }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function git(cwd: string, args: string[], allowFailure = false): Promise<string> {
+async function git(cwd: string, args: string[]): Promise<string> {
   try {
     const { stdout } = await execFileAsync('git', args, {
       cwd,
@@ -97,9 +122,11 @@ async function git(cwd: string, args: string[], allowFailure = false): Promise<s
       maxBuffer: 16 * 1024 * 1024,
       env: { ...process.env, GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true' }
     })
+    if (args[0] === 'rev-parse' && (args.includes('--show-toplevel') || args.includes('--git-common-dir'))) {
+      return stdout.replace(process.platform === 'win32' ? /\r?\n$/ : /\n$/, '')
+    }
     return stdout.trim()
   } catch (error) {
-    if (allowFailure) return ''
     const detail = error as { stderr?: string; stdout?: string; message?: string }
     throw new Error((detail.stderr || detail.stdout || detail.message || 'Git 命令失败').trim())
   }
@@ -115,7 +142,18 @@ function normalizeLoaded(value: unknown): WorkflowSnapshot | null {
   if (!value || typeof value !== 'object') return null
   const workflow = value as Partial<WorkflowSnapshot>
   if (typeof workflow.id !== 'string' || typeof workflow.cwd !== 'string' || typeof workflow.goal !== 'string') return null
-  if (typeof workflow.state !== 'string' || typeof workflow.createdAt !== 'number') return null
+  if (!['draft', 'awaiting_start', 'preparing', 'planning', 'awaiting_plan', 'implementing', 'integrating',
+    'reviewing', 'testing', 'awaiting_merge', 'merging', 'completed', 'waiting_permission', 'blocked',
+    'failed', 'cancelling', 'cancelled', 'interrupted', 'stale'].includes(workflow.state ?? '')
+    || typeof workflow.createdAt !== 'number' || !Number.isFinite(workflow.createdAt)) return null
+  if (workflow.workers !== undefined && (!Array.isArray(workflow.workers)
+    || workflow.workers.some((worker) => !worker || typeof worker.id !== 'string'
+      || !WORKFLOW_ROLES.includes(worker.role) || !['agent', 'command'].includes(worker.kind)
+      || !['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(worker.status)
+      || (worker.worktreePath !== undefined && typeof worker.worktreePath !== 'string')))) return null
+  if (workflow.worktrees !== undefined && (!workflow.worktrees || typeof workflow.worktrees !== 'object'
+    || Array.isArray(workflow.worktrees) || Object.entries(workflow.worktrees).some(([role, path]) =>
+      !WORKFLOW_ROLES.includes(role as WorkflowRole) || typeof path !== 'string'))) return null
   return {
     version: 1,
     id: workflow.id,
@@ -153,6 +191,10 @@ export class WorkflowManager {
   private readonly projectTrusted: (cwd: string) => boolean
   private readonly workflows = new Map<string, WorkflowSnapshot>()
   private readonly operations = new Set<string>()
+  private readonly background = new Map<string, Promise<void>>()
+  private readonly cancellations = new Map<string, AbortController>()
+  private readonly unconfirmedWorkers = new Map<string, string>()
+  private storageError?: Error
   private pendingMutations = 0
   private mutationGuard?: () => void
 
@@ -171,7 +213,7 @@ export class WorkflowManager {
       || workflow.workers.some((worker) => Boolean(worker.worktreePath && related(worker.worktreePath))))) {
       throw new Error('此目录由工作流管理，不能通过分支菜单删除')
     }
-    if (this.pendingMutations || this.operations.size
+    if (this.pendingMutations || this.operations.size || this.unconfirmedWorkers.size
       || [...this.workflows.values()].some((workflow) => isWorkflowRunning(workflow.state)
         || workflow.state === 'waiting_permission'
         || workflow.workers.some((worker) => worker.status === 'running'))) {
@@ -180,18 +222,27 @@ export class WorkflowManager {
   }
 
   private async mutate<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.loading) await this.loading
+    if (this.storageError) throw this.storageError
     this.mutationGuard?.()
     this.pendingMutations += 1
     try { return await operation() }
     finally { this.pendingMutations -= 1 }
   }
 
-  private git(cwd: string, args: string[], allowFailure = false): Promise<string> {
+  private git(cwd: string, args: string[]): Promise<string> {
     this.mutationGuard?.()
-    return git(cwd, args, allowFailure)
+    return git(cwd, args)
+  }
+
+  private async activeGit(workflow: WorkflowSnapshot, cwd: string, args: string[]): Promise<string> {
+    this.checkWorktreeMutation(workflow)
+    const result = await this.git(cwd, args)
+    this.checkWorktreeMutation(workflow)
+    return result
   }
   private win: BrowserWindow | null = null
-  private loaded = false
+  private loading?: Promise<void>
   private writeQueue: Promise<void> = Promise.resolve()
 
   constructor(options: WorkflowManagerOptions) {
@@ -210,14 +261,29 @@ export class WorkflowManager {
     if (this.win === win) this.win = null
   }
 
-  async load(): Promise<void> {
-    if (this.loaded) return
-    this.loaded = true
+  load(): Promise<void> {
+    return this.loading ??= this.loadStorage()
+  }
+
+  private async loadStorage(): Promise<void> {
+    const recovered = new Map<string, WorkflowSnapshot>()
+    let reconciled = false
     try {
-      const parsed = JSON.parse(await readFile(this.filePath, 'utf8')) as Partial<WorkflowFile>
-      for (const item of parsed.workflows ?? []) {
+      let text: string
+      try { text = await readFile(this.filePath, 'utf8') } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+        throw error
+      }
+      const parsed = JSON.parse(text) as Partial<WorkflowFile> | null
+      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.workflows)) throw new Error('工作流文件格式无效')
+      for (const item of parsed.workflows) {
         const workflow = normalizeLoaded(item)
-        if (!workflow) continue
+        if (!workflow || recovered.has(workflow.id)) throw new Error('工作流条目无效或重复')
+        for (const worker of workflow.workers) {
+          if (worker.status === 'running' || worker.status === 'interrupted') {
+            this.unconfirmedWorkers.set(worker.id, worker.worktreePath ?? workflow.cwd)
+          }
+        }
         if (isWorkflowRunning(workflow.state) || workflow.state === 'waiting_permission') {
           workflow.interruptedFrom = workflow.state
           workflow.state = 'interrupted'
@@ -227,13 +293,17 @@ export class WorkflowManager {
             : worker)
           workflow.updatedAt = Date.now()
           workflow.revision += 1
+          reconciled = true
         }
-        this.workflows.set(workflow.id, workflow)
+        recovered.set(workflow.id, workflow)
       }
-    } catch {
-      // Missing or malformed storage starts empty.
+    } catch (error) {
+      this.storageError = new Error(`工作流存储读取失败，已保留原文件：${errorMessage(error)}`)
+      console.error('[pion] workflow storage unavailable:', this.storageError)
+      return
     }
-    await this.flush()
+    for (const [id, workflow] of recovered) this.workflows.set(id, workflow)
+    if (reconciled) await this.persist()
   }
 
   list(cwd?: string): WorkflowSnapshot[] {
@@ -372,6 +442,7 @@ export class WorkflowManager {
       this.launch(workflow, () => this.plan(workflow))
     } else if (previous === 'merging') {
       const head = await this.git(workflow.cwd, ['rev-parse', 'HEAD'])
+      if (workflow.state !== 'interrupted') return clone(workflow)
       workflow.state = head === workflow.candidateOid ? 'completed' : 'awaiting_merge'
       if (head === workflow.candidateOid) workflow.mergeOid = head
       await this.changed(workflow)
@@ -395,12 +466,11 @@ export class WorkflowManager {
       return clone(workflow)
     }
     workflow.state = 'cancelling'
+    // Revoke execution authority before storage or extension preparation waits.
+    const cancellation = this.cancelWorkers(workflow)
+    void cancellation.catch(() => undefined)
     await this.changed(workflow)
-    const active = workflow.workers.find((worker) => worker.status === 'running')
-    if (active?.kind === 'agent') await this.runner.cancel(active.id)
-    if (active?.kind === 'command' && workflow.verification?.runId) {
-      await this.verification.cancel(workflow.verification.runId)
-    }
+    await cancellation
     workflow.workers = workflow.workers.map((worker) => worker.status === 'running'
       ? { ...worker, status: 'cancelled', finishedAt: Date.now(), error: '用户取消' }
       : worker)
@@ -470,48 +540,100 @@ export class WorkflowManager {
       throw new Error('运行中的工作流不能清理，请先取消')
     }
     this.ensureIdle(workflow)
-    for (const path of Object.values(workflow.worktrees)) {
-      if (!path || !managedPath(this.worktreeRoot, path)) continue
-      await this.git(workflow.cwd, ['worktree', 'remove', '--force', path], true)
-      this.mutationGuard?.()
-      await rm(path, { recursive: true, force: true }).catch(() => undefined)
+    validateWorkflowRole(workflow.id, 'planner')
+    this.operations.add(workflow.id)
+    workflow.cleanupCompletedAt = undefined
+    const failures: string[] = []
+    let removed = 0
+    try {
+      if (Object.keys(workflow.worktrees).some((role) => !WORKFLOW_ROLES.includes(role as WorkflowRole))) {
+        failures.push('包含未知角色路径，已保留')
+      }
+      for (const role of WORKFLOW_ROLES) {
+        const path = this.retainedRolePath(workflow, role)
+        if (!path) continue
+        try {
+          const location = await this.inspectRoleWorktree(workflow, role, path)
+          this.assertWorkersIdle(workflow)
+          if (location.head) {
+            await this.removeRoleWorktree(workflow, role, location, true)
+            removed += 1
+          }
+          delete workflow.worktrees[role]
+        } catch (error) {
+          // Retain the exact failed/unknown target, including history-only paths.
+          workflow.worktrees[role] = path
+          failures.push(`${role}: ${errorMessage(error)}`)
+        }
+      }
+      if (!failures.length && workflow.candidateBranch) {
+        try {
+          if (workflow.candidateBranch !== `pion/${workflow.id.slice(0, 8)}/candidate`) throw new Error('候选分支身份无效')
+          const oid = await this.git(workflow.cwd, ['for-each-ref', '--format=%(objectname)', `refs/heads/${workflow.candidateBranch}`])
+          if (oid) {
+            if (oid !== (workflow.candidateOid ?? workflow.baseOid)) throw new Error('候选分支提交已变化')
+            await this.git(workflow.cwd, ['merge-base', '--is-ancestor', oid, 'HEAD'])
+            this.assertWorkersIdle(workflow)
+            await this.git(workflow.cwd, ['branch', '-d', '--', workflow.candidateBranch])
+            this.assertWorkersIdle(workflow)
+          }
+        } catch (error) {
+          failures.push(`候选分支: ${errorMessage(error)}`)
+        }
+      }
+      workflow.error = failures.length ? `清理未完成，已确认移除 ${removed} 个工作树；${failures.join('；')}` : undefined
+      if (!failures.length) workflow.cleanupCompletedAt = Date.now()
+      await this.changed(workflow)
+      return clone(workflow)
+    } finally {
+      this.operations.delete(workflow.id)
     }
-    await this.git(workflow.cwd, ['worktree', 'prune'], true)
-    if (workflow.candidateBranch) {
-      await this.git(workflow.cwd, ['branch', '-D', workflow.candidateBranch], true)
-    }
-    workflow.worktrees = {}
-    workflow.cleanupCompletedAt = Date.now()
-    await this.changed(workflow)
-    return clone(workflow)
+  }
+
+  private cancelWorkers(workflow: WorkflowSnapshot): Promise<void> {
+    this.cancellations.get(workflow.id)?.abort()
+    return Promise.all(workflow.workers.filter((worker) => worker.status === 'running').map((worker) => {
+      if (worker.kind === 'agent') return this.runner.cancel(worker.id)
+      if (workflow.verification?.runId) return this.verification.cancel(workflow.verification.runId)
+      return Promise.resolve()
+    })).then(() => undefined)
   }
 
   async shutdown(): Promise<void> {
-    const active = [...this.workflows.values()].filter((workflow) => isWorkflowRunning(workflow.state))
+    const active = [...this.workflows.values()].filter((workflow) => isWorkflowRunning(workflow.state) || workflow.state === 'waiting_permission')
     for (const workflow of active) {
       workflow.interruptedFrom = workflow.state
       workflow.state = 'interrupted'
-      workflow.error = 'Pion 已退出；Agent 和命令不会在后台继续。'
-      const worker = workflow.workers.find((item) => item.status === 'running')
-      if (worker?.kind === 'agent') await this.runner.cancel(worker.id)
-      if (worker?.kind === 'command' && workflow.verification?.runId) {
-        await this.verification.cancel(workflow.verification.runId)
-      }
+      workflow.error = 'Pion 退出时中断了工作流；不会自动续跑。'
+      this.cancellations.get(workflow.id)?.abort()
+    }
+    for (const workflow of active) {
+      await this.cancelWorkers(workflow)
       workflow.workers = workflow.workers.map((item) => item.status === 'running'
         ? { ...item, status: 'interrupted', finishedAt: Date.now(), error: '应用退出' }
         : item)
-      await this.changed(workflow)
+      if (!this.storageError) await this.changed(workflow)
     }
-    await this.flush()
+    await Promise.allSettled(this.background.values())
+    if (!this.storageError) await this.flush()
   }
 
   flush(): Promise<void> {
+    return this.loading ? this.loading.then(() => this.persist()) : this.persist()
+  }
+
+  private persist(): Promise<void> {
+    if (this.storageError) return Promise.reject(this.storageError)
     const snapshot = `${JSON.stringify({ version: 1, workflows: [...this.workflows.values()] }, null, 2)}\n`
     const temp = `${this.filePath}.${randomUUID()}.tmp`
     const write = this.writeQueue.then(async () => {
+      if (this.storageError) throw this.storageError
       await mkdir(dirname(this.filePath), { recursive: true })
       await writeFile(temp, snapshot, 'utf8')
       await rename(temp, this.filePath)
+    }).catch((error) => {
+      this.storageError ??= new Error(`工作流存储保存失败，已停止后续写入并保留现场：${errorMessage(error)}`)
+      throw this.storageError
     })
     this.writeQueue = write.catch(() => undefined)
     return write
@@ -525,11 +647,29 @@ export class WorkflowManager {
 
   private ensureIdle(workflow: WorkflowSnapshot): void {
     if (this.operations.has(workflow.id)) throw new Error('此工作流已有操作正在进行')
+    this.assertWorkersIdle(workflow)
+  }
+
+  private assertWorkersIdle(workflow: WorkflowSnapshot): void {
+    if (workflow.workers.some((worker) => this.unconfirmedWorkers.has(worker.id))) {
+      throw new Error('工作流 worker 退出尚未确认，工作树已隔离保留')
+    }
+    const paths = new Set([...Object.values(workflow.worktrees),
+      ...workflow.workers.map((worker) => worker.worktreePath).filter((path): path is string => Boolean(path))])
+    for (const path of paths) {
+      const target = resolve(path)
+      if ([...this.unconfirmedWorkers.values()].some((cwd) => cwd === target
+        || cwd.startsWith(`${target}${sep}`) || target.startsWith(`${cwd}${sep}`))) {
+        throw new Error('工作流 worker 退出尚未确认，工作树已隔离保留')
+      }
+      this.runner.assertWorktreeDeletionIdle?.(path)
+      this.verification.assertWorktreeDeletionIdle?.(path)
+    }
   }
 
   private launch(workflow: WorkflowSnapshot, operation: () => Promise<void>): void {
     this.operations.add(workflow.id)
-    void Promise.resolve().then(() => {
+    const running: Promise<void> = Promise.resolve().then(() => {
       if (this.wasStopped(workflow)) return
       this.mutationGuard?.()
       return operation()
@@ -540,14 +680,20 @@ export class WorkflowManager {
         workflow.error = errorMessage(error)
         await this.changed(workflow)
       })
-      .finally(() => this.operations.delete(workflow.id))
+      .finally(() => {
+        this.operations.delete(workflow.id)
+        if (this.background.get(workflow.id) === running) this.background.delete(workflow.id)
+      })
+    this.background.set(workflow.id, running)
+    void running.catch((error) => console.error('[pion] workflow finalization failed:', error))
   }
 
   private async plan(workflow: WorkflowSnapshot): Promise<void> {
     await this.prepare(workflow)
-    if (workflow.state === 'cancelled' || workflow.state === 'cancelling') return
+    if (this.wasStopped(workflow)) return
     workflow.state = 'planning'
     await this.changed(workflow)
+    this.checkWorktreeMutation(workflow)
     const worktree = workflow.worktrees.planner
     if (!worktree) throw new Error('规划 worktree 未创建')
     const output = await this.runAgent(workflow, 'planner', worktree, [
@@ -556,6 +702,7 @@ export class WorkflowManager {
       `目标：${workflow.goal}`,
       '输出一份可执行计划：范围、文件、步骤、验证、风险与明确的完成条件。'
     ].join('\n\n'))
+    this.checkWorktreeMutation(workflow)
     workflow.plan = clip(output, MAX_PROMPT_CONTEXT).text
     workflow.state = 'awaiting_plan'
     workflow.error = undefined
@@ -563,34 +710,41 @@ export class WorkflowManager {
   }
 
   private async prepare(workflow: WorkflowSnapshot): Promise<void> {
-    const root = resolve(await this.git(workflow.cwd, ['rev-parse', '--show-toplevel']))
+    this.checkWorktreeMutation(workflow)
+    this.assertWorkersIdle(workflow)
+    validateWorkflowRole(workflow.id, 'planner')
+    const root = resolve(await this.activeGit(workflow, workflow.cwd, ['rev-parse', '--show-toplevel']))
     workflow.cwd = root
     if (!workflow.baseOid) {
-      const dirty = await this.git(root, ['status', '--porcelain=v1', '--untracked-files=all'])
+      const dirty = await this.activeGit(workflow, root, ['status', '--porcelain=v1', '--untracked-files=all'])
       if (dirty) throw new Error('启动多 Agent 工作流前，目标 Git 工作区必须干净')
-      workflow.baseOid = await this.git(root, ['rev-parse', 'HEAD'])
-      workflow.targetBranch = await this.git(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
+      workflow.baseOid = await this.activeGit(workflow, root, ['rev-parse', 'HEAD'])
+      workflow.targetBranch = await this.activeGit(workflow, root, ['symbolic-ref', '--quiet', '--short', 'HEAD'])
       if (!workflow.targetBranch) throw new Error('目标工作区处于 detached HEAD，无法安全合并')
       workflow.candidateBranch = `pion/${workflow.id.slice(0, 8)}/candidate`
     }
 
-    const baseDir = join(this.worktreeRoot, workflow.id)
-    this.mutationGuard?.()
-    await mkdir(baseDir, { recursive: true })
-    const planner = workflow.worktrees.planner ?? join(baseDir, 'planner')
-    const implementer = workflow.worktrees.implementer ?? join(baseDir, 'implementer')
-    if (!(await exists(join(planner, '.git')))) {
-      this.mutationGuard?.()
-      await rm(planner, { recursive: true, force: true })
-      await this.git(root, ['worktree', 'add', '--detach', planner, workflow.baseOid])
+    if (!GIT_OID.test(workflow.baseOid) || workflow.candidateBranch !== `pion/${workflow.id.slice(0, 8)}/candidate`) {
+      throw new Error('工作流基准提交或候选分支身份无效')
     }
-    if (!(await exists(join(implementer, '.git')))) {
-      this.mutationGuard?.()
-      await rm(implementer, { recursive: true, force: true })
-      await this.git(root, ['worktree', 'add', '-b', workflow.candidateBranch!, implementer, workflow.baseOid])
+    for (const role of ['planner', 'implementer'] as const) {
+      const location = await this.roleWorktreeLocation(workflow, role)
+      this.checkWorktreeMutation(workflow)
+      workflow.worktrees[role] = location.path
+      // Persist ownership before Git: a partial/failed add must remain visible.
+      await this.changed(workflow)
+      await this.checkLocationUnchanged(location)
+      this.checkWorktreeMutation(workflow)
+      if (!location.head) {
+        await this.activeGit(workflow, root, role === 'planner'
+          ? ['worktree', 'add', '--detach', location.path, workflow.baseOid]
+          : ['worktree', 'add', '-b', workflow.candidateBranch!, location.path, workflow.baseOid])
+        if ((await this.inspectRoleWorktree(workflow, role, location.path)).head !== workflow.baseOid) {
+          throw new Error('新角色工作树的起点提交不一致')
+        }
+        await this.checkLocationUnchanged(location)
+      }
     }
-    workflow.worktrees.planner = planner
-    workflow.worktrees.implementer = implementer
     await this.writePermissionConfig(workflow)
     await this.changed(workflow)
   }
@@ -615,12 +769,12 @@ export class WorkflowManager {
 
     workflow.state = 'integrating'
     await this.changed(workflow)
-    const dirty = await this.git(implementer, ['status', '--porcelain=v1', '--untracked-files=all'])
+    const dirty = await this.activeGit(workflow, implementer, ['status', '--porcelain=v1', '--untracked-files=all'])
     if (dirty) {
-      await this.git(implementer, ['add', '--all'])
-      await this.git(implementer, ['commit', '-m', `Pion workflow ${workflow.id.slice(0, 8)} implementation`])
+      await this.activeGit(workflow, implementer, ['add', '--all'])
+      await this.activeGit(workflow, implementer, ['commit', '-m', `Pion workflow ${workflow.id.slice(0, 8)} implementation`])
     }
-    workflow.candidateOid = await this.git(implementer, ['rev-parse', 'HEAD'])
+    workflow.candidateOid = await this.activeGit(workflow, implementer, ['rev-parse', 'HEAD'])
     if (this.wasStopped(workflow)) return
     if (workflow.candidateOid === workflow.baseOid) {
       workflow.state = 'blocked'
@@ -641,8 +795,8 @@ export class WorkflowManager {
     workflow.blockedReason = undefined
     await this.changed(workflow)
     const reviewer = await this.recreateDetachedWorktree(workflow, 'reviewer', workflow.candidateOid)
-    const stat = await this.git(workflow.cwd, ['diff', '--stat', `${workflow.baseOid}..${workflow.candidateOid}`])
-    const diff = await this.git(workflow.cwd, ['diff', '--no-ext-diff', '--unified=3', `${workflow.baseOid}..${workflow.candidateOid}`])
+    const stat = await this.activeGit(workflow, workflow.cwd, ['diff', '--stat', `${workflow.baseOid}..${workflow.candidateOid}`])
+    const diff = await this.activeGit(workflow, workflow.cwd, ['diff', '--no-ext-diff', '--unified=3', `${workflow.baseOid}..${workflow.candidateOid}`])
     const boundedDiff = diff.length > MAX_PROMPT_CONTEXT ? `${diff.slice(0, MAX_PROMPT_CONTEXT)}\n…差异已截断` : diff
     const output = await this.runAgent(workflow, 'reviewer', reviewer, [
       '你是 Pion 多 Agent 工作流中的 Reviewer。只读审查，不修改文件、不运行 Shell、不委派其他 Agent。',
@@ -652,6 +806,7 @@ export class WorkflowManager {
       `候选差异：\n${boundedDiff}`,
       '检查正确性、安全性、回归风险和测试覆盖。最后单独输出 PION_REVIEW_VERDICT: pass 或 PION_REVIEW_VERDICT: fail。'
     ].join('\n\n'))
+    this.checkWorktreeMutation(workflow)
     const matches = [...output.matchAll(/PION_REVIEW_VERDICT\s*:\s*(pass|fail)\b/ig)]
     const conclusion = matches.at(-1)?.[1]?.toLowerCase()
     const verdict = conclusion === 'pass' ? 'pass' : conclusion === 'fail' ? 'fail' : 'unknown'
@@ -674,17 +829,32 @@ export class WorkflowManager {
     workflow.state = 'testing'
     await this.changed(workflow)
     const tester = await this.recreateDetachedWorktree(workflow, 'tester', workflow.candidateOid)
+    this.checkWorktreeMutation(workflow)
+    const controller = new AbortController()
+    this.cancellations.set(workflow.id, controller)
     const worker = this.newWorker('tester', 'command', tester)
+    workflow.verification = undefined
     workflow.workers.push(worker)
-    await this.changed(workflow)
-    this.mutationGuard?.()
-    const result = await this.verification.run(tester, (message, runId) => {
-      if (runId) workflow.verification = { runId, state: 'running', summary: message }
-      this.appendWorkerOutput(worker, message)
-      void this.changed(workflow).catch((error) => {
-        console.error('[pion] workflow progress persistence failed:', error)
-      })
-    })
+    let invoked = false
+    let result: WorkflowVerificationResult
+    try {
+      await this.changed(workflow)
+      this.checkWorktreeMutation(workflow)
+      invoked = true
+      result = await this.verification.run(tester, (message, runId) => {
+        if (this.wasStopped(workflow) || this.cancellations.get(workflow.id) !== controller) return
+        if (runId) workflow.verification = { runId, state: 'running', summary: message }
+        this.appendWorkerOutput(worker, message)
+        void this.changed(workflow).catch((error) => {
+          console.error('[pion] workflow progress persistence failed:', error)
+        })
+      }, controller.signal)
+    } catch (error) {
+      if (invoked) this.retainUnknownWorker(worker, this.verification)
+      throw error
+    } finally {
+      if (this.cancellations.get(workflow.id) === controller) this.cancellations.delete(workflow.id)
+    }
     if (this.wasStopped(workflow)) return
     worker.status = result.state === 'passed' ? 'completed' : result.state === 'cancelled' ? 'cancelled' : 'failed'
     worker.finishedAt = Date.now()
@@ -717,32 +887,44 @@ export class WorkflowManager {
     cwd: string,
     prompt: string
   ): Promise<string> {
+    this.checkWorktreeMutation(workflow)
+    const controller = new AbortController()
+    this.cancellations.set(workflow.id, controller)
     const worker = this.newWorker(role, 'agent', cwd)
     workflow.workers.push(worker)
-    await this.changed(workflow)
+    let invoked = false
+    let finished = false
     try {
-      this.mutationGuard?.()
+      await this.changed(workflow)
+      this.checkWorktreeMutation(workflow)
+      invoked = true
       const result = await this.runner.run({
         id: worker.id,
         workflowId: workflow.id,
         role,
         cwd,
         prompt,
-        permissionConfigPath: join(this.worktreeRoot, workflow.id, 'permissions.json')
+        permissionConfigPath: this.permissionConfigPath(workflow),
+        signal: controller.signal
       }, (message) => {
+        if (this.wasStopped(workflow) || this.cancellations.get(workflow.id) !== controller) return
         this.appendWorkerOutput(worker, message)
         void this.changed(workflow).catch((error) => {
           console.error('[pion] workflow progress persistence failed:', error)
         })
       })
+      finished = true
+      this.checkWorktreeMutation(workflow)
       worker.status = 'completed'
       worker.finishedAt = Date.now()
       const output = clip(result.output)
       worker.outputTail = output.text
       worker.outputTruncated ||= output.truncated
       await this.changed(workflow)
+      this.checkWorktreeMutation(workflow)
       return result.output
     } catch (error) {
+      if (invoked && !finished) this.retainUnknownWorker(worker, this.runner)
       worker.status = workflow.state === 'interrupted'
         ? 'interrupted'
         : workflow.state === 'cancelling' || workflow.state === 'cancelled'
@@ -752,7 +934,17 @@ export class WorkflowManager {
       worker.error = errorMessage(error)
       await this.changed(workflow)
       throw error
+    } finally {
+      if (this.cancellations.get(workflow.id) === controller) this.cancellations.delete(workflow.id)
     }
+  }
+
+  private retainUnknownWorker(worker: WorkflowWorker, runner: { assertWorktreeDeletionIdle?(cwd: string): void }): void {
+    if (!worker.worktreePath) return
+    if (runner.assertWorktreeDeletionIdle) {
+      try { runner.assertWorktreeDeletionIdle(worker.worktreePath); return } catch { /* Retain unknown shutdown. */ }
+    }
+    this.unconfirmedWorkers.set(worker.id, resolve(worker.worktreePath))
   }
 
   private newWorker(role: WorkflowRole, kind: 'agent' | 'command', worktreePath: string): WorkflowWorker {
@@ -775,22 +967,159 @@ export class WorkflowManager {
     worker.outputTruncated ||= next.truncated
   }
 
+  private permissionConfigPath(workflow: WorkflowSnapshot): string {
+    validateWorkflowRole(workflow.id, 'planner')
+    return join(this.worktreeRoot, workflow.id, 'permissions.json')
+  }
+
+  private retainedRolePath(workflow: WorkflowSnapshot, role: WorkflowRole): string | undefined {
+    return workflow.worktrees[role]
+      ?? workflow.workers.findLast((worker) => worker.role === role && worker.worktreePath)?.worktreePath
+  }
+
+  private checkWorktreeMutation(workflow: WorkflowSnapshot): void {
+    this.mutationGuard?.()
+    if (this.wasStopped(workflow)) throw new Error('工作流已停止，未继续执行')
+  }
+
+  private async checkLocationUnchanged(location: WorkflowWorktreeLocation, removed = false): Promise<void> {
+    for (const [path, identity] of location.identities) {
+      if (removed && (path === location.path || path === join(location.path, '.git'))) continue
+      if (await pathIdentity(path, path !== join(location.path, '.git')) !== identity) {
+        throw new Error('工作流目录身份已改变')
+      }
+    }
+  }
+
+  private async inspectRoleWorktree(
+    workflow: WorkflowSnapshot, role: WorkflowRole, path: string, owned = true
+  ): Promise<WorkflowWorktreeLocation> {
+    validateWorkflowRole(workflow.id, role)
+    if (typeof path !== 'string' || path.length > 4096 || path.includes('\0') || path !== resolve(path)) {
+      throw new Error('工作流工作树路径无效')
+    }
+    const records = parseDeletionWorktrees(await this.git(workflow.cwd, ['worktree', 'list', '--porcelain', '-z']))
+    const primary = resolve(records[0].path)
+    const project = path === join(primary, WORKFLOW_DIRECTORY, workflow.id, role)
+    if (!project && path !== join(this.worktreeRoot, workflow.id, role)) throw new Error('路径不是此工作流的受管角色目录')
+    if (path === primary || managedPath(path, workflow.cwd) || (managedPath(primary, path) && !project)) {
+      throw new Error('不能操作主工作树、当前工作树或普通项目目录')
+    }
+    const identities = new Map<string, string>()
+    for (const directory of [primary, dirname(dirname(path)), dirname(path)]) {
+      if (directory === primary || await pathExists(directory)) identities.set(directory, await pathIdentity(directory))
+    }
+    const matches = records.filter((record) => resolve(record.path) === path)
+    const present = await pathExists(path)
+    if (!present && !matches.length) return { path, project, identities }
+    const record = matches[0]
+    if (!owned || !present || matches.length !== 1 || record === records[0] || record.locked || record.prunable
+      || (role === 'implementer' ? record.detached || !workflow.candidateBranch || record.branch !== workflow.candidateBranch
+        : !record.detached || Boolean(record.branch))) throw new Error('目标不是本工作流真实登记的角色工作树，已保留')
+    if (records.slice(1).some((other) => other !== record
+      && (managedPath(path, other.path) || managedPath(other.path, path)))) throw new Error('工作流工作树与其他登记目录嵌套')
+    identities.set(path, await pathIdentity(path))
+    identities.set(join(path, '.git'), await pathIdentity(join(path, '.git'), false))
+    const common = await realpath(await this.git(workflow.cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']))
+    identities.set(common, await pathIdentity(common))
+    if (resolve(await this.git(path, ['rev-parse', '--show-toplevel'])) !== path
+      || await realpath(await this.git(path, ['rev-parse', '--path-format=absolute', '--git-common-dir'])) !== common
+      || await this.git(path, ['rev-parse', 'HEAD']) !== record.head) throw new Error('角色工作树的仓库或提交身份不一致')
+    return { path, project, identities, head: record.head }
+  }
+
+  private async roleWorktreeLocation(workflow: WorkflowSnapshot, role: WorkflowRole): Promise<WorkflowWorktreeLocation> {
+    this.checkWorktreeMutation(workflow)
+    this.assertWorkersIdle(workflow)
+    validateWorkflowRole(workflow.id, role)
+    const retained = this.retainedRolePath(workflow, role)
+    if (retained) {
+      const location = await this.inspectRoleWorktree(workflow, role, retained)
+      if (location.head) return location
+    }
+    // Only absent roles get a new destination. Metadata and live legacy roles
+    // keep their original locations; never infer an external role from a sibling.
+    this.checkWorktreeMutation(workflow)
+    const root = await ensureProjectWorktreeDirectory(workflow.cwd, WORKFLOW_DIRECTORY)
+    this.checkWorktreeMutation(workflow)
+    const identity = await pathIdentity(root)
+    const base = join(root, workflow.id)
+    this.checkWorktreeMutation(workflow)
+    try { await mkdir(base) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+    this.checkWorktreeMutation(workflow)
+    await pathIdentity(base)
+    if (await pathIdentity(root) !== identity) throw new Error('工作流受管根目录身份已改变')
+    this.checkWorktreeMutation(workflow)
+    return this.inspectRoleWorktree(workflow, role, join(base, role), retained === join(base, role))
+  }
+
+  private async checkCleanRoleWorktree(
+    workflow: WorkflowSnapshot, role: WorkflowRole, location: WorkflowWorktreeLocation
+  ): Promise<void> {
+    if (await this.git(location.path, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching'])) {
+      throw new Error('角色工作树含修改、未跟踪或忽略文件，已保留')
+    }
+    const current = await this.inspectRoleWorktree(workflow, role, location.path)
+    if (!current.head || current.head !== location.head) throw new Error('角色工作树登记或提交已改变')
+    if (role !== 'implementer') {
+      // A clean detached worktree can still be the only owner of a user commit.
+      const retained = await this.git(workflow.cwd, ['for-each-ref', `--contains=${current.head}`,
+        '--format=%(objectname)', 'refs/heads/', 'refs/remotes/', 'refs/tags/'])
+      if (!retained || retained.split(/\r?\n/).some((oid) => !GIT_OID.test(oid))) {
+        throw new Error('角色工作树含尚未被分支或标签保留的提交，已保留')
+      }
+    }
+    await this.checkLocationUnchanged(location)
+  }
+
+  private async removeRoleWorktree(
+    workflow: WorkflowSnapshot, role: WorkflowRole, location: WorkflowWorktreeLocation, cleanup = false
+  ): Promise<void> {
+    await this.checkCleanRoleWorktree(workflow, role, location)
+    if (!cleanup) this.checkWorktreeMutation(workflow)
+    this.assertWorkersIdle(workflow)
+    await this.git(workflow.cwd, ['worktree', 'remove', '--', location.path])
+    this.assertWorkersIdle(workflow)
+    const records = parseDeletionWorktrees(await this.git(workflow.cwd, ['worktree', 'list', '--porcelain', '-z']))
+    if (await pathExists(location.path) || records.some((record) => resolve(record.path) === location.path)) {
+      throw new Error('工作树移除尚未确认，保留清理记录')
+    }
+    await this.checkLocationUnchanged(location, true)
+  }
+
   private async recreateDetachedWorktree(
     workflow: WorkflowSnapshot,
     role: 'reviewer' | 'tester',
     oid: string
   ): Promise<string> {
-    const path = join(this.worktreeRoot, workflow.id, role)
-    if (await exists(path)) {
-      await this.git(workflow.cwd, ['worktree', 'remove', '--force', path], true)
-      this.mutationGuard?.()
-      await rm(path, { recursive: true, force: true })
+    this.checkWorktreeMutation(workflow)
+    if (!GIT_OID.test(oid)) throw new Error('角色工作树候选提交无效')
+    const location = await this.roleWorktreeLocation(workflow, role)
+    this.checkWorktreeMutation(workflow)
+    workflow.worktrees[role] = location.path
+    await this.changed(workflow)
+    if (location.head && !location.project) {
+      // Existing external roles stay registered in place; never create another
+      // userData worktree or move their directory as a side effect of repair.
+      await this.checkCleanRoleWorktree(workflow, role, location)
+      this.checkWorktreeMutation(workflow)
+      await this.activeGit(workflow, location.path, ['checkout', '--detach', oid, '--'])
+    } else {
+      if (location.head) await this.removeRoleWorktree(workflow, role, location)
+      const vacant = await this.inspectRoleWorktree(workflow, role, location.path)
+      if (vacant.head) throw new Error('工作流目标重新被登记，未重建')
+      await this.checkLocationUnchanged(vacant)
+      await this.checkLocationUnchanged(location, Boolean(location.head))
+      this.checkWorktreeMutation(workflow)
+      await this.activeGit(workflow, workflow.cwd, ['worktree', 'add', '--detach', location.path, oid])
     }
-    await this.git(workflow.cwd, ['worktree', 'add', '--detach', path, oid])
-    workflow.worktrees[role] = path
+    if ((await this.inspectRoleWorktree(workflow, role, location.path)).head !== oid) throw new Error('角色工作树候选提交不一致')
+    await this.checkLocationUnchanged(location, Boolean(location.head && location.project))
     await this.writePermissionConfig(workflow)
     await this.changed(workflow)
-    return path
+    return location.path
   }
 
   private async writePermissionConfig(workflow: WorkflowSnapshot): Promise<void> {
@@ -806,11 +1135,12 @@ export class WorkflowManager {
         external: 'deny'
       }
     }
-    const path = join(this.worktreeRoot, workflow.id, 'permissions.json')
-    this.mutationGuard?.()
+    const path = this.permissionConfigPath(workflow)
+    this.checkWorktreeMutation(workflow)
     await mkdir(dirname(path), { recursive: true })
-    this.mutationGuard?.()
+    this.checkWorktreeMutation(workflow)
     await writeFile(path, `${JSON.stringify({ version: 1, projects }, null, 2)}\n`, 'utf8')
+    this.checkWorktreeMutation(workflow)
   }
 
   private wasStopped(workflow: WorkflowSnapshot): boolean {

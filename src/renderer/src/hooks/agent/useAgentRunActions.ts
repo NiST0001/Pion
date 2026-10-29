@@ -105,20 +105,23 @@ export function useAgentRunActions({
   )
 
   const sendQueuedMessage = useCallback(
-    async (kind: 'steering' | 'followUp', index: number): Promise<void> => {
-      if (!api || !Number.isInteger(index) || index < 0) return
-      await api.sendQueuedMessage(kind, index)
+    async (kind: 'steering' | 'followUp', index: number, runId: string): Promise<void> => {
+      if (!api || kind !== 'followUp' || !Number.isInteger(index) || index < 0
+        || typeof runId !== 'string' || !runId.trim() || !state.status.cwd || !state.session) return
+      // The captured row owns the identity; a newer index may refer to another prompt.
+      await api.sendQueuedMessage({ runId, cwd: state.status.cwd, sessionFile: state.session.sessionFile })
       await refreshModels()
     },
-    [api, refreshModels]
+    [api, refreshModels, state.status.cwd, state.session]
   )
 
   const removeQueuedMessage = useCallback(
-    async (kind: 'steering' | 'followUp', index: number): Promise<void> => {
-      if (!api || !Number.isInteger(index) || index < 0) return
-      await api.removeQueuedMessage(kind, index)
+    async (kind: 'steering' | 'followUp', index: number, runId: string): Promise<void> => {
+      if (!api || kind !== 'followUp' || !Number.isInteger(index) || index < 0
+        || typeof runId !== 'string' || !runId.trim() || !state.status.cwd || !state.session) return
+      await api.removeQueuedMessage({ runId, cwd: state.status.cwd, sessionFile: state.session.sessionFile })
     },
-    [api]
+    [api, state.status.cwd, state.session]
   )
 
   const editQueuedMessage = useCallback(

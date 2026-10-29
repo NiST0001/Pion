@@ -11,6 +11,7 @@ export const IPC = {
   ComputerUseGetState: 'pion:computer-use-get-state',
   ComputerUseStart: 'pion:computer-use-start',
   ComputerUseCapture: 'pion:computer-use-capture',
+  ComputerUseAct: 'pion:computer-use-act',
   ComputerUseStop: 'pion:computer-use-stop',
   // agent lifecycle
   AgentStart: 'pion:agent-start',

@@ -8,6 +8,8 @@ import type { ProviderAuthService, ProviderLoginInteraction } from '../../src/ma
 import { ProviderConfigStore } from '../../src/main/provider-config'
 import { RunStore } from '../../src/main/run-store'
 import type { ModelProviderInfo } from '../../src/shared/types'
+import type { BackendRecord } from '../../src/main/agent/types'
+import { BackendPool } from '../../src/main/agent/backend-pool'
 
 const roots: string[] = []
 
@@ -28,6 +30,32 @@ afterEach(async () => {
 })
 
 describe('AgentBridge provider authentication', () => {
+  it.each(['prompt', 'steering', 'control', 'completion', 'checkpoint-create', 'checkpoint-refresh', 'queue', 'interaction', 'run'])
+  ('holds provider mutation behind the actual %s receipt even when busy is false', async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-provider-idle-'))
+    roots.push(root)
+    const service = { logout: vi.fn(), invalidate: vi.fn() } as unknown as ProviderAuthService
+    const bridge = new AgentBridge(new RunStore(join(root, 'runs.json')), undefined,
+      new ProviderConfigStore(join(root, 'agent')), service)
+    const backend = { key: 'retained', cwd: root, client: {}, phase: 'running', busy: false, compacting: false,
+      pendingRunIds: [], startPromise: Promise.resolve() } as unknown as BackendRecord
+    const pending = new Promise<void>(() => undefined)
+    if (kind === 'prompt') backend.promptDispatch = { promise: pending, runId: 'in-flight' }
+    if (kind === 'steering') backend.steeringDispatchPromises = new Set([pending])
+    if (kind === 'control') backend.controlDispatchPromises = new Set([pending])
+    if (kind === 'completion') backend.runCompletionPromise = pending
+    if (kind === 'checkpoint-create') backend.checkpointCreatePromise = pending
+    if (kind === 'checkpoint-refresh') backend.checkpointRefreshPromise = pending.then(() => null)
+    if (kind === 'queue') backend.localFollowUps = [{ runId: 'unsent', text: 'unsent', images: [] }]
+    if (kind === 'run') backend.activeRunId = 'still-running'
+    const internals = bridge as unknown as { backendPool: BackendPool; capabilityHasPendingInteraction(backend: BackendRecord): boolean }
+    internals.backendPool.add(backend)
+    if (kind === 'interaction') vi.spyOn(internals, 'capabilityHasPendingInteraction').mockReturnValue(true)
+    await expect(bridge.logoutModelProvider('openai')).rejects.toThrow('会话正在运行')
+    expect(service.logout).not.toHaveBeenCalled()
+    expect((bridge as unknown as { providerMutationInFlight: boolean }).providerMutationInFlight).toBe(false)
+  })
+
   it('reads the independent SDK directory without a backend and rejects wrong or replaced owners', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pion-subagent-models-'))
     roots.push(root)

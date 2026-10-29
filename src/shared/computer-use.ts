@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Pure contracts only: identifiers correlate host records; none authenticate a peer.
+import { copyComputerUseDiagnostics, type ComputerUseDiagnostics } from './computer-use-diagnostics'
 export interface ComputerUseOwner {
   ownerWindowId: number
   backendId: string
@@ -13,12 +14,14 @@ export interface ComputerUseConsent {
   upload: boolean
   retention: 'sdk-session'
   control: boolean
+  /** Explicit display selection for global virtual input; omission preserves window-only observation. */
+  captureScope?: 'window' | 'display'
 }
 
 export type ComputerUseScope = 'unknown-window-or-display' | 'window' | 'display'
 export interface ComputerUseCapability {
   platform: 'linux-wayland'
-  method: 'portal-screencast' | 'portal-remote-desktop' | 'unavailable'
+  method: 'portal-screencast' | 'portal-screencast+wayland-virtual-input' | 'portal-remote-desktop' | 'unavailable'
   capture: boolean
   control: boolean
   unsupportedReason?: 'not-probed' | 'portal-unavailable' | 'capture-unavailable' | 'control-unavailable' | 'stop-unverified' | 'scope-unverified'
@@ -71,7 +74,17 @@ export interface ComputerUseBudget {
   frameBytes: number
   framePixels: number
 }
+/** Bounded display metadata only; no lock path, receipt or peer identity.
+ * unclaimed: positive proof this instance acquired no marker and has no own
+ * pending resources; not a release of anyone else's marker or global Stop.
+ * not-checked (also legacy omission) supplies no such positive proof. */
+export type ComputerUseCoordination = 'not-checked' | 'held' | 'blocked' | 'unknown' | 'released' | 'unclaimed'
 export interface ComputerUseStatus {
+  /** Read-only host development configuration, not OS capability, consent or a reusable grant. Legacy omission is disabled. */
+  readonly inputDevelopmentEnabled?: boolean
+  /** Explicit GPU-buffer readback development configuration only; not hardware support, consent or readiness. Legacy omission is disabled. */
+  readonly dmaBufDevelopmentEnabled?: boolean
+  coordination: ComputerUseCoordination
   state: ComputerUseState
   revision: number
   scopeRevision: number
@@ -82,6 +95,8 @@ export interface ComputerUseStatus {
   capability?: ComputerUseCapability
   frame?: ComputerUseFrame
   receipt?: ComputerUseReceipt
+  /** Fixed failure boundaries only; never raw native diagnostics or stop proof. */
+  diagnostics?: ComputerUseDiagnostics
 }
 
 // Proposed conservative source defaults, NOT platform/SDK acceptance guarantees.
@@ -161,13 +176,16 @@ export function sameComputerUseOwner(a: ComputerUseOwner, b: ComputerUseOwner): 
   return a.ownerWindowId === b.ownerWindowId && a.backendId === b.backendId && a.runtimeId === b.runtimeId && a.runId === b.runId && a.generation === b.generation
 }
 export function validateComputerUseConsent(value: unknown): ComputerUseConsent {
-  const v = record(value, ['capture', 'upload', 'retention', 'control'])
-  return { capture: boolean(v.capture), upload: boolean(v.upload), retention: choice(v.retention, ['sdk-session']), control: boolean(v.control) }
+  const v = record(value, ['capture', 'upload', 'retention', 'control'], ['captureScope'])
+  const result: ComputerUseConsent = { capture: boolean(v.capture), upload: boolean(v.upload), retention: choice(v.retention, ['sdk-session']), control: boolean(v.control) }
+  if (Object.hasOwn(v, 'captureScope')) result.captureScope = choice(v.captureScope, ['window', 'display'] as const)
+  return result
 }
 export function validateComputerUseCapability(value: unknown): ComputerUseCapability {
   const v = record(value, ['platform', 'method', 'capture', 'control', 'scope'], ['unsupportedReason'])
-  const result: ComputerUseCapability = { platform: choice(v.platform, ['linux-wayland']), method: choice(v.method, ['portal-screencast', 'portal-remote-desktop', 'unavailable']), capture: boolean(v.capture), control: boolean(v.control), scope: scope(v.scope) }
+  const result: ComputerUseCapability = { platform: choice(v.platform, ['linux-wayland']), method: choice(v.method, ['portal-screencast', 'portal-screencast+wayland-virtual-input', 'portal-remote-desktop', 'unavailable']), capture: boolean(v.capture), control: boolean(v.control), scope: scope(v.scope) }
   if (Object.hasOwn(v, 'unsupportedReason')) result.unsupportedReason = choice(v.unsupportedReason, ['not-probed', 'portal-unavailable', 'capture-unavailable', 'control-unavailable', 'stop-unverified', 'scope-unverified'] as const)
+  if (result.method === 'portal-screencast+wayland-virtual-input' && (!result.capture || !result.control || result.scope !== 'display')) return invalid()
   if ((result.method === 'unavailable' && (result.capture || result.control)) || (result.method === 'portal-screencast' && result.control) || ((!result.capture || !result.control) && !result.unsupportedReason)) return invalid()
   return result
 }
@@ -218,17 +236,30 @@ export function validateComputerUseBudget(value: unknown): ComputerUseBudget {
   return { actions: integer(v.actions, 0, COMPUTER_USE_LIMITS.maxActions), captures: integer(v.captures, 0, COMPUTER_USE_LIMITS.maxCaptures), frameBytes: integer(v.frameBytes, 0, COMPUTER_USE_LIMITS.maxTotalFrameBytes), framePixels: integer(v.framePixels, 0, COMPUTER_USE_LIMITS.maxTotalFramePixels) }
 }
 export function validateComputerUseStatus(value: unknown): ComputerUseStatus {
-  const v = record(value, ['state', 'revision', 'scopeRevision', 'actualPending', 'budget'], ['owner', 'consent', 'capability', 'frame', 'receipt'])
-  const result: ComputerUseStatus = { state: choice(v.state, ['disabled', 'preparing', 'awaiting-consent', 'observing', 'ready', 'acting', 'stopping', 'stopped', 'paused', 'quarantined']), revision: integer(v.revision), scopeRevision: integer(v.scopeRevision), actualPending: boolean(v.actualPending), budget: validateComputerUseBudget(v.budget) }
+  const v = record(value, ['state', 'revision', 'scopeRevision', 'actualPending', 'budget'], ['owner', 'consent', 'capability', 'frame', 'receipt', 'coordination', 'diagnostics', 'inputDevelopmentEnabled', 'dmaBufDevelopmentEnabled'])
+  const coordination = Object.hasOwn(v, 'coordination')
+    ? choice(v.coordination, ['not-checked', 'held', 'blocked', 'unknown', 'released', 'unclaimed'] as const) : 'not-checked'
+  const inputDevelopment = Object.hasOwn(v, 'inputDevelopmentEnabled')
+    ? { inputDevelopmentEnabled: boolean(v.inputDevelopmentEnabled) } : {}
+  const dmaBufDevelopment = Object.hasOwn(v, 'dmaBufDevelopmentEnabled')
+    ? { dmaBufDevelopmentEnabled: boolean(v.dmaBufDevelopmentEnabled) } : {}
+  const result: ComputerUseStatus = { ...inputDevelopment, ...dmaBufDevelopment, coordination, state: choice(v.state, ['disabled', 'preparing', 'awaiting-consent', 'observing', 'ready', 'acting', 'stopping', 'stopped', 'paused', 'quarantined']), revision: integer(v.revision), scopeRevision: integer(v.scopeRevision), actualPending: boolean(v.actualPending), budget: validateComputerUseBudget(v.budget) }
   if (Object.hasOwn(v, 'owner')) result.owner = validateComputerUseOwner(v.owner)
   if (Object.hasOwn(v, 'consent')) result.consent = validateComputerUseConsent(v.consent)
   if (Object.hasOwn(v, 'capability')) result.capability = validateComputerUseCapability(v.capability)
   if (Object.hasOwn(v, 'frame')) result.frame = validateComputerUseFrame(v.frame)
   if (Object.hasOwn(v, 'receipt')) result.receipt = validateComputerUseReceipt(v.receipt)
+  if (Object.hasOwn(v, 'diagnostics')) {
+    const diagnostics = copyComputerUseDiagnostics(v.diagnostics)
+    if (!diagnostics) return invalid()
+    result.diagnostics = diagnostics
+  }
   if ((result.actualPending && ['disabled', 'ready', 'stopped'].includes(result.state)) || (result.receipt?.actualPending && !result.actualPending) || (result.frame && result.frame.scopeRevision !== result.scopeRevision) || (result.receipt && result.receipt.scopeRevision !== result.scopeRevision)) return invalid()
   return result
 }
 export interface ComputerUseActRequest { frameId: string; action: ComputerUseAction }
+/** Local host IPC only; no caller-supplied owner, native fence or SDK identity. */
+export interface ComputerUseLocalActRequest extends ComputerUseActRequest { scopeRevision: number }
 export function validateComputerUseActRequest(value: unknown, frame: ComputerUseFrame): ComputerUseActRequest {
   const v = record(value, ['frameId', 'action'])
   const f = validateComputerUseFrame(frame)
@@ -257,7 +288,7 @@ export function normalizeComputerUseStatus(value: unknown): ComputerUseStatus | 
   try { return validateComputerUseStatus(value) } catch { return undefined }
 }
 export function createDisabledComputerUseStatus(): ComputerUseStatus {
-  return { state: 'disabled', revision: 0, scopeRevision: 0, actualPending: false, budget: { actions: 0, captures: 0, frameBytes: 0, framePixels: 0 }, consent: { ...DEFAULT_COMPUTER_USE_CONSENT }, capability: { ...DEFAULT_COMPUTER_USE_CAPABILITY } }
+  return { inputDevelopmentEnabled: false, dmaBufDevelopmentEnabled: false, coordination: 'not-checked', state: 'disabled', revision: 0, scopeRevision: 0, actualPending: false, budget: { actions: 0, captures: 0, frameBytes: 0, framePixels: 0 }, consent: { ...DEFAULT_COMPUTER_USE_CONSENT }, capability: { ...DEFAULT_COMPUTER_USE_CAPABILITY } }
 }
 
 /** Model-only transport. Never embed in status, UI projection, or a receipt.

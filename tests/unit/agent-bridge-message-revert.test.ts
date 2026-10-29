@@ -241,17 +241,19 @@ function fixture() {
     ipcMain: { handle: (channel, listener) => { handlers.set(channel, listener) } },
     bridge,
     projects: { touchCanonical: async () => { throw new Error('Unexpected project mutation') } },
-    pushProjects: () => { throw new Error('Unexpected project mutation') }
+    pushProjects: () => { throw new Error('Unexpected project mutation') },
+    getMainWindowId: () => internals.win?.webContents.id
   })
-  const frame = {}
-  const event = { sender: { id: OWNER_ID, mainFrame: frame }, senderFrame: frame } as unknown as IpcMainInvokeEvent
+  const frame = { detached: false }
+  const sender = { id: OWNER_ID, mainFrame: frame, isDestroyed: vi.fn(() => false) }
+  const event = { sender, senderFrame: frame } as unknown as IpcMainInvokeEvent
   const invoke = async (channel: string, ...args: unknown[]): Promise<unknown> => {
     const listener = handlers.get(channel)
     if (!listener) throw new Error(`Missing fixture IPC handler: ${channel}`)
     return listener(event, ...args)
   }
   return { ...session, ...original, root, bridge, internals, send, runStore, backendPool,
-    pendingRequests, createBackend, recreated, handlers, event, invoke }
+    pendingRequests, createBackend, recreated, handlers, frame, sender, event, invoke }
 }
 
 type Fixture = ReturnType<typeof fixture>
@@ -345,8 +347,15 @@ describe('AgentBridge conversation-only message revert', () => {
     const before = readFileSync(h.request.sessionPath)
     await expect(h.bridge.revertMessage(h.request, OWNER_ID + 1)).rejects.toThrow('所属主窗口')
     const listener = h.handlers.get(IPC.AgentRevertMessage)!
-    expect(() => listener({ ...h.event, senderFrame: {} } as IpcMainInvokeEvent, h.request)).toThrow('主窗口')
+    expect(() => listener({ ...h.event, senderFrame: {} } as IpcMainInvokeEvent, h.request)).toThrow('只允许所属主窗口的活主帧调用')
+    h.frame.detached = true
+    await expect(h.invoke(IPC.AgentRevertMessage, h.request)).rejects.toThrow('只允许所属主窗口的活主帧调用')
+    h.frame.detached = false
+    h.sender.isDestroyed.mockReturnValue(true)
+    await expect(h.invoke(IPC.AgentRevertMessage, h.request)).rejects.toThrow('只允许所属主窗口的活主帧调用')
+    h.sender.isDestroyed.mockReturnValue(false)
     h.internals.win = null
+    await expect(h.invoke(IPC.AgentRevertMessage, h.request)).rejects.toThrow('只允许所属主窗口的活主帧调用')
     await expect(h.bridge.revertMessage(h.request, OWNER_ID)).rejects.toThrow('所属主窗口')
     expect(h.client.getState).not.toHaveBeenCalled()
     expect(h.client.stop).not.toHaveBeenCalled()

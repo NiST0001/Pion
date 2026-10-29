@@ -171,6 +171,42 @@ it('discovers trusted .agents ancestors only through the repository boundary; de
   expect(untrusted.catalogueRevision).not.toBe(trusted.catalogueRevision)
 })
 
+it('projects legacy capabilities through the read-only catalogue with desired, trust and verified runtime metadata', async () => {
+  const { loadAgentCapabilities } = await import('../../src/main/agent/capabilities')
+  const global = await skill(join(agentDir, 'skills', 'global', 'SKILL.md'), 'global-skill')
+  const hidden = await skill(join(agentDir, 'skills', 'hidden', 'SKILL.md'), 'hidden-skill')
+  const project = await skill(join(cwd, '.pi', 'skills', 'project', 'SKILL.md'), 'project-skill')
+  await file(join(agentDir, 'extensions', 'never.ts'), 'export default () => { throw new Error("FACTORY_MUST_NOT_RUN") }')
+  const preferences = prefs({ overrides: { [capabilityResourceId('skill', hidden)]: false } })
+  const options = { agentDir, preferences }
+  const staticOnly = await loadAgentCapabilities(cwd, true, options)
+  expect(staticOnly.skills).toEqual(expect.arrayContaining([
+    { name: 'global-skill', description: 'global-skill metadata', source: capabilityResourceId('skill', global) },
+    { name: 'project-skill', description: 'project-skill metadata', source: capabilityResourceId('skill', project) }
+  ]))
+  expect(staticOnly.skills.some((item) => item.name === 'hidden-skill')).toBe(false)
+  expect(staticOnly.tools).toEqual([]) // selected entries are not tool registrations
+  const untrusted = await loadAgentCapabilities(cwd, false, options)
+  expect(untrusted.skills.map((item) => item.name)).toEqual(['global-skill'])
+  const runtime: CapabilityItem = { id: 'tool:late_tool', kind: 'tool', name: 'late_tool', label: 'Actual label',
+    description: 'Actual runtime description', origin: 'extension', enabled: true, available: true }
+  const resourceTool: CapabilityItem = { ...runtime, id: 'tool:read_mcp_resource', name: 'read_mcp_resource' }
+  const runtimeItems = [runtime, resourceTool, { ...runtime, id: 'tool:read', name: 'read', origin: 'pi' as const },
+    { ...runtime, id: 'tool:unavailable', name: 'unavailable', available: false }]
+  const registered = await loadAgentCapabilities(cwd, true, { ...options, runtimeItems })
+  expect(registered.tools).toEqual([resourceTool, runtime].map((item) => ({
+    name: item.name, label: item.label, description: item.description, source: item.id
+  })))
+  const off = await loadAgentCapabilities(cwd, true, { agentDir, runtimeItems,
+    preferences: prefs({ defaults: { tool: false, mcp: 'inherit', skill: false, extension: 'inherit' } }) })
+  expect(off).toEqual({ skills: [], tools: [] })
+  const pendingOn = await loadAgentCapabilities(cwd, true, { ...options, runtimeItems: [{ ...runtime, enabled: false }],
+    preferences: prefs({ overrides: { [runtime.id]: true } }) })
+  expect(pendingOn.tools).toEqual([]) // desired ON awaits the real runtime's enabled state
+  expect(JSON.stringify(registered)).not.toContain(root)
+  expect((await readdir(agentDir)).sort()).toEqual(['extensions', 'skills']) // no loader locks or temporary installs
+})
+
 it('keeps SDK-disabled metadata reopenable and returns only preference-selected private paths', async () => {
   const disabled = await skill(join(agentDir, 'skills', 'disabled', 'SKILL.md'), 'disabled-skill')
   const active = await skill(join(agentDir, 'skills', 'active', 'SKILL.md'), 'active-skill')
@@ -194,6 +230,12 @@ it('keeps SDK-disabled metadata reopenable and returns only preference-selected 
   expect(first.extensionPaths).not.toContain(extension)
   expect(first.promptPaths).toEqual([join(agentDir, 'prompts', 'on.md')])
   expect(first.themePaths).toEqual([join(agentDir, 'themes', 'theme.json')])
+  const runtimeOn = await scan(prefs(), true, [skillItem, entry, builtin].map((item) => ({ ...item, enabled: true, available: true })))
+  for (const disabled of [skillItem, entry, builtin]) {
+    expect(runtimeOn.items.find((item) => item.id === disabled.id)?.enabled).toBe(false)
+  }
+  expect(runtimeOn.skillPaths).not.toContain(disabled)
+  expect(runtimeOn.extensionPaths).not.toContain(extension)
   const reopened = await scan(prefs({ overrides: { [skillItem.id]: true, [entry.id]: true, [builtin.id]: true } }))
   expect(reopened.skillPaths).toContain(disabled)
   expect(reopened.extensionPaths).toEqual(expect.arrayContaining([extension, 'builtin:codemode']))
@@ -319,6 +361,7 @@ it('accepts only bounded runtime metadata with matching kind/keys and an explici
     { ...dynamic, kind: 'subagent', id: 'tool:discovered' },
     { ...dynamic, kind: 'tool', id: 'tool:pion_subagents', name: 'pion_subagents' },
     { ...dynamic, kind: 'mcp', id: dynamic.id }, { ...dynamic, kind: 'unknown' }, { ...dynamic, origin: 'unknown' },
+    { ...dynamic, kind: ['skill'] }, { ...dynamic, origin: ['extension'] },
     { ...dynamic, name: 'x'.repeat(129) }, { ...dynamic, label: 'x'.repeat(129) }, { ...dynamic, description: 'x'.repeat(1025) },
     { ...dynamic, name: 'control\ncharacter' }, { ...dynamic, description: '\u0000' },
     { ...dynamic, unavailableReason: 'x'.repeat(257) }, { ...dynamic, unavailableReason: '\u007f' },
@@ -331,6 +374,21 @@ it('accepts only bounded runtime metadata with matching kind/keys and an explici
   expect(polluted.items.filter((item) => item.id === dynamic.id || item.id === extension.id)).toEqual([dynamic, extension])
   expect(JSON.stringify(polluted.items)).not.toMatch(/PRIVATE_RUNTIME_CANARY|sourcePath|privateConfig/)
   expect(JSON.stringify(polluted.items)).not.toContain(root)
+
+  const { readCapabilityRuntimeNotice } = await import('../../src/main/agent/capability-state')
+  const commands = (items: unknown[]): CapabilityCommands => [{ name: CAPABILITY_RUNTIME_COMMAND, source: 'extension',
+    sourceInfo: { path: CAPABILITY_RUNTIME_SOURCE, source: 'inline', scope: 'temporary', origin: 'top-level' },
+    description: JSON.stringify({ version: 1, revision: 0, runtimeId: 'fixture', cwd, subagentsEnabled: false,
+      items, notices: [] }) }]
+  const valid = commands([{ ...dynamic, privateConfig: 'PRIVATE_RUNTIME_CANARY' }, extension])
+  expect(readCapabilityRuntimeNotice(valid, { cwd }).items).toEqual([dynamic, extension])
+  // Optional catalogue entries are skipped above; an authenticated receipt is
+  // atomic and rejects every malformed item, including string-coercible arrays.
+  for (const item of invalid) {
+    expect(() => readCapabilityRuntimeNotice(commands([dynamic, item]), { cwd })).toThrow('能力运行时条目无效')
+  }
+  expect(() => readCapabilityRuntimeNotice([{ ...valid[0], sourceInfo: { ...valid[0].sourceInfo!, path: '<inline:untrusted>' } }], { cwd }))
+    .toThrow('能力运行时来源未确认')
 })
 
 it.each(['getGlobalSettings', 'getProjectSettings', 'getDefaultTools'] as const)(

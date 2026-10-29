@@ -1693,6 +1693,124 @@ it('publishes a ready worktree list without waiting for slow or rejected sidebar
   h.unmount()
 })
 
+function sidebarSession(cwd: string, revision: number | undefined, id = 'shared', totalTokens?: number): SessionMeta {
+  return { id, path: `${cwd}/${id}.jsonl`, projectCwd: cwd, name: id,
+    timestamp: '2026-01-01T00:00:00Z', mtime: 1, preview: '', messageCount: 1,
+    sidebarRevision: revision, totalTokens }
+}
+
+function sidebarSubscriptionsFixture(cwds: string[]) {
+  const projects = cwds.map((cwd) => ({ cwd, name: cwd, addedAt: 0, lastUsedAt: 0 }))
+  // Keep these inputs stable: reducer branch updates must not restart the
+  // session effect and accidentally replace the queued bootstrap under test.
+  const branchesByProject = Object.fromEntries(cwds.map((cwd) => [cwd, [{ name: 'main', cwd, isMain: true }]]))
+  const reads = new Map(cwds.map((cwd) => [cwd, deferred<SessionMeta[]>()]))
+  const listeners = new Set<(sessions: SessionMeta[]) => void>()
+  const subscribe = () => () => undefined
+  const api = { onStatus: subscribe, onRunCheckpoint: subscribe, onState: subscribe,
+    onSessions: vi.fn((listener: (sessions: SessionMeta[]) => void) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    }),
+    onUnreadSessions: subscribe, onRunningSessionPaths: subscribe, onTree: subscribe,
+    onProjects: subscribe, onEvent: subscribe, getRunningSessionPaths: vi.fn().mockResolvedValue([]),
+    getUnreadSessionPaths: vi.fn().mockResolvedValue([]),
+    listBranches: vi.fn(async (cwd: string) => branchesByProject[cwd]),
+    listSessions: vi.fn((cwd: string) => reads.get(cwd)!.promise) }
+  let reduce!: Dispatch<Action>
+  const dispatch = vi.fn((action: Action) => reduce(action))
+  const h = renderHook(() => {
+    const [state, nextDispatch] = useReducer(reducer, { ...initialState,
+      status: { phase: 'running', cwd: cwds[cwds.length - 1] }, projects, branchesByProject })
+    reduce = nextDispatch
+    const optimisticSessionTimers = useRef(new Map<string, number>())
+    useAgentSubscriptions({ api: api as never, dispatch, projects, branchesByProject,
+      sessionsByProject: state.sessionsByProject, optimisticSessionTimers })
+    return state
+  })
+  return { h, api, reads, dispatch,
+    push: (sessions: SessionMeta[]) => listeners.forEach((listener) => listener(sessions)),
+    close: async () => {
+      h.unmount()
+      await act(async () => { for (const pending of reads.values()) pending.resolve([]) })
+    } }
+}
+
+it('publishes a queued fifth worktree scan after its older token-total push without waiting for new totals', async () => {
+  vi.useFakeTimers()
+  const cwds = ['/one', '/two', '/three', '/four', '/five'], cwd = cwds[4]
+  const fixture = sidebarSubscriptionsFixture(cwds)
+  expect(fixture.api.listSessions.mock.calls.map(([value]) => value)).toEqual(cwds.slice(0, 4))
+  const oldRows = [sidebarSession(cwd, 1, 'shared', 80), sidebarSession(cwd, 1, 'removed', 30)]
+  act(() => fixture.push(oldRows))
+  expect(fixture.h.result.current.sessionsByProject[cwd]).toHaveLength(2)
+  expect(fixture.api.listSessions).not.toHaveBeenCalledWith(cwd)
+  await act(async () => { fixture.reads.get(cwds[0])!.resolve([]) })
+  expect(fixture.api.listSessions).toHaveBeenNthCalledWith(5, cwd)
+  const fresh = { ...sidebarSession(cwd, 2), name: 'new scan, totals unknown' }
+  await act(async () => { fixture.reads.get(cwd)!.resolve([fresh]) })
+  expect(fixture.dispatch).toHaveBeenCalledWith({ type: 'projectSessionsUpdate', cwd, sessions: [fresh] })
+  expect(fixture.h.result.current.sessionsByProject[cwd]).toEqual([fresh])
+  expect(fixture.h.result.current.sessions).toEqual([fresh])
+  expect(fixture.h.result.current.sessions[0].totalTokens).toBeUndefined()
+  expect(fixture.api.listSessions).toHaveBeenCalledTimes(5)
+  await fixture.close()
+})
+
+it.each([1, 2])('lets a late revision %s query reach the reducer without replacing a newer or enriched push', async (revision) => {
+  vi.useFakeTimers()
+  const cwd = '/sidebar', fixture = sidebarSubscriptionsFixture([cwd])
+  const enriched = sidebarSession(cwd, 2, 'shared', 80)
+  act(() => fixture.push([enriched]))
+  const queried = [sidebarSession(cwd, revision),
+    ...(revision === 1 ? [sidebarSession(cwd, revision, 'obsolete')] : [])]
+  await act(async () => { fixture.reads.get(cwd)!.resolve(queried) })
+  expect(fixture.dispatch).toHaveBeenCalledWith({ type: 'projectSessionsUpdate', cwd, sessions: queried })
+  expect(fixture.h.result.current.sessionsByProject[cwd]).toEqual([enriched])
+  expect(fixture.h.result.current.sessions).toEqual([enriched])
+  expect(fixture.api.listSessions).toHaveBeenCalledTimes(1)
+  await fixture.close()
+})
+
+it.each([
+  ['the last push is unversioned', [{ sidebarRevision: undefined }], [{}]],
+  ['the query is unversioned', [{}], [{ sidebarRevision: undefined }]],
+  ['the last push has a partly missing revision', [{}, { sidebarRevision: undefined }], [{}]],
+  ['the query has a partly missing revision', [{}], [{}, { sidebarRevision: undefined }]],
+  ['the last push mixes revisions', [{}, { sidebarRevision: 2 }], [{}]],
+  ['the query mixes revisions', [{}], [{}, { sidebarRevision: 3 }]],
+  ['the last push mixes cwds', [{}, { projectCwd: '/other' }], [{}]],
+  ['the query mixes cwds', [{}], [{}, { projectCwd: '/other' }]],
+  ['the last push has a zero revision', [{ sidebarRevision: 0 }], [{}]],
+  ['the query has a negative revision', [{}], [{ sidebarRevision: -1 }]],
+  ['the last push has a fractional revision', [{ sidebarRevision: 1.5 }], [{}]],
+  ['the query has an unsafe revision', [{}], [{ sidebarRevision: Number.MAX_SAFE_INTEGER + 1 }]],
+  ['the push is empty', [], [{}]],
+  ['the push has no known cwd', [{ projectCwd: undefined }], [{}]],
+  ['the query is empty', [{}], []]
+] as const)('keeps the conservative bootstrap fence when %s', async (_reason, pushOverrides, queryOverrides) => {
+  vi.useFakeTimers()
+  const cwd = '/sidebar', fixture = sidebarSubscriptionsFixture([cwd])
+  const latest = sidebarSession(cwd, 1, 'shared', 80)
+  // The second push must replace the first push's versioned eligibility;
+  // unknown/empty pushes must still fence even with a known versioned push.
+  act(() => {
+    fixture.push([latest])
+    fixture.push(pushOverrides.map((overrides, index) => ({
+      ...sidebarSession(cwd, 1, index === 0 ? 'shared' : 'other', 80), ...overrides
+    })))
+  })
+  const pushed = fixture.h.result.current.sessionsByProject[cwd]
+  const queried = queryOverrides.map((overrides, index) => ({
+    ...sidebarSession(cwd, 2, index === 0 ? 'shared' : 'other'), ...overrides
+  }))
+  await act(async () => { fixture.reads.get(cwd)!.resolve(queried) })
+  expect(fixture.dispatch).not.toHaveBeenCalledWith({ type: 'projectSessionsUpdate', cwd, sessions: queried })
+  expect(fixture.h.result.current.sessionsByProject[cwd]).toBe(pushed)
+  expect(fixture.api.listSessions).toHaveBeenCalledTimes(1)
+  await fixture.close()
+})
+
 it('accepts the first history response when the selected SDK identity and file arrive late', async () => {
   const path = '/late-sdk-file.jsonl'
   const pending = deferred<SessionEntriesPage>()

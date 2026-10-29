@@ -19,10 +19,29 @@ all dependencies are MIT or that all license alternatives have been selected.
 | futures-util | 0.3.32 | MIT OR Apache-2.0 |
 | png | 0.17.16 | MIT OR Apache-2.0 |
 | base64 | 0.22.1 | MIT OR Apache-2.0 |
+| wayland-client | 0.31.14 | MIT |
+| wayland-protocols | 0.32.13 | MIT |
+| wayland-protocols-misc | 0.3.12 | MIT |
+| wayland-protocols-wlr | 0.3.12 | MIT |
+| libc | 0.2.190 | MIT OR Apache-2.0 |
 
 PipeWire's resolved Rust wrapper and FFI packages (libspa/libspa-sys/pipewire-sys
 0.9.2) declare MIT. Bindgen declares BSD-3-Clause; clang-sys Apache-2.0. Rust
 wrapper declarations are not a substitute for linked system library license review.
+
+The optional DMA-BUF reader uses the existing `libc` dependency to lazily open
+fixed system sonames `libEGL.so.1` and `libGLESv2.so.2` only at explicit GPU open.
+No EGL/GLES Rust package, driver binary or downloaded dependency is added. The
+actual system EGL/GLES implementation and vendor driver notices still require
+release review; dynamic loading is not a claim that those components are MIT.
+
+The isolated `virtual_input` Rust tests additionally link the host `libxkbcommon`
+and read its installed XKB data to compile/verify the explicitly supplied US keymap,
+evdev-to-XKB offset, modifier indices and independent virtual keyboard states.
+This is test-only system linkage, not a new Cargo/runtime dependency or a desktop
+input connection. Its system-library/data notices still require release review.
+The bounded wire peer uses anonymous Unix sockets and no `wayland-server` package;
+it is protocol choreography coverage, not a full compositor or real-seat proof.
 
 ## All resolved third-party declarations, grouped by actual expression
 
@@ -57,6 +76,9 @@ bindgen 0.72.1
 libloading 0.8.9
 
 ### MIT
+wayland-backend 0.3.15, wayland-client 0.31.14, wayland-protocols 0.32.13,
+wayland-protocols-misc 0.3.12, wayland-protocols-wlr 0.3.12,
+wayland-scanner 0.31.10, wayland-sys 0.31.11, quick-xml 0.39.4,
 bytes 1.12.1, cfg_aliases 0.2.2, convert_case 0.8.0,
 cookie-factory 0.3.3, endi 1.1.1, libspa 0.9.2, libspa-sys 0.9.2,
 memoffset 0.9.1, mio 1.2.4, nix 0.30.1, nom 7.1.3, nom 8.0.0,
@@ -102,7 +124,7 @@ r-efi 6.0.0
 miniz_oxide 0.8.9, miniz_oxide 0.9.1
 
 ### MIT/Apache-2.0
-bitflags 1.3.2, minimal-lexical 0.2.1
+bitflags 1.3.2, minimal-lexical 0.2.1, downcast-rs 1.2.1
 
 ### Unlicense OR MIT
 aho-corasick 1.1.5, memchr 2.8.3

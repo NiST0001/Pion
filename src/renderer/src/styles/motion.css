@@ -141,7 +141,7 @@ body,
 }
 
 .sidebar {
-  animation: pion-slide-in-left var(--motion-slow) var(--motion-ease-out) both;
+  animation: pion-slide-in-left var(--motion-slow) var(--motion-ease-out) backwards;
 }
 
 .review-panel {
@@ -196,7 +196,11 @@ body,
 
 .side-section-body,
 .project-folder-branches,
-.project-branch-sessions,
+.project-branch-sessions {
+  transform-origin: top center;
+  animation: pion-expand-in var(--motion-normal) var(--motion-ease-out) backwards;
+}
+
 .tool-body,
 .composer-attachments,
 .message-images,

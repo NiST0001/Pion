@@ -219,15 +219,15 @@ export class GitService {
     const file = snapshot.files.find((candidate) => candidate.path === path && candidate.conflicted)
     if (!file) throw new Error('文件不再处于冲突状态')
     const target = safeRepoPath(snapshot.root, path)
-    const [base, ours, theirs, working, stageRecords] = await Promise.all([
-      this.readStage(snapshot.root, 1, path),
-      this.readStage(snapshot.root, 2, path),
-      this.readStage(snapshot.root, 3, path),
-      readFile(target).catch(() => undefined),
-      runGitBuffer(snapshot.root, ['ls-files', '--unmerged', '-z', '--', path])
+    const stages = await this.readConflictStages(snapshot.root, path)
+    const [base, ours, theirs, working] = await Promise.all([
+      this.readStage(snapshot.root, 1, path, stages),
+      this.readStage(snapshot.root, 2, path, stages),
+      this.readStage(snapshot.root, 3, path, stages),
+      readFile(target).catch(() => undefined)
     ])
     const values = [base, ours, theirs, working].filter((value): value is Buffer => Boolean(value))
-    const specialMode = stageRecords.toString('utf8').split('\0').some((record) => /^(120000|160000) /.test(record))
+    const specialMode = [...stages.values()].some((mode) => mode === '120000' || mode === '160000')
     const binary = specialMode || values.some((value) => value.includes(0))
     return {
       path,
@@ -258,7 +258,8 @@ export class GitService {
       await rename(temp, target)
     } else {
       const stage = strategy === 'ours' ? 2 : 3
-      const bytes = await this.readStage(snapshot.root, stage, path)
+      const stages = await this.readConflictStages(snapshot.root, path)
+      const bytes = await this.readStage(snapshot.root, stage, path, stages)
       if (bytes === undefined) {
         await rm(target, { force: true })
       } else {
@@ -395,15 +396,32 @@ export class GitService {
     return aggregate.digest('hex')
   }
 
-  private async readStage(root: string, stage: 1 | 2 | 3, path: string): Promise<Buffer | undefined> {
-    try {
-      const value = await runGitBuffer(root, ['show', `:${stage}:${path}`])
-      if (value.length > MAX_CONFLICT_TEXT) throw new Error('冲突文件超过 2 MiB 限制')
-      return value
-    } catch (error) {
-      if (error instanceof Error && error.message.includes('超过 2 MiB')) throw error
-      return undefined
+  private async readConflictStages(root: string, path: string): Promise<Map<1 | 2 | 3, string>> {
+    const records = await runGitBuffer(root, ['ls-files', '--unmerged', '-z', '--', `:(literal)${path}`])
+    const stages = new Map<1 | 2 | 3, string>()
+    for (const record of records.toString('utf8').split('\0')) {
+      if (!record) continue
+      const tab = record.indexOf('\t')
+      const header = /^([0-7]{6}) [0-9a-f]+ ([123])$/.exec(record.slice(0, tab))
+      if (tab < 0 || !header || record.slice(tab + 1) !== path) throw new Error('Git 冲突索引记录无效，请刷新后重试')
+      const stage = Number(header[2]) as 1 | 2 | 3
+      if (stages.has(stage)) throw new Error('Git 冲突索引记录重复，请刷新后重试')
+      stages.set(stage, header[1])
     }
+    if (stages.size === 0) throw new Error('文件不再处于冲突状态')
+    return stages
+  }
+
+  private async readStage(
+    root: string,
+    stage: 1 | 2 | 3,
+    path: string,
+    stages: ReadonlyMap<1 | 2 | 3, string>
+  ): Promise<Buffer | undefined> {
+    if (!stages.has(stage)) return undefined
+    const value = await runGitBuffer(root, ['show', `:${stage}:${path}`])
+    if (value.length > MAX_CONFLICT_TEXT) throw new Error('冲突文件超过 2 MiB 限制')
+    return value
   }
 
   private async detectOperation(root: string): Promise<GitOperation> {

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, Notification } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, Notification } from 'electron'
 import { dirname, join, resolve } from 'node:path'
 import { homedir, release } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -28,13 +28,17 @@ import { registerSessionOrganizationIpc } from './ipc/session-organization'
 import { assertThemeSettingsOwner, ThemeSettingsStore } from './theme-settings'
 import { ProviderVisibilityStore } from './provider-visibility'
 import { registerAgentIpc } from './ipc/agent'
+import { captureIpcOwner } from './ipc/owner'
 import { registerUsageIpc } from './ipc/usage'
 import { registerGitIpc } from './ipc/git'
 import { registerWindowIpc } from './ipc/window'
 import { registerComputerUseIpc, projectComputerUseState } from './ipc/computer-use'
 import { ComputerUseService } from './computer-use/service'
+import { PersistentComputerUseCoordination } from './computer-use/coordination'
 import { WaylandComputerUseDriver } from './computer-use/wayland-driver'
 import { sameComputerUseOwner, type ComputerUseOwner } from '../shared/computer-use'
+import { COMPUTER_USE_AGENT_LIMITS as COMPUTER_USE_AGENT_IMAGE_LIMITS } from '../shared/computer-use-agent'
+import { normalizeComputerUseModelPng } from './agent/computer-use-bridge'
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import type {
@@ -70,6 +74,7 @@ let captureDocumentGeneration = 0
 let localCaptureDocumentGeneration: number | undefined
 let localCaptureFrame: Electron.WebFrameMain | undefined
 let computerUseQuitting = false
+let agentComputerUseHost: Pick<AgentBridge, 'assertComputerUseAgentOwned' | 'revokeComputerUseAgent' | 'onComputerUseState'> | undefined
 
 function requireCaptureDocument(windowId: number, statusOnly = false): Electron.WebFrameMain {
   const win = BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed() && candidate.webContents.id === windowId)
@@ -90,7 +95,7 @@ function createLocalCaptureOwner(windowId: number): ComputerUseOwner {
   const frame = requireCaptureDocument(windowId)
   const state = computerUse.getState()
   if (state.actualPending || state.owner) throw new Error('ComputerUse desktop lease occupied')
-  localCaptureOwner = { ownerWindowId: windowId, backendId: 'local-preview', runtimeId: `local-preview-${windowId}-${captureDocument!.generation}`, runId: `local-preview-${randomUUID()}`, generation: ++localCaptureGeneration }
+  localCaptureOwner = { ownerWindowId: windowId, backendId: 'local-manual', runtimeId: `local-manual-${windowId}-${captureDocument!.generation}`, runId: `local-manual-${randomUUID()}`, generation: ++localCaptureGeneration }
   localCaptureDocumentGeneration = captureDocument!.generation
   localCaptureFrame = frame
   localCaptureApproved = true
@@ -120,21 +125,34 @@ function bindCaptureDocument(contents: Electron.WebContents): void {
   contents.on('render-process-gone', invalidate)
   contents.once('destroyed', invalidate)
 }
+const allowDmaBufReadback = !app.isPackaged && process.env.PION_COMPUTER_USE_DMABUF_DEVELOPMENT === '1'
 const computerUse = new ComputerUseService({
+  allowVirtualInput: !app.isPackaged && process.env.PION_COMPUTER_USE_INPUT_DEVELOPMENT === '1',
+  allowDmaBufReadback,
+  coordination: new PersistentComputerUseCoordination(),
   clock: () => performance.now(),
   randomId: () => randomUUID(),
   driverFactory: () => {
     // Native packaging is not configured: no asar binary, download or fallback.
     if (app.isPackaged || process.platform !== 'linux' || process.env.XDG_SESSION_TYPE !== 'wayland') throw new Error('ComputerUse helper unavailable')
-    return new WaylandComputerUseDriver(join(app.getAppPath(), 'native/computer-use/target/debug/pion-computer-use-helper'))
+    return new WaylandComputerUseDriver(join(app.getAppPath(), 'native/computer-use/target/debug/pion-computer-use-helper'), allowDmaBufReadback)
   },
-  assertOwned: (owner) => {
+  assertOwned: (owner, operation) => {
+    // Refuse unsupported hosts before even claiming a persistent marker.
+    if (app.isPackaged || process.platform !== 'linux' || process.env.XDG_SESSION_TYPE !== 'wayland') throw new Error('ComputerUse helper unavailable')
     const win = BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed() && candidate.webContents.id === mainWindowId)
-    const approvedOwner = requireLocalCaptureOwner(owner.ownerWindowId)
-    if (!sameComputerUseOwner(owner, approvedOwner) || !win || win.webContents.isDestroyed()) throw new Error('ComputerUse local approval revoked')
-    // This is manual local UI, not an Agent tool: no YOLO or SDK plan-mode grant.
+    if (!win || win.webContents.isDestroyed()) throw new Error('ComputerUse owner unavailable')
+    if (owner.backendId === 'local-manual') {
+      const approvedOwner = requireLocalCaptureOwner(owner.ownerWindowId)
+      if (!sameComputerUseOwner(owner, approvedOwner)) throw new Error('ComputerUse local approval revoked')
+      // Manual local UI is not an Agent tool: no YOLO or SDK plan-mode grant.
+    } else {
+      if (!agentComputerUseHost) throw new Error('ComputerUse Agent unavailable')
+      agentComputerUseHost.assertComputerUseAgentOwned(owner, operation)
+    }
   },
   publish: (state) => {
+    agentComputerUseHost?.onComputerUseState(state)
     const win = BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed() && candidate.webContents.id === mainWindowId)
     if (!win || win.webContents.isDestroyed() || mainWindowId === undefined) return
     // Reading redacted status needs a live document, not a still-valid grant.
@@ -146,6 +164,7 @@ const computerUse = new ComputerUseService({
 function stopLocalCapture(windowId?: number): Promise<import('../shared/computer-use').ComputerUseStatus> {
   if (windowId !== undefined && windowId !== mainWindowId) return Promise.resolve(computerUse.getState())
   const owner = localCaptureOwner
+  agentComputerUseHost?.revokeComputerUseAgent()
   localCaptureApproved = false
   localCaptureOwner = undefined
   localCaptureDocumentGeneration = undefined
@@ -164,6 +183,42 @@ const bridge = new AgentBridge(runStore, appSettings, undefined, undefined, prov
 const capabilitySettings = new CapabilitySettingsStore(join(app.getPath('userData'), 'pion-capabilities.json'))
 bridge.configureCapabilitySettings(capabilitySettings)
 bridge.configureUsageLedger(usageLedger)
+agentComputerUseHost = bridge
+bridge.configureComputerUseAgent({
+  enabled: !app.isPackaged && process.env.PION_COMPUTER_USE_AGENT_DEVELOPMENT === '1',
+  service: computerUse,
+  randomId: () => randomUUID(),
+  clock: () => performance.now(),
+  document: () => {
+    if (mainWindowId === undefined) throw new Error('ComputerUse document unavailable')
+    const frame = requireCaptureDocument(mainWindowId)
+    return { windowId: mainWindowId, generation: captureDocument!.generation, frame }
+  },
+  projectFrame: async (png, frame) => {
+    // Only reached after the approved service's complete bounded original-PNG
+    // validation. Never reuse the independent 512px UI preview for targeting.
+    const image = nativeImage.createFromBuffer(Buffer.from(png))
+    const size = image.getSize()
+    if (image.isEmpty() || size.width !== frame.width || size.height !== frame.height) throw new Error('ComputerUse model image unavailable')
+    let scale = Math.min(1, COMPUTER_USE_AGENT_IMAGE_LIMITS.maxModelEdge / Math.max(size.width, size.height))
+    // This is an explicitly bounded model projection, not a change to original
+    // capture settings. Actual dimensions are returned and mapped privately.
+    for (let attempt = 0; attempt < 12; attempt++, scale *= 0.85) {
+      const width = Math.max(1, Math.floor(size.width * scale))
+      const height = Math.max(1, Math.floor(size.height * scale))
+      const projected = scale < 1 ? image.resize({ width, height, quality: 'best' }) : image
+      const actual = projected.getSize()
+      if (projected.isEmpty() || actual.width !== width || actual.height !== height) throw new Error('ComputerUse model image unavailable')
+      // nativeImage may emit color-profile/ancillary chunks. Strip only after
+      // complete integrity validation, then revalidate the exact SDK view.
+      const data = normalizeComputerUseModelPng(new Uint8Array(projected.toPNG()), actual)
+      if (data.byteLength <= COMPUTER_USE_AGENT_IMAGE_LIMITS.maxModelImageBytes
+        && Buffer.from(data).toString('base64').length < COMPUTER_USE_AGENT_IMAGE_LIMITS.maxModelBase64) return { png: data, width: actual.width, height: actual.height }
+    }
+    throw new Error('ComputerUse model image budget exhausted')
+  }
+  // No default trusted target/takeover guard: Agent input fails closed.
+})
 const verification = new VerificationService(join(app.getPath('userData'), 'pion-verification.json'))
 const workflowPermissionStore = new ToolPermissionStore()
 const workflows = new WorkflowManager({
@@ -214,8 +269,8 @@ function showToolPermissionNotification(request: ToolPermissionRequest, context?
 bridge.onSessionCompleted(showSessionCompletionNotification)
 bridge.onToolPermissionRequested(showToolPermissionNotification)
 bridge.onRunCompleted((run) => verification.handleAgentRunCompleted(run))
-verification.setAutoRepairHandler((run, prompt) =>
-  bridge.startVerificationRepair(run.sessionPath, run.cwd, prompt)
+verification.setAutoRepairHandler((run, prompt, signal) =>
+  bridge.startVerificationRepair(run.sessionPath, run.cwd, prompt, signal)
 )
 
 let projectsPush = (list: ProjectMeta[]): void => {
@@ -262,7 +317,7 @@ function createWindow(): void {
     if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.Projects, list)
   }
   projectsPush = push
-  void pushProjects()
+  void pushProjects().catch(() => console.error('[pion] 项目列表读取失败，已保留原文件。'))
 
   const pushMaximized = (): void => {
     if (!win.isDestroyed()) win.webContents.send(IPC_EVENTS.WindowState, win.isMaximized())
@@ -324,24 +379,33 @@ function createWindow(): void {
 }
 
 function registerIpc(): void {
+  const getMainWindowId = (): number | undefined => mainWindowId
+  const handle: typeof ipcMain.handle = (channel, listener) => {
+    ipcMain.handle(channel, async (event, ...args) => {
+      const assertCurrent = captureIpcOwner(event, getMainWindowId)
+      const value = await listener(event, ...args)
+      assertCurrent()
+      return value
+    })
+  }
   registerComputerUseIpc({
-    ipcMain, service: computerUse, getMainWindowId: () => mainWindowId,
+    ipcMain, service: computerUse, getMainWindowId,
     createLocalOwner: createLocalCaptureOwner,
     getLocalOwner: requireLocalCaptureOwner
   })
-  ipcMain.handle(IPC.GetTheme, (event) => {
+  handle(IPC.GetTheme, (event) => {
     assertThemeSettingsOwner(event, mainWindowId)
     return themeSettings.get()
   })
-  ipcMain.handle(IPC.SetTheme, (event, theme: unknown) => {
+  handle(IPC.SetTheme, (event, theme: unknown) => {
     assertThemeSettingsOwner(event, mainWindowId)
     return themeSettings.set(theme)
   })
-  ipcMain.handle(IPC.GetSubagentSettings, (event) => {
+  handle(IPC.GetSubagentSettings, (event) => {
     assertSubagentSettingsOwner(event, mainWindowId)
     return subagentSettings.get()
   })
-  ipcMain.handle(IPC.SetSubagentSettings, (event, settings: unknown) => {
+  handle(IPC.SetSubagentSettings, (event, settings: unknown) => {
     assertSubagentSettingsOwner(event, mainWindowId)
     return subagentSettings.set(settings)
   })
@@ -351,109 +415,119 @@ function registerIpc(): void {
     windowEffects,
     terminals,
     questionSettings,
-    getMainWindowId: () => mainWindowId,
+    getMainWindowId,
     reserveMutation: (operation) => bridge.withSessionOperation(operation)
   })
-  registerSessionOrganizationIpc({ ipcMain, store: sessionOrganization, getMainWindowId: () => mainWindowId })
-  registerUsageIpc({ ipcMain, ledger: usageLedger, appSettings, getMainWindowId: () => mainWindowId })
-  registerAgentIpc({ ipcMain, bridge, projects, pushProjects, getMainWindowId: () => mainWindowId,
+  registerSessionOrganizationIpc({ ipcMain, store: sessionOrganization, getMainWindowId })
+  registerUsageIpc({ ipcMain, ledger: usageLedger, appSettings, getMainWindowId })
+  registerAgentIpc({ ipcMain, bridge, projects, pushProjects, getMainWindowId,
     assertWorktreeDeletionIdle: (cwd) => {
       terminals.assertWorktreeDeletionIdle(cwd)
       workflows.assertWorktreeDeletionIdle(cwd)
       verification.assertWorktreeDeletionIdle(cwd)
     }
   })
-  registerGitIpc({ ipcMain, git, getMainWindowId: () => mainWindowId })
+  registerGitIpc({ ipcMain, git, getMainWindowId })
 
   // automatic verification --------------------------------------------------
-  ipcMain.handle(IPC.VerificationDiscover, (_event, cwd: string, force?: boolean) =>
+  handle(IPC.VerificationDiscover, (_event, cwd: string, force?: boolean) =>
     verification.discover(cwd, force)
   )
-  ipcMain.handle(IPC.VerificationRuns, (_event, cwd?: string, sessionPath?: string) =>
+  handle(IPC.VerificationRuns, (_event, cwd?: string, sessionPath?: string) =>
     verification.listRuns(cwd, sessionPath)
   )
-  ipcMain.handle(
+  handle(
     IPC.VerificationStart,
     (_event, cwd: string, options?: StartVerificationOptions) => bridge.withSessionOperation(() => verification.start(cwd, options))
   )
-  ipcMain.handle(IPC.VerificationRerun, (_event, runId: string) => bridge.withSessionOperation(() => verification.rerun(runId)))
-  ipcMain.handle(IPC.VerificationCancel, (_event, runId: string) => verification.cancel(runId))
-  ipcMain.handle(IPC.VerificationPolicyGet, (_event, cwd: string) => verification.getPolicy(cwd))
-  ipcMain.handle(
+  handle(IPC.VerificationRerun, (_event, runId: string) => bridge.withSessionOperation(() => verification.rerun(runId)))
+  handle(IPC.VerificationCancel, (_event, runId: string) => verification.cancel(runId))
+  handle(IPC.VerificationPolicyGet, (_event, cwd: string) => verification.getPolicy(cwd))
+  handle(
     IPC.VerificationPolicySet,
     (_event, cwd: string, updates: Partial<Omit<VerificationPolicy, 'cwd'>>) =>
       verification.setPolicy(cwd, updates)
   )
 
   // bounded multi-agent workflows ------------------------------------------
-  ipcMain.handle(IPC.WorkflowList, (_event, cwd?: string) => workflows.list(cwd))
-  ipcMain.handle(IPC.WorkflowCreate, (_event, request) => bridge.withSessionOperation(() => workflows.create(request)))
-  ipcMain.handle(IPC.WorkflowStart, (_event, id: string) => bridge.withSessionOperation(() => workflows.start(id)))
-  ipcMain.handle(IPC.WorkflowApprovePlan, (_event, id: string) => bridge.withSessionOperation(() => workflows.approvePlan(id)))
-  ipcMain.handle(IPC.WorkflowRepair, (_event, id: string) => bridge.withSessionOperation(() => workflows.repair(id)))
-  ipcMain.handle(IPC.WorkflowWaiveTests, (_event, id: string) => bridge.withSessionOperation(() => workflows.waiveTests(id)))
-  ipcMain.handle(IPC.WorkflowResume, (_event, id: string) => bridge.withSessionOperation(() => workflows.resume(id)))
-  ipcMain.handle(IPC.WorkflowCancel, (_event, id: string) => workflows.cancel(id))
-  ipcMain.handle(IPC.WorkflowMerge, (_event, id: string) => bridge.withSessionOperation(() => workflows.merge(id)))
-  ipcMain.handle(IPC.WorkflowCleanup, (_event, id: string) => bridge.withSessionOperation(() => workflows.cleanup(id)))
+  handle(IPC.WorkflowList, (_event, cwd?: string) => workflows.list(cwd))
+  handle(IPC.WorkflowCreate, (_event, request) => bridge.withSessionOperation(() => workflows.create(request)))
+  handle(IPC.WorkflowStart, (_event, id: string) => bridge.withSessionOperation(() => workflows.start(id)))
+  handle(IPC.WorkflowApprovePlan, (_event, id: string) => bridge.withSessionOperation(() => workflows.approvePlan(id)))
+  handle(IPC.WorkflowRepair, (_event, id: string) => bridge.withSessionOperation(() => workflows.repair(id)))
+  handle(IPC.WorkflowWaiveTests, (_event, id: string) => bridge.withSessionOperation(() => workflows.waiveTests(id)))
+  handle(IPC.WorkflowResume, (_event, id: string) => bridge.withSessionOperation(() => workflows.resume(id)))
+  handle(IPC.WorkflowCancel, (_event, id: string) => workflows.cancel(id))
+  handle(IPC.WorkflowMerge, (_event, id: string) => bridge.withSessionOperation(() => workflows.merge(id)))
+  handle(IPC.WorkflowCleanup, (_event, id: string) => bridge.withSessionOperation(() => workflows.cleanup(id)))
 
   // plugin store --------------------------------------------------------------
-  ipcMain.handle(IPC.PluginsCatalog, () => plugins.getCatalog())
-  ipcMain.handle(IPC.PluginsInstalled, () => plugins.getInstalled())
-  ipcMain.handle(IPC.PluginsInstall, (_event, source: string) => plugins.install(source))
-  ipcMain.handle(IPC.PluginsUninstall, (_event, source: string) => plugins.uninstall(source))
+  handle(IPC.PluginsCatalog, () => plugins.getCatalog())
+  handle(IPC.PluginsInstalled, () => plugins.getInstalled())
+  handle(IPC.PluginsInstall, (_event, source: string) => plugins.install(source))
+  handle(IPC.PluginsUninstall, (_event, source: string) => plugins.uninstall(source))
 
   // app settings ------------------------------------------------------------------
-  ipcMain.handle(IPC.GetCompletionNotifications, () => completionNotificationsEnabled)
-  ipcMain.handle(IPC.SetCompletionNotifications, async (_event, enabled: boolean) => {
-    completionNotificationsEnabled = enabled === true
-    try {
-      await appSettings.setCompletionNotificationsEnabled(completionNotificationsEnabled)
-    } catch (error) {
-      console.error('[pion] failed to persist notification setting:', error)
-    }
+  handle(IPC.GetCompletionNotifications, () => completionNotificationsEnabled)
+  handle(IPC.SetCompletionNotifications, async (_event, enabled: boolean) => {
+    await appSettings.setCompletionNotificationsEnabled(enabled === true)
+    completionNotificationsEnabled = appSettings.completionNotificationsEnabled
   })
 
   // projects ----------------------------------------------------------------------
-  ipcMain.handle(IPC.ProjectsList, () => projects.listGrouped())
-  ipcMain.handle(IPC.ProjectsAdd, async (_event, cwd: string) => {
+  handle(IPC.ProjectsList, () => projects.listGrouped())
+  handle(IPC.ProjectsAdd, async (event, cwd: string) => {
+    const assertCurrent = captureIpcOwner(event, getMainWindowId)
     await projects.touchCanonical(cwd)
+    assertCurrent()
     await pushProjects()
+    assertCurrent()
     return projects.listGrouped()
   })
-  ipcMain.handle(IPC.ProjectsRemove, async (_event, cwd: string) => {
+  handle(IPC.ProjectsRemove, async (event, cwd: string) => {
+    const assertCurrent = captureIpcOwner(event, getMainWindowId)
     await projects.removeCanonical(cwd)
+    assertCurrent()
     await pushProjects()
+    assertCurrent()
     return projects.listGrouped()
   })
 
   // misc --------------------------------------------------------------------------
-  ipcMain.handle(IPC.ClipboardImage, async () => {
+  handle(IPC.ClipboardImage, async (event) => {
+    const assertCurrent = captureIpcOwner(event, getMainWindowId)
     const items = await clipboard.read()
+    assertCurrent()
     for (const item of items) {
       const mimeType = item.types.find((type) => type.startsWith('image/'))
       if (!mimeType) continue
       const blob = await item.getType(mimeType) as Blob
-      return {
-        type: 'image' as const,
-        data: Buffer.from(await blob.arrayBuffer()).toString('base64'),
-        mimeType
-      }
+      assertCurrent()
+      const data = await blob.arrayBuffer()
+      assertCurrent()
+      return { type: 'image' as const, data: Buffer.from(data).toString('base64'), mimeType }
     }
     return null
   })
-  ipcMain.handle(IPC.PickWorkspace, async () => {
+  handle(IPC.PickWorkspace, async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openDirectory', 'createDirectory'],
       title: '选择工作目录'
     })
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
-  ipcMain.handle(IPC.DefaultWorkspace, () => homedir())
+  handle(IPC.DefaultWorkspace, () => homedir())
 }
 
 app.whenReady().then(async () => {
-  await Promise.all([appSettings.load(), bridge.loadToolPermissions(), verification.load(), workflows.load()])
+  await Promise.all([
+    appSettings.load().catch(() => {
+      const message = 'Pion 设置读取失败，已保留原文件。本次使用默认设置，后续保存前会重新读取。'
+      console.error(`[pion] ${message}`)
+      dialog.showErrorBox('Pion 设置读取失败', message)
+    }),
+    bridge.loadToolPermissions(), verification.load(), workflows.load()
+  ])
   completionNotificationsEnabled = appSettings.completionNotificationsEnabled
   usageLedger.setBackgroundCollectionEnabled(appSettings.usageBackgroundCollectionEnabled)
   registerIpc()
@@ -485,6 +559,8 @@ app.on('before-quit', (event) => {
         if (state.actualPending) return // Never force-exit an unknown helper lease.
         await windowShutdown
         await bridge.stop()
+        await appSettings.shutdown()
+        await projects.shutdown()
         await sessionOrganization.shutdown()
         try { await usageLedger.flush() } catch (error) {
           // Data collection failures do not trap quit. Unknown physical closes do.

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ModelOption } from '../../../../shared/types'
+import type { PionApi } from '../../../../shared/pion-api'
 import { PionSelect, type PionSelectOption } from '../common/PionSelect'
 import { DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, validateSubagentSettings, type SubagentSettings as Settings } from '../../../../shared/subagents'
 
@@ -9,6 +10,15 @@ const FIELDS: { key: keyof typeof SUBAGENT_LIMITS; label: string; description: s
   { key: 'maxTurns', label: '每个子代理最多轮数', description: '1–1000 轮；到达上限后停止并报告未完成事项。' },
   { key: 'maxResultChars', label: '每个结果最多字符', description: '1000–32000 字符；超出时明确标记截断，不影响用量统计。' }
 ]
+
+interface SaveSlot {
+  pending?: Promise<Settings>
+  draft: Settings
+  error: string
+}
+// Page cleanup retires UI callbacks only. The API owns its real pending write
+// and, on failure, the submitted draft until an explicit save succeeds.
+const saveSlots = new WeakMap<PionApi, SaveSlot>()
 
 export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
   const api = typeof window === 'undefined' ? undefined : window.pion
@@ -23,29 +33,41 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
   const [modelsLoading, setModelsLoading] = useState(independentDirectory)
   const [modelsError, setModelsError] = useState('')
   const mounted = useRef(true)
-  const inFlight = useRef(false)
   const owner = useRef(api)
   owner.current = api
   const generation = useRef(0)
   useEffect(() => {
     const revision = ++generation.current
     const capturedApi = api
-    const current = () => mounted.current && owner.current === capturedApi && generation.current === revision
+    const current = () => mounted.current && owner.current === capturedApi && window.pion === capturedApi && generation.current === revision
+    const retained = capturedApi && saveSlots.get(capturedApi)
     mounted.current = true
     setLoading(true)
-    setSaving(inFlight.current)
-    setSettings({ ...DEFAULT_SUBAGENT_SETTINGS })
-    setError('')
+    setSaving(Boolean(retained?.pending))
+    setSettings(retained?.draft ?? { ...DEFAULT_SUBAGENT_SETTINGS })
+    setError(retained?.error ?? '')
     setMessage('')
     if (!available) {
       setError('子代理设置不可用，请使用更新后的桌面主进程。')
       setLoading(false)
     } else {
-      void api!.getSubagentSettings().then((value) => {
-        if (current()) setSettings(validateSubagentSettings(value))
-      }).catch((reason: unknown) => {
-        if (current()) setError(`读取失败，可修改后保存以修复：${String(reason)}`)
-      }).finally(() => { if (current()) setLoading(false) })
+      const load = async () => {
+        while (saveSlots.get(capturedApi!)?.pending) {
+          await saveSlots.get(capturedApi!)!.pending!.catch(() => undefined)
+          if (!current()) return
+        }
+        if (!current()) return
+        setSaving(false)
+        const failed = saveSlots.get(capturedApi!)
+        if (failed) { setSettings(failed.draft); setError(failed.error) }
+        try {
+          const value = validateSubagentSettings(await capturedApi!.getSubagentSettings())
+          if (current()) setSettings(failed?.draft ?? value)
+        } catch (reason) {
+          if (current()) setError([failed?.error, `读取失败，可修改后保存以修复：${String(reason)}`].filter(Boolean).join(' '))
+        } finally { if (current()) setLoading(false) }
+      }
+      void load()
     }
     return () => { ++generation.current; mounted.current = false }
   }, [api, available])
@@ -55,7 +77,7 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
     const revision = generation.current
     let active = true
     let timer: ReturnType<typeof setTimeout> | undefined
-    const current = () => active && mounted.current && owner.current === capturedApi && generation.current === revision
+    const current = () => active && mounted.current && owner.current === capturedApi && window.pion === capturedApi && generation.current === revision
     setDirectory([])
     setModelsError('')
     setModelsLoading(independentDirectory)
@@ -83,25 +105,30 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
   }, [api, independentDirectory, available])
 
   const save = async () => {
-    if (!available || loading || inFlight.current) return
+    if (!available || loading || !api || window.pion !== api || saveSlots.get(api)?.pending) return
     let next: Settings
     try { next = validateSubagentSettings(settings) }
     catch (reason) { setError(String(reason)); return }
     const capturedApi = api!
     const revision = generation.current
-    const current = () => mounted.current && owner.current === capturedApi && generation.current === revision
-    inFlight.current = true
+    const current = () => mounted.current && owner.current === capturedApi && window.pion === capturedApi && generation.current === revision
+    const slot: SaveSlot = { draft: next, error: '' }
+    saveSlots.set(capturedApi, slot)
     setSaving(true)
     setError('')
     setMessage('')
     try {
-      const saved = await capturedApi.setSubagentSettings(next)
+      slot.pending = capturedApi.setSubagentSettings(next)
+      const saved = validateSubagentSettings(await slot.pending)
+      if (saveSlots.get(capturedApi) === slot) saveSlots.delete(capturedApi)
       if (current()) {
-        setSettings(validateSubagentSettings(saved))
+        setSettings(saved)
         setMessage('已保存，下一批子代理任务生效。')
       }
-    } catch (reason) { if (current()) setError(`保存失败：${String(reason)}`) }
-    finally { inFlight.current = false; if (mounted.current) setSaving(false) }
+    } catch (reason) {
+      slot.error = `保存失败：${String(reason)}`
+      if (current()) setError(slot.error)
+    } finally { slot.pending = undefined; if (current()) setSaving(false) }
   }
 
   const selection = settings.defaultModel ?? null
@@ -150,7 +177,7 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
         onChange={(event) => { setSettings((current) => ({ ...current, [key]: Number(event.target.value) })); setMessage('') }} />
     </label>)}
     <div className="subagent-settings-actions">
-      <button type="submit" disabled={loading || saving || !available}>{loading ? '读取中…' : saving ? '保存中…' : '保存子代理设置'}</button>
+      <button type="submit" disabled={loading || saving || !available}>{saving ? (loading ? '等待上次保存结束…' : '保存中…') : loading ? '读取中…' : '保存子代理设置'}</button>
       <button type="button" disabled={loading || saving || !available}
         onClick={() => { setSettings({ ...DEFAULT_SUBAGENT_SETTINGS }); setMessage('已填入默认值，请保存后生效。'); setError('') }}>恢复默认值</button>
     </div>

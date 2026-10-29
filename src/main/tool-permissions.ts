@@ -1,13 +1,14 @@
 import { app } from 'electron'
-import { realpathSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
   CODEX_IMAGE_MODEL_OPTIONS, CODEX_IMAGE_QUALITIES, CODEX_IMAGE_REQUEST_ALIAS, IMAGE_GENERATION_TOOL_NAME,
   MAX_IMAGE_REFERENCES, MAX_IMAGE_REFERENCE_PATH_LENGTH, MAX_IMAGE_REFERENCE_PATHS_LENGTH,
   MAX_IMAGE_REQUEST_DIMENSION, MAX_IMAGE_REQUEST_PIXELS
 } from '../shared/image-generation'
+import { COMPUTER_USE_ACT_TOOL, COMPUTER_USE_OBSERVE_TOOL } from '../shared/computer-use-agent'
 import type {
   ProjectToolPermissionPolicy,
   ToolPermissionCategory,
@@ -35,49 +36,150 @@ interface ToolPermissionFile {
 }
 
 const CATEGORIES: ToolPermissionCategory[] = ['read', 'write', 'shell', 'network', 'external']
+export function computerUsePolicyCategories(operation: 'observe' | 'act' | 'egress'): ToolPermissionCategory[] {
+  return operation === 'act' ? ['external', 'read', 'write', 'shell', 'network'] : ['external', 'network', 'read']
+}
 
-function canonicalCwd(cwd: string): string {
-  const absolute = resolve(cwd)
+/** Shared with the standalone gate, including normalization of saved keys. */
+function canonicalPolicyCwd(cwd: string, io: Pick<typeof import('node:fs'), 'realpathSync'> & Pick<typeof import('node:path'), 'resolve'>): string {
+  const absolute = io.resolve(cwd)
   try {
-    return realpathSync.native(absolute)
+    return io.realpathSync.native(absolute)
   } catch {
     return absolute
   }
 }
 
-/** Worktree sessions inherit the base project's policy (mirrors the gate). */
-function projectRootOf(cwd: string): string {
-  const canonicalPath = canonicalCwd(cwd)
-  const marker = `${sep}.pion-worktrees${sep}`
+function canonicalCwd(cwd: string): string {
+  return canonicalPolicyCwd(cwd, { resolve, realpathSync })
+}
+
+/** Serialized into the standalone gate: all filesystem/path dependencies are explicit. */
+function worktreePolicyRoot(
+  canonicalPath: string,
+  io: Pick<typeof import('node:fs'), 'closeSync' | 'constants' | 'existsSync' | 'fstatSync' | 'lstatSync' | 'openSync' | 'readSync' | 'realpathSync'>
+    & Pick<typeof import('node:path'), 'basename' | 'dirname' | 'resolve' | 'sep'>
+): string {
+  const marker = io.sep + '.pion-worktrees' + io.sep
   const index = canonicalPath.indexOf(marker)
   if (index < 0) return canonicalPath
-  const projectName = canonicalPath.slice(index + marker.length).split(sep)[0]
-  if (!projectName) return canonicalPath
-  return join(canonicalPath.slice(0, index), projectName)
+  const prefix = canonicalPath.slice(0, index) || io.sep
+  // Keep the in-project layout tied to the repository, not a branch-named child.
+  if (io.existsSync(io.resolve(prefix, '.git'))) return prefix
+  const parts = canonicalPath.slice(index + marker.length).split(io.sep)
+  if (!parts[0]) return canonicalPath
+  const worktree = io.resolve(prefix, '.pion-worktrees', parts[0])
+  const gitfile = io.resolve(worktree, '.git')
+  let hasGitfile = false
+  try {
+    io.lstatSync(gitfile)
+    hasGitfile = true
+    const directory = (path: string): string => {
+      if (!io.lstatSync(path).isDirectory()) throw new Error('Invalid worktree directory')
+      return io.realpathSync.native(path)
+    }
+    const readMetadata = (path: string): string => {
+      const before = io.lstatSync(path)
+      if (!before.isFile() || before.size < 1 || before.size > 4096) throw new Error('Invalid worktree metadata')
+      const fd = io.openSync(path, io.constants.O_RDONLY | (io.constants.O_NOFOLLOW ?? 0) | (io.constants.O_NONBLOCK ?? 0))
+      try {
+        const same = (stat: typeof before): boolean => stat.isFile() && stat.dev === before.dev && stat.ino === before.ino
+          && stat.size === before.size && stat.mtimeMs === before.mtimeMs && stat.ctimeMs === before.ctimeMs
+        if (!same(io.fstatSync(fd))) throw new Error('Changed worktree metadata')
+        const buffer = Buffer.alloc(4097)
+        const length = io.readSync(fd, buffer, 0, buffer.length, 0)
+        if (length !== before.size || !same(io.fstatSync(fd)) || !same(io.lstatSync(path))) throw new Error('Changed worktree metadata')
+        const text = buffer.toString('utf8', 0, length)
+        const line = text.replace(/\r?\n$/, '')
+        if (!line || /[\0\r\n]/.test(line) || !buffer.subarray(0, length).equals(Buffer.from(text))) throw new Error('Invalid worktree metadata')
+        return line
+      } finally {
+        io.closeSync(fd)
+      }
+    }
+    if (directory(worktree) !== worktree) return canonicalPath
+    const pointer = readMetadata(gitfile)
+    if (!pointer.startsWith('gitdir: ') || pointer.length <= 8) return canonicalPath
+    const entry = directory(io.resolve(worktree, pointer.slice(8)))
+    const expectedCommon = io.dirname(io.dirname(entry))
+    // Only standard <project>/.git/worktrees/<entry> metadata proves a main root.
+    if (io.basename(io.dirname(entry)) !== 'worktrees' || io.basename(expectedCommon) !== '.git') return canonicalPath
+    const common = directory(io.resolve(entry, readMetadata(io.resolve(entry, 'commondir'))))
+    if (common !== expectedCommon) return canonicalPath
+    const project = directory(io.dirname(common))
+    if (directory(io.resolve(project, '.git')) !== common
+      || io.realpathSync.native(io.resolve(entry, readMetadata(io.resolve(entry, 'gitdir')))) !== gitfile) return canonicalPath
+    return project
+  } catch (error) {
+    // Preserve the old <name>/<branch> fallback only when the first child has
+    // no Git marker. A malformed/external flat gitdir must not invent an owner.
+    if (!hasGitfile && (error as { code?: string } | undefined)?.code === 'ENOENT' && parts.length > 1) {
+      return io.resolve(prefix, parts[0])
+    }
+    return canonicalPath
+  }
+}
+
+/** Worktree sessions inherit the base project's policy (mirrors the gate). */
+function projectRootOf(cwd: string): string {
+  return worktreePolicyRoot(canonicalCwd(cwd), {
+    closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, realpathSync, basename, dirname, resolve, sep
+  })
 }
 
 function isDecision(value: unknown): value is ToolPermissionDecision {
   return value === 'allow' || value === 'ask' || value === 'deny'
 }
 
-function parseRules(value: unknown): ToolPermissionRules | null {
-  if (typeof value !== 'object' || value === null) return null
+/** Also serialized into the gate; keep validation independent of module bindings. */
+function parsePermissionFile(value: unknown): ToolPermissionFile {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('工具权限配置格式无效')
   const record = value as Record<string, unknown>
-  const rules = { ...DEFAULT_TOOL_PERMISSION_RULES }
-  for (const category of CATEGORIES) {
-    const decision = record[category]
-    if (!isDecision(decision)) return null
-    rules[category] = decision
+  if (record.version !== 1 || typeof record.projects !== 'object' || record.projects === null || Array.isArray(record.projects)) {
+    throw new Error('工具权限配置格式无效')
   }
-  return rules
+  const projects: Record<string, ToolPermissionRules> = Object.create(null)
+  const categories: ToolPermissionCategory[] = ['read', 'write', 'shell', 'network', 'external']
+  for (const [cwd, value] of Object.entries(record.projects)) {
+    if (!cwd || typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('工具权限配置格式无效')
+    const rules = {} as ToolPermissionRules
+    for (const category of categories) {
+      const decision = (value as Record<string, unknown>)[category]
+      if (decision !== 'allow' && decision !== 'ask' && decision !== 'deny') throw new Error('工具权限配置格式无效')
+      rules[category] = decision
+    }
+    projects[cwd] = rules
+  }
+  return { version: 1, projects }
+}
+
+/** Longest configured prefix wins; shared by the store and standalone gate. */
+function policyRulesFor(projects: Record<string, ToolPermissionRules>, root: string, separator: string): ToolPermissionRules | undefined {
+  let best = ''
+  for (const key of Object.keys(projects)) {
+    if ((root === key || root.startsWith(key.endsWith(separator) ? key : key + separator)) && key.length > best.length) best = key
+  }
+  return best ? projects[best] : undefined
+}
+
+const DENIED_TOOL_PERMISSION_RULES: ToolPermissionRules = {
+  read: 'deny', write: 'deny', shell: 'deny', network: 'deny', external: 'deny'
 }
 
 /** Persistent project-scoped policy consumed by Pion and its global Pi gate extension. */
 export class ToolPermissionStore {
   private data: ToolPermissionFile = { version: 1, projects: {} }
   private loaded = false
+  private loadPromise?: Promise<void>
+  private loadError?: Error
   private extensionReady = false
   private writeQueue: Promise<void> = Promise.resolve()
+  private readonly changed = new Set<() => void>()
+
+  onChanged(listener: () => void): () => void { this.changed.add(listener); return () => this.changed.delete(listener) }
+  /** Current loaded policy only; no loading, backend, auth or model work. */
+  getPolicySnapshot(cwd: string): ProjectToolPermissionPolicy { return this.currentPolicy(cwd) }
+  private notifyChanged(): void { for (const listener of this.changed) { try { listener() } catch { /* Policy remains authoritative. */ } } }
 
   get filePath(): string {
     return join(app.getPath('userData'), 'pion-tool-permissions.json')
@@ -87,22 +189,36 @@ export class ToolPermissionStore {
     return join(app.getPath('userData'), 'runtime', 'pion-tool-permission-extension.ts')
   }
 
-  async load(): Promise<void> {
-    if (this.loaded) return
-    this.loaded = true
+  load(): Promise<void> {
+    return this.loadPromise ??= this.loadFile()
+  }
+
+  private async loadFile(): Promise<void> {
     try {
-      const parsed: unknown = JSON.parse(await readFile(this.filePath, 'utf8'))
-      if (typeof parsed !== 'object' || parsed === null) return
-      const projects = (parsed as { projects?: unknown }).projects
-      if (typeof projects !== 'object' || projects === null) return
+      const parsed = parsePermissionFile(JSON.parse(await readFile(this.filePath, 'utf8')))
       const normalized: Record<string, ToolPermissionRules> = {}
-      for (const [cwd, value] of Object.entries(projects)) {
-        const rules = parseRules(value)
-        if (rules) normalized[canonicalCwd(cwd)] = rules
-      }
+      for (const [cwd, rules] of Object.entries(parsed.projects)) normalized[canonicalCwd(cwd)] = rules
       this.data = { version: 1, projects: normalized }
-    } catch {
-      // Missing or malformed settings use the safe defaults.
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') this.recordLoadError()
+    } finally {
+      this.loaded = true
+    }
+  }
+
+  private recordLoadError(): void {
+    this.loadError = new Error('工具权限配置读取失败或格式无效；原文件已保留，请修复配置后重启')
+    this.notifyChanged()
+  }
+
+  private async checkWritableSource(): Promise<void> {
+    if (this.loadError) throw this.loadError
+    try {
+      parsePermissionFile(JSON.parse(await readFile(this.filePath, 'utf8')))
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return
+      this.recordLoadError()
+      throw this.loadError
     }
   }
 
@@ -126,20 +242,19 @@ export class ToolPermissionStore {
 
   async getPolicy(cwd: string): Promise<ProjectToolPermissionPolicy> {
     await this.load()
+    if (this.loadError) throw this.loadError
     return this.currentPolicy(cwd)
   }
 
   private currentPolicy(cwd: string): ProjectToolPermissionPolicy {
     const normalizedCwd = canonicalCwd(cwd)
     const policyRoot = projectRootOf(cwd)
-    const saved = this.data.projects[policyRoot]
-      ?? Object.entries(this.data.projects)
-        .filter(([key]) => policyRoot === key || policyRoot.startsWith(`${key}${sep}`))
-        .sort((left, right) => right[0].length - left[0].length)[0]?.[1]
+    const saved = policyRulesFor(this.data.projects, policyRoot, sep)
     return {
       cwd: normalizedCwd,
       source: saved ? 'saved' : 'default',
-      rules: { ...(saved ?? DEFAULT_TOOL_PERMISSION_RULES) }
+      // Snapshots can be consulted before load or after a failed settings read.
+      rules: { ...(!this.loaded || this.loadError ? DENIED_TOOL_PERMISSION_RULES : saved ?? DEFAULT_TOOL_PERMISSION_RULES) }
     }
   }
 
@@ -148,9 +263,10 @@ export class ToolPermissionStore {
     updates: Partial<ToolPermissionRules> | null
   ): Promise<ProjectToolPermissionPolicy> {
     await this.load()
-    const normalizedCwd = canonicalCwd(cwd)
+    await this.checkWritableSource()
+    const policyOwner = projectRootOf(cwd)
     if (updates === null) {
-      const { [normalizedCwd]: _removed, ...projects } = this.data.projects
+      const { [policyOwner]: _removed, ...projects } = this.data.projects
       this.data = { version: 1, projects }
     } else {
       for (const [category, decision] of Object.entries(updates)) {
@@ -158,17 +274,18 @@ export class ToolPermissionStore {
           throw new Error('无效的工具权限设置')
         }
       }
-      const current = this.data.projects[normalizedCwd] ?? DEFAULT_TOOL_PERMISSION_RULES
+      const current = this.currentPolicy(cwd).rules
       this.data = {
         version: 1,
         projects: {
           ...this.data.projects,
-          [normalizedCwd]: { ...current, ...updates }
+          [policyOwner]: { ...current, ...updates }
         }
       }
     }
+    this.notifyChanged()
     await this.persist()
-    return this.getPolicy(normalizedCwd)
+    return this.getPolicy(cwd)
   }
 
   async allowProjectCategories(
@@ -179,6 +296,8 @@ export class ToolPermissionStore {
     for (const category of categories) {
       if (!CATEGORIES.includes(category)) throw new Error('无效的工具权限设置')
     }
+    await this.checkWritableSource()
+    const policyOwner = projectRootOf(cwd)
     const policy = this.currentPolicy(cwd)
     // A stale dialog is not an explicit settings change: do not replace a
     // newly denied category (including inherited project/worktree policy).
@@ -186,7 +305,8 @@ export class ToolPermissionStore {
     const rules = { ...policy.rules }
     for (const category of categories) rules[category] = 'allow'
     // Check and apply synchronously, before the first persistence await.
-    this.data = { version: 1, projects: { ...this.data.projects, [policy.cwd]: rules } }
+    this.data = { version: 1, projects: { ...this.data.projects, [policyOwner]: rules } }
+    this.notifyChanged()
     await this.persist()
     return this.getPolicy(policy.cwd)
   }
@@ -196,6 +316,8 @@ export class ToolPermissionStore {
     const target = this.filePath
     const temp = `${target}.${randomUUID()}.tmp`
     const write = this.writeQueue.then(async () => {
+      // A later external failure/corruption also preserves the source file.
+      await this.checkWritableSource()
       await mkdir(dirname(target), { recursive: true })
       await writeFile(temp, snapshot, 'utf8')
       await rename(temp, target)
@@ -211,10 +333,14 @@ export class ToolPermissionStore {
  * Exported for mocked emitted-source regression tests without starting a backend.
  */
 export function toolPermissionExtensionSource(): string {
-  return String.raw`import { readFileSync, realpathSync } from "node:fs";
-import { basename, dirname, resolve, sep } from "node:path";
+  return String.raw`import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 const IMAGE_GENERATION_TOOL_NAME = ${JSON.stringify(IMAGE_GENERATION_TOOL_NAME)};
+const COMPUTER_USE_OBSERVE_TOOL = ${JSON.stringify(COMPUTER_USE_OBSERVE_TOOL)};
+const COMPUTER_USE_ACT_TOOL = ${JSON.stringify(COMPUTER_USE_ACT_TOOL)};
 const IMAGE_REQUEST_ALIAS = ${JSON.stringify(CODEX_IMAGE_REQUEST_ALIAS)};
 const IMAGE_MODEL_OPTIONS = ${JSON.stringify(CODEX_IMAGE_MODEL_OPTIONS)};
 const IMAGE_QUALITIES = ${JSON.stringify(CODEX_IMAGE_QUALITIES)};
@@ -228,7 +354,11 @@ const CHECKPOINT_MARKER = "__PION_RUN_CHECKPOINT__";
 const CHECKPOINT_TIMEOUT = 30000;
 const CHECKPOINT_READ_ONLY = new Set(["read", "grep", "find", "ls", "pion_task", "pion_ask_user"]);
 const TIMEOUT = 120000;
-const DEFAULTS = { read: "allow", write: "allow", shell: "allow", network: "ask", external: "ask" };
+const DEFAULTS = ${JSON.stringify(DEFAULT_TOOL_PERMISSION_RULES)};
+const DENIED = ${JSON.stringify(DENIED_TOOL_PERMISSION_RULES)};
+const parsePermissionFile = ${parsePermissionFile.toString()};
+const policyRulesFor = ${policyRulesFor.toString()};
+const canonicalPolicyCwd = ${canonicalPolicyCwd.toString()};
 const READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const WRITE_TOOLS = new Set(["write", "edit"]);
 const SHELL_TOOLS = new Set(["bash", "powershell"]);
@@ -265,47 +395,23 @@ function canonical(path) {
   }
 }
 
-/**
- * Worktree sessions live under <projectParent>/.pion-worktrees/<name>/<branch>,
- * outside the project folder. Map them back to the base project so its
- * permission policy and workspace boundary apply instead of the bare defaults.
- */
+const worktreePolicyRoot = ${worktreePolicyRoot.toString()};
 function projectRootOf(cwd) {
-  const canonicalCwd = canonical(cwd);
-  const marker = sep + ".pion-worktrees" + sep;
-  const index = canonicalCwd.indexOf(marker);
-  if (index < 0) return canonicalCwd;
-  const projectName = canonicalCwd.slice(index + marker.length).split(sep)[0];
-  if (!projectName) return canonicalCwd;
-  return resolve(canonicalCwd.slice(0, index), projectName);
+  return worktreePolicyRoot(canonicalPolicyCwd(cwd, { resolve, realpathSync }), {
+    closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, realpathSync, basename, dirname, resolve, sep
+  });
 }
 
 function readPolicy(cwd) {
   const file = process.env.PION_TOOL_PERMISSION_CONFIG;
   if (!file) return { ...DEFAULTS };
   try {
-    const parsed = JSON.parse(readFileSync(file, "utf8"));
-    const projects = parsed && parsed.projects ? parsed.projects : {};
-    const root = projectRootOf(cwd);
-    let saved = projects[root];
-    if (!saved) {
-      // Longest configured prefix wins (e.g. a home-level allow rule).
-      let best = "";
-      for (const key of Object.keys(projects)) {
-        if ((root === key || root.startsWith(key + sep)) && key.length > best.length) best = key;
-      }
-      if (best) saved = projects[best];
-    }
-    if (!saved) return { ...DEFAULTS };
-    const rules = { ...DEFAULTS };
-    for (const category of Object.keys(DEFAULTS)) {
-      if (saved[category] === "allow" || saved[category] === "ask" || saved[category] === "deny") {
-        rules[category] = saved[category];
-      }
-    }
-    return rules;
-  } catch {
-    return { ...DEFAULTS };
+    const { projects } = parsePermissionFile(JSON.parse(readFileSync(file, "utf8")));
+    const normalized = Object.create(null);
+    for (const [path, rules] of Object.entries(projects)) normalized[canonicalPolicyCwd(path, { resolve, realpathSync })] = rules;
+    return { ...(policyRulesFor(normalized, projectRootOf(cwd), sep) ?? DEFAULTS) };
+  } catch (error) {
+    return { ...(error?.code === "ENOENT" ? DEFAULTS : DENIED) };
   }
 }
 
@@ -389,14 +495,40 @@ function imageQualityLabel(value) {
   return value === undefined ? "auto" : IMAGE_QUALITIES.includes(value) ? value : "参数无效，执行将拒绝";
 }
 
+// Mirrors the locked SDK 1.4.0 utils/paths.js and tools/path-utils.js.
+// Keep local: importing SDK internals would couple this standalone gate to
+// packaged module locations. Image filenames deliberately skip this syntax.
+function sdkNormalizePath(input, toolInput = false) {
+  let path = toolInput ? input.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/^@/, "") : input;
+  if (process.platform === "win32" && path.startsWith("/") && !path.startsWith("//") && !path.includes("\\")) {
+    const match = path.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i);
+    if (match) path = match[1].toUpperCase() + ":\\" + (match[2]?.replaceAll("/", "\\") ?? "");
+  }
+  if (path === "~") return homedir();
+  if (path.startsWith("~/") || (process.platform === "win32" && path.startsWith("~\\"))) return join(homedir(), path.slice(2));
+  return /^file:\/\//.test(path) ? fileURLToPath(path) : path;
+}
+
+function sdkToolPath(path, cwd, read) {
+  const normalized = sdkNormalizePath(path, true);
+  const resolved = isAbsolute(normalized) ? resolve(normalized) : resolve(sdkNormalizePath(cwd), normalized);
+  if (!read) return resolved;
+  const nfd = resolved.normalize("NFD");
+  const candidates = [resolved, resolved.replace(/ (AM|PM)\./gi, "\u202F$1."), nfd,
+    resolved.replace(/'/g, "\u2019"), nfd.replace(/'/g, "\u2019")];
+  for (const candidate of new Set(candidates)) {
+    try { accessSync(candidate, constants.F_OK); return candidate; } catch { /* Same read fallback order as SDK. */ }
+  }
+  return resolved;
+}
+
 function toolPath(input, cwd, toolName) {
   const supplied = input && typeof input.path === "string" ? input.path : "";
-  // Image destinations are literal filenames, not the read/write tools' @ references.
-  // The image tool admits at most 1024 output-path characters; do not walk a
-  // malformed huge path through canonical() or echo it in permission metadata.
-  if (toolName === IMAGE_GENERATION_TOOL_NAME && supplied.length > 1024) return undefined;
-  const raw = toolName === IMAGE_GENERATION_TOOL_NAME ? supplied : supplied.replace(/^@/, "");
-  return raw ? resolve(cwd, raw) : undefined;
+  // Image paths are literal, with a bounded destination for permission metadata.
+  if (toolName === IMAGE_GENERATION_TOOL_NAME) return supplied && supplied.length <= 1024 ? resolve(cwd, supplied) : undefined;
+  if (!supplied) return undefined;
+  if (READ_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName)) return sdkToolPath(supplied, cwd, toolName === "read");
+  return resolve(cwd, supplied.replace(/^@/, ""));
 }
 
 function isWithin(root, target) {
@@ -421,9 +553,12 @@ function classify(event, ctx) {
   const opaque = isOpaqueTool(toolName);
   const nativeResource = MCP_RESOURCE_TOOLS.has(toolName) && isNativeTool(toolName);
   const nativeSearch = toolName === "tool_search" && isNativeTool(toolName);
-  const privateInput = opaque || nativeResource || nativeSearch;
+  const computerUse = toolName === COMPUTER_USE_OBSERVE_TOOL || toolName === COMPUTER_USE_ACT_TOOL;
+  const privateInput = opaque || nativeResource || nativeSearch || computerUse;
   const categories = [];
-  if (opaque) categories.push(...OPAQUE_CATEGORIES);
+  if (toolName === COMPUTER_USE_ACT_TOOL) categories.push("external", "read", "write", "shell", "network");
+  else if (toolName === COMPUTER_USE_OBSERVE_TOOL) categories.push("external", "network", "read");
+  else if (opaque) categories.push(...OPAQUE_CATEGORIES);
   else if (nativeResource) categories.push("network", "read", "external");
   else if (nativeSearch) categories.push("read", "external");
   else if (toolName === IMAGE_GENERATION_TOOL_NAME) {
@@ -438,7 +573,8 @@ function classify(event, ctx) {
 
   const root = canonical(ctx.cwd);
   const projectRoot = projectRootOf(ctx.cwd);
-  const path = privateInput ? undefined : toolPath(input, root, toolName);
+  const toolCwd = READ_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName) ? ctx.cwd : root;
+  const path = privateInput ? undefined : toolPath(input, toolCwd, toolName);
   const risks = [];
   const paths = path ? [path] : [];
   if (references) paths.push(...references.riskPaths.map((reference) => resolve(root, reference)));
@@ -481,6 +617,11 @@ function classify(event, ctx) {
       + (references.needsRead ? "\n读取并上传完整参考/原图文件（包含文件内 metadata），不是只上传预览；读取仍仅限当前项目实际目录。" : "")
       + "\n通过网络生成并写入 PNG；使用 Codex 图片额度，会产生额外账号用量（失败或取消也可能消耗额度）。"
       + "不自动重试或降级，无 API-key/付费 API 回退。";
+  } else if (computerUse) {
+    summary = toolName === COMPUTER_USE_ACT_TOOL ? "ComputerUse · 请求真实桌面输入" : "ComputerUse · 请求观察并外发截图";
+    detail = toolName === COMPUTER_USE_ACT_TOOL
+      ? "真实桌面键鼠有全局焦点风险，不能视为窗口沙箱；仍须独立屏幕/控制许可、可信禁止目标与人工接管检查。此审批不代替执行层安全门。"
+      : "捕获用户通过 Portal 明确选择的窗口，并上传给当前精确模型；截图将保存在 SDK 会话中，可能含敏感可见内容。主进程还会独立核对实际 root 工具来源和本次捕获/上传/SDK 留存许可。";
   } else if (privateInput) {
     summary = "运行工具 " + clip(toolName, 120);
     detail = nativeSearch
@@ -506,6 +647,8 @@ function classify(event, ctx) {
 async function checkpointGate(event, ctx) {
   // Delegated tools re-enter this gate individually with the parent's context.
   if (event.toolName === "pion_subagents" || CHECKPOINT_READ_ONLY.has(event.toolName)) return;
+  // Observation writes no project files; the private broker owns capture/upload approval.
+  if (event.toolName === COMPUTER_USE_OBSERVE_TOOL) return;
   // Native discovery loads schemas, not the discovered tools' side effects.
   if (event.toolName === "tool_search" && isNativeTool(event.toolName)) return;
   if (!ctx.hasUI) return;
@@ -521,6 +664,11 @@ async function gate(event, ctx) {
   const signal = subagentSignal ?? ctx.signal;
   const abortReason = subagentSignal ? "子代理已中止" : "工具调用已中止";
   if (signal?.aborted) return { block: true, reason: abortReason };
+  const computerUse = event.toolName === COMPUTER_USE_OBSERVE_TOOL || event.toolName === COMPUTER_USE_ACT_TOOL;
+  if (computerUse && (event.parentToolCallId !== undefined || subagentSignal
+    || (typeof event.toolCallId === "string" && event.toolCallId.startsWith("subagent-")))) {
+    return { block: true, reason: "ComputerUse 仅允许真实主会话根工具调用" };
+  }
   const internal = PION_INTERNAL_TOOLS.has(event.toolName);
   const request = internal ? undefined : classify(event, ctx);
   const admissionPolicy = readPolicy(ctx.cwd);
@@ -539,7 +687,7 @@ async function gate(event, ctx) {
 
   // models.* has no inner tool_call event. Disclose billing on every outer
   // codemode admission, including all-allow policies, without new risk flags.
-  const forced = request.risks.length > 0 || request.toolName === "codemode";
+  const forced = request.risks.length > 0 || request.toolName === "codemode" || computerUse;
   const sessionKey = request.policyCategories.slice().sort().join("+") + ":" + request.risks.slice().sort().join("+");
   if (!forced && sessionAllows.has(sessionKey)) return undefined;
   if (!forced && decisions.every((decision) => decision === "allow")) return undefined;

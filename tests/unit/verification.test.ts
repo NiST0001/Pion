@@ -1,11 +1,18 @@
-import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import type { BrowserWindow } from 'electron'
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CommandChunk, CommandResult, CommandSpec } from '../../src/main/command-runner'
 import { CommandRunner } from '../../src/main/command-runner'
 import { VerificationService } from '../../src/main/verification'
-import type { VerificationRun } from '../../src/shared/operations'
+import type { RunOperation, VerificationLogUpdate, VerificationPlan, VerificationRun, VerificationSnapshotUpdate } from '../../src/shared/operations'
+
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof import('node:fs/promises')>()
+  return { ...actual, readFile: vi.fn(actual.readFile) }
+})
 
 const roots: string[] = []
 const originalPath = process.env.PATH
@@ -58,7 +65,71 @@ async function fixture(): Promise<{ root: string; stateFile: string; npmName: st
   return { root, stateFile: join(root, 'verification-state.json'), npmName }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 describe('VerificationService', () => {
+  it.each(['{broken', 'null', '{"version":2,"policies":{},"runs":[]}', '{"version":1,"policies":{},"runs":[{}]}'])('preserves invalid storage and blocks subsequent writes and commands: %s', async (source) => {
+    const { root, stateFile } = await fixture()
+    await writeFile(stateFile, source)
+    const runner = new FakeRunner([])
+    const execute = vi.spyOn(runner, 'run')
+    const service = new VerificationService(stateFile, runner)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const discover = vi.spyOn(service, 'discover')
+    await service.load()
+    await expect(service.flush()).rejects.toThrow(/存储读取失败/)
+    await expect(service.setPolicy(root, { autoRun: true })).rejects.toThrow(/存储读取失败/)
+    await expect(service.start(root)).rejects.toThrow(/存储读取失败/)
+    expect(service.getPolicy(root).autoRun).toBe(false)
+    expect(await readFile(stateFile, 'utf8')).toBe(source)
+    expect(discover).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('preserves non-missing storage read failures without publishing defaults', async () => {
+    const { root, stateFile } = await fixture()
+    await mkdir(stateFile)
+    await writeFile(join(stateFile, 'preserved'), 'original')
+    const service = new VerificationService(stateFile, new FakeRunner([]))
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    await service.load()
+    await expect(service.setPolicy(root, { autoRun: true })).rejects.toThrow(/存储读取失败/)
+    expect(await readFile(join(stateFile, 'preserved'), 'utf8')).toBe('original')
+  })
+
+  it('shares an actual pending load and reserves starts until a failed read settles', async () => {
+    const { root, stateFile } = await fixture()
+    await writeFile(stateFile, '{broken')
+    const reading = deferred<string>()
+    vi.mocked(fs.readFile).mockImplementationOnce(() => reading.promise)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const service = new VerificationService(stateFile, new FakeRunner([]))
+    const discover = vi.spyOn(service, 'discover')
+    const loading = service.load()
+    expect(service.load()).toBe(loading)
+    const starting = service.start(root)
+    const rejected = [
+      expect(starting).rejects.toThrow(/存储读取失败/),
+      expect(service.setPolicy(root, { autoRun: true })).rejects.toThrow(/存储读取失败/),
+      expect(service.flush()).rejects.toThrow(/存储读取失败/)
+    ]
+    let finished = false
+    void starting.catch(() => { finished = true })
+    await Promise.resolve()
+    expect(finished).toBe(false)
+    expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    reading.resolve('{broken')
+    await Promise.all([loading, ...rejected])
+    expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow()
+    expect(service.getPolicy(root).autoRun).toBe(false)
+    expect(discover).not.toHaveBeenCalled()
+    expect(await readFile(stateFile, 'utf8')).toBe('{broken')
+  })
+
   it('checks the full private run map beyond thirty displayed records', () => {
     const service = new VerificationService(join(tmpdir(), 'unused-verification.json'), new FakeRunner([]))
     const internal = service as unknown as { runs: Map<string, VerificationRun> }
@@ -83,6 +154,7 @@ describe('VerificationService', () => {
     await vi.waitFor(() => expect(service.listRuns(root)[0].state).toBe('infrastructure-error'))
     await service.flush()
     expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    await expect(service.start(root)).rejects.toThrow(/收尾尚未确认/)
   })
 
   it('guards starts before discovery and after pending discovery', async () => {
@@ -104,6 +176,84 @@ describe('VerificationService', () => {
     expect(discovery).toHaveBeenCalledOnce()
   })
 
+  it('revokes a pending discovery before any command or run snapshot is published', async () => {
+    const { root, stateFile } = await fixture()
+    const runner = new FakeRunner([])
+    const execute = vi.spyOn(runner, 'run')
+    const service = new VerificationService(stateFile, runner)
+    const plan = await service.discover(root)
+    const discovery = deferred<VerificationPlan>()
+    vi.spyOn(service, 'discover').mockImplementationOnce(() => discovery.promise)
+    const send = vi.fn()
+    service.bind({ webContents: { send } } as unknown as BrowserWindow)
+    const controller = new AbortController()
+    const pending = service.start(root, {}, controller.signal)
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    controller.abort()
+    expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    discovery.resolve(plan)
+    await rejected
+    expect(execute).not.toHaveBeenCalled()
+    expect(send).not.toHaveBeenCalled()
+    expect(service.listRuns(root)).toEqual([])
+    expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow()
+  })
+
+  it('keeps a cancelled flush pending and suppresses automatic repair after it resolves', async () => {
+    const { root, stateFile } = await fixture()
+    const service = new VerificationService(stateFile, new FakeRunner([1]))
+    await service.setPolicy(root, { autoRepair: true })
+    const repair = vi.fn(async () => null)
+    service.setAutoRepairHandler(repair)
+    const writing = deferred<void>()
+    const persistence = vi.spyOn(service, 'flush').mockImplementationOnce(() => writing.promise)
+    const controller = new AbortController()
+    const started = await service.start(root, {}, controller.signal)
+    await vi.waitFor(() => expect(persistence).toHaveBeenCalledOnce())
+    expect(service.listRuns(root)[0].state).toBe('failed')
+    controller.abort()
+    let settled = false
+    const completion = service.waitForRun(started.id).then(() => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    writing.resolve(undefined)
+    await completion
+    expect(repair).not.toHaveBeenCalled()
+    expect(service.listRuns(root)[0].state).toBe('cancelled')
+    persistence.mockRestore()
+    await service.flush()
+  })
+
+  it('rechecks cancellation between steps and discards late command output', async () => {
+    const { root, stateFile } = await fixture()
+    const runner = new FakeRunner([])
+    let lateChunk!: (chunk: CommandChunk) => void
+    const execute = vi.spyOn(runner, 'run').mockImplementation(async (_id, _step, onChunk) => {
+      lateChunk = onChunk
+      return { exitCode: 0, durationMs: 1, cancelled: false, timedOut: false }
+    })
+    vi.spyOn(runner, 'cancel').mockResolvedValue(true)
+    const service = new VerificationService(stateFile, runner)
+    const controller = new AbortController()
+    const send = vi.fn((_channel: string, update: VerificationSnapshotUpdate | VerificationLogUpdate) => {
+      if ('runs' in update && update.runs[0]?.state === 'running' && update.runs[0].steps[0]?.state === 'passed') {
+        controller.abort()
+      }
+    })
+    service.bind({ webContents: { send } } as unknown as BrowserWindow)
+    const started = await service.start(root, {}, controller.signal)
+    await service.waitForRun(started.id)
+    expect(execute).toHaveBeenCalledOnce()
+    expect(service.listRuns(root)[0]).toMatchObject({ state: 'cancelled' })
+    expect(service.listRuns(root)[0].steps.map((step) => step.state)).toEqual(['passed', 'queued', 'queued'])
+    const updates = send.mock.calls.length
+    lateChunk({ stream: 'stdout', text: 'late output' })
+    expect(send).toHaveBeenCalledTimes(updates)
+    expect(service.listRuns(root)[0].steps[0].outputTail).toBe('')
+    await service.flush()
+  })
+
   it('keeps cancelled command promises reserved until real settlement', async () => {
     const { root, stateFile } = await fixture()
     const runner = new FakeRunner([])
@@ -121,19 +271,30 @@ describe('VerificationService', () => {
     await service.flush()
   })
 
-  it('retains the execution slot while automatic repair is pending', async () => {
+  it('retains pending repair and prevents a late cancelled repair from restarting verification', async () => {
     const { root, stateFile } = await fixture()
     const service = new VerificationService(stateFile, new FakeRunner([1]))
-    await service.setPolicy(root, { autoRepair: true })
+    await service.setPolicy(root, { autoRun: true, autoRepair: true })
+    const agentRun = { id: 'cancelled-repair', cwd: root, state: 'completed' } as RunOperation
     let finish!: () => void
-    const repair = vi.fn(() => new Promise<null>((done) => { finish = () => done(null) }))
+    let repairSignal: AbortSignal | undefined
+    const repair = vi.fn((_run: VerificationRun, _prompt: string, signal?: AbortSignal) => {
+      repairSignal = signal
+      return new Promise<RunOperation>((done) => { finish = () => done(agentRun) })
+    })
     service.setAutoRepairHandler(repair)
-    await service.start(root)
+    const started = await service.start(root)
     await vi.waitFor(() => expect(repair).toHaveBeenCalledOnce())
     expect(service.listRuns(root)[0].state).toBe('failed')
+    await service.cancel(started.id)
+    expect(repairSignal?.aborted).toBe(true)
     expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
     finish()
-    await vi.waitFor(() => expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow())
+    await service.waitForRun(started.id)
+    expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow()
+    const followup = vi.spyOn(service, 'start').mockRejectedValue(new Error('unexpected follow-up'))
+    await service.handleAgentRunCompleted(agentRun)
+    expect(followup).not.toHaveBeenCalled()
     await service.flush()
   })
 

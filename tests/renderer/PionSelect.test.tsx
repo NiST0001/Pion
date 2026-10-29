@@ -226,6 +226,42 @@ it('handles unknown values, no enabled options and live option replacement safel
   expect(button).not.toHaveAttribute('aria-activedescendant')
 })
 
+it('keeps decorated rows accessible and typeahead-driven by their string labels with exact values', () => {
+  const first = JSON.stringify(['alpha/beta', 'shared'])
+  const second = JSON.stringify(['alpha', 'beta/shared'])
+  const { button, change } = setup({
+    value: first,
+    notifyOnReselect: true,
+    title: 'Current choice',
+    popupClassName: 'decorated-popup',
+    options: [
+      { value: first, label: 'Alpha', group: 'Models', title: 'alpha/beta/shared', render: <><span>Visual A</span><span>128k</span></> },
+      { value: 'blocked', label: 'Charlie blocked', group: 'Models', disabled: true, render: <span>Visual blocked</span> },
+      { value: second, label: 'Charlie', group: 'Models', render: <span>Visual C</span> }
+    ]
+  })
+  expect(button).toHaveTextContent('Alpha') // Decorative content is confined to the option row.
+  expect(button).toHaveAttribute('title', 'Current choice')
+  open(button)
+  expect(screen.getByRole('listbox')).toHaveClass('decorated-popup')
+  const firstRow = screen.getByRole('option', { name: 'Alpha' })
+  expect(firstRow).toHaveTextContent('Visual A128k')
+  expect(firstRow).toHaveAttribute('title', 'alpha/beta/shared')
+  fireEvent.click(firstRow)
+  expect(change).toHaveBeenCalledExactlyOnceWith(first)
+  change.mockClear()
+  open(button)
+  expect(screen.getByRole('option', { name: 'Charlie blocked' })).toHaveAttribute('aria-disabled', 'true')
+  fireEvent.click(screen.getByRole('option', { name: 'Charlie blocked' }))
+  expect(change).not.toHaveBeenCalled()
+  fireEvent.keyDown(button, { key: 'c' })
+  expect(active(button)).toHaveAccessibleName('Charlie')
+  expect(active(button)).toHaveTextContent('Visual C')
+  fireEvent.keyDown(button, { key: 'Enter' })
+  expect(change).toHaveBeenCalledExactlyOnceWith(second)
+  expect(button).toHaveFocus()
+})
+
 it('keeps shared corners, keyboard-only focus, neutral signal-orange and accessibility fallbacks', () => {
   const css = readFileSync('src/renderer/src/styles/pion-select.css', 'utf8')
   expect(css).toContain('var(--radius-sm)')

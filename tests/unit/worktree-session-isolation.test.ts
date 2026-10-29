@@ -1,14 +1,18 @@
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { join, resolve } from 'node:path'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { SessionManager, type SessionInfo } from '@earendil-works/pi-coding-agent'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
+import * as sessionTokens from '../../src/main/agent/session-token-total'
+import { IPC_EVENTS } from '../../src/shared/ipc'
 
 const info = (cwd: string, id: string): SessionInfo => ({
   cwd, id, path: resolve(`/tmp/${id}.jsonl`), created: new Date(0), modified: new Date(1),
   messageCount: 1, firstMessage: id, allMessagesText: id
 })
+// Discovery tests exercise projection, not real asynchronous JSONL readers.
+beforeEach(() => { vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockResolvedValue(undefined) })
 afterEach(() => vi.restoreAllMocks())
 
 function deferred<T>() {
@@ -139,4 +143,126 @@ it('retains displayed rows on discovery rejection instead of publishing a false 
   await bridge.refreshSidebarSessions(false)
   expect(send).not.toHaveBeenCalled()
   await expect(bridge.listSessions('/tmp/project')).rejects.toThrow('discovery failed')
+})
+
+async function flushTotals() {
+  for (let i = 0; i < 32; i++) await Promise.resolve()
+}
+
+function sidebarWindow() {
+  return { isDestroyed: vi.fn(() => false), webContents: { isDestroyed: vi.fn(() => false), send: vi.fn() } }
+}
+
+it('returns exact-cwd rows before token totals settle, then publishes the scoped supplement without loading a backend', async () => {
+  const firstCwd = resolve('/tmp/first-project')
+  const secondCwd = resolve('/tmp/second-project')
+  const tokens = deferred<number | undefined>()
+  const list = vi.spyOn(SessionManager, 'list').mockImplementation(async (cwd) => [info(cwd, cwd === firstCwd ? 'first' : 'second'), info('/tmp/foreign', 'foreign')])
+  const read = vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockReturnValue(tokens.promise)
+  const win = sidebarWindow()
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), {
+    win, status: { cwd: firstCwd }, ensureActiveBackend: vi.fn()
+  })
+  const first = await bridge.listSessions(firstCwd)
+  const second = await bridge.listSessions(secondCwd)
+  expect(first).toEqual([expect.objectContaining({ id: 'first', projectCwd: firstCwd, sidebarRevision: 1 })])
+  expect(second).toEqual([expect.objectContaining({ id: 'second', projectCwd: secondCwd, sidebarRevision: 2 })])
+  expect(first[0]).not.toHaveProperty('totalTokens')
+  expect(second[0]).not.toHaveProperty('allMessagesText')
+  expect(win.webContents.send).not.toHaveBeenCalled()
+  expect(read).toHaveBeenCalledWith(first[0].path, { id: 'first', cwd: firstCwd })
+  expect(read).toHaveBeenCalledWith(second[0].path, { id: 'second', cwd: secondCwd })
+  expect(read).toHaveBeenCalledTimes(2)
+  tokens.resolve(23)
+  await flushTotals()
+  expect(win.webContents.send.mock.calls).toEqual([
+    [IPC_EVENTS.AgentSessions, [{ ...first[0], totalTokens: 23 }]],
+    [IPC_EVENTS.AgentSessions, [{ ...second[0], totalTokens: 23 }]]
+  ])
+  expect((await bridge.listSessions(secondCwd))[0]).toEqual({ ...second[0], totalTokens: 23 })
+  expect(list).toHaveBeenCalledTimes(2)
+  expect(bridge.ensureActiveBackend).not.toHaveBeenCalled()
+  expect(bridge.status.cwd).toBe(firstCwd)
+})
+
+it('does not publish an old token result after a hard mutation starts a newer discovery', async () => {
+  const cwd = resolve('/tmp/project')
+  const oldTokens = deferred<number | undefined>()
+  const newTokens = deferred<number | undefined>()
+  vi.spyOn(SessionManager, 'list').mockResolvedValueOnce([info(cwd, 'deleted')]).mockResolvedValueOnce([info(cwd, 'fresh')])
+  const read = vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockReturnValueOnce(oldTokens.promise).mockReturnValueOnce(newTokens.promise)
+  const win = sidebarWindow()
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), { win })
+  const first = await bridge.listSessions(cwd)
+  bridge.sessionListCache.invalidate(cwd)
+  const latest = await bridge.listSessions(cwd)
+  expect(latest[0].sidebarRevision).toBeGreaterThan(first[0].sidebarRevision)
+  expect(read).toHaveBeenCalledTimes(1)
+  oldTokens.resolve(999)
+  await flushTotals()
+  expect(win.webContents.send).not.toHaveBeenCalled()
+  expect(read).toHaveBeenCalledTimes(2)
+  newTokens.resolve(7)
+  await flushTotals()
+  expect(win.webContents.send).toHaveBeenCalledExactlyOnceWith(IPC_EVENTS.AgentSessions, [{ ...latest[0], totalTokens: 7 }])
+})
+
+it('retires a token publisher after unbind even if the same window object returns', async () => {
+  const cwd = resolve('/tmp/project')
+  const tokens = deferred<number | undefined>()
+  vi.spyOn(SessionManager, 'list').mockResolvedValue([info(cwd, 'own')])
+  vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockReturnValue(tokens.promise)
+  const win = sidebarWindow()
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), { win })
+  await bridge.listSessions(cwd)
+  bridge.unbind(win)
+  bridge.win = win // A -> detached -> A must not revive the old receipt.
+  tokens.resolve(12)
+  await flushTotals()
+  expect(win.webContents.send).not.toHaveBeenCalled()
+  expect((await bridge.listSessions(cwd))[0].totalTokens).toBe(12)
+})
+
+it.each([false, true])('publishes to a replacement window only after it reads that cwd (read=%s)', async (readAgain) => {
+  const cwd = resolve('/tmp/project')
+  const tokens = deferred<number | undefined>()
+  const list = vi.spyOn(SessionManager, 'list').mockResolvedValue([info(cwd, 'own')])
+  vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockReturnValue(tokens.promise)
+  const firstWin = sidebarWindow()
+  const nextWin = sidebarWindow()
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), { win: firstWin })
+  const sessions = await bridge.listSessions(cwd)
+  bridge.win = nextWin
+  if (readAgain) await bridge.listSessions(cwd)
+  tokens.resolve(12)
+  await flushTotals()
+  expect(firstWin.webContents.send).not.toHaveBeenCalled()
+  if (readAgain) expect(nextWin.webContents.send).toHaveBeenCalledExactlyOnceWith(IPC_EVENTS.AgentSessions, [{ ...sessions[0], totalTokens: 12 }])
+  else expect(nextWin.webContents.send).not.toHaveBeenCalled()
+  expect(list).toHaveBeenCalledTimes(1)
+})
+
+it.each(['window', 'webContents'] as const)('does not push a completed supplement to destroyed %s', async (destroyed) => {
+  const tokens = deferred<number | undefined>()
+  vi.spyOn(SessionManager, 'list').mockResolvedValue([info('/tmp/project', 'own')])
+  vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockReturnValue(tokens.promise)
+  const win = sidebarWindow()
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), { win })
+  await bridge.listSessions('/tmp/project')
+  if (destroyed === 'window') win.isDestroyed.mockReturnValue(true)
+  else win.webContents.isDestroyed.mockReturnValue(true)
+  tokens.resolve(12)
+  await flushTotals()
+  expect(win.webContents.send).not.toHaveBeenCalled()
+})
+
+it('does not send an ambiguous empty supplement or read tokens from another cwd', async () => {
+  vi.spyOn(SessionManager, 'list').mockResolvedValue([info('/tmp/foreign', 'foreign')])
+  const read = vi.spyOn(sessionTokens, 'readSessionTokenTotal').mockResolvedValue(5)
+  const win = sidebarWindow()
+  const bridge = Object.assign(Object.create(AgentBridge.prototype), { win })
+  expect(await bridge.listSessions('/tmp/project')).toEqual([])
+  await flushTotals()
+  expect(read).not.toHaveBeenCalled()
+  expect(win.webContents.send).not.toHaveBeenCalled()
 })

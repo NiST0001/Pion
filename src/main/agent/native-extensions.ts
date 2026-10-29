@@ -64,14 +64,25 @@ function projectNativeResult(event: Pick<ToolResultEvent, 'content' | 'details'>
   return { content, details }
 }
 
+/** Copy descriptors without reading getters. Only the separate facade's slots are
+ * configurable, so wrapped methods can differ from frozen source data properties. */
+function nativeFacadeTarget<T extends object>(source: T): T {
+  const target = Object.create(Object.getPrototypeOf(source)) as T
+  for (const property of Reflect.ownKeys(source)) {
+    const descriptor = Object.getOwnPropertyDescriptor(source, property)
+    if (descriptor) Object.defineProperty(target, property, { ...descriptor, configurable: true })
+  }
+  return target
+}
+
 /** A fresh registry facade per invocation: preserve private-field method receivers. */
 function scopedModelRegistry(registry: ExtensionToolContext['modelRegistry'], signal: AbortSignal) {
   let calls = 0
-  return new Proxy(registry, {
-    get(target, property) {
-      const value: unknown = Reflect.get(target, property, target)
+  return new Proxy(nativeFacadeTarget(registry), {
+    get(_target, property) {
+      const value: unknown = Reflect.get(registry, property, registry)
       if (typeof value !== 'function') return value
-      if (!MODEL_CALL_METHODS.has(String(property))) return value.bind(target)
+      if (!MODEL_CALL_METHODS.has(String(property))) return value.bind(registry)
       return (model: unknown, context: unknown, options?: Record<string, unknown>) => {
         if (signal.aborted) throw new Error('Native script cancelled; no new model request started')
         if (calls >= NATIVE_SCRIPT_MAX_MODEL_CALLS) throw new Error('Native script model-call budget exhausted (8 calls)')
@@ -80,7 +91,7 @@ function scopedModelRegistry(registry: ExtensionToolContext['modelRegistry'], si
         if (combined.aborted) throw new Error('Native script model request cancelled before dispatch')
         calls++
         // No retry/fallback, no runtime mutation, and no separate usage reporting.
-        return value.call(target, model, context, { ...options, signal: combined })
+        return value.call(registry, model, context, { ...options, signal: combined })
       }
     }
   })
@@ -99,14 +110,15 @@ function boundedCodemode(definition: ToolDefinition): ToolDefinition {
       let stopWaiting: (() => void) | undefined
       try {
         if (signal.aborted) throw signal.reason
-        const scopedContext = new Proxy(ctx, {
-          get(target, property) {
-            if (property === 'modelRegistry') return registry
-            const value: unknown = Reflect.get(target, property, target)
-            return typeof value === 'function' ? value.bind(target) : value
+        let registry: ExtensionToolContext['modelRegistry'] | undefined
+        const scopedContext = new Proxy(nativeFacadeTarget(ctx), {
+          get(_target, property) {
+            // Keep SDK getters lazy and re-run their active-runtime checks on every read.
+            const value: unknown = Reflect.get(ctx, property, ctx)
+            if (property === 'modelRegistry') return registry ??= scopedModelRegistry(value as ExtensionToolContext['modelRegistry'], signal)
+            return typeof value === 'function' ? value.bind(ctx) : value
           }
         })
-        const registry = scopedModelRegistry(ctx.modelRegistry, signal)
         const stopped = new Promise<never>((_resolve, reject) => {
           stopWaiting = () => reject(signal.reason)
           signal.addEventListener('abort', stopWaiting, { once: true })

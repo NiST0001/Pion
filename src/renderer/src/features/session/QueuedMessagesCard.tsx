@@ -33,14 +33,14 @@ export function QueuedMessagesCard({
   sessionKey: string
   steering?: string[]
   followUp?: string[]
-  /** Leading followUp entries owned by Pi's native queue (not Pion-editable). */
+  /** Leading followUp entries owned by Pi's native queue (display-only). */
   nativeFollowUpCount?: number
   controlsDisabled?: boolean
   followUpRunIds?: (string | null)[]
   agentBusy?: boolean
-  onSendItem?: (kind: QueueKind, index: number) => void | Promise<void>
+  onSendItem?: (kind: QueueKind, index: number, runId: string) => void | Promise<void>
   onEditItem?: (item: QueueItem) => void | Promise<void>
-  onRemoveItem?: (kind: QueueKind, index: number) => void | Promise<void>
+  onRemoveItem?: (kind: QueueKind, index: number, runId: string) => void | Promise<void>
 }): ReactElement | null {
   const items: QueueItem[] = [
     ...steering.map((text, index) => ({ kind: 'steering' as const, text, index, runId: null })),
@@ -66,12 +66,11 @@ export function QueuedMessagesCard({
   }, [sessionKey, expanded])
 
   const handleSendItem = async (item: QueueItem): Promise<void> => {
-    if (!onSendItem) return
-    const key = `${item.kind}:${item.index}:${item.text}`
-    if (sendingKey === key) return
+    if (!onSendItem || controlsDisabled || item.kind !== 'followUp' || !item.runId || sendingKey !== null) return
+    const key = `${sessionKey}\u0000${item.runId}`
     setSendingKey(key)
     try {
-      await onSendItem(item.kind, item.index)
+      await onSendItem(item.kind, item.index, item.runId)
     } finally {
       setSendingKey((current) => current === key ? null : current)
     }
@@ -114,9 +113,10 @@ export function QueuedMessagesCard({
             {items.map((item, index) => {
               const text = displayText(item.text)
               const isSteering = item.kind === 'steering'
-              // Only Pion's own local follow-ups can be edited or removed;
-              // native Pi queue entries have no RPC removal path.
-              const editable = !isSteering && item.index >= nativeFollowUpCount
+              // Native steering has already been dispatched; only identified
+              // Pion-local follow-ups support queue mutations.
+              const local = !isSteering && item.index >= nativeFollowUpCount
+              const actionable = local && Boolean(item.runId?.trim())
               return (
                 <div
                   key={item.runId ?? `${item.kind}-${item.index}-${item.text}`}
@@ -140,7 +140,7 @@ export function QueuedMessagesCard({
                       className="queue-item-action"
                       aria-label={`编辑第 ${index + 1} 条排队消息`}
                       title={item.runId ? '退回到输入框编辑' : '这条消息暂不支持编辑'}
-                      disabled={controlsDisabled || !editable || !item.runId || sendingKey !== null}
+                      disabled={controlsDisabled || !actionable || sendingKey !== null}
                       onClick={(event) => {
                         event.stopPropagation()
                         void onEditItem(item)
@@ -149,16 +149,16 @@ export function QueuedMessagesCard({
                       <Pencil size={12} aria-hidden="true" />
                     </button>
                   )}
-                  {editable && onRemoveItem && (
+                  {local && onRemoveItem && (
                     <button
                       type="button"
                       className="queue-item-action queue-item-remove"
                       aria-label={`删除第 ${index + 1} 条排队消息`}
-                      title="删除这条排队消息"
-                      disabled={controlsDisabled || sendingKey !== null}
+                      title={actionable ? '删除这条排队消息' : '这条消息暂不支持删除'}
+                      disabled={controlsDisabled || !actionable || sendingKey !== null}
                       onClick={(event) => {
                         event.stopPropagation()
-                        void onRemoveItem(item.kind, item.index)
+                        if (item.runId) void onRemoveItem(item.kind, item.index, item.runId)
                       }}
                     >
                       <Trash2 size={12} aria-hidden="true" />
@@ -168,14 +168,14 @@ export function QueuedMessagesCard({
                     type="button"
                     className="queue-item-send"
                     aria-label={`直接发送第 ${index + 1} 条排队消息`}
-                    title="直接发送"
-                    disabled={controlsDisabled || !onSendItem || sendingKey !== null}
+                    title={actionable ? '直接发送' : '这条消息暂不支持直接发送'}
+                    disabled={controlsDisabled || !actionable || !onSendItem || sendingKey !== null}
                     onClick={(event) => {
                       event.stopPropagation()
                       void handleSendItem(item)
                     }}
                   >
-                    {sendingKey === `${item.kind}:${item.index}:${item.text}`
+                    {sendingKey === `${sessionKey}\u0000${item.runId}`
                       ? <span className="queue-item-send-pending" aria-hidden="true">…</span>
                       : <Send size={12} aria-hidden="true" />}
                   </button>

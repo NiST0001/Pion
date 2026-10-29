@@ -8,6 +8,7 @@ export interface WorkflowWorkerInput {
   cwd: string
   prompt: string
   permissionConfigPath: string
+  signal?: AbortSignal
 }
 
 export interface WorkflowWorkerResult {
@@ -18,6 +19,8 @@ export interface WorkflowWorkerResult {
 export interface WorkflowWorkerRunner {
   run(input: WorkflowWorkerInput, onProgress: (message: string) => void): Promise<WorkflowWorkerResult>
   cancel(workerId: string): Promise<void>
+  /** Throws while preparation, process shutdown or an unknown exit retains this cwd. */
+  assertWorktreeDeletionIdle?(cwd: string): void
 }
 
 export interface WorkflowVerificationResult {
@@ -27,6 +30,7 @@ export interface WorkflowVerificationResult {
 }
 
 export interface WorkflowVerificationRunner {
-  run(cwd: string, onProgress: (message: string, runId?: string) => void): Promise<WorkflowVerificationResult>
+  run(cwd: string, onProgress: (message: string, runId?: string) => void, signal?: AbortSignal): Promise<WorkflowVerificationResult>
   cancel(runId: string): Promise<void>
+  assertWorktreeDeletionIdle?(cwd: string): void
 }

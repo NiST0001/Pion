@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { renameGitBranch, listBranchInfos } from '../../src/main/git'
 import { GitService, parsePorcelainV2, parseUnifiedDiff } from '../../src/main/git-service'
 import * as gitProcess from '../../src/main/git/process'
+import type { GitWorkspaceSnapshot } from '../../src/shared/operations'
 
 const roots: string[] = []
 
@@ -215,6 +216,101 @@ describe('GitService parsing', () => {
     expect(diff.hunks).toHaveLength(1)
     expect(diff.hunks[0].lines.map((line) => line.kind)).toEqual(['delete', 'add', 'context'])
     expect(diff).toMatchObject({ additions: 1, deletions: 1, selectable: true })
+  })
+})
+
+describe('GitService conflict stage safety', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  async function conflictFixture() {
+    const root = await mkdtemp(join(tmpdir(), 'pion-git-conflict-mock-'))
+    roots.push(root)
+    const path = 'file.txt'
+    const original = Buffer.from([0, 1, 2, 255])
+    await writeFile(join(root, path), original)
+    const snapshot: GitWorkspaceSnapshot = {
+      root, snapshotId: 'conflict-snapshot', head: 'abc', branch: 'main', ahead: 0, behind: 0,
+      operation: 'merge', stagedCount: 0, unstagedCount: 1, conflictCount: 1, capturedAt: 0,
+      files: [{ path, kind: 'conflicted', indexCode: 'U', worktreeCode: 'U',
+        staged: false, unstaged: true, conflicted: true, binary: true }]
+    }
+    const service = new GitService()
+    vi.spyOn(service, 'getStatus').mockResolvedValue(snapshot)
+    return { root, path, original, service, snapshot }
+  }
+
+  function stageRecords(path: string, stages: number[], mode = '100644'): Buffer {
+    return Buffer.from(stages.map((stage) => `${mode} ${'a'.repeat(40)} ${stage}\t${path}\0`).join(''))
+  }
+
+  it.each([
+    ['ls-files', 'Git 命令超时'], ['ls-files', 'index unreadable'],
+    ['show', 'Git 命令超时'], ['show', 'object unavailable']
+  ])('preserves the original file when %s fails with %s', async (command, message) => {
+    const { root, path, original, service, snapshot } = await conflictFixture()
+    const failure = new Error(message)
+    const run = vi.spyOn(gitProcess, 'runGitBuffer').mockImplementation(async (_cwd, args) => {
+      if (args[0] === command) throw failure
+      return stageRecords(path, [1, 2, 3])
+    })
+
+    await expect(service.resolveConflict(root, snapshot.snapshotId, path, 'ours')).rejects.toBe(failure)
+    expect(await readFile(join(root, path))).toEqual(original)
+    expect(run.mock.calls.map(([, args]) => args[0])).toEqual(command === 'ls-files' ? ['ls-files'] : ['ls-files', 'show'])
+  })
+
+  it.each(['ours', 'theirs'] as const)('deletes only a registered missing %s stage', async (strategy) => {
+    const { root, path, service, snapshot } = await conflictFixture()
+    const run = vi.spyOn(gitProcess, 'runGitBuffer').mockResolvedValue(
+      stageRecords(path, [1, strategy === 'ours' ? 3 : 2])
+    )
+
+    await service.resolveConflict(root, snapshot.snapshotId, path, strategy)
+    await expect(readFile(join(root, path))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(run.mock.calls.map(([, args]) => args)).toEqual([
+      ['ls-files', '--unmerged', '-z', '--', `:(literal)${path}`], ['add', '-A', '--', path]
+    ])
+  })
+
+  it.each(['100644', '100755', '120000'])('keeps checkout-index responsible for %s mode and binary bytes', async (mode) => {
+    const { root, path, original, service, snapshot } = await conflictFixture()
+    const run = vi.spyOn(gitProcess, 'runGitBuffer').mockImplementation(async (_cwd, args) => (
+      args[0] === 'ls-files' ? stageRecords(path, [1, 2, 3], mode) : original
+    ))
+
+    await service.resolveConflict(root, snapshot.snapshotId, path, 'theirs')
+    expect(await readFile(join(root, path))).toEqual(original)
+    expect(run.mock.calls.map(([, args]) => args)).toEqual([
+      ['ls-files', '--unmerged', '-z', '--', `:(literal)${path}`], ['show', `:3:${path}`],
+      ['checkout-index', '--force', '--stage=3', '--', path], ['add', '-A', '--', path]
+    ])
+  })
+
+  it.each(['', 'malformed\0'])('preserves the file when the unmerged registration is empty or invalid (%j)', async (records) => {
+    const { root, path, original, service, snapshot } = await conflictFixture()
+    const run = vi.spyOn(gitProcess, 'runGitBuffer').mockResolvedValue(Buffer.from(records))
+
+    await expect(service.resolveConflict(root, snapshot.snapshotId, path, 'ours')).rejects.toThrow()
+    expect(await readFile(join(root, path))).toEqual(original)
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads only registered conflict stages and propagates blob failures', async () => {
+    const { root, path, original, service } = await conflictFixture()
+    const run = vi.spyOn(gitProcess, 'runGitBuffer').mockImplementation(async (_cwd, args) => (
+      args[0] === 'ls-files' ? stageRecords(path, [1, 3]) : Buffer.from('text\n')
+    ))
+    expect(await service.readConflict(root, path)).toMatchObject({ binary: true })
+    expect(run.mock.calls.map(([, args]) => args)).toEqual([
+      ['ls-files', '--unmerged', '-z', '--', `:(literal)${path}`], ['show', `:1:${path}`], ['show', `:3:${path}`]
+    ])
+    const failure = new Error('object unavailable')
+    run.mockImplementation(async (_cwd, args) => {
+      if (args[0] === 'show') throw failure
+      return stageRecords(path, [1, 3])
+    })
+    await expect(service.readConflict(root, path)).rejects.toBe(failure)
+    expect(await readFile(join(root, path))).toEqual(original)
   })
 })
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest'
 import { useEffect } from 'react'
-import type { DragEvent } from 'react'
+import type { DragEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DOCK_PANELS, DOCK_LABELS, DOCK_EDGES, DOCK_STORAGE_KEY, defaultDockLayout, dockEdgeAt, measureDockLayout, moveDockPanel, normalizeDockLayout, readDockLayout, resizeDockSplit } from '../../src/renderer/src/utils/dockLayout'
@@ -20,7 +20,36 @@ const oldFiveDefault: DockLayout = { version: 2, root: splitNode('x', 0.2, panel
   splitNode('x', 0.68, splitNode('y', 0.7, splitNode('x', 0.6, panelNode('chat'), panelNode('browser')), panelNode('terminal')), panelNode('review'))) }
 const leaves = (node: DockNode): DockPanel[] => node.type === 'panel' ? [node.panel] : [...leaves(node.first), ...leaves(node.second)]
 beforeEach(() => localStorage.clear())
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.useRealTimers() })
+
+function resizeFixture() {
+  vi.useFakeTimers()
+  const frames = new Map<number, FrameRequestCallback>()
+  let frameId = 0
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.set(++frameId, callback); return frameId })
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id) })
+  const saved = vi.spyOn(Storage.prototype, 'setItem')
+  const hook = renderHook(() => useDockLayout(visible))
+  const root = document.createElement('div')
+  vi.spyOn(root, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 1000, 800))
+  hook.result.current.rootRef.current = root
+  const begin = (path = '', clientX = 200, clientY = 0) => act(() => {
+    const divider = hook.result.current.dividers.find((item) => item.path === path)!
+    hook.result.current.dividerProps(divider).onPointerDown({ button: 0, pointerId: 1, clientX, clientY,
+      currentTarget: root, preventDefault: vi.fn() } as unknown as ReactPointerEvent<HTMLDivElement>)
+  })
+  const pointer = (type: string, clientX: number, clientY = 0, pointerId = 1) => act(() => {
+    const event = new MouseEvent(type, { clientX, clientY })
+    Object.defineProperty(event, 'pointerId', { value: pointerId })
+    window.dispatchEvent(event)
+  })
+  const frame = () => act(() => {
+    const batch = [...frames.values()]
+    frames.clear()
+    batch.forEach((callback) => callback(0))
+  })
+  return { ...hook, saved, frames, begin, pointer, frame }
+}
 
 it('supports nested docking beside or beneath any panel rather than four fixed slots', () => {
   const beside = moveDockPanel(defaultDockLayout(), 'terminal', 'review', 'right')
@@ -210,6 +239,144 @@ it('previews the final split geometry and changes layout only on a valid drop', 
   expect(panels.terminal!.x).toBeGreaterThan(panels.review!.x)
   expect(result.current.dragged).toBeNull()
   expect(result.current.previewStyle).toBeUndefined()
+})
+
+it('coalesces pointer moves into one frame and saves the final pointerup position', () => {
+  const h = resizeFixture()
+  const initial = h.result.current.layout
+  h.begin()
+  h.pointer('pointermove', 300)
+  h.pointer('pointermove', 400)
+  h.pointer('pointermove', 900, 0, 2)
+  h.pointer('pointerup', 900, 0, 2)
+  expect(h.result.current.layout).toBe(initial)
+  expect(h.frames.size).toBe(1)
+  expect(h.saved).not.toHaveBeenCalled()
+  h.frame()
+  expect(h.result.current.layout).toEqual(resizeDockSplit(initial, '', 0.4))
+  expect(h.saved).not.toHaveBeenCalled()
+  h.pointer('pointermove', 420)
+  h.pointer('pointerup', 470)
+  expect(measureDockLayout(h.result.current.layout, visible).panels.projects!.width).toBeCloseTo(0.47)
+  expect(h.saved).toHaveBeenCalledTimes(1)
+  expect(readDockLayout()).toEqual(h.result.current.layout)
+  expect(h.frames.size).toBe(0)
+  expect(document.body).not.toHaveClass('pion-resizing-panels')
+  act(() => vi.advanceTimersByTime(1000))
+  expect(h.saved).toHaveBeenCalledTimes(1)
+})
+
+it('flushes the last captured coordinates on Escape and rejects the retired frame', () => {
+  const h = resizeFixture()
+  const initial = h.result.current.layout
+  h.begin()
+  h.pointer('pointermove', 400)
+  const late = [...h.frames.values()][0]
+  act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })))
+  const settled = h.result.current.layout
+  expect(settled).toEqual(resizeDockSplit(initial, '', 0.4))
+  expect(readDockLayout()).toEqual(settled)
+  expect(h.saved).toHaveBeenCalledTimes(1)
+  expect(h.frames.size).toBe(0)
+  // Drain JSDOM's 0ms storage event; a leaked 250ms dock save must remain visible.
+  act(() => vi.advanceTimersByTime(0))
+  expect(vi.getTimerCount()).toBe(0)
+  expect(document.body).not.toHaveClass('pion-resizing-panels')
+  act(() => late(0))
+  h.pointer('pointermove', 600)
+  expect(h.result.current.layout).toBe(settled)
+})
+
+it('uses the nested span and last captured move when pointercancel has zero coordinates', () => {
+  const h = resizeFixture()
+  h.begin('10', 0, 560)
+  h.pointer('pointermove', 0, 640)
+  h.pointer('pointercancel', 0, 0)
+  expect(measureDockLayout(h.result.current.layout, visible).panels.chat!.height).toBeCloseTo(0.8)
+  expect(readDockLayout()).toEqual(h.result.current.layout)
+  expect(h.frames.size).toBe(0)
+  expect(document.body).not.toHaveClass('pion-resizing-panels')
+})
+
+it.each(['reset', 'move'] as const)('retires a queued resize before %s and rejects its late callback during a new drag', (operation) => {
+  const h = resizeFixture()
+  h.begin()
+  h.pointer('pointermove', 400)
+  const late = [...h.frames.values()][0]
+  act(() => operation === 'reset' ? h.result.current.reset() : h.result.current.movePanel('terminal', 'review', 'right'))
+  const replacement = h.result.current.layout
+  h.begin()
+  h.pointer('pointermove', 300)
+  act(() => late(0))
+  expect(h.result.current.layout).toBe(replacement)
+  h.frame()
+  expect(h.result.current.layout).toEqual(resizeDockSplit(replacement, '', (replacement.root as { ratio: number }).ratio + 0.1))
+  h.pointer('pointercancel', 0)
+  expect(readDockLayout()).toEqual(h.result.current.layout)
+})
+
+it('bounds the save tail during repeated keyboard input and skips unchanged clamped drag frames', () => {
+  const h = resizeFixture()
+  const resize = h.result.current.dividerProps(h.result.current.dividers[0]).onKeyDown
+  const key = { key: 'ArrowRight', preventDefault: vi.fn() } as unknown as ReactKeyboardEvent<HTMLDivElement>
+  act(() => { resize(key); resize(key); vi.advanceTimersByTime(200); resize(key) })
+  expect(h.saved).not.toHaveBeenCalled()
+  act(() => vi.advanceTimersByTime(50))
+  expect(h.saved).toHaveBeenCalledTimes(1)
+  expect(measureDockLayout(readDockLayout(), visible).panels.projects!.width).toBeCloseTo(0.29)
+  h.begin()
+  h.pointer('pointermove', 2000)
+  h.frame()
+  act(() => vi.advanceTimersByTime(250))
+  const clamped = h.result.current.layout
+  expect(measureDockLayout(clamped, visible).panels.projects!.width).toBeCloseTo(0.88)
+  h.pointer('pointermove', 3000)
+  h.frame()
+  expect(h.result.current.layout).toBe(clamped)
+  h.pointer('pointercancel', 0)
+  act(() => vi.advanceTimersByTime(250))
+  expect(h.saved).toHaveBeenCalledTimes(2)
+})
+
+it.each(['pagehide', 'unmount'] as const)('flushes captured user coordinates on %s before the queued frame renders', (exit) => {
+  const h = resizeFixture()
+  const initial = h.result.current.layout
+  h.begin()
+  h.pointer('pointermove', 400)
+  expect(h.result.current.layout).toBe(initial)
+  if (exit === 'pagehide') act(() => window.dispatchEvent(new Event('pagehide')))
+  h.unmount()
+  expect(readDockLayout()).toEqual(resizeDockSplit(initial, '', 0.4))
+  expect(h.saved).toHaveBeenCalledTimes(1)
+  expect(h.frames.size).toBe(0)
+  act(() => vi.advanceTimersByTime(0))
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it('preserves a failed initial read through pagehide and unmount until an explicit reset', () => {
+  localStorage.setItem(DOCK_STORAGE_KEY, '{broken')
+  const h = resizeFixture()
+  act(() => window.dispatchEvent(new Event('pagehide')))
+  h.unmount()
+  expect(h.saved).not.toHaveBeenCalled()
+  expect(localStorage.getItem(DOCK_STORAGE_KEY)).toBe('{broken')
+  const reopened = renderHook(() => useDockLayout(visible))
+  act(() => reopened.result.current.reset())
+  reopened.unmount()
+  expect(h.saved).toHaveBeenCalledTimes(1)
+  expect(readDockLayout()).toEqual(defaultDockLayout())
+})
+
+it('preserves stored layout when the initial storage read throws', () => {
+  const stored = JSON.stringify(resizeDockSplit(defaultDockLayout(), '', 0.4))
+  localStorage.setItem(DOCK_STORAGE_KEY, stored)
+  vi.spyOn(Storage.prototype, 'getItem').mockImplementationOnce(() => { throw new Error('storage unavailable') })
+  const h = resizeFixture()
+  expect(h.result.current.layout).toEqual(defaultDockLayout())
+  act(() => window.dispatchEvent(new Event('pagehide')))
+  h.unmount()
+  expect(h.saved).not.toHaveBeenCalled()
+  expect(localStorage.getItem(DOCK_STORAGE_KEY)).toBe(stored)
 })
 
 it('moves six panels through the custom menu without remounting content, and persists layout', () => {

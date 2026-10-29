@@ -3,6 +3,7 @@ import type { ReactElement, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Archive, BarChart3, ShieldCheck, Users, X } from 'lucide-react'
 import { containModalTab, isTopmostModalDialog } from '../../utils/dialogFocus'
+import { ownsPionSelectKey } from '../common/PionSelect'
 
 export type OperationsPanelKind = 'verification' | 'agents' | 'stats'
 
@@ -34,6 +35,13 @@ export function OperationsModal({
     if (isTopmostModalDialog(dialog)) closeRef.current?.focus({ preventScroll: true })
     const onKeyDown = (event: KeyboardEvent): void => {
       if (!isTopmostModalDialog(dialog)) return
+      if (ownsPionSelectKey(event, dialog)) {
+        if (event.isComposing || event.keyCode === 229 || composingRef.current) {
+          event.stopImmediatePropagation()
+          if (kind === 'stats') event.preventDefault()
+        }
+        return
+      }
       if (event.key === 'Tab') {
         if (document.activeElement === dialog) {
           const focusable = dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')

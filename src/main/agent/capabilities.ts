@@ -1,47 +1,46 @@
-import {
-  DefaultResourceLoader,
-  SettingsManager,
-  getAgentDir
-} from '@earendil-works/pi-coding-agent'
 import type { AgentCapabilities, SkillInfo } from '../../shared/types'
-import { createPionNativeExtensions } from './native-extensions'
+import { PI_CORE_TOOL_NAMES, type CapabilityItem } from '../../shared/capability-settings'
+import { parseCapabilityItem } from '../../shared/capability-item'
+import { readCapabilityResources, type ReadCapabilityResourcesOptions } from '../capability-catalogue'
 
-/** Load skills and extension tools using the same Pi resource pipeline as AgentBridge. */
+export type LoadAgentCapabilitiesOptions = Pick<ReadCapabilityResourcesOptions, 'agentDir' | 'preferences' | 'runtimeItems'>
+
+/** Legacy display projection of the read-only catalogue. The bridge supplies
+ * desired preferences and authenticates runtimeItems against its current
+ * client/cwd/trust/generation; discovery never starts or reloads that runtime.
+ */
 export async function loadAgentCapabilities(
   cwd: string,
-  projectTrusted: boolean
+  projectTrusted: boolean,
+  options: LoadAgentCapabilitiesOptions
 ): Promise<AgentCapabilities> {
-  const agentDir = getAgentDir()
-  const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted })
-  // Discovery registers tools only: no bindExtensions/session_start, MCP configuration,
-  // credentials, transports or connection-derived service counts are read here.
-  const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, extensionFactories: createPionNativeExtensions() })
-  await resourceLoader.reload()
-
+  const runtime = new Map<string, CapabilityItem>()
+  for (const value of options.runtimeItems ?? []) {
+    const item = parseCapabilityItem(value)
+    if (item) runtime.set(item.id, item)
+  }
+  const resources = await readCapabilityResources({
+    cwd, projectTrusted, preferences: options.preferences, agentDir: options.agentDir, runtimeItems: [...runtime.values()]
+  })
+  const coreTools = new Set<string>(PI_CORE_TOOL_NAMES)
   const skills = new Map<string, SkillInfo>()
-  for (const skill of resourceLoader.getSkills().skills) {
-    if (!skills.has(skill.name)) {
-      skills.set(skill.name, {
-        name: skill.name,
-        description: skill.description,
-        source: skill.sourceInfo.source
+  const tools: AgentCapabilities['tools'] = []
+  for (const item of resources.items) {
+    if (!item.enabled || !item.available) continue
+    const registered = runtime.get(item.id)
+    // Desired ON may precede application; keep the actual runtime's OFF state.
+    if (registered && (!registered.enabled || !registered.available)) continue
+    if (item.kind === 'skill') {
+      if (!skills.has(item.name)) skills.set(item.name, {
+        name: item.name, description: item.description, source: item.id
+      })
+    } else if ((item.kind === 'tool' || item.kind === 'subagent') && !coreTools.has(item.name)) {
+      // Fixed catalogue slots describe preferences, not actual registrations.
+      // Only the caller's verified runtime can provide dynamic tool metadata.
+      if (registered) tools.push({
+        name: registered.name, label: registered.label, description: registered.description, source: registered.id
       })
     }
   }
-
-  const tools = new Map<string, AgentCapabilities['tools'][number]>()
-  for (const extension of resourceLoader.getExtensions().extensions) {
-    for (const { definition, sourceInfo } of extension.tools.values()) {
-      if (!tools.has(definition.name)) {
-        tools.set(definition.name, {
-          name: definition.name,
-          label: definition.label,
-          description: definition.description,
-          source: sourceInfo.source
-        })
-      }
-    }
-  }
-
-  return { skills: [...skills.values()], tools: [...tools.values()] }
+  return { skills: [...skills.values()], tools }
 }

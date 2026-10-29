@@ -13,6 +13,8 @@ import { readCapabilityResources } from '../capability-catalogue'
 import { applyCapabilityMcpRegistrations, capabilityMcpRegistrationItems, loadCapabilityMcpConfiguration } from './capability-mcp'
 import { capabilityResourceSettings, createCapabilityPolicy, immutableCapabilityPreferences } from './capability-policy'
 import { createImageGenerationTool } from './image-generation'
+import { createComputerUseAgentChannel, createComputerUseTools } from './computer-use'
+import { createComputerUseModelGate, type ComputerUseModelGate } from './computer-use-model-gate'
 import { createMcpStatusObserver, type McpStatusReadSlot } from './mcp-status-observer'
 import { createSubagentControl, createSubagentRunner } from './subagents'
 import { createSubagentSessionPublisher, type SubagentSessionPublisher } from './subagent-session-observer'
@@ -45,12 +47,14 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
   // keeps its slot until it really settles, without blocking ordinary startup.
   const mcpReadSlot: McpStatusReadSlot = { busy: false }
   let previousSubagentPublisher: SubagentSessionPublisher | undefined
+  let previousComputerUseGate: ComputerUseModelGate | undefined
   let previousNativeClose: ReturnType<typeof createPionNativeMcpCloseBarrier> | undefined
   let previousCapabilityPolicy: ReturnType<typeof createCapabilityPolicy> | undefined
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     // Each backend belongs to one project. Cross-project switches must go
     // through AgentBridge, which checks the target project's trust first.
     if (relative(root, resolve(cwd)) !== '' || relative(root, resolve(sessionManager.getCwd())) !== '') throw new Error('跨项目会话切换必须由 Pion 工作台发起')
+    previousComputerUseGate?.retire()
     previousSubagentPublisher?.halt()
     previousCapabilityPolicy?.retire()
     // SDK swallows lifecycle-handler errors. Check the previous native MCP's
@@ -66,6 +70,12 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
     let capabilityPolicy: ReturnType<typeof createCapabilityPolicy> | undefined
     const runtimeId = randomUUID()
     const timing = createConversationTiming(runtimeId)
+    const computerUseNonce = process.env.PION_COMPUTER_USE_AGENT_NONCE
+    let computerUseGate: ComputerUseModelGate
+    let computerUse: ReturnType<typeof createComputerUseTools>
+    const computerUseCurrent = () => previousComputerUseGate === computerUseGate && !!parent
+    const computerUseChannel = createComputerUseAgentChannel({ runtimeId, nonce: computerUseNonce,
+      createContext: () => parent?.extensionRunner?.createCommandContext(), isCurrent: computerUseCurrent })
     // SDK replacement fences every old display callback before creating the
     // next runtime. Capture the real RPC command context only at tool execute.
     const subagentPublisher = createSubagentSessionPublisher({
@@ -116,6 +126,32 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
     // Only the resource loader keeps the read-only resource-list facade. Model,
     // session and user settings retain their original public manager/receiver.
     services.settingsManager = settingsManager
+    // Install at the actual runtime boundary before AgentSession constructs its
+    // streamFn, ModelRegistry, compaction/summaries and idle cache warmer. Keep
+    // the gate even when development tools are disabled: restored screenshot
+    // history must not silently regain ordinary model egress.
+    // Keep only the compiled image tool's delayed Codex OAuth resolver outside
+    // the history facade. Its independent Images request carries no SDK history;
+    // ordinary model/summary/compaction services below must retain the gate.
+    const imageModelRuntime = services.modelRuntime
+    computerUseGate = createComputerUseModelGate(imageModelRuntime, {
+      runtimeId, sessionManager, settingsManager,
+      isCurrent: computerUseCurrent,
+      authorize: (model, signal) => computerUse.authorizeEgress(model, signal),
+      assertObservation: computerUseChannel.assertObservation,
+      watch: (model, signal) => {
+        const request = computerUseChannel.watch(model, signal)
+        return { watchRequestId: request.watchRequestId, isAcknowledged: request.isAcknowledged,
+          result: request.result.then(response => ({ scopeRevision: response.scopeRevision! })) }
+      },
+      unwatch: async (model, watchRequestId) => { await computerUseChannel('unwatch', model, { watchRequestId }) }
+    })
+    previousComputerUseGate = computerUseGate
+    services.modelRuntime = computerUseGate.models
+    computerUse = createComputerUseTools({ runtimeId, nonce: computerUseNonce,
+      enabled: process.env.PION_COMPUTER_USE_AGENT_DEVELOPMENT === '1' && !!computerUseNonce,
+      sessionManager, getSession: () => parent, getModels: () => services.modelRuntime,
+      channel: computerUseChannel, gate: computerUseGate, isCurrent: computerUseCurrent })
     const patterns = settingsManager.getEnabledModels()
     const scope = patterns?.length
       ? await resolveModelScopeWithDiagnostics(patterns, services.modelRuntime, { signal: AbortSignal.timeout(15_000) })
@@ -127,10 +163,10 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
     const selected = fresh ? preferred ?? scope.scopedModels[0] : undefined
     const customTools = [createAskUserTool(), subagents.tool, createImageGenerationTool({
       cwd,
-      // Capture this runtime's services, not a mutable active-session/global
-      // credential store. Refresh only after SDK tool permission gates.
-      getAuth: (overrides) => services.modelRuntime.getAuth('openai-codex', overrides)
-    })]
+      // Resolve only this backend's OAuth after the tool's existing permission
+      // and input gates; do not expose the raw runtime to SDK/extensions.
+      getAuth: (overrides) => imageModelRuntime.getAuth('openai-codex', overrides)
+    }), ...computerUse.tools]
     const toolOptions = capabilityPolicy?.initialize(customTools, defaultTools,
       () => services.resourceLoader.getSkills().skills)
     const created = await createAgentSessionFromServices({
@@ -146,6 +182,7 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
     parent = created.session
     models = services.modelRuntime
     timing.attach(parent)
+    computerUse.attach(parent)
     return { ...created, services, diagnostics: [...services.diagnostics, ...scope.diagnostics] }
   }
   return createAgentSessionRuntime(createRuntime, { cwd: root, agentDir, sessionManager })

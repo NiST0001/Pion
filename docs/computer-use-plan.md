@@ -1,16 +1,30 @@
 # Pion ComputerUse 自研规划
 
-> 状态：总体模型闭环/输入仍是提案；**Wayland 阶段 1 手动本地观察已有源码、编译与 pure/mock 验证，未实机验收**。
-> 当前实现见 [实施说明](computer-use-implementation.md)。已获源码、Rust 开发依赖/编译、类型及模拟回归授权；未获真实 GUI/截图、输入、模型外发联调、Pion 安装或发布授权。
+> 状态：总体控制闭环未交付，用户已另行明确批准 EGL/DMA-BUF route，默认仍 CPU。**两轮旧 unknown marker 各自独立维护退役，不补旧 stopped/released；#10 核心真实观察、owner 文档/来源 Closed 撤权、多实例与 normal release 已完成。** 同 capture-only Input0/Agent0/DMA1：scope5 一次原 PNG/独立预览/同帧四色及正常 Stop 至 scope6，scope7 同账户第二进程 before-open 拒绝且不干扰 A，主文档真实 reload 至 scope8，scope9 关闭自建 target 触发真实 SessionClosed 先于自有 client 断连并自动收尾至 scope10。两种撤权后均 released/pendingfalse，直接 IPC capture 被拒绝且状态/预算不变；Portal 独立按钮未单独点击，不混成手动 Stop/伪造事件。图片外发、SDK 图留存、模型调用与键鼠仍零，不是全功能可用/已安装发布。
+> 当前实现及证据见 [实施说明](computer-use-implementation.md)。总体授权与单独 GPU 路线批准不代替用户选择真实 Portal 来源、独立风险许可和执行 gate；不走 VM、不复制凭据、不安装/发布。#22 GPU 源码/fake/定向 types/build 已完成，完整项目 types 最近一次被用户并行 capability 等范围外错误阻塞，不计通过；#10 核心实机验收完成；#8 真实模型接线验收进行中，认证方案待用户选择、尚未登录/请求/交图；#21 未完成；#23 无 heartbeat 静态来源 fresh frame pending/尚未执行。带 3 px CSS heartbeat 的单帧不外推静态无 damage、所有缩放/GPU/应用；source/fake/mock/定向 types/build 与实机/网络证据分层，本次仅文档/静态 diff，未重跑检查。
 > 原始规划源码核对基线为 `488af9d`；以下总体架构与候选 API 不能当当前功能清单。实际模块与限制以实施说明/源码为准。
 
 ## 已确认的阶段决定
 
 - 首个平台为 **Linux Wayland**；保持 ScreenCast + PipeWire 持续用户选定窗口观察，不以单次 Screenshot/整屏捕获替代。
-- 用户选择未来截图可发送当前模型并随 SDK 会话留存；这是设计决定，不表示本轮已上传、写入历史或授权真实模型联调。历史再次外发/撤回协议仍须在模型阶段定案。
-- 先交付独立手动本地观察：本次捕获许可、原图预算与独立缩略图、停止隔离、typed IPC/设置页；**当前没有 SDK 工具或键鼠输入**。
-- 实际 Portal/窗口像素/撤权/停止须另获实机许可；跨进程租约与未知重启隔离尚未实现，不能以重启或编译证明旧资源已结束。模型闭环及输入开放先满足这些前置。
+- 截图采用用户已选择的 SDK 会话留存路线；每次 observe 独立审批捕获/精确模型外发/留存，后续 root run 只可独立审批已有历史图 egress，不包含新 capture/control。恢复/fork/import 来源未知仍拒绝，撤权不删除 SDK 历史或追回已发内容；源码与合成回归不等于真实上传已验收。
+- 手动本地观察仍为默认入口；Agent 工具另需非打包开发开关 `PION_COMPUTER_USE_AGENT_DEVELOPMENT=1`，observe 当前仅窗口，act 无可信 focus/禁止目标/物理接管 guard 必须 fail-closed。执行层守真实 factory/client/root/run/session/document 来源、deny/plan/YOLO/显式工具子集与嵌套/子代理隔离，不注册即代表关闭而非已实现控制闭环。
+- 模型图只准实际 physical `openai-codex / openai-codex-responses` 且显式 SSE，PNG ≤2000/边、base64 严格 <4.5 MiB、去 metadata 并保私有坐标；UI 保持 512/96 KiB。交图前持久 taint，真 appendMessage 后核实际条目再 retained ACK；普通 toolResult 无 entry_appended、message_end 不算落盘。taint 后 SDK modelRuntime facade 内实际 provider 请求/重试及自动模型/getAuth（含摘要/压缩）先 gate，显式 login 不挡；真 stream/auth 收口 finally 等相关 unwatch ACK，不把 extension 抛错/TTL/取消当终止。
+- 用户同意以所属 Portal API 确认加全部 Pion 本地实际收尾为本实例停止边界，不要求独立服务内部全资源销毁。独占 Unix D-Bus 双向断连、关联 closeReceipt 和 PipeWire/watcher/进程/stdio/请求/解码/FS 全收口已让后续普通失败真实 released，不把整机重启作常规失败恢复。两轮旧 unknown 各自经 prepare→完整重启→verify→单独批准 finish 独立归档退役，不再 held/prepared、也不补造旧 stopped/released；普通状态/Stop 无 clear 路由，跨进程崩溃恢复仍未完成，见 [受控维护](computer-use-maintenance.md)。
+- 此前用户亲选 SAFE TARGET 后实际 Portal CreateSession、SelectSources、Start/source_type=2 与 OpenPipeWireRemote 成功，后续 CPU 流 no input formats/EPIPE，正常 helper/FD/FS 收尾、actualPending=false。对应公开 niri `8ed0da4` 的 `pw_utils::make_video_params` 强制 VideoModifier MANDATORY、缺 modifier 停止且无 MemFd 路线，与实测吻合；VARIABLE_FPS 仅 timing 放行，非解决该阻断。早期 niri focus-window 只辅助用户看见另一 workspace 的 chooser，不改配置/替选源/成为依赖。有限 stage trace 默认关闭、不改 PCU1/UI 四槽码或透传 raw stderr/标题/URI；120 秒仅 Start chooser Response，connect/Create/Select 仍 30 秒。
+- 最新隔离 profile `app-gpu2` 的 inputDevelopmentEnabled=false、dmaBufDevelopmentEnabled=true、Agent 开关为 0，未启动模型。用户再次亲选 SAFE TARGET 后，官方 SPA filter/fixate 的 EnumFormat body ID/ChoiceNone 备用尾部兼容修复已实际到达 GpuFormatAccepted→MemoryParamsAccepted→Streaming→StreamReady；仅一次 capture 取得原尺寸 PNG 与独立有界 UI 预览，原图未进 renderer/工具日志/文件。renderer 对同一预览做已知四色白名单布尔检测，确认四色、左右/上下顺序及非垂直倒置；首次比例采样落错点不改 GPU 像素/不裁剪/不重拍，目标 CSS heartbeat 只保障本轮新帧。随后明确 Stop，GPU/PW/native/进程/stdio/请求/解码/FS 实际门全过，stopped/released、actualPending=false、许可全撤、diagnostics 为空；这是本机一轮观察成功，非全桌面停止或独立 driver 硬件内部全毁。数值与同帧采样限制见实施记录。
+- 同 capture-only Input0/Agent0/DMA1 后续已完成：scope7 app-cross1 同账户第二进程 before-open 拒绝，B Stop 不触及仍 ready/consented 的 A；A 主文档真实 reload 至 scope8 released/pendingfalse；scope9 用户重选 SAFE TARGET 后关闭自建 target，真实 SessionClosed 先于自有 client 断连，自动收尾至 scope10 released/pendingfalse/captures0。两次撤权后直接 IPC capture 均被后端拒绝且状态/预算不变，不新增 PNG；Portal 独立按钮未另点，真实来源 Closed 不混成手动 Stop 或伪造事件。详见实施记录。
+- 用户已**另行明确批准 EGL/DMA-BUF route**。默认 CPU 不放开 Modifier/DMA；仅非 packaged 精确 `PION_COMPUTER_USE_DMABUF_DEVELOPMENT=1` 开启，status 可选 dmaBufDevelopmentEnabled 仅纯配置/缺失 false，不代替硬件能力或许可。固定 soname lazy dlopen，构造/getState/hello 不初始化 GPU；获准来源后 PW worker 单线程实际 formats/modifiers EGL readback。只报实际 modifier、等 DONT_FIXATE 具体化，限定 packed/≤4 planes/尺寸/stride/offset/预算，仍只选中窗口/独立选择显示器的 remote buffer，不缩放裁剪原图、不改 niri、不走 X11/VM、不自动外发。native close→optional input→optional accounting→optional DMA 八组合、DMA flag 严格最后，按需 hello dmaBufReadbackVersion:1，旧组合不增字段，缺 feature 在 open/Portal/GPU 前失败，无 fallback/restart。
+- 独立审阅 P1 已源码修复：GL/EGL context loss/同步未知粘性，不被后来 NO_ERROR/成功 destroy 清除；完成证明与句柄清理分开，同步真完成才返 PW buffer，GPU close 先于 PW teardown。未知时实际 worker park 并持 buffer、Stream/Core/FD、GPU/readback 内存，不正常退出/clean ACK/release/自动重试；普通 unsupported 且资源正面收口可正常失败释放，现有 join/process/stdio/account/FS 门全保。成功 API 仅本实例受信驱动的软件边界，不证明独立 driver/compositor 硬件内部全毁。niri 精确 opaque 1/1/0 长度非 CPU mmap 长度，bounded raster/EGL 验证不放宽；实际 n_datas==num_planes，不猜四槽 unused 或丢 slot。最新单帧 buffer 导入/读回、完整 PNG 及本地预览已经实机执行；source fence/合成四色或该单帧结果均不等于全局坐标、所有 driver、静态无 damage、普遍兼容/性能/失效验收。
+- 用户选择当前真实桌面、不走 VM；只读 registry 已确认通用 virtual keyboard v1 / virtual pointer v2，Portal RemoteDesktop 设备数 0 不等于没有输入接口。VM 未启动、下载停止、暂存保留。输入另需 `PION_COMPUTER_USE_INPUT_DEVELOPMENT=1`、独立 display/control、真实唯一几何/拓扑与私有单帧资格、成对释放/实际 join，不是 RemoteDesktop grant 或窗口沙箱；当前仅有上述一次本地捕获，模型/SDK 图留存/输入仍未实测。
 
+| 原生目标 | 当前证据与剩余门 |
+| --- | --- |
+| #22 EGL/DMA-BUF 源码 | 用户已单独明确批准路线；GPU 源码/fake/定向 types/build 已完成，P1 粘性完成未知/真实 park 已源码修复；完整项目 types 仍有用户并行 capability 等范围外错误，未擅改、不计通过；这些软件证据本身非 buffer/像素验收 |
+| #8 模型/SDK | 进行中：真实模型接线验收；已有 taint/retained/egress/request gate 源码/合成回归，认证方案待用户选择，尚未登录/请求/交图，真实留存/历史 egress 未验收 |
+| #10 真实窗口观察 | 核心实机验收完成：一次原 PNG/独立预览/同帧四色方向、normal Stop/release、同账户第二进程 before-open 拒绝且不干扰 A、owner 主文档真实 reload 与来源 SessionClosed 撤权及撤权后 IPC 拒绝 |
+| #21 真实输入 | 未完成；源码默认关闭，global focus/禁止目标/physical takeover guard 与实际输入效果未验收，不开放 Agent 自动控制 |
+| #23 静态 fresh frame | pending，尚未执行：无 heartbeat 静态来源；已有 3 px CSS heartbeat 窗口通过不外推静态无 damage、所有缩放/GPU/应用 |
 
 ## 1. 目标与推荐路线
 
@@ -22,7 +36,7 @@
 - 优先结构化单步动作，而非模型生成任意 Python/JavaScript 后在桌面运行。
 - 主进程统一拥有桌面；SDK 子进程只能通过有界私有通道请求工具执行。
 - 首版只支持一个经过实机验收的平台后端；跨平台不能用统一接口名冒充已完成。
-- 推荐先做真实本地桌面，但开发和验收只用专门的测试桌面/临时应用，不操作用户日常账户。此选择仍需用户确认，不构成实际桌面访问授权。
+- 用户已选择当前真实本地桌面、拒绝 VM；开发验收仅用其明确手选的临时安全目标，不扩展到日常应用、凭据或高风险事务。总体授权不替代实际来源选择及每项执行准入。
 
 ## 2. Codex 参考：借鉴什么、不复制什么
 
@@ -50,7 +64,7 @@
 
 1. 默认关闭；用户从 Pion 开启并选择目标应用/窗口，查看捕获与控制能力。
 2. 明确批准本地截图、向当前模型发送截图及其会话留存；控制另行批准。
-3. 单个受支持桌面、单个目标顶层窗口；不自动跨应用扩权。
+3. 单个受支持桌面；默认单窗口观察。新增显式单 monitor 捕获及全局键鼠的开发原型需独立确认，不自动扩权，也不能发布成窗口限定输入；可信禁止目标/用户接管的执行门尚需完成。
 4. 模型工具：观察、点击、有限键盘组合、文本输入、有限滚动。一次调用最多一个动作，动作后自动回传新观察。
 5. 可见状态：目标、占用会话、最近观察、正在执行的动作、剩余预算、暂停与立即停止。
 6. 用户接管、目标改变、系统权限撤回、执行结果未知时停止自动操作；恢复须用户显式同意并重新观察。
@@ -64,7 +78,7 @@
 | 平台 | 观察与输入方向 | 发布前必须证明 |
 | --- | --- | --- |
 | Linux X11 | 自写窗口查询/捕获及 X11/XTest 输入 helper | 窗口归属、遮挡/焦点、输入释放、缩放/装饰坐标、无提权；应用声明的 PID/标题不是恶意程序认证 |
-| Linux Wayland | ScreenCast/RemoteDesktop portal、PipeWire 与对应 compositor 能力 | 真实用户选择、授权撤回、可用输入范围、停止确认；截图裁剪不等于 portal 输入被限制在窗口 |
+| Linux Wayland | 默认 ScreenCast/PipeWire CPU，另行批准的 EGL/DMA-BUF 仅显式开发模式；控制另用通用 Wayland virtual keyboard/pointer，不冒充 RemoteDesktop grant | 真实用户选择、授权撤回、可用输入范围、停止确认；截图裁剪不等于 portal 输入被限制在窗口 |
 | Windows | 系统捕获、窗口身份与前台输入 API | DPI awareness、多屏负坐标、进程权限差异；不绕 UAC/安全桌面，不承诺后台输入 |
 | macOS | ScreenCaptureKit/对应系统捕获与 Accessibility/输入 API | TCC 归属、Retina、权限撤回、真实停止；不实现锁屏自动解锁 |
 
@@ -87,25 +101,30 @@ ComputerUseService（主进程：授权、桌面租约、预算、frame、状态
   选择/批准/预览/暂停/停止；不直接调用 OS，不向网页 guest 暴露控制接口
 ```
 
-### 4.1 总体候选模块（部分已实现观察子集）
+### 4.1 已有源码与候选模块
 
-`shared/computer-use.ts`、观察 service/driver/helper-client、local IPC/UI 及 native helper 已创建；其职责仅限实施说明的本地观察。下表中的 policy/frames/Agent 工具与输入映射仍为候选，不得从路径或类型名称推断已开放。
+手动观察、同账户协调、显式 native gpu_readback、input-policy/native virtual_input 及开发 Agent 工具/模型 gate 已有源码；#22 GPU 源码/fake/定向 types/build 已完成，完整项目 types 不计通过，开发开关不等于实际验收或发布。`policy.ts / frames.ts` 仍是拆分候选，现有准入/模型投影分布在 service/input-policy/Agent bridge。实际职责以 [实施说明](computer-use-implementation.md) 和 map 为准。
 
-| 候选路径 | 职责 |
+| 路径 | 职责 / 状态 |
 | --- | --- |
 | `src/shared/computer-use.ts` | 固定动作、frame/receipt、能力、状态和显示白名单契约 |
 | `src/main/computer-use/service.ts` | 全应用唯一服务，跨 backend 桌面租约、实际 pending、授权与停止 |
-| `src/main/computer-use/policy.ts` | 目标与动作准入、禁止目标、deny 与用户授权复核 |
-| `src/main/computer-use/frames.ts` | 有界图像、坐标映射、frame 有效性与留存投影 |
+| `src/main/computer-use/coordination.ts` | 同系统账户固定全桌面 marker，持久 claim/真实 release、未知拒绝；后续新租约失败/观察/撤权均实机释放，同账户第二进程 before-open 拒绝且不干扰 A 已通过，崩溃恢复未验收；旧两轮另经独立维护退役，无普通 clear 入口 |
+| `src/main/computer-use/policy.ts`（候选） | 后续目标与动作准入拆分；可信 focus/禁止目标/接管 guard 仍缺失，当前 Agent act 必须拒绝 |
+| `src/main/computer-use/frames.ts`（候选） | 后续帧职责拆分；当前有界模型图/私有坐标映射在 Agent bridge，native 单用 fence 在 input-policy |
 | `src/main/computer-use/helper-client.ts` | 自写 helper 的握手、请求身份、进程生命周期和隔离 |
-| `src/main/agent/computer-use.ts` | SDK 自定义工具工厂、捕获所属 runtime、工具结果投影 |
+| `src/shared/computer-use-agent.ts` | 有界私有协议、factory source 与通用 UI 原图剥离 |
+| `src/main/agent/computer-use.ts` | 实际 SDK root customTools/精确 physical model、交图前 taint、真 append/条目核验后 retained ACK |
+| `src/main/agent/computer-use-bridge.ts` | Main 真实来源/独立审批、共享服务窗口 observe、模型图/坐标与历史留存/跨 run egress/watch |
+| `src/main/agent/computer-use-model-gate.ts` | 真实 ModelRuntime 的 taint/physical Codex/显式 SSE、自动 getAuth 与每请求/重试出口 gate，实际收口后相关 unwatch |
 | `src/main/ipc/computer-use.ts` | 仅显式注册 typed IPC，不创建服务/接管生命周期 |
 | `src/renderer/src/features/computer-use/` | 目标选择、授权说明、运行状态、预览与停止控件 |
 | `native/computer-use/` | 自写平台 helper；固定协议而非任意代码执行端点 |
+| `native/computer-use/src/gpu_readback.rs`、`capture.rs` | 默认关闭的 EGL/DMA-BUF readback、实际 modifier/有界 plane 准入、粘性完成/句柄分证及真实 worker park；fake 回归不初始化 GPU |
 
 ### 4.2 现有文件联查
 
-- `src/main/agent/runtime-host.ts`：同一 runtime 的 `customTools` 工厂；不新建模型/认证服务。
+- `src/main/agent/runtime-host.ts`：同一 runtime 的 `customTools` 工厂；SDK modelRuntime facade 继续保护自动模型/getAuth/摘要/压缩，所属 factory 仅为内置生图在 facade 前私有捕获原 ModelRuntime，工具自身检查通过后才延迟解析 Codex OAuth，不新建模型/认证服务或向扩展暴露原 runtime。
 - `src/main/agent/agent-bridge.ts`、`src/main/agent/types.ts`、`src/main/agent/backend-events.ts`：可信 backend/client/run 绑定、停止与替换、完成监听器；桌面 pending 不可被 SDK idle/stop 冒充收口。
 - `src/main/tool-permissions.ts`、`src/main/agent/tool-permission-request.ts`、`src/shared/types.ts`、权限 UI：现有类别只有 read/write/shell/network/external，需完整设计桌面特有的捕获、外发、控制授权，不能只增加名称就绕过旧 deny。
 - `src/main/agent/native-extensions.ts`、`src/main/agent/plan-mode.ts`、`src/main/agent/subagents.ts`、`src/main/agent/capabilities.ts`：展示与执行过滤一致；显式工具子集持续生效；计划模式不捕获或控制桌面；子代理默认不继承 ComputerUse。
@@ -115,7 +134,7 @@ ComputerUseService（主进程：授权、桌面租约、预算、frame、状态
 
 ## 5. 工具与协议草案
 
-工具名字建议为 `pion_computer_observe` 和 `pion_computer_act`；用户开启、选择目标及授予控制租约不由模型工具决定。停止主要是主进程用户控制，不需要模型同意。
+`pion_computer_observe / pion_computer_act` 已有开发 root 工具源码，不等于模型/控制实机通过。用户选择真实来源及授予控制租约不由工具参数决定；observe 只请求用户 Portal 选窗口、捕获及已批准模型留存，act 不自动重观察或扩展到 display。下列完整闭环/receipt 仍含后续设计；停止是主进程用户控制，不需要模型同意。
 
 - `observe`：无任意路径/URL/模型 ID；从当前已批准的 target lease 捕获，返回 frameId、图片尺寸、坐标约定与一张模型图像。
 - `act`：引用明确 frameId；动作判别联合只能是 click、key、type、scroll。坐标都是**模型实际收到图片中的像素**，不是 OS 像素或 0–1 比例；未知字段与动作拒绝。
@@ -144,7 +163,9 @@ frame 记录截图区域、捕获像素、模型图像像素、裁剪/缩放变�
 
 租约覆盖“观察→模型思考→审批→动作→验证”，不是只锁一次 click。一个 Pion 实例的所有项目/backend 竞争同一个登录桌面；MVP 忙时拒绝新 ComputerUse 请求，不自动排队交棒。普通聊天/编码工具可以继续，不能利用它们继承桌面权限。
 
-不同 Pion 进程的协调要单独验证：建议 helper 配合 OS 生命周期锁，不能仅放一个可覆盖的锁文件；未知进程状态禁止强抢。外部程序和用户仍能操作桌面，该锁不是系统级独占或 OS 沙箱。锁可获得/进程退出也不证明桌面清洁；阶段 0 必须定义跨进程未知状态及重启后的恢复门，未确认输入状态前不可重新控制，不以重建进程清除安全问题。
+当前 capture-only 已编写同系统账户协作 marker：获准 Start 才从系统账户 UID/home 取得固定 `<系统账户home>/.pion-computer-use-coordination-v1/capture.marker`，不按环境 HOME/XDG、userData/profile 或不同桌面分锁。私有 0700 目录、0600 exclusive/no-follow marker 的常量 payload、marker/目录/home sync 及全部 FD close 成功后才打开 driver；任何已有 marker 均拒绝，不按 PID/年龄/超时/重启强抢。实际 driver/Portal/PipeWire/进程/stdio、帧记账、解码和 FS 收口后，才以私有对象 receipt/inode 复查 unlink/sync/close；释放失败隔离且不补建 marker（unlink 后失败可能已无 pathname），普通状态/Stop 不提供 clear 路由；独立开发维护 CLI 已有源码与模拟回归，不补造旧 receipt，真实操作分步另行确认；prepare、重启后 verify 和另行获准 finish 已成功，不把维护退役当作旧普通停止成功。
+
+既有源码有类型/定向模拟/纯与匿名 socket 回归记录；此前 CPU 协商失败和 GPU Ready 超时均已正常释放；最新 GPU 已在兼容修复及用户再次选源后实际 Ready，并完成一次原尺寸 PNG/独立预览与明确 Stop，持所属独占客户端断连和全部本地结束凭证 stopped/released、actualPending=false、许可全撤。后续 scope7 同账户第二进程 before-open 拒绝，B Stop 不干扰 A；主文档真实 reload 至 scope8、关闭自建来源窗口触发实际 SessionClosed（先于自有 client 断连）至 scope10，均自动正常 release/pendingfalse，后端拒绝再 capture 且状态/预算不变。Portal 独立按钮未另点，不混成手动 Stop/伪造事件；这不是全桌面停止、独立 driver 内部硬件全毁、完整崩溃恢复或输入生命周期保证。两轮旧租约已分别独立维护退役，不能据新协议追溯补证。foreign blocked 只证明本实例无资源，不证明他者 alive/全桌面停止；not-checked/旧缺字段也非 held/释放证据。外部程序与用户仍可操作桌面，marker/receipt 不是认证、系统级独占或 OS 沙箱；恶意同 UID、账户 home 变化、坏 FS/TOCTOU、旧版本/helper 与非合作程序不在覆盖范围。宿主崩溃持久恢复、输入异常释放及真实验收仍待完成；未确认输入状态前不得重新控制，不以重建进程清问题。
 
 ## 6. 授权、安全与停止
 
@@ -190,22 +211,23 @@ helper 维护自己注入的按键/按钮状态，固定事务在 finally 释放
 
 当前通用 UI/MCP 预览限制为 4 张、512 px/边、96 KiB/张；不应为 ComputerUse 放宽全局限制。模型定位图片与 UI 预览必须分开预算和投影，低清缩略图不是定位依据。
 
-建议每次只返回一张有界模型图像，超限则按明确变换缩放；需要更清晰的局部观察可后续增加 crop，但仍在同一批准目标内。仅当前精确模型声明 image input 时可启用；catalog 能力不是服务可用/效果证明。
+当前开发工具每次只返回一张模型 PNG：Main 从完整原图生成 ≤2000/边、base64 严格 <4.5 MiB 的有界投影，校验后去 metadata 并保私有原图坐标映射；UI 的 512px 预览不是定位图。不增加 crop，精确模型 image 能力不证明远端效果；只接受实际 physical Codex/openai-codex-responses 与显式 SSE，不换模型/transport 或付费回退。
 
-**SDK 通常会将 toolResult 图像写入会话，并在后续轮次/恢复时用于模型上下文。不能先宣称“仅内存”。** 两条可选路线必须在阶段 0 定案：
+**已选择 SDK 留存路线，不能宣称“仅内存”。** 工具交图前持久 taint；普通 SDK toolResult 无 entry_appended，message_end 又先于 appendMessage，故 factory 只在真 appendMessage 成功并核实际 session/分支/root/image hash 后发 retained 私有请求、等 Main ACK。截图预算不变，通用 live/wire/history 剥原图与私有 source，不造 entry ID、不删历史或改变模型记录。无留存附件路线未实现，若要求不留存须先另设计协议。
 
-1. MVP 明确采用现有 SDK 留存：用户批准截图上传与写入会话；截图数量/字节受硬预算限制，wire/live/cache/export 对 UI 只发有界显示投影，保实际 SDK 消息身份。达到预算就停，不自动删旧历史、造 entryId 或截断模型原记录。
-2. 若用户要求不留截图：先设计并核实模型专用附件/历史重建协议，再实施；不能通过将工具图片替换为引用占位，静默改变当前和恢复后的模型上下文。
-
-撤回外发授权不能追回已经发送的数据或自动删除 SDK 历史。普通聊天、重试和会话恢复可能再次携带历史截图：阶段 0 必须确定授权范围与撤回后的请求阻断/用户选择机制，未解决不得宣称“关闭 ComputerUse 就停止所有截图外发”。不能静默替换历史图片或偷偷新建/切换会话来掩盖这一问题。
+撤权不追回已发数据或删除 SDK 历史。已有真实交图/留存 provenance 仅沿同一 live client/factory/session 跨 run；后续 root run 必须独立审批已有历史图 egress，不批准新 capture/control。恢复/fork/clone/import/未知 provenance 仍 fail-closed，暂不支持恢复后再授权；不得静默换图、新建/切换会话掩盖外发。
 
 默认不另外建截图目录/录像，不抓全屏再声称未捕获范围外内容；必须分清本地捕获、裁剪、向模型发送和实际持久化范围。若平台只能先整屏抓取，再裁剪，需明确说明并获得相应本地捕获同意，不能把裁剪当作 OS 捕获边界。生成图像尽量去除不必要 metadata，不承诺像素中自动抹除所有秘密。
+
+SDK extension runner 对 context / before_provider_request / before_provider_headers handler 异常会报告后继续，不能靠抛错作 fail-closed 出口。当前源码在 AgentSession/ModelRegistry/预热/压缩创建前装 SDK modelRuntime facade；taint 后其中每个真实 provider 请求、payload hook 后、每次 Codex fetch 重试及自动模型/getAuth（含摘要/压缩认证）先 gate，显式 login 不挡。经 facade 的未审计 provider-derived/deferred/image/classifier/虚拟路由拒绝；auth/stream 各有 watch，真 Promise/iterator/result 收口 finally 才等精确 unwatch ACK，未知/超时 poison，不把 TTL/本地 input abort/终态事件当请求结束。这是本地源码与合成边界，不证明网络效果或收费停止。
+
+内置生图是独立 Images API 请求，不携 Cua 会话 history。所属 factory 在 facade 前私有捕获原 ModelRuntime，只向编译内置生图提供延迟 Codex OAuth 解析闭包；既有工具自身授权及参数/参考图/目标路径检查后才调用，不提前 auth、不迁移凭据、不走 API-key/付费 fallback，也不向任意 extension 暴露原 runtime。Cua taint 不以 blanket provider-only getAuth 永久禁用该工具；普通 SDK/扩展 getAuth 不获绕 gate 权限，显式 login 同原规则不拦。source/mock 回归已证明与 live taint 并存，不是实际网络兼容验收。
 
 用户可见历史需串查 `wire.ts`、live snapshot、分页、缓存、导出、工具详情、只读子会话。普通工具结果不带高分辨率 base64、任意路径/窗口诊断；模型原图与渲染缩略图共享可信 frame 关联但各自有界。显示不能被当作权限 receipt。
 
 ## 8. 预算与交互建议（待验证定值）
 
-建议首版：一次流程最多 40 个动作、10 分钟；单动作默认 5 秒期限。流程单调 deadline 从第一次获准捕获开始，覆盖观察、模型思考、审批与重观察；用户选择/初次 consent 有另一个有限等待期限，建议沿现有普通工具的 120 秒边界，不误用提问工具的 10 分钟设置，超时不授权。
+当前源码一次租约最多 40 个动作、10 分钟派发准入，单帧/捕获另有限额；这些不代表实际输入已验收。Portal 仅 Start chooser Response 给用户 120 秒，connect/CreateSession/SelectSources 等 RPC/Response 仍 30 秒；不扩大其他协议期限，不误用提问工具等待设置，超时不授权、不丢弃实际 pending。动作/模型往返的最终体验定值仍待真实验证。
 
 截图/frame 有独立有效期、捕获次数及累计字节/像素硬预算；40 个输入动作不是无限 observe 的许可。具体值在阶段 0 定案，有效期根据平台/模型往返测量确定，不能简单短 TTL 造成慢模型无限重拍；过期/失败重观察也计入总预算。期限或预算到达即禁止新派发，但真实 pending 仍持槽至确认收尾。
 
@@ -217,7 +239,7 @@ helper 维护自己注入的按键/按钮状态，固定事务在 finally 释放
 
 ## 9. 实施阶段与验收门
 
-以下是未来里程碑，不是当前已启动的实施任务；各阶段执行检查需另获授权。
+以下是交付验收门；观察/开发 Agent/输入已有部分源码，不能把整阶段视为完成。总体及单独 GPU 路线批准仍须逐项执行准入；#22 GPU 源码/fake/定向 types/build 已完成，完整项目 types 未通过；#10 核心真实观察、owner 文档/来源 Closed 撤权、多实例与 normal release 已完成；#8 真实模型接线验收进行中，尚未登录/请求/交图；#21 未完成，#23 无 heartbeat 静态 fresh frame 尚未执行。单帧/两种撤权实机与网络、source/fake/mock/定向 types/build 分开记证，不外推全路径或完整控制闭环。
 
 | 阶段 | 交付 | Go / No-go |
 | --- | --- | --- |
@@ -235,20 +257,19 @@ helper 维护自己注入的按键/按钮状态，固定事务在 finally 释放
 - 并发：A 的截图和模型等待仍占租约；B/backend 替换/第二进程不可抢；旧 close/late permission 不清新 owner；OS 状态未知持续隔离。
 - 停止：capture/input 挂起、helper crash、键入中 stop、按钮/快捷键、用户接管、权限撤回/锁屏、主窗口关闭；确认释放与未知路径，绝不把 timeout 当退出。
 - 图像：真实尺寸/裁剪/DPI/装饰、多屏负坐标、模型图与缩略图区别、历史分页与导出白名单、预算饱和、无视觉模型；不得把清晰度/能力快照当远端成功证明。
+- GPU：纯 fake 核实际 modifier/DONT_FIXATE、opaque DMA 长度、有界 raster、context loss 粘性及同步已证/句柄失败分支；完成未知必须持 buffer/PW/FD/GPU/readback 内存且无 clean ACK/release。另行真实四色/色序/行序、坐标、兼容/性能/撤权/失效验证，source fence、fake 或 build 不替代实机。
 - 副作用：已执行键入/点击的响应丢失 → 不重发；终端/Pion/授权框/提权/秘密任务拒绝；没有敏感检测把握时人工接管。
 - 兼容：原队列/提问/子代理/生图、信任、既有主题/可访问性、聊天 DOM/草稿/滚动、浏览器 guest 安全均不回归。
 - 真机：用外部可观察的 fixture 应用记录实际收到的输入与状态；不只断言“helper 返回 success”。自写 helper 未过真实停止验收不得开放输入。
 
 ## 10. 需确认的决定与下一步
 
-实施前需要确认：
+已确认 Linux Wayland 当前真实桌面（niri）、不走 VM、采用 SDK 留存、默认单窗口与显式独立 display/control；文本源码首版只接受可打印 ASCII，不冒称中文支持。禁止终端/生产 Pion/授权或凭据目标与高风险事务、默认本轮授权/子代理不继承仍是交付边界，不能用截图标题猜目标或普通确认覆盖。
 
-1. 首个平台：Linux X11、Wayland 具体 compositor，还是 Windows？
-2. 操作真实当前桌面还是专用桌面/VM？推荐先在专用测试环境开发。
-3. 首版是否必须完整中文输入？
-4. 截图允许随现有 SDK 会话留存，还是要求不留原图？后者需优先设计附件协议。
-5. 首版禁止终端/生产 Pion/秘密和高风险事务、默认仅本轮授权、子代理不继承的范围是否接受？
+#10 核心实机验收与 #22 GPU 源码/fake/定向 types/build 已完成，数值、scope5→10 与历史限制见实施说明。最近完整项目 types 被并行 capability 等范围外错误阻塞，未擅改、不计通过，本次未重跑；目标 types/native/mock/build 与真实效果分层。
 
-推荐下一步仅实施阶段 0 与阶段 1：先把身份、授权、图像与捕获证明清楚，再开放输入。不在本轮创建全部实现任务、安装依赖、测试收费兼容、提交/发布或自动启动功能。
+#8 正进行真实模型接线验收，尚未登录/请求/交图；**认证方案待用户选择**。SDK 公开 `ModelRuntime.create({authPath})` 支持独立认证源，但当前 RuntimeHost 未接。GUI userData 与 AgentDIR 隔离，实际 `SessionManager.create(root)` 仍在隔离 `AgentDIR/sessions/<encodedcwd>`；不声称 `SESSION_DIR` 环境变量已被宿主消费。隔离 GUI 正常 OAuth 登录仅为可选方案；原源复用需另行受控准入，refresh 会写回。不得 copy/symlink auth 或静默写原源，未获准新登录/复用，不提前认证/请求模型；选定方案后仍须真实执行 gate 才可验精确模型交图/SDK 留存及后续历史 egress。
+
+#23 pending：无 heartbeat 静态来源 fresh frame 尚未执行，带 3 px CSS heartbeat 的目标通过不扩大为静态无 damage、全局坐标或所有缩放/GPU/应用。#21 须先补 global focus/禁止目标/physical takeover guard 再验真实输入，不因开发开关/source fence 放开控制。跨进程崩溃恢复、真实输入/模型闭环和打包发布仍未完成，不称 full ComputerUse 可用/已安装，不自动安装、复制凭据、切 VM 或用付费模型回退。
 
 本规划不替代 [AGENTS.md](../AGENTS.md)、[现有功能协议](feature-contracts.md) 和 [开发验证规则](development.md)。实施时同步相关协议和地图，并分别报告源码、mock、typecheck、coverage、build、GUI、远端服务与安装的实际验证范围。

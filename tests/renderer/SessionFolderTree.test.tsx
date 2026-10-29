@@ -8,6 +8,7 @@ import type { SessionMeta } from '../../src/shared/types'
 import { SessionFolderTree } from '../../src/renderer/src/features/session/SessionFolderTree'
 import { SessionItems } from '../../src/renderer/src/features/session/SessionList'
 import { SESSION_DRAG_MIME } from '../../src/renderer/src/utils/sessionDrag'
+import { SESSION_FOLDER_DRAG_MIME } from '../../src/renderer/src/utils/sessionFolderDrag'
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 const cwd = '/project'
@@ -33,13 +34,13 @@ function organization(): SessionOrganization {
 function row(container: HTMLElement, path: string): HTMLElement {
   return [...container.querySelectorAll<HTMLElement>('[data-session-path]')].find((element) => element.dataset.sessionPath === path)!
 }
-function startDrag(source: HTMLElement) {
+function startDrag(source: HTMLElement, mime = SESSION_DRAG_MIME) {
   const values = new Map<string, string>()
   const dataTransfer = { get types() { return [...values.keys()] },
     getData: (type: string) => values.get(type) ?? '',
     setData: (type: string, value: string) => { values.set(type, value) }, effectAllowed: '', dropEffect: '' }
   fireEvent.dragStart(source, { dataTransfer })
-  expect(dataTransfer.types).toContain(SESSION_DRAG_MIME)
+  expect(dataTransfer.types).toContain(mime)
   return dataTransfer
 }
 
@@ -116,6 +117,41 @@ describe('SessionFolderTree organization projection', () => {
     expect(row(view.container, root.path)).toBe(rootRow)
     expect(itemProps.onReorder).not.toHaveBeenCalled()
     expect(itemProps.onSelect).not.toHaveBeenCalled()
+  })
+
+  it.each(['folder', 'session'] as const)('reuses ranked complete siblings after equivalent list refresh during a %s drag', async (kind) => {
+    const org = organization(); org.folders[1].collapsed = false
+    org.folders.push({ id: 'leaf', cwd, name: '叶目录', parentId: 'child', collapsed: true, order: 1 })
+    org.sessions[0].order = 0; org.sessions[1].order = 2
+    const itemProps = items(), change = vi.fn().mockResolvedValue(undefined)
+    const props = { cwd, organization: org, itemProps, onOrganizationChange: change }
+    const view = render(<SessionFolderTree {...props} />)
+    const first = row(view.container, a.path), second = row(view.container, b.path), rootRow = row(view.container, root.path)
+    const leaf = view.container.querySelector<HTMLElement>('[data-folder-id="leaf"]')!
+    const content = leaf.querySelector('.session-folder-content')!
+    const dataTransfer = startDrag(kind === 'folder' ? leaf.querySelector<HTMLElement>('.session-folder-toggle')! : second,
+      kind === 'folder' ? SESSION_FOLDER_DRAG_MIME : SESSION_DRAG_MIME)
+    view.rerender(<SessionFolderTree {...props} itemProps={{ ...itemProps,
+      sessions: itemProps.sessions.map((entry) => ({ ...entry, name: `更新 ${entry.id}`, preview: '更新预览', totalTokens: 100 })),
+      pendingDeletePaths: new Set() }} />)
+    expect(row(view.container, a.path)).toBe(first)
+    expect(leaf.querySelector('.session-folder-content')).toBe(content)
+    expect(content).toHaveAttribute('hidden')
+    expect(content).toHaveAttribute('inert')
+    await act(async () => { fireEvent.drop(first, { dataTransfer }) })
+    const patch: SessionOrganizationChange = { type: 'reorderItems', cwd, parentId: 'child', expectedRevision: org.revision,
+      items: kind === 'folder' ? [{ kind: 'folder', id: 'leaf' }, { kind: 'session', path: a.path }, { kind: 'session', path: b.path }]
+        : [{ kind: 'session', path: b.path }, { kind: 'session', path: a.path }, { kind: 'folder', id: 'leaf' }] }
+    expect(change).toHaveBeenCalledExactlyOnceWith(patch)
+    await act(async () => { fireEvent.drop(first, { dataTransfer }) })
+    expect(change).toHaveBeenCalledTimes(1)
+    view.rerender(<SessionFolderTree {...props} organization={applySessionOrganizationChange(org, patch)} />)
+    expect(row(view.container, a.path)).toBe(first)
+    expect(row(view.container, b.path)).toBe(second)
+    expect(row(view.container, root.path)).toBe(rootRow)
+    expect(view.container.querySelector('[data-folder-id="leaf"]')).toBe(leaf)
+    expect(leaf.querySelector('.session-folder-content')).toBe(content)
+    expect(itemProps.onReorder).not.toHaveBeenCalled()
   })
 
   it('preserves the reorder capability layout while respecting item-level reorder disablement', () => {

@@ -12,6 +12,7 @@ afterEach(() => {
   vi.resetModules()
 })
 
+const ownerError = '只允许所属主窗口的活主帧调用'
 const cwd = '/project/worktree'
 const snapshot: CapabilitySettingsSnapshot = {
   cwd, revision: 3, catalogueRevision: 'c'.repeat(64), items: [], notices: [],
@@ -35,7 +36,7 @@ function mainEvent() {
   }
 }
 
-function harness(withOwnerGetter = true) {
+function harness() {
   type Handler = Parameters<IpcMain['handle']>[1]
   const handlers = new Map<string, Handler>()
   const owner = { id: 41 as number | undefined }
@@ -47,7 +48,7 @@ function harness(withOwnerGetter = true) {
   registerAgentIpc({
     ipcMain: { handle: (channel, handler) => { handlers.set(channel, handler) } },
     bridge: bridge as unknown as AgentBridge, projects, pushProjects,
-    getMainWindowId: withOwnerGetter ? () => owner.id : undefined
+    getMainWindowId: () => owner.id
   })
   return {
     bridge, owner, projects, pushProjects,
@@ -71,8 +72,7 @@ describe('capability settings IPC', () => {
       expect(() => stub.mock.calls[0][1]()).not.toThrow()
       const promised = Promise.resolve(snapshot)
       stub.mockReturnValueOnce(promised)
-      expect(h.invoke(channel, event, input)).toBe(promised)
-      await expect(promised).resolves.toBe(snapshot)
+      await expect(h.invoke(channel, event, input)).resolves.toBe(snapshot)
       const error = new Error('capability settings rejected')
       stub.mockImplementationOnce(() => { throw error })
       expect(() => h.invoke(channel, event, input)).toThrow(error)
@@ -86,15 +86,15 @@ describe('capability settings IPC', () => {
   )
 
   it.each(routes)('%s rejects foreign, missing or dead owners and non-main frames before %s', (channel, method, input) => {
-    for (const kind of ['foreign-owner', 'missing-owner', 'missing-getter', 'iframe', 'missing-frame', 'detached', 'destroyed'] as const) {
-      const h = harness(kind !== 'missing-getter'), event = mainEvent()
+    for (const kind of ['foreign-owner', 'missing-owner', 'iframe', 'missing-frame', 'detached', 'destroyed'] as const) {
+      const h = harness(), event = mainEvent()
       if (kind === 'foreign-owner') event.sender.id = 73
       if (kind === 'missing-owner') h.owner.id = undefined
       if (kind === 'iframe') event.senderFrame = { detached: false }
       if (kind === 'missing-frame') event.senderFrame = null
       if (kind === 'detached') event.senderFrame!.detached = true
       if (kind === 'destroyed') event.sender.isDestroyed.mockReturnValue(true)
-      expect(() => h.invoke(channel, event, input)).toThrow('只允许所属主窗口管理工具与能力')
+      expect(() => h.invoke(channel, event, input)).toThrow(ownerError)
       expect(h.bridge[method]).not.toHaveBeenCalled()
       expect(h.bridge.withSessionOperation).not.toHaveBeenCalled()
       expect(h.bridge.start).not.toHaveBeenCalled()
@@ -102,7 +102,7 @@ describe('capability settings IPC', () => {
   })
 
   it.each(routes)('%s supplies %s with a live owner/frame fence for asynchronous work', async (channel, method, input) => {
-    for (const kind of ['owner', 'missing-owner', 'main-frame', 'sender-frame', 'detached', 'destroyed'] as const) {
+    for (const kind of ['owner', 'missing-owner', 'sender', 'main-frame', 'sender-frame', 'missing-frame', 'detached', 'destroyed'] as const) {
       const h = harness(), event = mainEvent()
       let finish!: () => void
       const pendingWork = new Promise<void>((resolve) => { finish = resolve })
@@ -115,13 +115,34 @@ describe('capability settings IPC', () => {
       expect(h.bridge[method]).toHaveBeenCalledExactlyOnceWith(input, expect.any(Function))
       if (kind === 'owner') h.owner.id = 73
       if (kind === 'missing-owner') h.owner.id = undefined
+      if (kind === 'sender') event.sender = { ...event.sender }
       if (kind === 'main-frame') event.sender.mainFrame = { detached: false }
       if (kind === 'sender-frame') event.senderFrame = { detached: false }
+      if (kind === 'missing-frame') event.senderFrame = null
       if (kind === 'detached') event.senderFrame!.detached = true
       if (kind === 'destroyed') event.sender.isDestroyed.mockReturnValue(true)
       finish()
-      await expect(pending).rejects.toThrow('只允许所属主窗口管理工具与能力')
+      await expect(pending).rejects.toThrow(ownerError)
       expect(h.bridge[method]).toHaveBeenCalledTimes(1)
+      expect(h.bridge.withSessionOperation).not.toHaveBeenCalled()
+      expect(h.bridge.start).not.toHaveBeenCalled()
+    }
+  })
+
+  it.each(routes)('%s rejects late %s publication even when the bridge returns without checking its fence', async (channel, method, input) => {
+    for (const kind of ['owner', 'sender-frame', 'detached', 'destroyed'] as const) {
+      const h = harness(), event = mainEvent()
+      let finish!: (value: CapabilitySettingsSnapshot) => void
+      const work = new Promise<CapabilitySettingsSnapshot>((resolve) => { finish = resolve })
+      h.bridge[method].mockReturnValueOnce(work)
+      const pending = h.invoke(channel, event, input)
+      if (kind === 'owner') h.owner.id = 73
+      if (kind === 'sender-frame') event.senderFrame = { detached: false }
+      if (kind === 'detached') event.senderFrame!.detached = true
+      if (kind === 'destroyed') event.sender.isDestroyed.mockReturnValue(true)
+      finish(snapshot)
+      await expect(pending).rejects.toThrow(ownerError)
+      expect(h.bridge[method]).toHaveBeenCalledExactlyOnceWith(input, expect.any(Function))
       expect(h.bridge.withSessionOperation).not.toHaveBeenCalled()
       expect(h.bridge.start).not.toHaveBeenCalled()
     }

@@ -18,33 +18,43 @@ function collectChild(
     const stdout: Buffer[] = []
     const stderr: Buffer[] = []
     let bytes = 0
-    let settled = false
-    const finishError = (message: string): void => {
-      if (settled) return
-      settled = true
+    let closed = false
+    let failure: Error | undefined
+    const recordError = (error: Error): void => {
+      if (closed || failure) return
+      failure = error
       clearTimeout(timeout)
-      reject(new Error(message))
+      stdout.length = 0
+      stderr.length = 0
+      // A signal request leaves the operation pending until the actual close.
+      try { child.kill('SIGKILL') } catch { /* keep waiting for close */ }
     }
     const timeout = setTimeout(() => {
-      try { child.kill('SIGKILL') } catch { /* already exited */ }
-      finishError(`Git 命令超时：git ${args.join(' ')}`)
+      recordError(new Error(`Git 命令超时：git ${args.join(' ')}`))
     }, options.timeoutMs ?? GIT_TIMEOUT_MS)
-
-    child.stdout?.on('data', (chunk: Buffer) => {
-      bytes += chunk.length
-      if (bytes > MAX_GIT_OUTPUT) {
-        try { child.kill('SIGKILL') } catch { /* already exited */ }
-        finishError('Git 输出超过 32 MiB 限制，请缩小审查范围')
+    const collect = (chunks: Buffer[], chunk: Buffer): void => {
+      if (closed || failure) return
+      if (chunk.length > MAX_GIT_OUTPUT - bytes) {
+        recordError(new Error('Git 输出超过 32 MiB 限制，请缩小审查范围'))
         return
       }
-      stdout.push(chunk)
-    })
-    child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk))
-    child.once('error', (error) => finishError(error.message))
+      bytes += chunk.length
+      chunks.push(chunk)
+    }
+
+    child.stdout?.on('data', (chunk: Buffer) => collect(stdout, chunk))
+    child.stderr?.on('data', (chunk: Buffer) => collect(stderr, chunk))
+    child.stdout?.on('error', recordError)
+    child.stderr?.on('error', recordError)
+    child.stdin?.on('error', recordError)
+    child.on('error', recordError)
     child.once('close', (code) => {
-      if (settled) return
-      settled = true
+      closed = true
       clearTimeout(timeout)
+      if (failure) {
+        reject(failure)
+        return
+      }
       const allowed = options.allowExitCodes ?? [0]
       if (!allowed.includes(code ?? -1)) {
         const detail = Buffer.concat(stderr).toString('utf8').trim()
@@ -53,8 +63,12 @@ function collectChild(
       }
       resolvePromise(Buffer.concat(stdout))
     })
-    if (options.input !== undefined) child.stdin?.end(options.input)
-    else child.stdin?.end()
+    try {
+      if (options.input !== undefined) child.stdin?.end(options.input)
+      else child.stdin?.end()
+    } catch (error) {
+      recordError(error instanceof Error ? error : new Error(String(error)))
+    }
   })
 }
 

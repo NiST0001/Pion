@@ -9,6 +9,7 @@ import {
   capabilityEnabled, DEFAULT_CAPABILITY_PREFERENCES, PI_CORE_TOOL_NAMES,
   type CapabilityItem, type CapabilityPreferences
 } from '../shared/capability-settings'
+import { parseCapabilityItem } from '../shared/capability-item'
 import { capabilityResourceId } from './capability-ids'
 import { CAPABILITY_LEGACY_MCP_NOTICE, loadCapabilityMcpConfiguration } from './agent/capability-mcp'
 import { expandCapabilityDefaultTools } from './agent/capability-policy'
@@ -130,32 +131,6 @@ function fixedTools(defaultTools: readonly string[], resources: ResolvedPaths): 
   return tools
 }
 
-function runtimeText(value: unknown, max: number): value is string {
-  return typeof value === 'string' && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value)
-}
-
-/** Metadata whitelist only: a source-bound ID is not a source receipt. The
- * bridge must already have checked the exact runtime/client/cwd/generation.
- */
-function runtimeItem(item: unknown): CapabilityItem | undefined {
-  if (!record(item) || !runtimeText(item.id, 160) || !runtimeText(item.name, 128)
-    || !runtimeText(item.label, 128) || !runtimeText(item.description, 1024)
-    || typeof item.enabled !== 'boolean' || typeof item.available !== 'boolean'
-    || typeof item.origin !== 'string' || !['pi', 'pion', 'user', 'project', 'extension', 'mcp'].includes(item.origin)
-    || typeof item.kind !== 'string' || !['tool', 'subagent', 'mcp', 'skill', 'extension'].includes(item.kind)
-    || (item.unavailableReason !== undefined && !runtimeText(item.unavailableReason, 256))) return undefined
-  const kind = item.kind as CapabilityItem['kind']
-  if ((kind === 'tool' || kind === 'subagent')
-    ? !/^tool:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(item.id) || item.id !== `tool:${item.name}`
-      || (kind === 'subagent') !== (item.id === 'tool:pion_subagents')
-    : !new RegExp(`^${kind}:[a-f0-9]{64}$`).test(item.id)) return undefined
-  return {
-    id: item.id, kind, name: item.name, label: item.label, description: item.description,
-    origin: item.origin as CapabilityItem['origin'], enabled: item.enabled, available: item.available,
-    ...(item.unavailableReason !== undefined ? { unavailableReason: item.unavailableReason as string } : {})
-  }
-}
-
 /** Read-only catalogue: no ResourceLoader, extension factory, ModelRuntime,
  * session, temporary extension source, credential resolver or MCP manager.
  */
@@ -165,7 +140,9 @@ export async function readCapabilityResources(options: ReadCapabilityResourcesOp
   const cwd = options.cwd === undefined ? agentDir : resolve(options.cwd)
   const projectTrusted = options.cwd !== undefined && options.projectTrusted
   const preferences = structuredClone(options.preferences)
-  const runtimeItems = options.runtimeItems?.map(runtimeItem).filter((item): item is CapabilityItem => item !== undefined) ?? []
+  // The caller authenticates exact runtime/client/cwd/generation before this
+  // metadata-only boundary. Catalogue scans skip malformed optional entries.
+  const runtimeItems = options.runtimeItems?.map(parseCapabilityItem).filter((item): item is CapabilityItem => item !== undefined) ?? []
   const notices = new Set<string>([DYNAMIC_NOTICE, CAPABILITY_LEGACY_MCP_NOTICE])
   if (options.cwd !== undefined && !projectTrusted) notices.add('项目未信任，未读取项目设置、扩展或 Skill；开启偏好不授予信任。')
   const settings = SettingsManager.fromStorage({
@@ -272,7 +249,11 @@ export async function readCapabilityResources(options: ReadCapabilityResourcesOp
     runtime.push(item)
     const known = projected.get(item.id)
     if (known) {
-      known.enabled = capabilityEnabled(preferences, known.id, known.kind, item.enabled)
+      // A receipt may narrow inherited settings, never reopen a disabled source
+      // or explicit loadout. With no loadout, native MCP may activate helpers.
+      const runtimeSelection = (known.kind === 'tool' || known.kind === 'subagent') && defaultTools === undefined
+      const inherited = item.enabled && (runtimeSelection || raw.get(item.id)!.enabled)
+      known.enabled = capabilityEnabled(preferences, known.id, known.kind, inherited)
       known.available = item.available
       if (item.available) delete known.unavailableReason
       else known.unavailableReason = item.unavailableReason ?? '所属运行时当前不可用。'

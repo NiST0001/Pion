@@ -8,6 +8,7 @@ import {
   orderedSessionOrganizationItems,
   sessionOrganizationItemKey,
   sessionPlacementKey,
+  sortSessionOrganizationItems,
   validateSessionOrganization,
   validateSessionOrganizationChange,
   type SessionOrganization
@@ -170,6 +171,21 @@ describe('session organization graph', () => {
     next.folders[1].name = 'caller mutation'
     next.sessions[1].order = 20
     expect(state).toEqual(before)
+  })
+
+  it('shares stable rank sorting without mutating entries or typed item identities', () => {
+    const entries = [
+      { item: { kind: 'session' as const, path: 'unranked' } },
+      { item: { kind: 'session' as const, path: 'same' }, order: 0 },
+      { item: { kind: 'folder' as const, id: 'same' }, order: 0 },
+      { item: { kind: 'folder' as const, id: 'last-ranked' }, order: Number.MAX_SAFE_INTEGER },
+      { item: { kind: 'folder' as const, id: 'unranked' } }
+    ]
+    const before = structuredClone(entries)
+    const sorted = sortSessionOrganizationItems(entries)
+    expect(sorted).toEqual([entries[1].item, entries[2].item, entries[3].item, entries[0].item, entries[4].item])
+    expect(sorted[0]).toBe(entries[1].item)
+    expect(entries).toEqual(before)
   })
 
   it('clears ranks only on actual parent changes and direct promotion', () => {

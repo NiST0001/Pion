@@ -184,6 +184,7 @@ export function App(): ReactElement {
     cwd: resourceCwd
   })
   const [prefill, setPrefill] = useState('')
+  const draftAvailable = useRef(false)
   const [reviewPath, setReviewPath] = useState<string | null>(null)
   const [reviewScope, setReviewScope] = useState<GitDiffScope>('unstaged')
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -420,7 +421,11 @@ export function App(): ReactElement {
       && selectionRef.current.sessionId === state.session.sessionId,
     editQueuedMessage: actions.editQueuedMessage
   })
+  const requestMessageRevert = useCallback((entryId: string): void => {
+    if (!queueEditor.frozen) messageRevert.requestRevert(entryId)
+  }, [queueEditor.frozen, messageRevert.requestRevert])
   const onDraftAvailabilityChange = useCallback((available: boolean): void => {
+    draftAvailable.current = available
     messageRevert.onDraftAvailabilityChange(available)
     queueEditor.onDraftAvailabilityChange(available)
   }, [messageRevert.onDraftAvailabilityChange, queueEditor.onDraftAvailabilityChange])
@@ -441,10 +446,12 @@ export function App(): ReactElement {
 
   const handleFork = useCallback(
     async (entryId: string) => {
-      sessionSelectionId.current += 1
+      const requestId = ++sessionSelectionId.current
+      const api = window.pion
       setSelectedSession(null)
       const text = await actions.forkAt(entryId)
-      if (text) setPrefill(`${text}`)
+      if (text && requestId === sessionSelectionId.current && window.pion === api
+        && deletionMounted.current && draftAvailable.current) setPrefill(text)
     },
     [actions]
   )
@@ -705,10 +712,12 @@ export function App(): ReactElement {
 
   const handleForkSession = useCallback(
     async (_cwd: string, path: string, entryId: string) => {
-      sessionSelectionId.current += 1
+      const requestId = ++sessionSelectionId.current
+      const api = window.pion
       setSelectedSession(null)
       const text = await actions.forkSession(path, entryId)
-      if (text) setPrefill(text)
+      if (requestId !== sessionSelectionId.current || window.pion !== api || !deletionMounted.current) return ''
+      if (text && draftAvailable.current) setPrefill(text)
       return text
     },
     [actions]
@@ -1073,7 +1082,7 @@ export function App(): ReactElement {
                 canFork={!queueEditor.frozen && !messageRevert.draftFrozen && state.status.phase !== 'error' && state.status.phase !== 'stopped' && Boolean(state.status.cwd)}
                 onFork={handleFork}
                 canRevert={!queueEditor.frozen && messageRevert.canRevert}
-                onRevert={(entryId) => { if (!queueEditor.frozen) messageRevert.requestRevert(entryId) }}
+                onRevert={requestMessageRevert}
                 revertDisabledReason={messageRevert.disabledReason}
 
                 agentActivity={agentActivity}
@@ -1139,13 +1148,13 @@ export function App(): ReactElement {
                   followUpRunIds={queuedMessages.followUpRunIds}
                   controlsDisabled={queueEditor.frozen}
                   agentBusy={state.busy}
-                  onSendItem={(kind, index) => actions.sendQueuedMessage(kind, index).catch((error: unknown) => {
+                  onSendItem={(kind, index, runId) => actions.sendQueuedMessage(kind, index, runId).catch((error: unknown) => {
                     console.error('[pion] 直接发送排队消息失败', error)
                   })}
                   onEditItem={(item) => {
                     if (item.runId) flushSync(() => { void queueEditor.edit(item.runId!) })
                   }}
-                  onRemoveItem={(kind, index) => actions.removeQueuedMessage(kind, index).catch((error: unknown) => {
+                  onRemoveItem={(kind, index, runId) => actions.removeQueuedMessage(kind, index, runId).catch((error: unknown) => {
                     console.error('[pion] 删除排队消息失败', error)
                   })}
                 />}

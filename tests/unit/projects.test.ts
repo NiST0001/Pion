@@ -6,11 +6,13 @@ import { runInNewContext } from 'node:vm'
 
 const mocks = {
   userData: '',
-  git: vi.fn<(cwd: string, args: string[]) => Promise<string>>()
+  git: vi.fn<(cwd: string, args: string[]) => Promise<string>>(),
+  publish: vi.fn<(file: string, value: unknown) => Promise<void>>()
 }
 let ProjectStore: typeof import('../../src/main/projects').ProjectStore
 let canonicalProjectCwd: typeof import('../../src/main/git').canonicalProjectCwd
 let previousElectron: typeof import('electron')
+let publishJson: typeof import('../../src/main/atomic-json-file').writeAtomicJson
 import type { ProjectMeta } from '../../src/shared/types'
 
 let temporary: string
@@ -30,6 +32,8 @@ beforeAll(async () => {
   previousElectron = { ...await import('electron') }
   vi.resetModules()
   vi.doMock('electron', () => ({ app: { getPath: () => mocks.userData } }))
+  ;({ writeAtomicJson: publishJson } = await vi.importActual<typeof import('../../src/main/atomic-json-file')>('../../src/main/atomic-json-file'))
+  vi.doMock('../../src/main/atomic-json-file', () => ({ writeAtomicJson: mocks.publish }))
   vi.doMock('node:child_process', async () => {
     const { promisify } = await import('node:util')
     // execFile's real promisify contract returns an object, not just stdout.
@@ -47,10 +51,12 @@ beforeAll(async () => {
     // Restore the original Electron identity, not this suite's userData closure.
     vi.doMock('electron', () => previousElectron)
     vi.doUnmock('node:child_process')
+    vi.doUnmock('../../src/main/atomic-json-file')
     vi.resetModules()
   }
 })
 afterAll(() => {
+  vi.doUnmock('../../src/main/atomic-json-file')
   vi.doUnmock('node:child_process')
   vi.resetModules()
 })
@@ -64,11 +70,12 @@ beforeEach(() => {
   ordinary = join(temporary, '.pion-worktrees', 'ordinary')
   for (const path of [mocks.userData, root, branch, ordinary]) mkdirSync(path, { recursive: true })
   registered = new Set([root, branch])
+  mocks.publish.mockReset().mockImplementation((file, value) => publishJson(file, value))
   mocks.git.mockReset()
   mocks.git.mockImplementation(async (cwd, args) => {
     if (!registered.has(cwd)) throw new Error('not a repository')
     if (args[0] === 'rev-parse') return cwd
-    if (args[0] === 'worktree') return `worktree ${root}\nHEAD aabbcc\nbranch refs/heads/main\n\nworktree ${branch}\nHEAD ddeeff\nbranch refs/heads/feature\n\n`
+    if (args[0] === 'worktree') return `worktree ${root}\0HEAD aabbcc\0branch refs/heads/main\0\0worktree ${branch}\0HEAD ddeeff\0branch refs/heads/feature\0\0`
     throw new Error('unexpected Git command')
   })
 })
@@ -79,12 +86,12 @@ describe('canonical project registration', () => {
     const store = new ProjectStore()
     await store.touchCanonical(branch)
     await store.touchCanonical(root)
-    expect(store.list()).toHaveLength(1)
-    expect(store.list()[0]).toMatchObject({ cwd: root, name: basename(root) })
+    expect(await store.list()).toHaveLength(1)
+    expect((await store.list())[0]).toMatchObject({ cwd: root, name: basename(root) })
     expect(await canonicalProjectCwd(branch)).toBe(root)
     expect(mocks.git).toHaveBeenCalledWith(branch, ['rev-parse', '--show-toplevel'])
-    expect(mocks.git).toHaveBeenCalledWith(branch, ['worktree', 'list', '--porcelain'])
-    expect(await store.listGrouped()).toEqual(store.list())
+    expect(mocks.git).toHaveBeenCalledWith(branch, ['worktree', 'list', '--porcelain', '-z'])
+    expect(await store.listGrouped()).toEqual(await store.list())
   })
 
   it('projects historical duplicates without rewriting metadata and keeps main name/order', async () => {
@@ -95,7 +102,7 @@ describe('canonical project registration', () => {
       meta(ordinary), meta(root, 'My custom project', 5, 40)
     ])
     expect(disk()).toBe(before)
-    expect(store.list()).toHaveLength(3)
+    expect(await store.list()).toHaveLength(3)
   })
 
   it('touching an old worktree-only entry retains its position and leaves its original record intact', async () => {
@@ -103,7 +110,7 @@ describe('canonical project registration', () => {
     seed([alias, meta(ordinary)])
     const store = new ProjectStore()
     await store.touchCanonical(branch)
-    expect(store.list()).toContainEqual(alias)
+    expect(await store.list()).toContainEqual(alias)
     expect(await store.listGrouped()).toEqual([
       expect.objectContaining({ cwd: root, name: basename(root), addedAt: 5 }), meta(ordinary)
     ])
@@ -132,7 +139,7 @@ describe('canonical project registration', () => {
     seed([meta(branch), meta(root), meta(ordinary)])
     const store = new ProjectStore()
     await store.removeCanonical(branch)
-    expect(store.list()).toEqual([meta(ordinary)])
+    expect(await store.list()).toEqual([meta(ordinary)])
   })
 
   it('keeps a live worktree independent if its registered main directory is missing', async () => {
@@ -160,7 +167,7 @@ describe('canonical project registration', () => {
     const nested = join(branch, 'src')
     mkdirSync(nested)
     registered.add(nested)
-    mocks.git.mockImplementation(async (_cwd, args) => args[0] === 'rev-parse' ? branch : `worktree ${root}\nbranch refs/heads/main\n\nworktree ${branch}\nbranch refs/heads/feature\n`)
+    mocks.git.mockImplementation(async (_cwd, args) => args[0] === 'rev-parse' ? branch : `worktree ${root}\0branch refs/heads/main\0\0worktree ${branch}\0branch refs/heads/feature\0\0`)
     expect(await canonicalProjectCwd(nested)).toBe(nested)
   })
 
@@ -181,7 +188,7 @@ describe('canonical project registration', () => {
     release()
     await Promise.all([add, remove, later])
     expect(await projection).toEqual([expect.objectContaining({ cwd: ordinary })])
-    expect(store.list()).toEqual([expect.objectContaining({ cwd: ordinary })])
+    expect(await store.list()).toEqual([expect.objectContaining({ cwd: ordinary })])
   })
 
   it('retries a projection if a mutation arrives while its Git lookups are delayed', async () => {
@@ -205,6 +212,80 @@ describe('canonical project registration', () => {
   })
 })
 
+describe('project persistence failures', () => {
+  it.each(['{broken', '{"projects":{}}', '{"projects":[{"cwd":"/project"}]}'])('preserves unreadable metadata: %s', async (raw) => {
+    writeFileSync(join(mocks.userData, 'projects.json'), raw)
+    const store = new ProjectStore()
+    await expect(store.list()).rejects.toThrow()
+    await expect(store.touchCanonical(root)).rejects.toThrow()
+    await expect(store.removeCanonical(root)).rejects.toThrow()
+    expect(disk()).toBe(raw)
+    expect(mocks.publish).not.toHaveBeenCalled()
+  })
+
+  it('rejects non-missing read errors instead of initializing an empty list', async () => {
+    const path = join(mocks.userData, 'projects.json')
+    mkdirSync(path)
+    writeFileSync(join(path, 'preserved'), 'original')
+    const store = new ProjectStore()
+    await expect(store.list()).rejects.toThrow()
+    await expect(store.touch(root)).rejects.toThrow()
+    expect(readFileSync(join(path, 'preserved'), 'utf8')).toBe('original')
+    expect(mocks.publish).not.toHaveBeenCalled()
+  })
+
+  it('reports publication failures, retaining old cache, source records and grouping', async () => {
+    const records = [meta(branch, 'feature', 5, 40), meta(root, 'custom', 10, 20), meta(ordinary)]
+    seed(records)
+    const before = disk()
+    const store = new ProjectStore()
+    expect(await store.list()).toEqual(records)
+    const failure = new Error('controlled publication failure')
+    mocks.publish.mockRejectedValueOnce(failure)
+    await expect(store.removeCanonical(root)).rejects.toBe(failure)
+    expect(await store.list()).toEqual(records)
+    expect(await store.listGrouped()).toEqual([meta(root, 'custom', 5, 40), meta(ordinary)])
+    expect(disk()).toBe(before)
+    await store.touchCanonical(ordinary)
+    expect(JSON.parse(disk()).projects.slice(0, 2)).toEqual(records.slice(0, 2))
+    const detached = await store.list()
+    detached[0].name = 'external mutation'
+    expect((await store.list())[0].name).toBe('feature')
+  })
+
+  it('shares the canonical mutation queue with direct writes and drains accepted operations on shutdown', async () => {
+    seed([meta(branch), meta(ordinary)])
+    const before = disk()
+    const store = new ProjectStore()
+    let release!: () => void
+    let entered!: () => void
+    const blocked = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    mocks.publish.mockImplementationOnce(async (file, value) => {
+      entered()
+      await blocked
+      await publishJson(file, value)
+    })
+    const first = store.touch(root)
+    await started
+    const second = store.removeCanonical(branch)
+    const third = store.touch(ordinary)
+    const projection = store.listGrouped()
+    let drained = false
+    const shutdown = store.shutdown().then(() => { drained = true })
+    await expect(store.touch(root)).rejects.toThrow('closed')
+    await expect(store.list()).rejects.toThrow('closed')
+    expect(mocks.publish).toHaveBeenCalledTimes(1)
+    expect(disk()).toBe(before)
+    expect(drained).toBe(false)
+    release()
+    await Promise.all([first, second, third, shutdown])
+    expect(await projection).toEqual([expect.objectContaining({ cwd: ordinary })])
+    expect(JSON.parse(disk()).projects).toEqual([expect.objectContaining({ cwd: ordinary })])
+    expect(drained).toBe(true)
+  })
+})
+
 // Evaluate the actual push function in isolation; no Electron application,
 // user configuration, backend, or Git process is started by this harness.
 function pushHarness() {
@@ -221,6 +302,20 @@ function pushHarness() {
 }
 
 describe('project push ordering', () => {
+  it('observes a failed background startup push without publishing an empty list', async () => {
+    const source = readFileSync(new URL('../../src/main/index.ts', import.meta.url), 'utf8')
+    const start = source.indexOf('  void pushProjects().catch(')
+    const end = source.indexOf('\n', start)
+    const error = vi.fn()
+    let recorded!: () => void
+    const observed = new Promise<void>((resolve) => { recorded = resolve })
+    const pushProjects = vi.fn(async () => { throw new Error('private read failure') })
+    runInNewContext(source.slice(start, end), { pushProjects, console: { error: (...args: unknown[]) => { error(...args); recorded() } } })
+    await observed
+    expect(pushProjects).toHaveBeenCalledTimes(1)
+    expect(error).toHaveBeenCalledExactlyOnceWith('[pion] 项目列表读取失败，已保留原文件。')
+  })
+
   it.each(['older-first', 'newer-first'])('publishes only the latest requested snapshot (%s)', async (order) => {
     const h = pushHarness()
     const old = h.push()

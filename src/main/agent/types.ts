@@ -13,6 +13,7 @@ import type { GitRunCheckpoint } from '../checkpoints'
 import type { RunOperation } from '../../shared/operations'
 import type { LiveSessionProjection } from './live-session-state'
 import type { McpStatusSnapshot } from '../../shared/mcp'
+import type { ComputerUseAgentSource } from '../../shared/computer-use-agent'
 import type { BackendCapabilityState } from './capability-state'
 import type { NotificationSessionContext, SessionCompletionNotice } from '../system-notifications'
 
@@ -32,6 +33,8 @@ export interface PendingBackendScope {
 }
 
 export interface PendingToolPermission {
+  /** Private main-owned approval; clear/cancel must resolve false. */
+  resolveApproval?: (allowed: boolean) => void
   request: ToolPermissionRequest
   backendKey: string
   extensionRequestId: string
@@ -99,11 +102,16 @@ export interface BackendSessionInfoSnapshot extends BackendSessionInfoScope {
 export interface BackendRecord {
   /** Desired/application receipts, never chat history or a persistent preset mode. */
   capability?: BackendCapabilityState
+  /** Main-owned epoch in which the cached native capability source was verified. */
+  capabilityNoticeEpoch?: object
   /** Bounded current-root-turn projection, isolated to this backend instance. */
   liveState?: LiveSessionProjection
   /** Private display routing nonce; not authentication against same-process extensions. */
   subagentViewNonce?: string
   questionUiNonce?: string
+  computerUseAgentNonce?: string
+  computerUseRuntimeId?: string
+  computerUseRetiredRuntimeIds?: string[]
   /** Private observations only; never part of the chat/live projection or billing. */
   mcpStatus?: BackendMcpStatusCache
   key: string
@@ -121,6 +129,8 @@ export interface BackendRecord {
   sessionExportPending?: boolean
   /** Never reuse/evict a writer whose actual process exit could not be confirmed. */
   historyStopFailed?: boolean
+  /** Captured at start invocation; retained if SDK cleanup loses the live child handle. */
+  startupProcess?: unknown
   modePrimed?: AgentMode
   subagentsEnabled?: boolean
   subagentsModePending?: boolean
@@ -152,6 +162,8 @@ export interface BackendRecord {
     name: string
     state: 'running' | 'ended'
     usageConsumed: boolean
+    /** Real factory event-adapter receipt, not inferred from name/payload. */
+    computerUseSource?: ComputerUseAgentSource
   }>
   activeRunId?: string
   pendingRunIds: string[]

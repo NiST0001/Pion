@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Pure bounded packed-frame conversion; PipeWire ownership is in capture.rs.
 use serde::Deserialize;
-use std::io::{self, Write};
+use std::{borrow::Cow, io::{self, Write}};
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Limits {
@@ -41,6 +41,15 @@ impl Write for BoundedOutput {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+/// Conservative original-PNG budget for admitted RGB bytes and transformed rows.
+/// Includes uncompressed DEFLATE, filter bytes, block/chunk framing and headers.
+pub fn rgb_png_upper_bound(raw_bytes: usize, output_rows: usize) -> io::Result<usize> {
+    let invalid = || io::Error::from(io::ErrorKind::InvalidData);
+    let filtered = raw_bytes.checked_add(output_rows).ok_or_else(invalid)?;
+    filtered.checked_add(filtered / 16_384 * 5)
+        .and_then(|n| n.checked_add(filtered / 32_768 * 12))
+        .and_then(|n| n.checked_add(1024)).ok_or_else(invalid)
 }
 /// Accept only positive packed stride, explicit offset and negotiated format.
 /// Transform values follow SPA_META_TRANSFORMATION_* (0..7).
@@ -98,34 +107,50 @@ pub fn encode_transformed(
     } else {
         (width, height)
     };
-    let filtered = raw_bytes.checked_add(out_height).ok_or_else(invalid)?;
-    let png_bound = filtered.checked_add(filtered / 16_384 * 5)
-        .and_then(|n| n.checked_add(filtered / 32_768 * 12))
-        .and_then(|n| n.checked_add(1024)).ok_or_else(invalid)?;
-    if png_bound > limits.max_frame_bytes { return Err(invalid()); }
-    let mut rgb = vec![0u8; raw_bytes];
-    for y in 0..height {
-        let source = &input[offset + y * stride..offset + y * stride + row];
-        for x in 0..width {
-            let s = &source[x * bpp..x * bpp + bpp];
-            let mx = if transform >= 4 { width - 1 - x } else { x };
-            let (dx, dy) = match transform % 4 {
-                0 => (mx, y),
-                1 => (y, width - 1 - mx),
-                2 => (width - 1 - mx, height - 1 - y),
-                _ => (height - 1 - y, mx),
-            };
-            let index = (dy * out_width + dx) * 3;
-            let d = &mut rgb[index..index + 3];
-            match format {
-                PackedFormat::Rgb | PackedFormat::Rgba => d.copy_from_slice(&s[..3]),
-                PackedFormat::Bgrx | PackedFormat::Bgra => d.copy_from_slice(&[s[2], s[1], s[0]]),
+    if rgb_png_upper_bound(raw_bytes, out_height)? > limits.max_frame_bytes { return Err(invalid()); }
+    // GPU readback already supplies tight RGB. Borrow it only after all layout
+    // and budget checks; padding, channel conversion and transforms still copy.
+    let rgb: Cow<'_, [u8]> = if transform == 0 && matches!(format, PackedFormat::Rgb) && stride == row {
+        Cow::Borrowed(&input[offset..offset + raw_bytes])
+    } else {
+        let mut rgb = vec![0u8; raw_bytes];
+        for y in 0..height {
+            let source = &input[offset + y * stride..offset + y * stride + row];
+            for x in 0..width {
+                let s = &source[x * bpp..x * bpp + bpp];
+                let mx = if transform >= 4 { width - 1 - x } else { x };
+                let (dx, dy) = match transform % 4 {
+                    0 => (mx, y),
+                    1 => (y, width - 1 - mx),
+                    2 => (width - 1 - mx, height - 1 - y),
+                    _ => (height - 1 - y, mx),
+                };
+                let index = (dy * out_width + dx) * 3;
+                let d = &mut rgb[index..index + 3];
+                match format {
+                    PackedFormat::Rgb | PackedFormat::Rgba => d.copy_from_slice(&s[..3]),
+                    PackedFormat::Bgrx | PackedFormat::Bgra => d.copy_from_slice(&[s[2], s[1], s[0]]),
+                }
             }
         }
-    }
-    let png = encode_rgb(&rgb, out_width, out_height, limits.max_frame_bytes)?;
-    let preview = encode_preview(&rgb, out_width, out_height)?;
+        Cow::Owned(rgb)
+    };
+    let (png, preview) = encode_frame_pngs(
+        || encode_preview(&rgb, out_width, out_height),
+        || encode_rgb(&rgb, out_width, out_height, limits.max_frame_bytes),
+    )?;
     Ok((png, preview, out_width as u32, out_height as u32))
+}
+/// A worker negative reply may attest no complete original PNG. Do every
+/// fallible auxiliary step FIRST: a preview failure must never discard an
+/// already-complete original behind that negative accounting receipt.
+fn encode_frame_pngs(
+    preview: impl FnOnce() -> io::Result<Vec<u8>>,
+    original: impl FnOnce() -> io::Result<Vec<u8>>,
+) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    let preview = preview()?;
+    let original = original()?;
+    Ok((original, preview))
 }
 pub const PREVIEW_BYTES: usize = 96 * 1024;
 pub const PREVIEW_EDGE: usize = 512;
@@ -175,6 +200,17 @@ mod tests {
         }
     }
     #[test]
+    fn auxiliary_failure_cannot_hide_a_complete_original_behind_negative_accounting() {
+        let called = std::cell::Cell::new(false);
+        let failed = encode_frame_pngs(
+            || Err(io::ErrorKind::InvalidData.into()),
+            || { called.set(true); Ok(vec![1]) },
+        );
+        assert!(failed.is_err());
+        assert!(!called.get());
+        assert_eq!(encode_frame_pngs(|| Ok(vec![2]), || Ok(vec![1])).unwrap(), (vec![1], vec![2]));
+    }
+    #[test]
     fn remaining_limits_reject_before_pixel_copy_or_png_allocation() {
         let open = limits();
         assert!(Limits { max_frame_bytes: 2048, max_frame_pixels: 1, max_frame_edge: 1 }.within(&open));
@@ -184,6 +220,45 @@ mod tests {
             &Limits { max_frame_bytes: 100, ..open.clone() }).is_err());
         assert!(encode_transformed(&[1, 2, 3, 4, 5, 6], 0, 6, 2, 1, PackedFormat::Rgb, 0,
             &Limits { max_frame_pixels: 1, ..open }).is_err());
+    }
+    #[test]
+    fn identity_tight_rgb_matches_padded_copy_with_exact_offset_rows_and_dimensions() {
+        let raw = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 1, 2, 3, 4, 5, 6];
+        let tight = encode_transformed(&raw, 0, 6, 2, 3, PackedFormat::Rgb, 0, &limits()).unwrap();
+        let mut padded = Vec::new();
+        for row in raw.chunks_exact(6) { padded.extend_from_slice(row); padded.push(99); }
+        assert_eq!(tight, encode_transformed(&padded, 0, 7, 2, 3, PackedFormat::Rgb, 0, &limits()).unwrap());
+        let mut offset = vec![98, 99];
+        offset.extend_from_slice(&raw);
+        offset.push(97);
+        assert_eq!(tight, encode_transformed(&offset, 2, 6, 2, 3, PackedFormat::Rgb, 0, &limits()).unwrap());
+        assert_eq!((tight.2, tight.3), (2, 3));
+        for png in [&tight.0, &tight.1] {
+            let mut reader = png::Decoder::new(std::io::Cursor::new(png.as_slice())).read_info().unwrap();
+            assert_eq!((reader.info().width, reader.info().height), (2, 3));
+            let mut decoded = vec![0; reader.output_buffer_size()];
+            reader.next_frame(&mut decoded).unwrap();
+            assert_eq!(decoded, raw);
+        }
+        assert!(encode_transformed(&raw[..17], 0, 6, 2, 3, PackedFormat::Rgb, 0, &limits()).is_err());
+        assert!(encode_transformed(&raw, usize::MAX, 6, 2, 3, PackedFormat::Rgb, 0, &limits()).is_err());
+    }
+    #[test]
+    fn png_upper_bound_keeps_exact_framing_and_identity_budget_boundary() {
+        for (raw, rows, expected) in [(30, 1, 1055), (30, 10, 1064),
+            (16_380, 3, 17_407), (16_380, 4, 17_413),
+            (32_766, 1, 33_796), (32_766, 2, 33_814)] {
+            assert_eq!(rgb_png_upper_bound(raw, rows).unwrap(), expected);
+        }
+        assert!(rgb_png_upper_bound(usize::MAX, 1).is_err());
+        assert!(rgb_png_upper_bound(usize::MAX - 1024, 1).is_err());
+        let bound = rgb_png_upper_bound(18, 3).unwrap();
+        for bytes in [bound - 1, bound] {
+            let limits = Limits { max_frame_bytes: bytes, ..limits() };
+            for stride in [6, 7] {
+                assert_eq!(encode_transformed(&[0; 21], 0, stride, 2, 3, PackedFormat::Rgb, 0, &limits).is_ok(), bytes == bound);
+            }
+        }
     }
     #[test]
     fn noisy_preview_reduces_dimensions_without_changing_model() {
@@ -196,6 +271,7 @@ mod tests {
         let limits = Limits { max_frame_bytes: 8 * 1024 * 1024, max_frame_pixels: 8_000_000, max_frame_edge: 4096 };
         let (model, preview, w, h) = encode_transformed(&raw, 0, width * 3, width, height, PackedFormat::Rgb, 0, &limits).unwrap();
         assert_eq!((w, h), (1024, 768));
+        assert!(model.len() <= rgb_png_upper_bound(raw.len(), height).unwrap());
         assert_eq!(u32::from_be_bytes(model[16..20].try_into().unwrap()), w);
         assert_eq!(u32::from_be_bytes(model[20..24].try_into().unwrap()), h);
         assert!(preview.len() <= PREVIEW_BYTES);
@@ -257,18 +333,40 @@ mod tests {
     }
     #[test]
     fn stride_and_transform_pixels() {
-        let bytes = [3, 2, 1, 0, 6, 5, 4, 0, 99, 99, 99, 99];
-        for t in 0..8 {
-            let (png, preview, w, h) =
-                encode_transformed(&bytes, 0, 12, 2, 1, PackedFormat::Bgrx, t, &limits()).unwrap();
-            assert!(preview.len() <= PREVIEW_BYTES);
-            assert_eq!((w, h), if t % 2 == 1 { (1, 2) } else { (2, 1) });
-            let mut reader = png::Decoder::new(std::io::Cursor::new(png))
-                .read_info()
-                .unwrap();
-            let mut output = vec![0; reader.output_buffer_size()];
-            reader.next_frame(&mut output).unwrap();
-            assert!(output == [1, 2, 3, 4, 5, 6] || output == [4, 5, 6, 1, 2, 3]);
+        let source: [[u8; 3]; 6] = [[1, 11, 21], [2, 12, 22], [3, 13, 23],
+            [4, 14, 24], [5, 15, 25], [6, 16, 26]];
+        // Explicit non-square permutations distinguish all eight transforms,
+        // including mirrors that must stay off the identity borrowing path.
+        let orders: [[usize; 6]; 8] = [
+            [0, 1, 2, 3, 4, 5], [1, 3, 5, 0, 2, 4],
+            [5, 4, 3, 2, 1, 0], [4, 2, 0, 5, 3, 1],
+            [1, 0, 3, 2, 5, 4], [0, 2, 4, 1, 3, 5],
+            [4, 5, 2, 3, 0, 1], [5, 3, 1, 4, 2, 0],
+        ];
+        for (t, order) in orders.into_iter().enumerate() {
+            let expected: Vec<u8> = order.into_iter().flat_map(|i| source[i]).collect();
+            for (format, bpp, bgr, padding) in [(PackedFormat::Rgb, 3, false, 0),
+                (PackedFormat::Rgba, 4, false, 3), (PackedFormat::Bgrx, 4, true, 3), (PackedFormat::Bgra, 4, true, 3)] {
+                let mut bytes = vec![98, 99];
+                for row in source.chunks_exact(2) {
+                    for pixel in row {
+                        bytes.extend_from_slice(&if bgr { [pixel[2], pixel[1], pixel[0]] } else { *pixel });
+                        if bpp == 4 { bytes.push(200); }
+                    }
+                    bytes.extend_from_slice(&[97; 3][..padding]);
+                }
+                let (png, preview, w, h) = encode_transformed(
+                    &bytes, 2, 2 * bpp + padding, 2, 3, format, t as u32, &limits()).unwrap();
+                assert!(preview.len() <= PREVIEW_BYTES);
+                assert_eq!((w, h), if t % 2 == 1 { (3, 2) } else { (2, 3) });
+                for png in [png, preview] {
+                    let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+                    assert_eq!((reader.info().width, reader.info().height), (w, h));
+                    let mut output = vec![0; reader.output_buffer_size()];
+                    reader.next_frame(&mut output).unwrap();
+                    assert_eq!(output, expected);
+                }
+            }
         }
     }
 }

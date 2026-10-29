@@ -9,6 +9,7 @@ import {
   validateComputerUseOwner, validateComputerUseReceipt, validateComputerUseStatus,
   type ComputerUseFrame, type ComputerUseOwner
 } from '../../src/shared/computer-use'
+import { COMPUTER_USE_DIAGNOSTIC_CODES, NATIVE_COMPUTER_USE_DIAGNOSTICS_BY_REQUEST, copyComputerUseDiagnostics } from '../../src/shared/computer-use-diagnostics'
 
 // Pure fixtures only. These checks do not launch an OS helper, SDK or image decoder.
 const owner: ComputerUseOwner = { ownerWindowId: 1, backendId: 'backend-1', runtimeId: 'runtime-1', runId: 'run-1', generation: 1 }
@@ -17,10 +18,167 @@ const receipt = { requestId: 'request-1', actionId: 'action-1', toolCallId: 'cal
 const emptyBudget = { actions: 0, captures: 0, frameBytes: 0, framePixels: 0 }
 
 describe('ComputerUse pure fixed contracts', () => {
+  it('copies only explicit boolean development configuration without granting capability or consent', () => {
+    const disabled = createDisabledComputerUseStatus()
+    expect(disabled.inputDevelopmentEnabled).toBe(false)
+    const { inputDevelopmentEnabled: _enabled, ...legacy } = disabled
+    expect(validateComputerUseStatus(legacy).inputDevelopmentEnabled).not.toBe(true)
+    for (const inputDevelopmentEnabled of [false, true]) {
+      const copy = validateComputerUseStatus({ ...disabled, inputDevelopmentEnabled })
+      expect(copy.inputDevelopmentEnabled).toBe(inputDevelopmentEnabled)
+      expect(copy.consent).toEqual(DEFAULT_COMPUTER_USE_CONSENT)
+      expect(copy.capability).toEqual(DEFAULT_COMPUTER_USE_CAPABILITY)
+    }
+    for (const inputDevelopmentEnabled of [undefined, null, 0, 1, 'true', {}, []]) {
+      expect(normalizeComputerUseStatus({ ...disabled, inputDevelopmentEnabled })).toBeUndefined()
+    }
+    const getter = vi.fn(() => true)
+    const accessor = Object.defineProperty(disabled, 'inputDevelopmentEnabled', { enumerable: true, get: getter })
+    expect(normalizeComputerUseStatus(accessor)).toBeUndefined()
+    expect(getter).not.toHaveBeenCalled()
+  })
+  it('copies explicit DMA-BUF configuration only, with legacy omission disabled and no inferred grants', () => {
+    const disabled = createDisabledComputerUseStatus()
+    expect(disabled.dmaBufDevelopmentEnabled).toBe(false)
+    const { dmaBufDevelopmentEnabled: _enabled, ...legacy } = disabled
+    expect(validateComputerUseStatus(legacy).dmaBufDevelopmentEnabled).not.toBe(true)
+    for (const dmaBufDevelopmentEnabled of [false, true]) {
+      const copy = validateComputerUseStatus({ ...disabled, dmaBufDevelopmentEnabled })
+      expect(copy.dmaBufDevelopmentEnabled).toBe(dmaBufDevelopmentEnabled)
+      expect(copy.consent).toEqual(DEFAULT_COMPUTER_USE_CONSENT)
+      expect(copy.capability).toEqual(DEFAULT_COMPUTER_USE_CAPABILITY)
+      expect(copy).toMatchObject({ state: 'disabled', actualPending: false, coordination: 'not-checked' })
+    }
+    for (const dmaBufDevelopmentEnabled of [undefined, null, 0, 1, 'true', {}, []]) {
+      expect(normalizeComputerUseStatus({ ...disabled, dmaBufDevelopmentEnabled })).toBeUndefined()
+    }
+    const getter = vi.fn(() => true)
+    expect(normalizeComputerUseStatus(Object.defineProperty(disabled, 'dmaBufDevelopmentEnabled', { enumerable: true, get: getter }))).toBeUndefined()
+    expect(getter).not.toHaveBeenCalled()
+  })
+  it('keeps the native request diagnostic matrix exact and immutable', () => {
+    expect(NATIVE_COMPUTER_USE_DIAGNOSTICS_BY_REQUEST).toEqual({
+      hello: ['request-state-invalid'],
+      open: ['portal-connect-failed', 'window-selection-failed', 'selection-not-deliverable',
+        'pipewire-start-failed', 'post-start-not-deliverable', 'request-state-invalid', 'display-selection-failed', 'input-open-failed'],
+      capture: ['capture-frame-failed', 'selection-not-deliverable', 'request-state-invalid'],
+      act: ['input-action-failed'],
+      close: ['pipewire-stop-failed', 'portal-close-failed', 'both-stop-failed', 'input-stop-failed']
+    })
+    expect(Object.isFrozen(NATIVE_COMPUTER_USE_DIAGNOSTICS_BY_REQUEST)).toBe(true)
+    for (const codes of Object.values(NATIVE_COMPUTER_USE_DIAGNOSTICS_BY_REQUEST)) expect(Object.isFrozen(codes)).toBe(true)
+  })
+  it('copies only four fixed diagnostic slots and the exact bounded codes', () => {
+    expect(COMPUTER_USE_DIAGNOSTIC_CODES).toEqual([
+      'portal-connect-failed', 'window-selection-failed', 'selection-not-deliverable',
+      'pipewire-start-failed', 'post-start-not-deliverable', 'capture-frame-failed',
+      'pipewire-stop-failed', 'portal-close-failed', 'both-stop-failed', 'request-state-invalid',
+      'display-selection-failed', 'input-open-failed', 'input-action-failed', 'input-stop-failed',
+      'helper-protocol-invalid', 'helper-exit-unverified', 'helper-transport-error', 'helper-preview-invalid'
+    ])
+    expect(Object.isFrozen(COMPUTER_USE_DIAGNOSTIC_CODES)).toBe(true)
+    for (const slot of ['open', 'capture', 'act', 'close'] as const) {
+      for (const code of COMPUTER_USE_DIAGNOSTIC_CODES) {
+        const diagnostics = { [slot]: code }
+        const copy = copyComputerUseDiagnostics(diagnostics)
+        expect(copy).toEqual(diagnostics)
+        expect(copy).not.toBe(diagnostics)
+        expect(validateComputerUseStatus({ ...createDisabledComputerUseStatus(), diagnostics }).diagnostics).toEqual(diagnostics)
+      }
+    }
+    expect(copyComputerUseDiagnostics({})).toEqual({})
+    expect(copyComputerUseDiagnostics(Object.assign(Object.create(null), { open: 'portal-connect-failed' })))
+      .toEqual({ open: 'portal-connect-failed' })
+  })
+
+  it('deep-copies diagnostics without changing coordination, pending, receipt or consent', () => {
+    const diagnostics = { open: 'pipewire-start-failed', capture: 'capture-frame-failed', close: 'portal-close-failed' }
+    const status = { ...createDisabledComputerUseStatus(), state: 'quarantined', coordination: 'held',
+      scopeRevision: 1, actualPending: true, owner: { ...owner },
+      receipt: { ...receipt, status: 'outcome-unknown', actualPending: true }, diagnostics }
+    const copy = validateComputerUseStatus(status)
+    expect(copy).toEqual(status)
+    expect(copy.diagnostics).not.toBe(diagnostics)
+    expect(Reflect.ownKeys(copy.diagnostics!)).toEqual(['open', 'capture', 'close'])
+    expect(copy.consent).not.toBe(status.consent)
+    expect(copy.receipt).not.toBe(status.receipt)
+    const { diagnostics: _diagnostics, ...withoutDiagnostics } = copy
+    const { diagnostics: _inputDiagnostics, ...legacyStatus } = status
+    expect(withoutDiagnostics).toEqual(validateComputerUseStatus(legacyStatus))
+    copy.diagnostics!.open = 'helper-protocol-invalid'
+    diagnostics.close = 'both-stop-failed'
+    expect(diagnostics.open).toBe('pipewire-start-failed')
+    expect(copy.diagnostics!.close).toBe('portal-close-failed')
+    expect(copy).toMatchObject({ state: 'quarantined', coordination: 'held', actualPending: true,
+      consent: DEFAULT_COMPUTER_USE_CONSENT, receipt: { status: 'outcome-unknown', actualPending: true } })
+    for (const invalid of [{ ...status, state: 'stopped' }, { ...status, state: 'ready' },
+      { ...status, actualPending: false }]) expect(normalizeComputerUseStatus(invalid)).toBeUndefined()
+    const legacy = createDisabledComputerUseStatus()
+    expect(validateComputerUseStatus(legacy)).toEqual(legacy)
+    expect(Object.hasOwn(validateComputerUseStatus(legacy), 'diagnostics')).toBe(false)
+  })
+
+  it('rejects all raw diagnostic data, unknown fields and codes without invoking accessors', () => {
+    const getter = vi.fn(() => 'portal-connect-failed')
+    const accessor = Object.defineProperty({}, 'open', { enumerable: true, get: getter })
+    const invalidDiagnostics = [
+      undefined, null, true, 1, 'portal-connect-failed', [], ['portal-connect-failed'],
+      Object.assign(Object.create({ inherited: true }), { open: 'portal-connect-failed' }), accessor,
+      Object.defineProperty({}, 'open', { value: 'portal-connect-failed', enumerable: false }),
+      { open: undefined }, { capture: null }, { close: ['portal-close-failed'] },
+      { open: 'unknown-code' }, { open: '/home/private/frame.png' },
+      { capture: 'file:///home/private/frame.png' }, { close: 'Error: private native failure' },
+      { open: 'portal-connect-failed', rawFilename: '/home/private/frame.png' },
+      { open: 'portal-connect-failed', uri: 'file:///home/private/frame.png' },
+      { close: 'portal-close-failed', error: 'private native failure' },
+      { open: 'portal-connect-failed', other: 'helper-transport-error' },
+      { open: 'portal-connect-failed', [Symbol('private')]: 'secret' }
+    ]
+    for (const diagnostics of invalidDiagnostics) {
+      expect(copyComputerUseDiagnostics(diagnostics)).toBeUndefined()
+      const status = { ...createDisabledComputerUseStatus(), diagnostics }
+      expect(() => validateComputerUseStatus(status)).toThrow('Invalid ComputerUse contract')
+      expect(normalizeComputerUseStatus(status)).toBeUndefined()
+    }
+    const statusGetter = vi.fn(() => ({ open: 'portal-connect-failed' }))
+    const accessorStatus = Object.defineProperty(createDisabledComputerUseStatus(), 'diagnostics', {
+      enumerable: true, get: statusGetter
+    })
+    expect(() => validateComputerUseStatus(accessorStatus)).toThrow('Invalid ComputerUse contract')
+    expect(normalizeComputerUseStatus(accessorStatus)).toBeUndefined()
+    expect(getter).not.toHaveBeenCalled()
+    expect(statusGetter).not.toHaveBeenCalled()
+  })
+
+  it('copies only the bounded coordination enum and treats missing legacy metadata as unchecked', () => {
+    const status = createDisabledComputerUseStatus()
+    const { coordination: _coordination, ...legacy } = status
+    expect(validateComputerUseStatus(legacy)).toEqual(status)
+    for (const coordination of ['not-checked', 'held', 'blocked', 'unknown', 'released', 'unclaimed']) {
+      const input = { ...status, coordination }
+      const copy = validateComputerUseStatus(input)
+      expect(copy).toEqual(input)
+      expect(copy).not.toBe(input)
+    }
+    for (const coordination of [undefined, null, true, 1, '', 'active', {}, { receipt: 'secret' }]) {
+      expect(normalizeComputerUseStatus({ ...status, coordination })).toBeUndefined()
+    }
+    const getter = vi.fn(() => 'held')
+    const accessor = { ...status }
+    Object.defineProperty(accessor, 'coordination', { enumerable: true, get: getter })
+    expect(normalizeComputerUseStatus(accessor)).toBeUndefined()
+    expect(getter).not.toHaveBeenCalled()
+    for (const extra of [{ lockPath: '/home/user/marker' }, { coordinationReceipt: 'secret' },
+      { pid: 123 }, { token: 'secret' }, { [Symbol('receipt')]: 'secret' }]) {
+      expect(normalizeComputerUseStatus({ ...status, ...extra })).toBeUndefined()
+    }
+  })
+
   it('defaults to disabled, unknown Wayland scope and independently denied consents', () => {
     const status = createDisabledComputerUseStatus()
     expect(validateComputerUseStatus(status)).toEqual(status)
     expect(status.state).toBe('disabled')
+    expect(status.coordination).toBe('not-checked')
     expect(status.consent).toEqual({ capture: false, upload: false, retention: 'sdk-session', control: false })
     expect(status.capability).toMatchObject({ platform: 'linux-wayland', method: 'unavailable', capture: false, control: false, scope: 'unknown-window-or-display', unsupportedReason: 'not-probed' })
     status.budget.actions = 1

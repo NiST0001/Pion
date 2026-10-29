@@ -1,12 +1,20 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest'
 import { AppSettings } from '../../src/main/app-settings'
 
-const paths = vi.hoisted(() => ({ userData: '' }))
+const paths = vi.hoisted(() => ({ userData: '', publish: vi.fn<(file: string, value: unknown) => Promise<void>>() }))
 vi.mock('electron', () => ({ app: { getPath: () => paths.userData } }))
-beforeEach(async () => { paths.userData = await mkdtemp(join(tmpdir(), 'pion-appearance-')) })
+vi.mock('../../src/main/atomic-json-file', () => ({ writeAtomicJson: paths.publish }))
+let publishJson: typeof import('../../src/main/atomic-json-file').writeAtomicJson
+beforeAll(async () => {
+  ;({ writeAtomicJson: publishJson } = await vi.importActual<typeof import('../../src/main/atomic-json-file')>('../../src/main/atomic-json-file'))
+})
+beforeEach(async () => {
+  paths.userData = await mkdtemp(join(tmpdir(), 'pion-appearance-'))
+  paths.publish.mockReset().mockImplementation((file, value) => publishJson(file, value))
+})
 afterEach(async () => { await rm(paths.userData, { recursive: true, force: true }) })
 
 it('keeps effects opt-in and persists them without discarding shell settings', async () => {
@@ -37,7 +45,7 @@ it('defaults background collection on and persists its switch without losing oth
   expect(restored.getSessionModel('/project/session.jsonl')).toEqual({ provider: 'example', modelId: 'model' })
 })
 
-it('rolls back only the collection preference after a failed write', async () => {
+it('retains the committed collection preference after a failed write', async () => {
   const store = new AppSettings()
   await store.setCompletionNotificationsEnabled(false)
   const path = join(paths.userData, 'pion-settings.json')
@@ -63,31 +71,30 @@ it.each([
   await store.setWindowEffectsEnabled(true)
   await store.setSessionModel('/project/session.jsonl', { provider: 'example', modelId: 'model' })
 
-  const persistence = store as unknown as { persist(): Promise<void> }
-  const persist = persistence.persist.bind(store)
   let releaseFirst!: () => void
   let markStarted!: () => void
   const blocked = new Promise<void>((resolve) => { releaseFirst = resolve })
   const started = new Promise<void>((resolve) => { markStarted = resolve })
   const failure = new Error('controlled collection write failure')
-  const spy = vi.spyOn(persistence, 'persist')
-    .mockImplementationOnce(async () => {
+  const spy = paths.publish
+    .mockImplementationOnce(async (file, value) => {
       markStarted()
       await blocked
       if (firstFails) throw failure
-      await persist()
+      await publishJson(file, value)
     })
-    .mockImplementationOnce(async () => {
+    .mockImplementationOnce(async (file, value) => {
       if (!firstFails) throw failure
-      await persist()
+      await publishJson(file, value)
     })
+  spy.mockClear()
 
   const first = store.setUsageBackgroundCollectionEnabled(false)
   await started
   const second = store.setUsageBackgroundCollectionEnabled(true)
   const settled = Promise.allSettled([first, second])
   await Promise.resolve()
-  expect(store.usageBackgroundCollectionEnabled).toBe(false)
+  expect(store.usageBackgroundCollectionEnabled).toBe(true)
   expect(spy).toHaveBeenCalledTimes(1)
   releaseFirst()
   const results = await settled
@@ -107,19 +114,20 @@ it.each([
   }
   const persisted = JSON.parse(await readFile(join(paths.userData, 'pion-settings.json'), 'utf8'))
   expect(persisted.usageBackgroundCollectionEnabled).toBe(expected)
-  spy.mockRestore()
 })
 
-it('ignores malformed background collection preferences', async () => {
-  await writeFile(join(paths.userData, 'pion-settings.json'), JSON.stringify({ usageBackgroundCollectionEnabled: 'false' }))
+it.each([
+  { usageBackgroundCollectionEnabled: 'false' },
+  { windowEffectsEnabled: 'yes' }
+])('preserves malformed shell preferences and rejects default replacement: %j', async (invalid) => {
+  const path = join(paths.userData, 'pion-settings.json')
+  const source = JSON.stringify(invalid)
+  await writeFile(path, source)
   const store = new AppSettings()
-  await store.load()
+  await expect(store.load()).rejects.toThrow()
   expect(store.usageBackgroundCollectionEnabled).toBe(true)
-})
-
-it('ignores malformed transparency preferences', async () => {
-  await writeFile(join(paths.userData, 'pion-settings.json'), JSON.stringify({ windowEffectsEnabled: 'yes' }))
-  const store = new AppSettings()
-  await store.load()
   expect(store.windowEffectsEnabled).toBe(false)
+  await expect(store.setWindowEffectsEnabled(true)).rejects.toThrow()
+  expect(await readFile(path, 'utf8')).toBe(source)
+  expect(paths.publish).not.toHaveBeenCalled()
 })

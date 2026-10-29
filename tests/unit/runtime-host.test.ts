@@ -1,8 +1,14 @@
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import type { Api, Model } from '@earendil-works/pi-ai'
+import type { AgentSession, SessionEntry } from '@earendil-works/pi-coding-agent'
 import { createPionRuntime, parseRuntimeArgs } from '../../src/main/agent/runtime-host'
+import * as modelGate from '../../src/main/agent/computer-use-model-gate'
+import * as computerUse from '../../src/main/agent/computer-use'
 
 const mocks = vi.hoisted(() => ({ services: vi.fn(), session: vi.fn(), runtime: vi.fn(), settings: vi.fn(), create: vi.fn(), open: vi.fn(), image: vi.fn(), auth: vi.fn() }))
+const io = vi.hoisted(() => ({ open: vi.fn(() => 7), sync: vi.fn(), close: vi.fn() }))
+vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>(), openSync: io.open, fsyncSync: io.sync, closeSync: io.close }))
 vi.mock('@earendil-works/pi-coding-agent', async (original) => ({
   ...await original<typeof import('@earendil-works/pi-coding-agent')>(),
   createAgentSessionServices: mocks.services,
@@ -21,8 +27,11 @@ beforeEach(() => {
   // These cases cover the no-preferences Pi activation path. Do not inherit
   // the running Pion instance's capability file or scan its real resources.
   vi.stubEnv('PION_CAPABILITY_SETTINGS_FILE', undefined)
-  const manager = { getCwd: () => cwd, buildSessionContext: () => ({ messages: [] }), appendMessage: vi.fn() }
-  const settings = { getEnabledModels: () => [], getDefaultProvider: () => undefined, getDefaultModel: () => undefined, getDefaultTools: () => undefined, getSettings: () => ({}), applyOverrides: vi.fn() }
+  const manager = { getCwd: () => cwd, buildSessionContext: () => ({ messages: [] }),
+    getEntries: () => [], getBranch: () => [], getEntry: () => undefined,
+    getSessionId: () => 'mock-session', getSessionFile: () => undefined, appendMessage: vi.fn(),
+    getHeader: () => ({ type: 'session', version: 3, id: 'mock-session', cwd, timestamp: '' }) }
+  const settings = { getEnabledModels: () => [], getDefaultProvider: () => undefined, getDefaultModel: () => undefined, getDefaultTools: () => undefined, getSettings: () => ({}), applyOverrides: vi.fn(), getBlockImages: () => false, getTransport: () => 'sse' }
   mocks.create.mockReturnValue(manager)
   mocks.open.mockReturnValue(manager)
   mocks.settings.mockReturnValue(settings)
@@ -32,7 +41,9 @@ beforeEach(() => {
     // Exercise only the injected runtime boundary, not the real image API.
     execute: async (signal: AbortSignal) => options.getAuth({ signal, minOAuthValidityMs: 300_000 })
   }))
-  mocks.services.mockResolvedValue({ settingsManager: settings, modelRuntime: { getAuth: mocks.auth }, resourceLoader: { getExtensions: () => ({ extensions: [] }) }, diagnostics: [] })
+  // SDK replacements create new service/runtime objects, never another facade
+  // around the previous backend's already-retired model runtime.
+  mocks.services.mockImplementation(async () => ({ settingsManager: settings, modelRuntime: { getAuth: mocks.auth }, resourceLoader: { getExtensions: () => ({ extensions: [] }) }, diagnostics: [] }))
   mocks.session.mockImplementation(async ({ sessionManager }) => ({ session: fakeSession(sessionManager), extensionsResult: {} }))
   mocks.runtime.mockImplementation(async (factory, target) => factory(target))
 })
@@ -47,7 +58,6 @@ it('parses only the private RPC arguments and fails closed on unknown flags', ()
 
 it('injects a compiled SDK tool, preserves trust gating, and recreates tools for replacement sessions', async () => {
   const initial = await createPionRuntime(['--mode', 'rpc', '--no-approve', '--extension', './permissions.ts'], cwd)
-
   expect(mocks.settings).toHaveBeenCalledWith(cwd, expect.any(String), { projectTrusted: false })
   expect(mocks.session).toHaveBeenCalledWith(expect.objectContaining({ customTools: [expect.objectContaining({ name: 'pion_ask_user' }), expect.objectContaining({ name: 'pion_subagents' }), expect.objectContaining({ name: 'pion_generate_image' })] }))
   expect(mocks.image).toHaveBeenCalledWith({ cwd, getAuth: expect.any(Function) })
@@ -82,13 +92,47 @@ it('injects a compiled SDK tool, preserves trust gating, and recreates tools for
   expect(mocks.image).toHaveBeenCalledTimes(2)
 })
 
+it('installs timing inside the Cua append/dispose chain and restores the manager before rebuilding (wrapper fakes only)', async () => {
+  const manager = mocks.create()
+  const baseAppend = manager.appendMessage
+  const innerAppends: AgentSession['sessionManager']['appendMessage'][] = []
+  const toolFactory = vi.spyOn(computerUse, 'createComputerUseTools').mockImplementation(() => ({
+    tools: [], authorizeEgress: vi.fn(),
+    attach(session: AgentSession) {
+      const innerAppend = session.sessionManager.appendMessage
+      expect(innerAppend).not.toBe(baseAppend)
+      expect(innerAppends).not.toContain(innerAppend)
+      innerAppends.push(innerAppend)
+      const innerDispose = session.dispose
+      const outer: typeof innerAppend = message => innerAppend.call(manager, message)
+      manager.appendMessage = outer
+      session.dispose = () => {
+        expect(manager.appendMessage).toBe(outer)
+        manager.appendMessage = innerAppend
+        innerDispose.call(session)
+      }
+    }
+  }))
+  try {
+    const initial = await createPionRuntime(['--mode', 'rpc'], cwd)
+    initial.session.dispose()
+    expect(manager.appendMessage).toBe(baseAppend)
+    const [factory, target] = mocks.runtime.mock.calls[0]
+    const replacement = await factory(target)
+    replacement.session.dispose()
+    expect(manager.appendMessage).toBe(baseAppend)
+    expect(innerAppends).toHaveLength(2)
+    expect(mocks.auth).not.toHaveBeenCalled()
+  } finally { toolFactory.mockRestore() }
+})
+
 it('captures each backend’s own model runtime and only resolves Codex OAuth when the image tool executes', async () => {
   const initial = await createPionRuntime(['--mode', 'rpc', '--approve'], cwd)
-
   const [factory, target] = mocks.runtime.mock.calls[0]
   const nextAuth = vi.fn().mockResolvedValue(undefined)
   const services = await mocks.services.mock.results[0].value
-  mocks.services.mockResolvedValue({ ...services, modelRuntime: { getAuth: nextAuth } })
+  const nextModels = { getAuth: nextAuth }
+  mocks.services.mockResolvedValue({ ...services, modelRuntime: nextModels })
   initial.session.dispose()
   await factory({ ...target, sessionStartEvent: { reason: 'resume' } })
   expect(mocks.auth).not.toHaveBeenCalled()
@@ -99,6 +143,59 @@ it('captures each backend’s own model runtime and only resolves Codex OAuth wh
   expect(nextAuth).not.toHaveBeenCalled()
   await mocks.session.mock.calls[1][0].customTools[2].execute(signal)
   expect(nextAuth).toHaveBeenCalledWith('openai-codex', { signal, minOAuthValidityMs: 300_000 })
+  expect(mocks.auth).toHaveBeenCalledTimes(1)
+  expect(mocks.auth.mock.contexts[0]).not.toBe(services.modelRuntime)
+  expect(mocks.auth.mock.contexts[0]).toHaveProperty('getAuth', mocks.auth)
+  expect(nextAuth.mock.contexts[0]).toBe(nextModels)
+})
+
+it('keeps independent image OAuth usable after live taint without exempting SDK history auth or streams (spies only)', async () => {
+  const model = { provider: 'openai-codex', id: 'mock-vision', api: 'openai-codex-responses', input: ['text', 'image'] } as Model<Api>
+  const entries: SessionEntry[] = [{ type: 'message', id: 'user', parentId: null, timestamp: '', message: { role: 'user', content: 'mock', timestamp: 1 } }]
+  Object.assign(mocks.create(), { getEntries: () => [...entries], getBranch: () => [...entries],
+    isPersisted: () => true, getSessionFile: () => '/mock/session.jsonl',
+    appendCustomEntry: (customType: string, data: unknown) => {
+      entries.push({ type: 'custom', id: 'taint', parentId: 'user', timestamp: '', customType, data })
+      return 'taint'
+    } })
+  const rawModels = { getAuth: mocks.auth, login: vi.fn(), streamSimple: vi.fn(),
+    getPhysicalModel: () => model, getRegisteredProviderConfig: () => undefined, getRegisteredNativeProvider: () => undefined }
+  mocks.services.mockResolvedValue({ settingsManager: mocks.settings(), modelRuntime: rawModels,
+    resourceLoader: { getExtensions: () => ({ extensions: [] }) }, diagnostics: [] })
+  const createGate = modelGate.createComputerUseModelGate
+  const authorize = vi.fn().mockRejectedValue(new Error('Main egress denied'))
+  const gateFactory = vi.spyOn(modelGate, 'createComputerUseModelGate').mockImplementationOnce((runtime, options) =>
+    // Synthetic Main observation/approval boundaries; marker filesystem is also
+    // mocked above. No screenshot, credential store, provider or network runs.
+    createGate(runtime, { ...options, authorize, assertObservation: vi.fn() }))
+  await createPionRuntime(['--mode', 'rpc', '--approve'], cwd)
+  const gate = gateFactory.mock.results[0].value!
+  expect(mocks.auth).not.toHaveBeenCalled()
+  expect(io.open).not.toHaveBeenCalled()
+  gate.retain(model, { version: 1, operation: 'observe', requestId: 'mock-observe', ok: true, scopeRevision: 4,
+    image: { mimeType: 'image/png', data: 'synthetic-only' } })
+  expect(modelGate.computerUseHistoryState(mocks.create(), gateFactory.mock.calls[0][1].runtimeId)).toBe('current')
+  const { services, customTools } = mocks.session.mock.calls[0][0]
+  expect(services.modelRuntime).toBe(gate.models)
+  expect(services.modelRuntime).not.toBe(rawModels)
+  await expect(services.modelRuntime.getAuth(model)).rejects.toThrow('Main egress denied')
+  await expect(services.modelRuntime.getAuth('openai-codex')).rejects.toThrow(/egress denied/)
+  expect(await services.modelRuntime.streamSimple(model, { messages: [] }).result()).toMatchObject({ stopReason: 'error', errorMessage: expect.stringContaining('Main egress denied') })
+  expect(rawModels.streamSimple).not.toHaveBeenCalled()
+  expect(mocks.auth).not.toHaveBeenCalled()
+  expect(authorize).toHaveBeenCalledTimes(2)
+  const signal = new AbortController().signal
+  await services.modelRuntime.login('openai-codex', 'oauth', { signal })
+  expect(rawModels.login).toHaveBeenCalledWith('openai-codex', 'oauth', { signal })
+  const auth = { source: 'OAuth', auth: { apiKey: 'synthetic-only' } }
+  mocks.auth.mockResolvedValue(auth)
+  // Execute only the injected auth closure at the image tool boundary, after
+  // its unchanged permission/input gates; it receives no SDK screenshot history.
+  expect(await customTools[2].execute(signal)).toBe(auth)
+  expect(mocks.auth).toHaveBeenCalledExactlyOnceWith('openai-codex', { signal, minOAuthValidityMs: 300_000 })
+  expect(mocks.auth.mock.contexts[0]).toBe(rawModels)
+  await expect(services.modelRuntime.getAuth(model)).rejects.toThrow('Main egress denied')
+  expect(authorize).toHaveBeenCalledTimes(3)
   expect(mocks.auth).toHaveBeenCalledTimes(1)
 })
 

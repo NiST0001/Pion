@@ -91,7 +91,10 @@ export async function prepareWorktreeBranchDeletion(
   const target = pathInput(targetCwd)
   const name = branchInput(branchName)
   if (typeof assertIdle !== 'function') fail('缺少工作树空闲检查')
-  if (related(root, target) || related(target, root) || related(target, resolve(process.cwd()))
+  // Only the primary project's managed direct children may sit inside the root.
+  // Real paths and the registered primary worktree are verified below.
+  const managedTarget = dirname(target) === join(root, '.pion-worktrees')
+  if ((related(root, target) && !managedTarget) || related(target, root) || related(target, resolve(process.cwd()))
     || related(target, resolve(dirname(process.execPath))) || basename(target).toLowerCase() === '.git') fail('不能删除主工作树或嵌套目录')
   await assertIdle()
   const dirs = new Map([...await ancestors(root), ...await ancestors(target)])
@@ -124,6 +127,7 @@ export async function prepareWorktreeBranchDeletion(
     const record = matches[0]
     if (matches.length !== 1 || list[0] === record || record.detached || record.locked || record.prunable
       || record.branch !== name || record.head !== targetSha || list.filter((r) => r.branch === name).length !== 1) fail('目标不是可删除的已登记分支工作树')
+    if (list.slice(1).some((r) => r !== record && (related(target, resolve(r.path)) || related(resolve(r.path), target)))) fail('不能删除嵌套工作树')
     if (await line(target, ['rev-parse', '--show-toplevel']) !== target
       || await line(target, ['rev-parse', '--show-superproject-working-tree']) !== ''
       || await realpath(await line(target, ['rev-parse', '--path-format=absolute', '--git-common-dir'])) !== rootCommon

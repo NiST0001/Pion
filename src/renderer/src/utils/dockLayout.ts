@@ -120,14 +120,17 @@ export function moveDockPanel(layout: DockLayout, panel: DockPanel, target: Dock
 }
 
 export function resizeDockSplit(layout: DockLayout, path: string, ratio: number): DockLayout {
-  if (!Number.isFinite(ratio)) return layout
+  if (!Number.isFinite(ratio) || /[^01]/.test(path)) return layout
+  const nextRatio = clampRatio(ratio)
   const visit = (node: DockNode, depth: number): DockNode => {
     if (node.type === 'panel') return node
-    if (depth === path.length) return { ...node, ratio: clampRatio(ratio) }
+    if (depth === path.length) return node.ratio === nextRatio ? node : { ...node, ratio: nextRatio }
     const child = path[depth] === '0' ? 'first' : 'second'
-    return { ...node, [child]: visit(node[child], depth + 1) }
+    const next = visit(node[child], depth + 1)
+    return next === node[child] ? node : { ...node, [child]: next }
   }
-  return { version: 2, root: visit(layout.root, 0) }
+  const root = visit(layout.root, 0)
+  return root === layout.root ? layout : { version: 2, root }
 }
 
 /** Project a split tree to rectangles. React renders panels in a fixed sibling

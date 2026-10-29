@@ -120,6 +120,8 @@ describe('WorkflowManager', () => {
       workflows: Map<string, WorkflowSnapshot>
       changed(workflow: WorkflowSnapshot): Promise<void>
       launch(workflow: WorkflowSnapshot, operation: () => Promise<void>): void
+      runAgent(workflow: WorkflowSnapshot, role: 'planner', cwd: string, prompt: string): Promise<string>
+      runner: WorkflowWorkerRunner
     }
     vi.spyOn(internal, 'changed').mockResolvedValue(undefined)
     return { workflows, internal }
@@ -186,6 +188,44 @@ describe('WorkflowManager', () => {
     await vi.waitFor(() => expect(() => workflows.assertWorktreeDeletionIdle('/project')).not.toThrow())
   })
 
+  it('keeps shutdown pending until cancelled background preparation actually settles', async () => {
+    const { workflows, internal } = isolatedManager()
+    vi.spyOn(workflows, 'flush').mockResolvedValue(undefined)
+    const value = snapshot('pending-preparation', 'preparing')
+    internal.workflows.set(value.id, value)
+    let finish!: () => void
+    internal.launch(value, () => new Promise<void>((done) => { finish = done }))
+    await Promise.resolve()
+    let closed = false
+    const shutdown = workflows.shutdown().then(() => { closed = true })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(closed).toBe(false)
+    expect(value.state).toBe('interrupted')
+    finish()
+    await shutdown
+    expect(closed).toBe(true)
+  })
+
+  it('does not invoke a worker cancelled while its running snapshot is still being saved', async () => {
+    const { workflows, internal } = isolatedManager()
+    const value = snapshot('12345678-1234-4234-8234-123456789abc', 'planning')
+    internal.workflows.set(value.id, value)
+    const run = vi.spyOn(internal.runner, 'run')
+    const cancel = vi.spyOn(internal.runner, 'cancel')
+    let finish!: () => void
+    vi.mocked(internal.changed).mockImplementationOnce(() => new Promise<void>((done) => { finish = done }))
+    const running = internal.runAgent(value, 'planner', '/isolated/planner', 'plan')
+    const rejected = expect(running).rejects.toThrow(/已停止/)
+    await workflows.cancel(value.id)
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(run).not.toHaveBeenCalled()
+    finish()
+    await rejected
+    expect(run).not.toHaveBeenCalled()
+    expect(workflows.get(value.id)?.state).toBe('cancelled')
+  })
+
   it('reserves startup persistence and rechecks the guard before launch', async () => {
     const { workflows, internal } = isolatedManager()
     const value = snapshot('pending-start')
@@ -213,6 +253,7 @@ describe('WorkflowManager', () => {
     await workflows.start(created.id)
     await waitForState(workflows, created.id, 'awaiting_plan')
     expect(workflows.get(created.id)?.plan).toContain('implement feature')
+    expect(workflows.get(created.id)?.worktrees.planner).toBe(join(root, '.pion-workflow-worktrees', created.id, 'planner'))
     expect(git(root, 'status', '--porcelain')).toBe('')
 
     await settle(() => workflows.approvePlan(created.id))
@@ -220,6 +261,15 @@ describe('WorkflowManager', () => {
     const candidate = workflows.get(created.id)
     expect(candidate?.review?.verdict).toBe('pass')
     expect(candidate?.verification?.state).toBe('passed')
+    for (const role of ['planner', 'implementer', 'reviewer', 'tester'] as const) {
+      expect(candidate?.worktrees[role]).toBe(join(root, '.pion-workflow-worktrees', created.id, role))
+    }
+    const metadataRoot = (workflows as unknown as { worktreeRoot: string }).worktreeRoot
+    const permissions = JSON.parse(await readFile(join(metadataRoot, created.id, 'permissions.json'), 'utf8'))
+    expect(permissions.projects[candidate!.worktrees.implementer!].write).toBe('allow')
+    expect(permissions.projects[candidate!.worktrees.reviewer!].write).toBe('deny')
+    expect(git(root, 'status', '--porcelain')).toBe('')
+    expect(git(root, 'check-ignore', '--', '.pion-workflow-worktrees/')).toBe('.pion-workflow-worktrees/')
     expect(git(root, 'show', `${candidate?.candidateOid}:feature.txt`)).toBe('implemented')
     await expect(readFile(join(root, 'feature.txt'), 'utf8')).rejects.toThrow()
 

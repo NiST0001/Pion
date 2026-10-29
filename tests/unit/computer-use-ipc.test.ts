@@ -26,6 +26,7 @@ function harness() {
     // Real getState returns fresh validated metadata, not the mutable broker state.
     getState: vi.fn(snapshot), start: vi.fn(async () => snapshot()),
     capture: vi.fn(async (): Promise<CaptureResult> => ({ state: snapshot(), png: new Uint8Array(8 * 1024 * 1024).fill(0xa5) })),
+    act: vi.fn(async (_owner: ComputerUseOwner, _request: import('../../src/shared/computer-use').ComputerUseActRequest) => snapshot()),
     stop: vi.fn(async () => snapshot())
   }
   const createLocalOwner = vi.fn(() => owner)
@@ -41,7 +42,7 @@ function harness() {
 const consent = { capture: true, upload: false, retention: 'sdk-session', control: false }
 function capturedState(): ComputerUseStatus {
   return {
-    ...createDisabledComputerUseStatus(), state: 'ready',
+    ...createDisabledComputerUseStatus(), state: 'ready', coordination: 'held',
     frame: { id: 'frame-1', width: 800, height: 600, createdAt: 1, scopeRevision: 0, captureScope: 'window', actualScope: 'window' }
   }
 }
@@ -53,7 +54,7 @@ function projected(state: ComputerUseStatus): ComputerUseStatus {
 }
 
 describe('ComputerUse local owner IPC (no OS)', () => {
-  it.each([IPC.ComputerUseGetState, IPC.ComputerUseStart, IPC.ComputerUseCapture, IPC.ComputerUseStop])('rejects secondary frames, guests and destroyed senders independently: %s', async channel => {
+  it.each([IPC.ComputerUseGetState, IPC.ComputerUseStart, IPC.ComputerUseCapture, IPC.ComputerUseAct, IPC.ComputerUseStop])('rejects secondary frames, guests and destroyed senders independently: %s', async channel => {
     const h = harness()
     const args = channel === IPC.ComputerUseStart ? [consent] : channel === IPC.ComputerUseCapture ? [{ scopeRevision: 0 }] : []
     for (const event of [{ ...h.event, senderFrame: {} }, { ...h.event, sender: { ...h.event.sender, id: 8 } }, { ...h.event, senderFrame: null }]) {
@@ -66,6 +67,44 @@ describe('ComputerUse local owner IPC (no OS)', () => {
     expect(h.service.stop).not.toHaveBeenCalled()
     expect(h.service.getState).not.toHaveBeenCalled()
   })
+  it('accepts explicit local display control without allowing upload or caller identity', async () => {
+    const h = harness()
+    const approval = { ...consent, control: true, captureScope: 'display' }
+    await h.invoke(IPC.ComputerUseStart, h.event, approval)
+    expect(h.service.start).toHaveBeenCalledWith(h.owner, approval)
+    await expect(h.invoke(IPC.ComputerUseStart, h.event, { ...approval, upload: true })).rejects.toThrow()
+    await expect(h.invoke(IPC.ComputerUseStart, h.event, { ...approval, control: false })).rejects.toThrow()
+  })
+  it('strictly bounds local act schema and forwards only host owner and validated action', async () => {
+    const h = harness()
+    const state = capturedState()
+    h.setState(state)
+    const action = { type: 'type', text: 'local-only' }
+    const request = { scopeRevision: 0, frameId: 'frame-1', action }
+    const getter = vi.fn(() => 0)
+    for (const invalid of [undefined, { ...request, scopeRevision: 1 }, { ...request, owner: h.owner }, { ...request, inputFrame: { sequence: 1, topology: 1 } }, { ...request, toolCallId: 'spoof' }, { ...request, path: '/tmp/input' }, { ...request, action: { ...action, extra: true } }, Object.defineProperty({ frameId: 'frame-1', action }, 'scopeRevision', { enumerable: true, get: getter })]) {
+      await expect(h.invoke(IPC.ComputerUseAct, h.event, invalid)).rejects.toThrow()
+    }
+    expect(getter).not.toHaveBeenCalled()
+    expect(h.service.act).not.toHaveBeenCalled()
+    const result = await h.invoke(IPC.ComputerUseAct, h.event, request)
+    expect(h.service.act).toHaveBeenCalledExactlyOnceWith(h.owner, { frameId: 'frame-1', action })
+    expect(result).toEqual(projected(state))
+  })
+  it.each(['scope', 'result-scope', 'navigation', 'destroyed'] as const)('rejects late act result after %s changes', async kind => {
+    const h = harness()
+    h.setState(capturedState())
+    let resolve!: (state: ComputerUseStatus) => void
+    h.service.act.mockReturnValueOnce(new Promise(done => { resolve = done }))
+    const pending = h.invoke(IPC.ComputerUseAct, h.event, { scopeRevision: 0, frameId: 'frame-1', action: { type: 'type', text: 'local' } })
+    const result = h.state
+    if (kind === 'scope') h.setState({ ...result, scopeRevision: 1, frame: undefined })
+    if (kind === 'result-scope') { result.scopeRevision = 1; delete result.frame }
+    if (kind === 'navigation') h.navigate()
+    if (kind === 'destroyed') h.destroy()
+    resolve(result)
+    await expect(pending).rejects.toThrow()
+  })
   it('queries only cached metadata and never falls back to Agent/OS', () => {
     const h = harness()
     expect(h.invoke(IPC.ComputerUseGetState)).toEqual(h.state)
@@ -74,25 +113,40 @@ describe('ComputerUse local owner IPC (no OS)', () => {
     expect(h.service.capture).not.toHaveBeenCalled()
     expect(h.createLocalOwner).not.toHaveBeenCalled()
   })
+  it.each([false, true])('projects DMA config %s only as metadata without owner or implied permissions', dmaBufDevelopmentEnabled => {
+    const h = harness()
+    h.setState({ ...h.state, dmaBufDevelopmentEnabled, owner: h.owner })
+    const result = h.invoke(IPC.ComputerUseGetState)
+    expect(result).toMatchObject({ dmaBufDevelopmentEnabled, inputDevelopmentEnabled: false, state: 'disabled',
+      consent: { capture: false, upload: false, control: false }, capability: { capture: false, control: false } })
+    expect(result).not.toHaveProperty('owner')
+    expect(result).not.toHaveProperty('receipt')
+    expect(h.service.start).not.toHaveBeenCalled()
+    expect(h.service.capture).not.toHaveBeenCalled()
+    expect(h.createLocalOwner).not.toHaveBeenCalled()
+  })
   it('constructing the service/driver and reading inactive status never spawns or probes', () => {
     const spawn = vi.fn(() => { throw new Error('unexpected helper execution') })
-    const factory = vi.fn(() => new WaylandComputerUseDriver('/explicit/project/helper', spawn))
+    const factory = vi.fn(() => new WaylandComputerUseDriver('/explicit/project/helper', false, spawn))
     const publish = vi.fn(), clock = vi.fn(() => 1), randomId = vi.fn(() => 'id-1')
-    new WaylandComputerUseDriver('/explicit/project/helper', spawn)
-    const service = new ComputerUseService({ driverFactory: factory, publish, clock, randomId })
+    new WaylandComputerUseDriver('/explicit/project/helper', false, spawn)
+    const coordination = { claim: vi.fn(async () => { throw new Error('unexpected coordination claim') }), release: vi.fn(async () => { throw new Error('unexpected coordination release') }) }
+    const service = new ComputerUseService({ coordination, driverFactory: factory, publish, clock, randomId })
     expect(service.getState()).toEqual(createDisabledComputerUseStatus())
     service.getState().budget.captures = 80
     expect(service.getState().budget.captures).toBe(0)
-    for (const callback of [spawn, factory, publish, clock, randomId]) expect(callback).not.toHaveBeenCalled()
+    for (const callback of [spawn, factory, publish, clock, randomId, coordination.claim, coordination.release]) expect(callback).not.toHaveBeenCalled()
     // Read the buddy source only: do not execute the helper, shell or main entry.
     const helper = readFileSync(new URL('../../src/main/computer-use/helper-client.ts', import.meta.url), 'utf8')
-    expect(helper).toContain("spawn(path, [], { stdio: ['pipe', 'pipe', 'pipe'], shell: false })")
+    expect(helper).toContain("const args = ['--client-close-receipt-v1', ...(this.control ? ['--wayland-virtual-input-v1'] : []), ...(this.accounting ? ['--capture-accounting-v1'] : []), ...(this.dmaBufReadback ? ['--dmabuf-readback-v1'] : [])]")
+    expect(helper).toContain("spawn(this.binary, args, { stdio: ['pipe', 'pipe', 'pipe'], shell: false })")
+    expect(helper.slice(helper.indexOf('constructor(private readonly binary:'), helper.indexOf('private launch():'))).not.toContain('spawn(')
     const driver = readFileSync(new URL('../../src/main/computer-use/wayland-driver.ts', import.meta.url), 'utf8')
-    expect(driver).toContain('constructor(private readonly binary: string, private readonly start?: HelperSpawn) {}')
+    expect(driver).toContain('constructor(private readonly binary: string, private readonly dmaBufReadback = false, private readonly start?: HelperSpawn) {}')
   })
   it('accepts only explicit local capture consent, host-generates identity', async () => {
     const h = harness()
-    for (const invalid of [{ ...consent, upload: true }, { ...consent, control: true }, { ...consent, capture: false }, { ...consent, owner: h.owner }, { ...consent, backendId: 'spoof' }]) await expect(h.invoke(IPC.ComputerUseStart, h.event, invalid)).rejects.toThrow()
+    for (const invalid of [{ ...consent, upload: true }, { ...consent, control: true }, { ...consent, capture: false }, { ...consent, owner: h.owner }, { ...consent, backendId: 'spoof' }, { ...consent, dmaBufDevelopmentEnabled: true }, { ...consent, dmaBufReadback: true }]) await expect(h.invoke(IPC.ComputerUseStart, h.event, invalid)).rejects.toThrow()
     await h.invoke(IPC.ComputerUseStart, h.event, consent)
     expect(h.service.start).toHaveBeenCalledExactlyOnceWith(h.owner, consent)
   })
@@ -218,7 +272,7 @@ describe('ComputerUse local owner IPC (no OS)', () => {
   it('preload exposes an independent namespace; subscribing never captures/starts and unsubscribes only its listener', async () => {
     await import('../../src/preload/index')
     const api = electron.exposeInMainWorld.mock.calls[0][1]
-    expect(Object.keys(api.computerUse).sort()).toEqual(['capture', 'getState', 'onState', 'start', 'stop'])
+    expect(Object.keys(api.computerUse).sort()).toEqual(['act', 'capture', 'getState', 'onState', 'start', 'stop'])
     api.computerUse.getState()
     expect(electron.invoke).toHaveBeenLastCalledWith(IPC.ComputerUseGetState)
     const invokesBefore = electron.invoke.mock.calls.length
@@ -232,6 +286,9 @@ describe('ComputerUse local owner IPC (no OS)', () => {
     expect(electron.off).toHaveBeenLastCalledWith(channel, wrapped)
     expect(electron.invoke.mock.calls.length).toBe(invokesBefore)
     expect(electron.send).not.toHaveBeenCalled()
+    const actionRequest = { scopeRevision: 4, frameId: 'frame-1', action: { type: 'type', text: 'local' } }
+    api.computerUse.act(actionRequest)
+    expect(electron.invoke).toHaveBeenLastCalledWith(IPC.ComputerUseAct, actionRequest)
     api.computerUse.capture({ scopeRevision: 4 })
     expect(electron.invoke).toHaveBeenLastCalledWith(IPC.ComputerUseCapture, { scopeRevision: 4 })
   })

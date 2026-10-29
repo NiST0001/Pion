@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { transpileModule, ScriptTarget, ModuleKind } from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import { ComputerUseService } from '../../src/main/computer-use/service'
+import type { ComputerUseCoordination } from '../../src/main/computer-use/coordination'
 import { sameComputerUseOwner } from '../../src/shared/computer-use'
 import { projectComputerUseState } from '../../src/main/ipc/computer-use'
 
@@ -20,18 +21,24 @@ function deferred<T>() {
   const promise = new Promise<T>(done => { resolve = done })
   return { promise, resolve }
 }
-function harness(options: { open?: Promise<unknown>; close?: Promise<unknown> } = {}) {
+function harness(options: { open?: Promise<unknown>; close?: Promise<unknown>; packaged?: boolean; dmaConfig?: string } = {}) {
   const windows: Array<{ isDestroyed: () => boolean; webContents: ReturnType<typeof makeContents> }> = []
   const driver = { open: vi.fn(() => options.open ?? Promise.resolve(capability)), close: vi.fn(() => options.close ?? Promise.resolve()), capture: vi.fn() }
+  const makeDriver = vi.fn(function (_binary: string, _dmaBufReadback: boolean) { return driver })
+  const app = { isPackaged: options.packaged === true, getAppPath: vi.fn(() => '/fake') }
   let id = 0
-  const host = new Function('BrowserWindow', 'ComputerUseService', 'WaylandComputerUseDriver', 'sameComputerUseOwner', 'randomUUID', 'performance', 'app', 'process', 'join', 'IPC_EVENTS', 'projectComputerUseState', 'console', `${hostJs}
+  const coordination: ComputerUseCoordination = {
+    claim: vi.fn(async () => ({ kind: 'claimed', receipt: { kind: 'computer-use-coordination-receipt' } } as const)),
+    release: vi.fn(async () => {})
+  }
+  const host = new Function('BrowserWindow', 'ComputerUseService', 'PersistentComputerUseCoordination', 'WaylandComputerUseDriver', 'sameComputerUseOwner', 'randomUUID', 'performance', 'app', 'process', 'join', 'IPC_EVENTS', 'projectComputerUseState', 'console', `${hostJs}
     return { bind(contents) { mainWindowId = contents.id; bindCaptureDocument(contents) },
       create: createLocalCaptureOwner, getOwner: requireLocalCaptureOwner, service: computerUse,
       stop: stopLocalCapture, document: () => captureDocument,
       beginQuit() { computerUseQuitting = true } };
   `)(
-    { getAllWindows: () => windows }, ComputerUseService, function () { return driver }, sameComputerUseOwner,
-    () => `id-${++id}`, { now: () => 1 }, { isPackaged: false, getAppPath: () => '/fake' }, { platform: 'linux', env: { XDG_SESSION_TYPE: 'wayland' } }, join,
+    { getAllWindows: () => windows }, ComputerUseService, function () { return coordination }, makeDriver, sameComputerUseOwner,
+    () => `id-${++id}`, { now: () => 1 }, app, { platform: 'linux', env: { XDG_SESSION_TYPE: 'wayland', PION_COMPUTER_USE_DMABUF_DEVELOPMENT: options.dmaConfig } }, join,
     { ComputerUseState: 'state' }, projectComputerUseState, { error: vi.fn() }
   )
   const addWindow = (windowId: number) => {
@@ -43,7 +50,7 @@ function harness(options: { open?: Promise<unknown>; close?: Promise<unknown> } 
   const contents = addWindow(7)
   const finish = () => contents.emit('did-finish-load')
   const start = () => host.service.start(host.create(contents.id), consent)
-  return { host, driver, contents, finish, start, addWindow }
+  return { host, driver, makeDriver, app, coordination, contents, finish, start, addWindow }
 }
 function makeContents(id: number) {
   return Object.assign(new EventEmitter(), { id, mainFrame: { detached: false }, isDestroyed: () => false, send: vi.fn() })
@@ -53,6 +60,28 @@ function navigate(contents: ReturnType<typeof makeContents>, extra = {}) {
 }
 
 describe('ComputerUse host document ownership (mock only)', () => {
+  it.each([
+    { dmaConfig: undefined, packaged: false, enabled: false },
+    { dmaConfig: '0', packaged: false, enabled: false },
+    { dmaConfig: 'true', packaged: false, enabled: false },
+    { dmaConfig: '1', packaged: false, enabled: true },
+    { dmaConfig: '1', packaged: true, enabled: false }
+  ])('wires only exact nonpackaged DMA config without probing: %j', async options => {
+    const h = harness(options)
+    expect(h.host.service.getState()).toMatchObject({ dmaBufDevelopmentEnabled: options.enabled, inputDevelopmentEnabled: false,
+      state: 'disabled', actualPending: false, coordination: 'not-checked', consent: { capture: false, control: false, upload: false } })
+    for (const spy of [h.makeDriver, h.app.getAppPath, h.coordination.claim, h.driver.open]) expect(spy).not.toHaveBeenCalled()
+    h.finish()
+    if (options.packaged) {
+      await expect(h.start()).rejects.toThrow('unavailable')
+      expect(h.makeDriver).not.toHaveBeenCalled(); expect(h.coordination.claim).not.toHaveBeenCalled()
+    } else {
+      await h.start()
+      expect(h.makeDriver).toHaveBeenCalledExactlyOnceWith('/fake/native/computer-use/target/debug/pion-computer-use-helper', options.enabled)
+      await h.host.stop(7)
+      expect(h.host.service.getState().dmaBufDevelopmentEnabled).toBe(options.enabled)
+    }
+  })
   it('wires the ledger before host load and both IPC owner callbacks use it', () => {
     expect(source.indexOf('bindCaptureDocument(win.webContents)')).toBeLessThan(source.indexOf('void win.loadURL('))
     expect(source).toContain('createLocalOwner: createLocalCaptureOwner')
@@ -87,7 +116,7 @@ describe('ComputerUse host document ownership (mock only)', () => {
     const revision = h.host.service.getState().scopeRevision
     navigate(h.contents)
     expect(() => h.host.getOwner(7)).toThrow()
-    expect(h.host.service.getState()).toMatchObject({ state: 'quarantined', actualPending: true, consent: { capture: false } })
+    expect(h.host.service.getState()).toMatchObject({ state: 'stopping', actualPending: true, consent: { capture: false } })
     h.finish()
     // Knowing current scopeRevision on a new document cannot recover approval.
     expect(h.host.service.getState().scopeRevision).toBeGreaterThan(revision)
@@ -147,7 +176,7 @@ describe('ComputerUse host document ownership (mock only)', () => {
     h.host.beginQuit()
     const stopping = h.host.stop(7)
     expect(() => h.host.create(7)).toThrow('document unavailable')
-    expect(h.contents.send).toHaveBeenCalledWith('state', expect.objectContaining({ state: 'quarantined', actualPending: true }))
+    expect(h.contents.send).toHaveBeenCalledWith('state', expect.objectContaining({ state: 'stopping', actualPending: true }))
     const [, status] = h.contents.send.mock.calls.at(-1)!
     expect(status).not.toHaveProperty('owner')
     expect(status).not.toHaveProperty('receipt')

@@ -22,7 +22,8 @@ function harness() {
     branch.push({ type: 'message', message, id, parentId: null, timestamp: 'unrelated-entry-clock' } as SessionEntry)
     return id
   })
-  const manager = { getBranch: vi.fn(() => branch), getSessionId: () => sessionId, getSessionFile: () => sessionFile,
+  const manager = { getBranch: vi.fn(() => branch), getLeafId: vi.fn(() => branch.at(-1)?.id ?? null),
+    getSessionId: () => sessionId, getSessionFile: () => sessionFile,
     getEntry: (id: string) => branch.find(entry => entry.id === id), appendMessage }
   const ctx = { sessionManager: manager } as unknown as ExtensionContext
   const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>()
@@ -63,7 +64,7 @@ function harness() {
     persist(message, id)
   }
   const settle = (aborted = false) => fire('agent_settled', { aborted })
-  return { branch, manager, append, appendMessage, session, subscribe, dispose, timing, deliver, fire, start, persist, end, settle,
+  return { branch, manager, ctx, append, appendMessage, session, subscribe, dispose, timing, deliver, fire, start, persist, end, settle,
     switchIdentity: () => { sessionId = 'session-b' }, switchFile: () => { sessionFile = '/mock/session-b.jsonl' } }
 }
 
@@ -150,6 +151,95 @@ describe('SDK settled timing receipts', () => {
       version: 1, userEntryId: `sdk-${index}`, inputId: `runtime:${index + 1}`, startedAt: message.timestamp,
       finishedAt: 7000, durationMs: 7000 - (message.timestamp as number), outcome: 'completed'
     })))
+    // The first write reuses the initial index; each real append changes its leaf.
+    expect(h.manager.getBranch).toHaveBeenCalledTimes(messages.length)
+  })
+
+  it('indexes one unchanged branch once for multiple inputs with unknown clocks', async () => {
+    const h = harness()
+    for (const message of [user(NaN), user(0), user('1000')]) { await h.start(message); await h.end(message) }
+    vi.spyOn(Date, 'now').mockReturnValue(7000)
+    await h.settle()
+    expect(h.append).not.toHaveBeenCalled()
+    expect(h.manager.getBranch).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['id', 'entry', 'object'])('reindexes after an append notification adds a duplicate %s', async proof => {
+    const h = harness()
+    for (const message of [user(), user(2000)]) { await h.start(message); await h.end(message) }
+    h.session.subscribe(event => {
+      if (event.type !== 'entry_appended') return
+      const entry = h.branch[1]
+      h.branch.push(proof === 'entry' ? entry : {
+        ...entry, id: proof === 'id' ? entry.id : 'duplicate-object',
+        message: proof === 'id' ? user(2000) : (entry as Extract<SessionEntry, { type: 'message' }>).message
+      } as SessionEntry)
+    })
+    vi.spyOn(Date, 'now').mockReturnValue(7000)
+    await h.settle()
+    expect(h.append).toHaveBeenCalledTimes(1)
+    expect(h.manager.getBranch).toHaveBeenCalledTimes(2)
+  })
+
+  it('reindexes after a thrown append mutates the branch while retaining the leaf id', async () => {
+    const h = harness()
+    for (const message of [user(), user(2000)]) { await h.start(message); await h.end(message) }
+    h.append.mockImplementationOnce(() => {
+      h.branch.push(h.branch[1])
+      throw new Error('append listener failed')
+    })
+    vi.spyOn(Date, 'now').mockReturnValue(7000)
+    await h.settle()
+    expect(h.append).toHaveBeenCalledTimes(1)
+    expect(h.manager.getBranch).toHaveBeenCalledTimes(2)
+  })
+
+  it('requires the original appended user object after an append notification replaces its message', async () => {
+    const h = harness()
+    for (const message of [user(), user(2000)]) { await h.start(message); await h.end(message) }
+    const entry = h.branch[1] as Extract<SessionEntry, { type: 'message' }>
+    const message = entry.message
+    h.session.subscribe(event => {
+      if (event.type === 'entry_appended') entry.message = { ...message }
+    })
+    vi.spyOn(Date, 'now').mockReturnValue(7000)
+    await h.settle()
+    expect(h.manager.getEntry(entry.id)).toBe(entry)
+    expect(entry.message).toEqual(message)
+    expect(entry.message).not.toBe(message)
+    expect(h.append).toHaveBeenCalledTimes(1)
+    expect(h.manager.getBranch).toHaveBeenCalledTimes(2)
+  })
+
+  it('checks branch membership again after an append notification navigates away', async () => {
+    const h = harness()
+    for (const message of [user(), user(2000)]) { await h.start(message); await h.end(message) }
+    h.session.subscribe(event => {
+      if (event.type !== 'entry_appended') return
+      // getEntry still knows the abandoned input; only the active branch omits it.
+      const fork = [h.branch[0], { type: 'custom', customType: 'fork', id: 'fork', parentId: h.branch[0].id, timestamp: '' } as SessionEntry]
+      h.manager.getBranch.mockReturnValue(fork)
+      h.manager.getLeafId.mockReturnValue('fork')
+    })
+    vi.spyOn(Date, 'now').mockReturnValue(7000)
+    await h.settle()
+    expect(h.manager.getEntry('sdk-1')).toBe(h.branch[1])
+    expect(h.append).toHaveBeenCalledTimes(1)
+    expect(h.manager.getBranch).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['manager', 'identity', 'file'])('rechecks %s ownership before each timing append', async boundary => {
+    const h = harness()
+    for (const message of [user(), user(2000)]) { await h.start(message); await h.end(message) }
+    h.session.subscribe(event => {
+      if (event.type !== 'entry_appended') return
+      if (boundary === 'manager') h.ctx.sessionManager = { ...h.manager } as unknown as ExtensionContext['sessionManager']
+      else if (boundary === 'identity') h.switchIdentity()
+      else h.switchFile()
+    })
+    vi.spyOn(Date, 'now').mockReturnValue(7000)
+    await h.settle()
+    expect(h.append).toHaveBeenCalledTimes(1)
   })
 
   it.each([

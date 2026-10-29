@@ -1,6 +1,8 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve, sep, win32 } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   IMAGE_GENERATION_TOOL_NAME, resolveCodexImageRequestQuality, resolveCodexImageRequestSize,
@@ -36,14 +38,70 @@ async function storeWith(rules: Record<string, unknown>): Promise<InstanceType<t
   return store
 }
 
+function legacyWorktreeMetadata(project: string, worktree: string, common = join(project, '.git')) {
+  const entry = join(common, 'worktrees', basename(worktree))
+  const files: Record<string, string> = {
+    [join(worktree, '.git')]: `gitdir: ${entry}\n`,
+    [join(entry, 'commondir')]: '../..\n',
+    [join(entry, 'gitdir')]: `${join(worktree, '.git')}\n`
+  }
+  return { entry, files }
+}
+
 describe('tool permission policy resolution', () => {
-  it('worktree sessions inherit the base project policy', async () => {
-    const store = await storeWith({
-      '/repo/app': { read: 'allow', write: 'allow', shell: 'allow', network: 'deny', external: 'ask' }
-    })
-    const worktree = join(sep, 'repo', '.pion-worktrees', 'app', 'feature-x')
+  it('legacy external worktree sessions still inherit the base project policy', async () => {
+    const store = await storeWith({})
+    const project = join(testUserData.dir, 'app')
+    const worktree = join(testUserData.dir, '.pion-worktrees', 'app', 'feature-x')
+    await Promise.all([join(project, '.git'), worktree].map((path) => mkdir(path, { recursive: true })))
+    await store.setPolicy(project, { read: 'allow', write: 'allow', shell: 'allow', network: 'deny', external: 'ask' })
     const policy = await store.getPolicy(worktree)
     expect(policy.rules).toMatchObject({ shell: 'allow', network: 'deny' })
+  })
+
+  it('resolves real legacy flat metadata without splitting hyphenated project/branch names or using a same-stem allow', async () => {
+    const store = await storeWith({})
+    const project = join(testUserData.dir, 'my-project-name')
+    const worktree = join(testUserData.dir, '.pion-worktrees', 'my-project-name-feature-with-many-hyphens')
+    const collision = join(testUserData.dir, basename(worktree))
+    const { entry, files } = legacyWorktreeMetadata(project, worktree)
+    await Promise.all([entry, join(worktree, 'src'), collision].map((path) => mkdir(path, { recursive: true })))
+    await Promise.all(Object.entries(files).map(([path, text]) => writeFile(path, text, 'utf8')))
+    const allowed: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'allow', network: 'allow', external: 'allow' }
+    const denied: ToolPermissionRules = { ...allowed, read: 'deny', write: 'deny', network: 'deny' }
+    // Seed obsolete worktree-local allows directly; explicit saves now target the main owner.
+    await writeFile(store.filePath, JSON.stringify({ version: 1, projects: {
+      [project]: denied, [collision]: allowed, [worktree]: allowed
+    } }))
+    expect((await store.getPolicy(worktree)).rules).toEqual(denied)
+    expect(store.getPolicySnapshot(worktree).rules).toEqual(denied)
+    expect((await store.getPolicy(join(worktree, 'src'))).rules).toEqual(denied)
+    expect((await store.getPolicy(collision)).rules).toEqual(allowed)
+    const saved = await readFile(store.filePath, 'utf8')
+    expect((await store.allowProjectCategories(worktree, ['read', 'write', 'network'])).rules).toEqual(denied)
+    expect(await readFile(store.filePath, 'utf8')).toBe(saved)
+    expect((await new ToolPermissionStore().getPolicy(worktree)).rules).toEqual(denied)
+  })
+
+  it.each(['read', 'write', 'network'] as const)('keeps an in-project worktree on its base %s deny despite child and stale branch allows', async (category) => {
+    const store = await storeWith({})
+    const project = join(testUserData.dir, 'app')
+    const worktree = join(project, '.pion-worktrees', 'feature-x')
+    const collision = join(project, 'feature-x')
+    await Promise.all([join(project, '.git'), worktree, collision].map((path) => mkdir(path, { recursive: true })))
+    const allowed: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'allow', network: 'allow', external: 'allow' }
+    const denied: ToolPermissionRules = { ...allowed, [category]: 'deny' }
+    const workflow = join(project, '.pion-workflow-worktrees', 'reviewer')
+    await writeFile(store.filePath, JSON.stringify({ version: 1, projects: {
+      [project]: denied, [collision]: allowed, [worktree]: allowed, [workflow]: allowed
+    } }))
+    expect((await store.getPolicy(worktree)).rules).toEqual(denied)
+    expect(store.getPolicySnapshot(worktree).rules).toEqual(denied)
+    expect((await store.getPolicy(workflow)).rules).toEqual(allowed)
+    const saved = await readFile(store.filePath, 'utf8')
+    expect((await store.allowProjectCategories(worktree, ['read', 'write', 'network'])).rules).toEqual(denied)
+    expect(await readFile(store.filePath, 'utf8')).toBe(saved)
+    expect((await new ToolPermissionStore().getPolicy(worktree)).rules).toEqual(denied)
   })
 
   it('falls back to the longest configured prefix when no exact match exists', async () => {
@@ -68,6 +126,107 @@ describe('tool permission policy resolution', () => {
     const store = await storeWith({ [join(sep, 'repo')]: inherited })
     const policy = await store.allowProjectCategories(join(sep, 'repo', 'app'), ['network', 'write'])
     expect(policy.rules).toEqual({ ...inherited, write: 'allow', network: 'allow' })
+  })
+
+  it('merges partial settings with effective inherited denies and resets only the child override', async () => {
+    const inherited: ToolPermissionRules = { read: 'deny', write: 'deny', shell: 'deny', network: 'ask', external: 'deny' }
+    const parent = join(sep, 'repo')
+    const child = join(parent, 'app')
+    const store = await storeWith({ [parent]: inherited })
+    const loading = store.load()
+    const saving = store.setPolicy(child, { network: 'allow' })
+    await loading
+    expect((await saving).rules).toEqual({ ...inherited, network: 'allow' })
+    expect((await new ToolPermissionStore().getPolicy(child)).rules).toEqual({ ...inherited, network: 'allow' })
+    expect((await store.setPolicy(child, null)).rules).toEqual(inherited)
+  })
+
+  it.each(['nested', 'flat'] as const)('saves/grants/resets the %s worktree policy owner and preserves workflow roles', async (layout) => {
+    const store = await storeWith({})
+    const project = join(testUserData.dir, 'app')
+    const worktree = layout === 'nested' ? join(project, '.pion-worktrees', 'feature') : join(testUserData.dir, '.pion-worktrees', 'app-feature')
+    const workflow = join(project, '.pion-workflow-worktrees', 'run-id', 'reviewer')
+    const { entry, files } = legacyWorktreeMetadata(project, worktree)
+    await Promise.all([entry, worktree, workflow].map((path) => mkdir(path, { recursive: true })))
+    await Promise.all(Object.entries(files).map(([path, text]) => writeFile(path, text)))
+    const role: ToolPermissionRules = { read: 'allow', write: 'deny', shell: 'deny', network: 'deny', external: 'deny' }
+    await store.setPolicy(workflow, role)
+    const base = (await store.setPolicy(project, { shell: 'deny' })).rules
+    expect((await store.setPolicy(worktree, { network: 'allow' })).rules).toEqual({ ...base, network: 'allow' })
+    expect((await store.getPolicy(project)).rules).toEqual({ ...base, network: 'allow' })
+    await store.setPolicy(worktree, { network: 'ask', write: 'ask' })
+    expect((await store.allowProjectCategories(worktree, ['network', 'write'])).rules).toEqual({ ...base, network: 'allow', write: 'allow' })
+    const projects = JSON.parse(await readFile(store.filePath, 'utf8')).projects
+    expect(projects[worktree]).toBeUndefined()
+    expect(projects[project]).toMatchObject({ shell: 'deny', network: 'allow', write: 'allow' })
+    expect((await new ToolPermissionStore().getPolicy(workflow)).rules).toEqual(role)
+    expect((await store.setPolicy(worktree, null)).source).toBe('default')
+    expect((await new ToolPermissionStore().getPolicy(project)).source).toBe('default')
+    expect((await store.getPolicy(workflow)).rules).toEqual(role)
+  })
+
+  it.each([
+    '{ broken', JSON.stringify({ version: 1, projects: [] }),
+    JSON.stringify({ version: 1, projects: { '/repo': { read: 'allow' } } }),
+    JSON.stringify({ version: 2, projects: {} })
+  ])('preserves malformed configuration and denies snapshots instead of saving defaults: %s', async (source) => {
+    const store = await storeWith({})
+    await writeFile(store.filePath, source)
+    await expect(store.getPolicy(PROJECT)).rejects.toThrow('工具权限配置')
+    expect(Object.values(store.getPolicySnapshot(PROJECT).rules)).toEqual(Array(5).fill('deny'))
+    await expect(store.setPolicy(PROJECT, { network: 'allow' })).rejects.toThrow('工具权限配置')
+    await expect(store.setPolicy(PROJECT, null)).rejects.toThrow('工具权限配置')
+    await expect(store.allowProjectCategories(PROJECT, ['network'])).rejects.toThrow('工具权限配置')
+    expect(await readFile(store.filePath, 'utf8')).toBe(source)
+    expect(await readdir(testUserData.dir)).toEqual(['pion-tool-permissions.json'])
+  })
+
+  it('preserves non-ENOENT read failures and corruption discovered after loading', async () => {
+    const store = await storeWith({})
+    await rm(store.filePath)
+    await mkdir(store.filePath)
+    const sentinel = join(store.filePath, 'keep')
+    await writeFile(sentinel, 'original')
+    await expect(store.getPolicy(PROJECT)).rejects.toThrow('工具权限配置')
+    await expect(store.setPolicy(PROJECT, null)).rejects.toThrow('工具权限配置')
+    expect(await readFile(sentinel, 'utf8')).toBe('original')
+    await rm(store.filePath, { recursive: true })
+    const fresh = new ToolPermissionStore()
+    await fresh.getPolicy(PROJECT)
+    await writeFile(fresh.filePath, '{ broken later')
+    await expect(fresh.setPolicy(PROJECT, { read: 'allow' })).rejects.toThrow('工具权限配置')
+    expect(Object.values(fresh.getPolicySnapshot(PROJECT).rules)).toEqual(Array(5).fill('deny'))
+    expect(await readFile(fresh.filePath, 'utf8')).toBe('{ broken later')
+  })
+
+  it('shares the initial load promise and keeps snapshots denied until it settles', async () => {
+    const store = await storeWith({})
+    const loading = store.load()
+    expect(store.load()).toBe(loading)
+    expect(Object.values(store.getPolicySnapshot(PROJECT).rules)).toEqual(Array(5).fill('deny'))
+    await loading
+    expect(store.load()).toBe(loading)
+    expect(store.getPolicySnapshot(PROJECT).rules.write).toBe('allow')
+  })
+
+  it('normalizes saved symlink owners identically in the store and standalone gate', async () => {
+    const store = await storeWith({})
+    const project = join(testUserData.dir, 'real-project')
+    const alias = join(testUserData.dir, 'project-link')
+    const worktree = join(project, '.pion-worktrees', 'feature')
+    await Promise.all([join(project, '.git'), worktree].map((path) => mkdir(path, { recursive: true })))
+    await symlink(project, alias, 'junction')
+    const denied: ToolPermissionRules = { read: 'allow', write: 'deny', shell: 'allow', network: 'ask', external: 'ask' }
+    const source = JSON.stringify({ version: 1, projects: { [alias]: denied } })
+    await writeFile(store.filePath, source)
+    const h = extensionRuntime({ [alias]: denied }, { [alias]: project }, [project])
+    for (const cwd of [project, worktree]) {
+      expect((await store.getPolicy(cwd)).rules).toEqual(denied)
+      expect(h.api.readPolicy(cwd)).toEqual(denied)
+      expect(await h.gate({ toolName: 'write', toolCallId: 'symlink-policy', input: { path: 'a.ts' } }, { ...h.ctx, cwd })).toMatchObject({ block: true })
+    }
+    expect(h.select).not.toHaveBeenCalled()
+    expect(await readFile(store.filePath, 'utf8')).toBe(source)
   })
 
   it('defaults in-project write/shell to allow', async () => {
@@ -109,15 +268,42 @@ function deferred<T>() {
 
 // Evaluate the actual materialized extension, including shared-name interpolation.
 // Policy/filesystem/UI are mocked; no SDK, network or image file is involved.
-function extensionRuntime(projects: Record<string, unknown>, canonicalPaths: Record<string, string> = {}) {
+function extensionRuntime(
+  projects: Record<string, unknown>, canonicalPaths: Record<string, string> = {}, gitRoots: string[] = [],
+  metadata: Record<string, string> = {}, platform: NodeJS.Platform = process.platform
+) {
   const source = toolPermissionExtensionSource()
     .replace(/^import \{ (.+) \} from "(node:.+)";$/gm, 'const { $1 } = require("$2");')
     .replace('export default function (pi)', 'function install(pi)')
   const readFileSync = vi.fn((path: string) => {
     if (path !== CONFIG) throw new Error(`unexpected read: ${path}`)
-    return JSON.stringify({ projects })
+    return JSON.stringify({ version: 1, projects })
   })
   const realpath = vi.fn((path: string) => canonicalPaths[path] ?? path)
+  const accessSync = vi.fn((_path: string, _mode: number) => undefined)
+  const home = platform === 'win32' ? 'C:\\Users\\pion' : resolve(sep, 'home', 'pion')
+  const stat = (path: string) => {
+    const text = metadata[path]
+    if (text === undefined && !gitRoots.some((root) => path === root || path === join(root, '.git'))
+      && !Object.keys(metadata).some((file) => file.startsWith(path + sep))) {
+      throw Object.assign(new Error(`missing metadata: ${path}`), { code: 'ENOENT' })
+    }
+    return {
+      dev: 1, ino: 1, size: text === undefined ? 0 : Buffer.byteLength(text), mtimeMs: 1, ctimeMs: 1,
+      isFile: () => text !== undefined, isDirectory: () => text === undefined
+    }
+  }
+  const descriptors = new Map<number, string>()
+  let nextFd = 1
+  const openSync = vi.fn((path: string) => {
+    if (metadata[path] === undefined) throw new Error(`unexpected open: ${path}`)
+    const fd = nextFd++
+    descriptors.set(fd, path)
+    return fd
+  })
+  const readSync = vi.fn((fd: number, buffer: Buffer, offset: number, length: number, position: number) =>
+    Buffer.from(metadata[descriptors.get(fd)!]).copy(buffer, offset, position, position + length))
+  const closeSync = vi.fn((fd: number) => { descriptors.delete(fd) })
   const handlers = new Map<string, GateHandler>()
   const tools: { name: string; sourceInfo: { source: string }; annotations?: { readOnlyHint: boolean } }[] = []
   const pi = {
@@ -127,22 +313,28 @@ function extensionRuntime(projects: Record<string, unknown>, canonicalPaths: Rec
   }
   const api = new Function('require', 'process', `${source}; return {
     install, classify, projectRootOf, readPolicy, DEFAULTS, CHECKPOINT_READ_ONLY, PION_INTERNAL_TOOLS,
-    validateImageReferencePaths, imageSizeLabel, imageQualityLabel
+    validateImageReferencePaths, imageSizeLabel, imageQualityLabel, toolPath
   };`)(
     (id: string) => {
       if (id === 'node:fs') return {
+        constants, accessSync, openSync, readSync, closeSync,
+        lstatSync: stat, fstatSync: (fd: number) => stat(descriptors.get(fd)!),
+        existsSync: (path: string) => gitRoots.some((root) => path === resolve(root, '.git')) || metadata[path] !== undefined,
         readFileSync,
         realpathSync: { native: realpath }
       }
-      if (id === 'node:path') return { basename, dirname, resolve, sep }
+      if (id === 'node:path') return platform === 'win32' ? win32 : { basename, dirname, isAbsolute, join, resolve, sep }
+      if (id === 'node:os') return { homedir: () => home }
+      if (id === 'node:url') return { fileURLToPath }
       throw new Error(`unexpected require: ${id}`)
     },
-    { env: { PION_TOOL_PERMISSION_CONFIG: CONFIG } }
+    { env: { PION_TOOL_PERMISSION_CONFIG: CONFIG }, platform }
   ) as {
     install(api: typeof pi): void
     classify(event: GateEvent, ctx: GateContext): Omit<PermissionMetadata, 'cwd' | 'sessionPath' | 'subagent' | 'canRemember'>
     projectRootOf(cwd: string): string
     readPolicy(cwd: string): ToolPermissionRules
+    toolPath(input: { path: string }, cwd: string, toolName: string): string | undefined
     validateImageReferencePaths(value: unknown): string[]
     imageSizeLabel(value: unknown): string
     imageQualityLabel(value: unknown): string
@@ -155,8 +347,134 @@ function extensionRuntime(projects: Record<string, unknown>, canonicalPaths: Rec
   const ctx: GateContext = {
     cwd: PROJECT, hasUI: true, ui: { select }, sessionManager: { getSessionFile: () => SESSION }
   }
-  return { api, gate: handlers.get('tool_call')!, select, ctx, readFileSync, realpath, tools }
+  return { api, gate: handlers.get('tool_call')!, select, ctx, readFileSync, realpath, accessSync, home, tools, openSync, readSync, closeSync }
 }
+
+describe('standalone configuration failure boundary (mock)', () => {
+  it.each([
+    '{ broken', JSON.stringify({ version: 1, projects: [] }),
+    JSON.stringify({ version: 1, projects: { [PROJECT]: { read: 'allow' } } })
+  ])('denies malformed readable settings before checkpoint or approval: %s', async (source) => {
+    const h = extensionRuntime({})
+    h.readFileSync.mockReturnValue(source)
+    expect(Object.values(h.api.readPolicy(PROJECT))).toEqual(Array(5).fill('deny'))
+    expect(await h.gate({ toolName: 'write', toolCallId: 'broken-config', input: { path: 'src/a.ts' } }, h.ctx)).toMatchObject({ block: true })
+    expect(h.select).not.toHaveBeenCalled()
+  })
+
+  it.each(['EACCES', 'EIO', 'EISDIR'])('denies a %s config read failure while preserving ENOENT defaults', async (code) => {
+    const h = extensionRuntime({})
+    h.readFileSync.mockImplementation(() => { throw Object.assign(new Error('read failed'), { code }) })
+    expect(await h.gate({ toolName: 'read', toolCallId: 'failed-config', input: { path: 'src/a.ts' } }, h.ctx)).toMatchObject({ block: true })
+    expect(h.select).not.toHaveBeenCalled()
+    h.readFileSync.mockImplementation(() => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) })
+    expect(h.api.readPolicy(PROJECT)).toEqual(h.api.DEFAULTS)
+  })
+
+  it.each(['allow-once', 'allow-session', 'allow-project'])('rejects a pending %s if the config becomes unreadable', async (choice) => {
+    const h = extensionRuntime({ [PROJECT]: { read: 'ask', write: 'allow', shell: 'allow', network: 'ask', external: 'ask' } })
+    const opened = deferred<void>()
+    const response = deferred<string | undefined>()
+    h.select.mockImplementation(() => { opened.resolve(); return response.promise })
+    const event = { toolName: 'read', toolCallId: 'late-config-failure', input: { path: 'src/a.ts' } }
+    const pending = h.gate(event, h.ctx)
+    await opened.promise
+    h.readFileSync.mockImplementation(() => { throw Object.assign(new Error('read failed'), { code: 'EIO' }) })
+    response.resolve(choice)
+    expect(await pending).toMatchObject({ block: true })
+  })
+})
+
+describe('SDK path permission semantics (mock)', () => {
+  it.each(['read', 'write', 'edit'])('normalizes home, file URLs and @ for %s and keeps risky approvals single-use', async (toolName) => {
+    const h = extensionRuntime({})
+    const target = join(h.home, 'private space', '.env')
+    for (const path of ['@~/.ssh/id_rsa', '~/auth.json', '@' + pathToFileURL(target).href]) {
+      const event = { toolName, toolCallId: 'sdk-path', input: { path } }
+      const request = h.api.classify(event, h.ctx)
+      expect(request.risks).toEqual(['outside-workspace', 'sensitive-path'])
+      expect(await h.gate(event, h.ctx)).toBeUndefined()
+    }
+    const permissions = h.select.mock.calls.filter(([title]) => title.startsWith(TOOL_PERMISSION_MARKER))
+    expect(permissions).toHaveLength(3)
+    for (const [title, choices] of permissions) {
+      expect(parseToolPermissionMetadata(title)?.canRemember).toBe(false)
+      expect(choices).toEqual(['allow-once', 'deny'])
+    }
+    expect(h.api.toolPath({ path: '@src/a\u00a0b.ts' }, PROJECT, toolName)).toBe(join(PROJECT, 'src', 'a b.ts'))
+  })
+
+  it('keeps image destinations literal while ordinary tools use SDK aliases', () => {
+    const { api } = extensionRuntime({})
+    for (const path of ['@image.png', '~/image.png', pathToFileURL(join(sep, 'outside', 'image.png')).href, 'art/a\u00a0b.png']) {
+      expect(api.toolPath({ path }, PROJECT, IMAGE_GENERATION_TOOL_NAME)).toBe(resolve(PROJECT, path))
+    }
+  })
+
+  it.each(['/c/Users/pion/.ssh/id_rsa', '/mnt/c/Users/pion/.ssh/id_rsa', '@/cygdrive/c/Users/pion/.ssh/id_rsa', '~\\.ssh\\id_rsa'])(
+    'uses native Windows path semantics for %s', (path) => {
+      const h = extensionRuntime({}, {}, [], {}, 'win32')
+      h.ctx.cwd = 'C:\\repo\\app'
+      expect(h.api.toolPath({ path }, h.ctx.cwd, 'read')).toBe('C:\\Users\\pion\\.ssh\\id_rsa')
+      expect(h.api.classify({ toolName: 'read', toolCallId: 'windows-path', input: { path } }, h.ctx).risks)
+        .toEqual(['outside-workspace', 'sensitive-path'])
+    }
+  )
+
+  it('classifies the actual SDK read fallback, including a symlink into sensitive files', () => {
+    const supplied = "captures/Café d'écran.png"
+    const resolved = resolve(PROJECT, supplied)
+    const fallback = resolved.normalize('NFD').replace(/'/g, '\u2019')
+    const target = join(sep, 'home', 'pion', '.ssh', 'key.png')
+    const h = extensionRuntime({}, { [fallback]: target })
+    h.accessSync.mockImplementation((path) => {
+      if (path !== fallback) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      return undefined
+    })
+    expect(h.api.toolPath({ path: supplied }, PROJECT, 'read')).toBe(fallback)
+    expect(h.api.classify({ toolName: 'read', toolCallId: 'read-fallback', input: { path: supplied } }, h.ctx).risks)
+      .toEqual(['outside-workspace', 'sensitive-path'])
+    expect(h.api.toolPath({ path: supplied }, PROJECT, 'write')).toBe(resolved)
+    expect(h.api.toolPath({ path: supplied }, PROJECT, 'edit')).toBe(resolved)
+  })
+})
+
+describe('ComputerUse combined execution permission gate (mock)', () => {
+  const allAllow: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'allow', network: 'allow', external: 'allow' }
+  it.each([
+    ['pion_computer_observe', 'read'], ['pion_computer_observe', 'external'], ['pion_computer_observe', 'network'],
+    ['pion_computer_act', 'read'], ['pion_computer_act', 'write'], ['pion_computer_act', 'shell'], ['pion_computer_act', 'external'], ['pion_computer_act', 'network']
+  ] as const)('independently enforces %s / %s deny before any UI', async (toolName, category) => {
+    const h = extensionRuntime({ [PROJECT]: { ...allAllow, [category]: 'deny' } })
+    expect(await h.gate({ toolName, toolCallId: 'root-cua', input: {} }, h.ctx)).toMatchObject({ block: true })
+    expect(h.select).not.toHaveBeenCalled()
+    expect(h.api.PION_INTERNAL_TOOLS.has(toolName)).toBe(false)
+  })
+
+  it.each(['pion_computer_observe', 'pion_computer_act'])('forces non-rememberable %s approval even with all global categories allowed', async toolName => {
+    const h = extensionRuntime({ [PROJECT]: allAllow })
+    const event = { toolName, toolCallId: 'root-cua', input: { action: { type: 'type', text: 'do-not-serialize-private-input' } } }
+    expect(await h.gate(event, h.ctx)).toBeUndefined()
+    expect(await h.gate({ ...event, toolCallId: 'next-cua' }, h.ctx)).toBeUndefined()
+    const dialogs = h.select.mock.calls.filter(([title]) => title.startsWith(TOOL_PERMISSION_MARKER))
+    expect(dialogs).toHaveLength(2)
+    for (const [title, choices] of dialogs) {
+      expect(choices).toEqual(['allow-once', 'deny'])
+      expect(title).not.toContain('do-not-serialize-private-input')
+      expect(parseToolPermissionMetadata(title)?.canRemember).toBe(false)
+    }
+  })
+
+  it.each(['parent', 'subagent'] as const)('blocks %s calls rather than giving ComputerUse to nested tools', async kind => {
+    const h = extensionRuntime({ [PROJECT]: allAllow })
+    const controller = new AbortController()
+    const event: GateEvent = { toolName: 'pion_computer_observe', toolCallId: 'root-cua', input: {} }
+    if (kind === 'parent') event.parentToolCallId = 'codemode'
+    else event.input[SUBAGENT_ABORT] = controller.signal
+    expect(await h.gate(event, h.ctx)).toMatchObject({ block: true })
+    expect(h.select).not.toHaveBeenCalled()
+  })
+})
 
 function imageRuntime(updates: Partial<ToolPermissionRules> = {}, canonicalPaths: Record<string, string> = {}) {
   // Denying unrelated categories makes an accidental external classification fail.
@@ -193,11 +511,97 @@ describe('extension gate source', () => {
   it('maps worktree paths back to the base project and resolves its policy', () => {
     const { api } = extensionRuntime({
       [PROJECT]: { read: 'allow', write: 'allow', shell: 'allow', network: 'deny', external: 'ask' }
-    })
+    }, {}, [PROJECT])
     const worktree = join(sep, 'repo', '.pion-worktrees', 'app', 'feature-x')
     expect(api.projectRootOf(worktree)).toBe(PROJECT)
     expect(api.readPolicy(worktree)).toMatchObject({ shell: 'allow', network: 'deny' })
     expect(api.DEFAULTS.shell).toBe('allow')
+  })
+
+  it('shares verified flat worktree ownership with the store and blocks the main deny before UI (metadata mock)', async () => {
+    const project = resolve(sep, 'repo', 'my-project-name')
+    const worktree = resolve(sep, 'repo', '.pion-worktrees', 'my-project-name-feature-with-many-hyphens')
+    const collision = join(dirname(project), basename(worktree))
+    const workflow = join(project, '.pion-workflow-worktrees', 'reviewer')
+    const allowed: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'allow', network: 'allow', external: 'allow' }
+    const denied: ToolPermissionRules = { ...allowed, read: 'deny', write: 'deny', network: 'deny' }
+    const h = extensionRuntime({ [project]: denied, [collision]: allowed, [worktree]: allowed, [workflow]: allowed }, {}, [project],
+      legacyWorktreeMetadata(project, worktree).files)
+    h.ctx.cwd = worktree
+    expect(h.api.projectRootOf(worktree)).toBe(project)
+    expect(h.api.projectRootOf(join(worktree, 'src'))).toBe(project)
+    expect(h.api.readPolicy(worktree)).toEqual(denied)
+    expect(h.api.readPolicy(collision)).toEqual(allowed)
+    expect(h.api.projectRootOf(workflow)).toBe(workflow)
+    expect(h.api.readPolicy(workflow)).toEqual(allowed)
+    expect(await h.gate({ toolName: 'read', toolCallId: 'legacy-flat-read', input: { path: 'src/file.ts' } }, h.ctx))
+      .toMatchObject({ block: true, reason: 'Pion 项目权限策略已拒绝此工具调用' })
+    expect(h.select).not.toHaveBeenCalled()
+    expect(h.readSync.mock.calls.every(([, , , length]) => length <= 4097)).toBe(true)
+    expect(h.readFileSync.mock.calls.every(([path]) => path === CONFIG)).toBe(true)
+    expect(h.closeSync).toHaveBeenCalledTimes(h.openSync.mock.calls.length)
+  })
+
+  it.each(['back-reference', 'missing-back-reference', 'commondir', 'oversized', 'non-directory', 'external-common'] as const)(
+    'does not invent a flat worktree owner from unconfirmed %s metadata (mock)', (kind) => {
+      const project = resolve(sep, 'repo', 'my-project-name')
+      const worktree = resolve(sep, 'repo', '.pion-worktrees', 'my-project-name-feature-with-many-hyphens')
+      const collision = join(dirname(project), basename(worktree))
+      const common = kind === 'external-common' ? resolve(sep, 'repo', 'external-git-data') : join(project, '.git')
+      const { entry, files } = legacyWorktreeMetadata(project, worktree, common)
+      if (kind === 'back-reference') files[join(entry, 'gitdir')] = `${join(collision, '.git')}\n`
+      if (kind === 'missing-back-reference') delete files[join(entry, 'gitdir')]
+      if (kind === 'commondir') files[join(entry, 'commondir')] = '../../../other/.git\n'
+      if (kind === 'oversized') files[join(worktree, '.git')] = `gitdir: ${'x'.repeat(4096)}\n`
+      if (kind === 'non-directory') files[entry] = 'not a directory'
+      const allowed: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'allow', network: 'allow', external: 'allow' }
+      const local: ToolPermissionRules = { ...allowed, read: 'ask' }
+      const h = extensionRuntime({ [project]: { ...allowed, read: 'deny' }, [collision]: allowed, [worktree]: local }, {}, [project], files)
+      expect(h.api.projectRootOf(worktree)).toBe(worktree)
+      expect(h.api.projectRootOf(join(worktree, 'src'))).toBe(join(worktree, 'src'))
+      expect(h.api.readPolicy(worktree)).toEqual(local)
+      expect(h.closeSync).toHaveBeenCalledTimes(h.openSync.mock.calls.length)
+    }
+  )
+
+  it('uses the repository marker for in-project branches, not a same-named child or stale branch allow', async () => {
+    const allowed: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'allow', network: 'allow', external: 'allow' }
+    const denied: ToolPermissionRules = { ...allowed, read: 'deny' }
+    const worktree = join(PROJECT, '.pion-worktrees', 'feature-x')
+    const workflow = join(PROJECT, '.pion-workflow-worktrees', 'reviewer')
+    const h = extensionRuntime({
+      [PROJECT]: denied, [join(PROJECT, 'feature-x')]: allowed, [worktree]: allowed, [workflow]: allowed
+    }, {}, [PROJECT])
+    h.ctx.cwd = worktree
+    expect(h.api.projectRootOf(worktree)).toBe(PROJECT)
+    expect(h.api.readPolicy(worktree)).toEqual(denied)
+    expect(h.api.projectRootOf(workflow)).toBe(workflow)
+    expect(h.api.readPolicy(workflow)).toEqual(allowed)
+    expect(await h.gate({ toolName: 'read', toolCallId: 'branch-read', input: { path: 'src/file.ts' } }, h.ctx))
+      .toMatchObject({ block: true, reason: 'Pion 项目权限策略已拒绝此工具调用' })
+    expect(h.select).not.toHaveBeenCalled()
+  })
+
+  it.each(['allow-once', 'allow-session', 'allow-project'])('rechecks an in-project base deny before accepting a stale %s', async (choice) => {
+    const allowed: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'allow', network: 'allow', external: 'allow' }
+    const rules: ToolPermissionRules = { ...allowed, read: 'ask' }
+    const worktree = join(PROJECT, '.pion-worktrees', 'feature-x')
+    const h = extensionRuntime({ [PROJECT]: rules, [join(PROJECT, 'feature-x')]: allowed, [worktree]: allowed }, {}, [PROJECT])
+    h.ctx.cwd = worktree
+    expect(h.api.readPolicy(worktree).read).toBe('ask')
+    const opened = deferred<void>()
+    const response = deferred<string | undefined>()
+    h.select.mockImplementation(() => { opened.resolve(); return response.promise })
+    const event = { toolName: 'read', toolCallId: 'branch-read', input: { path: 'src/file.ts' } }
+    const pending = h.gate(event, h.ctx)
+    await opened.promise
+    rules.read = 'deny'
+    response.resolve(choice)
+    expect(await pending).toMatchObject({ block: true })
+    rules.read = 'ask'
+    h.select.mockResolvedValue('deny')
+    expect(await h.gate({ ...event, toolCallId: 'next-branch-read' }, h.ctx)).toMatchObject({ block: true })
+    expect(h.select).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -806,10 +1210,12 @@ describe('image reference permission boundary', () => {
 // The generated gate is standalone JS: verify parity with pure shared admission
 // instead of accidentally relying on an application path in the CLI extension.
 describe('standalone image permission helpers', () => {
-  it('imports only node filesystem/path modules', () => {
+  it('imports only self-contained node filesystem/path/os/url dependencies', () => {
     expect(toolPermissionExtensionSource().match(/^import .+;$/gm)).toEqual([
-      'import { readFileSync, realpathSync } from "node:fs";',
-      'import { basename, dirname, resolve, sep } from "node:path";'
+      'import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";',
+      'import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";',
+      'import { homedir } from "node:os";',
+      'import { fileURLToPath } from "node:url";'
     ])
   })
 

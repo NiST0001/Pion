@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   Cpu,
@@ -33,6 +33,7 @@ import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { currentTheme, saveTheme } from '../../utils/theme'
 import type { ThemeId } from '../../utils/theme'
 import type { SettingsNavigationRequest, SettingsPage } from './settingsNavigation'
+import { containModalTab, isTopmostModalDialog, restoreModalFocus } from '../../utils/dialogFocus'
 
 export interface SettingsActions {
   setModel(provider: string, modelId: string): Promise<void>
@@ -122,6 +123,14 @@ export function SettingsModal({
   onClose,
   actions
 }: SettingsModalProps): ReactElement | null {
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const titleId = useId()
+  const composingTarget = useRef<EventTarget | null>(null)
+  const onCloseRef = useRef(onClose)
+
+  useEffect(() => { onCloseRef.current = onClose }, [onClose])
+
   // Page views mount on navigation; keep the existing drafts and in-flight state in this host.
   const [selectedPage, setPage] = useState<SettingsPage>('models')
   const [providerRequest, setProviderRequest] = useState<SettingsNavigationRequest>()
@@ -223,12 +232,40 @@ export function SettingsModal({
   }
 
   useEffect(() => {
+    if (!open) return
+    const dialog = dialogRef.current
+    if (!dialog) return
+    composingTarget.current = null
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const frame = requestAnimationFrame(() => {
+      // A nested modal or focus already inside this dialog owns the first frame.
+      if (!isTopmostModalDialog(dialog) || dialog.contains(document.activeElement)) return
+      closeRef.current?.focus({ preventScroll: true })
+    })
     const handler = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && open) onClose()
+      if (event.key !== 'Tab' && event.key !== 'Escape') return
+      if (event.defaultPrevented || !isTopmostModalDialog(dialog)) return
+      if (event.key === 'Tab') {
+        containModalTab(event, dialog)
+        event.stopImmediatePropagation()
+        return
+      }
+      event.stopImmediatePropagation()
+      if (event.isComposing || event.keyCode === 229 || event.repeat
+        || (composingTarget.current !== null
+          && (composingTarget.current === event.target || composingTarget.current === document.activeElement))) return
+      event.preventDefault()
+      onCloseRef.current()
     }
+    // PionSelect consumes an open portal menu's Escape during capture.
     window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [open, onClose])
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('keydown', handler)
+      composingTarget.current = null
+      restoreModalFocus(dialog, previousFocus)
+    }
+  }, [open])
 
   if (!open) return null
 
@@ -305,14 +342,27 @@ export function SettingsModal({
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal settings-modal" onClick={(event) => event.stopPropagation()}>
+    <div className="modal-backdrop" onClick={() => {
+      if (isTopmostModalDialog(dialogRef.current)) onClose()
+    }}>
+      <div
+        ref={dialogRef}
+        className="modal settings-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        data-modal-layer="110"
+        tabIndex={-1}
+        onCompositionStartCapture={(event) => { composingTarget.current = event.target }}
+        onCompositionEndCapture={() => { composingTarget.current = null }}
+        onClick={(event) => event.stopPropagation()}
+      >
         <header className="modal-head">
           <div>
             <div className="modal-kicker">PION WORKSPACE</div>
-            <h2>设置</h2>
+            <h2 id={titleId}>设置</h2>
           </div>
-          <button type="button" className="icon-button" onClick={onClose} title="关闭">
+          <button ref={closeRef} type="button" className="icon-button" onClick={onClose} title="关闭">
             <X size={16} />
           </button>
         </header>

@@ -45,7 +45,7 @@
   min-width: 0;
 }
 
-.picker-trigger {
+.pion-select.picker-trigger {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -53,15 +53,18 @@
   max-width: 100%;
   text-align: left;
   padding: 5px 10px;
+  border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--fg-dim);
-  font-size: 12px;
+  font-size: 14px;
   font-family: var(--mono);
+  line-height: normal;
   transition: background 0.12s ease, color 0.12s ease;
 }
 
-.picker-trigger:hover {
+.pion-select.picker-trigger:hover:not(:disabled),
+.pion-select.picker-trigger[aria-expanded='true'] {
   background: var(--bg-hover);
   color: var(--fg);
 }
@@ -69,6 +72,8 @@
 .picker-trigger > svg {
   flex: 0 0 auto;
 }
+
+.pion-select.picker-trigger .pion-select-chevron { width: 13px; height: 13px; }
 
 .picker-value {
   display: block;
@@ -80,25 +85,17 @@
   white-space: nowrap;
 }
 
-.picker-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  width: min(360px, calc(100vw - 32px));
-  min-width: min(280px, calc(100vw - 32px));
-  max-width: calc(100vw - 32px);
-  max-height: 420px;
-  overflow-y: auto;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-pop);
+/* Placement, viewport bounds and independent scrolling belong to PionSelect. */
+.pion-select-popup.model-picker-popup,
+.pion-select-popup.thinking-picker-popup {
   padding: 6px;
-  z-index: 60;
+  font-family: var(--mono);
+  line-height: 1.62;
 }
 
-.picker-group-title {
-  font-size: 10.5px;
+.model-picker-popup .pion-select-group {
+  font-family: var(--sans);
+  font-size: 12px;
   text-align: left;
   text-transform: uppercase;
   letter-spacing: 0.8px;
@@ -106,36 +103,27 @@
   padding: 8px 8px 4px;
 }
 
-.picker-empty {
-  padding: 10px 12px;
-  color: var(--fg-faint);
-  font-size: 12px;
-}
-
-.picker-option {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.model-picker-popup .pion-select-option {
   gap: 12px;
-  width: 100%;
   min-width: 0;
-  text-align: left;
+  min-height: 0;
   padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  color: var(--fg-dim);
-  font-size: 12.5px;
-  font-family: var(--mono);
-  transition: background 0.1s ease;
+  font-size: 14px;
+  line-height: normal;
 }
 
-.picker-option:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
-}
-
-.picker-option.selected {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+@media not all and (forced-colors: active) {
+  :is(.model-picker-popup, .thinking-picker-popup) .pion-select-option:not([aria-disabled='true']) {
+    color: var(--fg-dim);
+  }
+  :is(.model-picker-popup, .thinking-picker-popup) .pion-select-option[aria-selected='true']:not([aria-disabled='true']) {
+    background: var(--selected-bg);
+    color: var(--fg);
+  }
+  :is(.model-picker-popup, .thinking-picker-popup) .pion-select-option[data-active='true']:not([aria-disabled='true']) {
+    background: var(--bg-hover);
+    color: var(--fg);
+  }
 }
 
 .picker-option-label {
@@ -165,7 +153,7 @@
 .picker-option-meta {
   flex: 0 0 auto;
   margin-left: auto;
-  font-size: 10.5px;
+  font-size: 12px;
   color: var(--fg-faint);
   white-space: nowrap;
 }
@@ -176,17 +164,19 @@
   align-items: center;
 }
 
-.thinking-trigger {
+.pion-select.thinking-trigger {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   min-width: 92px;
   padding: 4px 8px;
+  border: 0;
   border-radius: 999px;
   background: transparent;
   color: var(--fg-dim);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 13px;
+  line-height: normal;
   transition: background 0.12s ease, color 0.12s ease;
 }
 
@@ -199,32 +189,46 @@
   color: var(--fg-faint);
 }
 
-.thinking-trigger:hover,
-.thinking-trigger[aria-expanded='true'] {
+.pion-select.thinking-trigger .pion-select-chevron { width: 12px; height: 12px; }
+
+.pion-select.thinking-trigger:hover:not(:disabled),
+.pion-select.thinking-trigger[aria-expanded='true'] {
   background: var(--bg-hover);
   color: var(--fg);
 }
 
-.thinking-menu {
-  min-width: 132px;
-}
-
-.thinking-option {
-  display: block;
-  width: 100%;
+.thinking-picker-popup .pion-select-option {
+  min-height: 0;
   padding: 6px 9px;
-  border-radius: var(--radius-sm);
-  color: var(--fg-dim);
-  font-family: var(--mono);
-  font-size: 11px;
-  text-align: left;
-  transition: background 0.1s ease, color 0.1s ease;
+  font-size: 13px;
+  line-height: normal;
 }
 
-.thinking-option:hover,
-.thinking-option.selected {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+@media (prefers-reduced-motion: reduce) {
+  .pion-select.picker-trigger,
+  .pion-select.thinking-trigger { transition: none; }
+}
+
+@media (forced-colors: active) {
+  .pion-select.picker-trigger,
+  .pion-select.thinking-trigger {
+    border: 1px solid ButtonText;
+    background: Canvas;
+    color: CanvasText;
+  }
+  .pion-select.picker-trigger:hover:not(:disabled),
+  .pion-select.picker-trigger[aria-expanded='true'],
+  .pion-select.thinking-trigger:hover:not(:disabled),
+  .pion-select.thinking-trigger[aria-expanded='true'] {
+    background: Canvas;
+    color: CanvasText;
+  }
+  .pion-select.picker-trigger:disabled,
+  .pion-select.thinking-trigger:disabled { color: GrayText; }
+  .model-picker-popup .pion-select-group,
+  .model-picker-popup .picker-option-meta,
+  .model-picker-popup .picker-reasoning,
+  .pion-select.thinking-trigger > svg { color: inherit; }
 }
 
 /* ==========================================================================
@@ -278,30 +282,14 @@
   overflow: visible;
 }
 
-.composer-inline-controls .picker-menu {
-  top: auto;
-  right: auto;
-  bottom: calc(100% + 8px);
-  left: 0;
-}
-
 .picker-compact {
   max-width: min(220px, 42vw);
 }
 
-.picker-compact .picker-trigger {
+.picker-compact .pion-select.picker-trigger {
   padding: 3px 8px;
-  font-size: 11.5px;
+  font-size: 13px;
   border-radius: 999px;
-  background: transparent;
-  color: var(--fg-dim);
-}
-
-.picker-compact .picker-trigger:hover,
-.picker-compact .picker-trigger[aria-expanded='true'] {
-  color: var(--accent-strong);
-  border-color: var(--border);
-  background: var(--bg-hover);
 }
 
 .composer-inline-controls .thinking-picker {

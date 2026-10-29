@@ -6,6 +6,7 @@
  * wire format into the `WireEvent` subset defined here.
  */
 
+/** Exact identity of one unsent Pion-local prompt, shared by queue mutations. */
 export interface QueuedMessageEditRequest {
   runId: string
   cwd: string
@@ -22,7 +23,7 @@ export interface QueuedMessagesSnapshot {
   steering: string[]
   followUp: string[]
   nativeFollowUpCount: number
-  /** Parallel to followUp; native or non-editable entries have null identity. */
+  /** Parallel to followUp; native or unsupported entries have null identity. */
   followUpRunIds?: (string | null)[]
 }
 
@@ -451,6 +452,9 @@ export interface SessionMeta {
   /** SDK reported usage across the whole persisted file, including branches;
    * not context occupancy or live/remote billing. Absent means unknown. */
   totalTokens?: number
+  /** Main-owned sidebar discovery revision, shared with its later token totals;
+   * not an SDK entry id, timestamp, or persisted session revision. */
+  sidebarRevision?: number
   /** Renderer-only projection shown while Pi persists a new first message. */
   optimistic?: boolean
 }

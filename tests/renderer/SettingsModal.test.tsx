@@ -2,10 +2,13 @@
 
 import '@testing-library/jest-dom/vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import type { ComponentProps } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SettingsModal } from '../../src/renderer/src/features/settings/SettingsModal'
 import type { SettingsActions } from '../../src/renderer/src/features/settings/SettingsModal'
+import { ConfirmDialog } from '../../src/renderer/src/features/common/ConfirmDialog'
+import { containModalTab, isTopmostModalDialog } from '../../src/renderer/src/utils/dialogFocus'
 import { applyTheme, currentTheme } from '../../src/renderer/src/utils/theme'
 import type { ThemeId } from '../../src/renderer/src/utils/theme'
 import type {
@@ -119,6 +122,151 @@ it('keeps five immediately applied themes without a redundant live-preview secti
     if (stored === null) localStorage.removeItem('pion:theme')
     else localStorage.setItem('pion:theme', stored)
   }
+})
+
+describe('SettingsModal focus ownership', () => {
+  it('labels the dialog, focuses its close button, wraps Tab in both directions and restores the opener', async () => {
+    const opener = document.createElement('button')
+    document.body.append(opener)
+    opener.focus()
+    const { rerender, props, unmount } = renderSettings(settingsActions())
+    try {
+      const user = userEvent.setup()
+      const dialog = screen.getByRole('dialog', { name: '设置' })
+      expect(dialog).toHaveAttribute('aria-modal', 'true')
+      const close = within(dialog).getByRole('button', { name: '关闭' })
+      await waitFor(() => expect(close).toHaveFocus())
+      goToSettingsPage(/^诊断/)
+      const last = within(dialog).getByRole('button', { name: '刷新日志' })
+      close.focus()
+      await user.tab({ shift: true })
+      expect(last).toHaveFocus()
+      await user.tab()
+      expect(close).toHaveFocus()
+      dialog.focus()
+      await user.tab({ shift: true })
+      expect(last).toHaveFocus()
+      rerender(<SettingsModal {...props} open={false} />)
+      expect(opener).toHaveFocus()
+    } finally {
+      unmount()
+      opener.remove()
+    }
+  })
+
+  it('keeps composing drafts on Escape and uses the latest close callback without refocusing the input', () => {
+    const onClose = vi.fn()
+    const { props, rerender } = renderSettings(settingsActions(), false, null, { onClose })
+    goToSettingsPage(/^会话/)
+    const input = screen.getByPlaceholderText('未命名')
+    fireEvent.change(input, { target: { value: '输入法草稿' } })
+    input.focus()
+    fireEvent.compositionStart(input)
+    fireEvent.keyDown(input, { key: 'Escape' })
+    fireEvent.compositionEnd(input)
+    fireEvent.keyDown(input, { key: 'Escape', isComposing: true })
+    fireEvent.keyDown(input, { key: 'Escape', keyCode: 229 })
+    fireEvent.keyDown(input, { key: 'Escape', repeat: true })
+    expect(onClose).not.toHaveBeenCalled()
+    expect(input).toHaveValue('输入法草稿')
+    const latestClose = vi.fn()
+    rerender(<SettingsModal {...props} onClose={latestClose} />)
+    expect(input).toHaveFocus()
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(latestClose).toHaveBeenCalledOnce()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('leaves initial focus, Tab and Escape to a higher confirmation and preserves its focus when settings closes', async () => {
+    const onClose = vi.fn()
+    const { props, rerender } = renderSettings(settingsActions(), false, null, { onClose })
+    const onCancel = vi.fn()
+    render(<ConfirmDialog open title="确认设置操作" message="保留草稿" confirmLabel="继续"
+      onConfirm={vi.fn()} onCancel={onCancel} />)
+    const confirm = screen.getByRole('alertdialog')
+    const cancel = within(confirm).getByRole('button', { name: '取消' })
+    await waitFor(() => expect(cancel).toHaveFocus())
+    await userEvent.setup().tab({ shift: true })
+    expect(within(confirm).getByRole('button', { name: '继续' })).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalledOnce()
+    expect(onClose).not.toHaveBeenCalled()
+    cancel.focus()
+    rerender(<SettingsModal {...props} open={false} />)
+    expect(cancel).toHaveFocus()
+  })
+
+  it('lets the portal select consume Escape and Tab before the settings dialog handles them', async () => {
+    const onClose = vi.fn()
+    renderSettings(settingsActions(), false, null, { onClose })
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+    fireEvent.click(screen.getByRole('tab', { name: /自定义 API/ }))
+    const trigger = screen.getByRole('combobox', { name: 'API 类型' })
+    trigger.focus()
+    fireEvent.click(trigger)
+    const dialog = screen.getByRole('dialog', { name: '设置' })
+    expect(dialog).not.toContainElement(screen.getByRole('listbox', { name: 'API 类型' }))
+    fireEvent.keyDown(trigger, { key: 'Escape' })
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(trigger).toHaveFocus()
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.click(trigger)
+    await userEvent.setup().tab()
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(dialog).toContainElement(document.activeElement as HTMLElement)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('leaves Escape to a newly opened confirmation while a select still holds focus before its focus frame', () => {
+    const onClose = vi.fn(), onCancel = vi.fn()
+    renderSettings(settingsActions(), false, null, { onClose })
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+    fireEvent.click(screen.getByRole('tab', { name: /自定义 API/ }))
+    const trigger = screen.getByRole('combobox', { name: 'API 类型' })
+    trigger.focus()
+    fireEvent.click(trigger)
+    render(<ConfirmDialog open title="确认设置操作" message="保留草稿" confirmLabel="继续"
+      onConfirm={vi.fn()} onCancel={onCancel} />)
+    expect(trigger).toHaveFocus()
+    fireEvent.keyDown(trigger, { key: 'Escape' })
+    expect(onCancel).toHaveBeenCalledOnce()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('listbox', { name: 'API 类型' })).toBeInTheDocument()
+  })
+
+  it('keeps the shared helpers compatible with unavailable controls and CSS-only modal layers', () => {
+    render(<div role="dialog" aria-modal="true" data-modal-layer="110" tabIndex={-1}>
+      <button>首项</button>
+      <button>末项</button>
+      <fieldset disabled><button>禁用项</button></fieldset>
+      <div hidden><button>隐藏项</button></div>
+      <div aria-hidden="true"><button>辅助隐藏项</button></div>
+      <div inert><button>停用项</button></div>
+      <div style={{ display: 'none' }}><button>样式隐藏项</button></div>
+      <div style={{ visibility: 'hidden' }}><button>样式不可见项</button></div>
+      <input type="hidden" />
+    </div>)
+    screen.getByRole('button', { name: '末项' }).focus()
+    const event = new KeyboardEvent('keydown', { key: 'Tab', cancelable: true })
+    const dialog = screen.getByRole('dialog')
+    containModalTab(event, dialog)
+    expect(event.defaultPrevented).toBe(true)
+    expect(screen.getByRole('button', { name: '首项' })).toHaveFocus()
+    render(<div style={{ zIndex: 260 }}><section role="dialog" aria-modal="true" aria-label="上层弹窗" /></div>)
+    expect(isTopmostModalDialog(dialog)).toBe(false)
+    const higher = screen.getByRole('dialog', { name: '上层弹窗' })
+    higher.dataset.modalLayer = 'invalid'
+    expect(isTopmostModalDialog(dialog)).toBe(false) // CSS remains the fallback for an invalid hint.
+    higher.hidden = true
+    expect(isTopmostModalDialog(dialog)).toBe(true)
+    higher.hidden = false
+    higher.style.visibility = 'hidden'
+    expect(isTopmostModalDialog(dialog)).toBe(true)
+    higher.style.visibility = 'visible'
+    higher.parentElement!.style.display = 'none'
+    expect(isTopmostModalDialog(dialog)).toBe(true)
+  })
 })
 
 describe('SettingsModal page state and callbacks', () => {

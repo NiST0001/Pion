@@ -27,6 +27,12 @@ npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 
 平台升级的进程边界、安全规则与状态机见
 [`docs/coding-agent-platform.md`](docs/coding-agent-platform.md)。
 
+Pi Durable 的渐进替换提案见 [迁移方案](pi-durable-migration.md)；仅为设计，当前后端尚未替换。
+
+## 优化与共享基础设施
+
+后续优化拆分与验收边界见 [优化路线](optimization-roadmap.md)。已有基础设施优先复用：`ipc/owner.ts` 校验活主窗口/主帧；`atomic-json-file.ts` 发布轻量配置，调用 Store 成功后提交内存并在退出等待；`process-exit.ts` 为工作流和初始化失败收尾核真实 exit/stdio，历史撤销保留其原独占准入；`shared/capability-item.ts` 统一纯条目解析；`features/session/session-folder-projection.ts` 统一目录与同级索引。
+
 ## 测试发现与覆盖率隔离
 
 - `vitest.config.ts` 与 `vitest.coverage.config.ts` 共用 `tests/test-files.ts` 的发现模式：`tests/unit/**/*.test.ts`、`tests/renderer/**/*.test.{ts,tsx}`。新增或移动符合模式的测试自动纳入普通测试和覆盖率，不维护手工 import 清单；E2E 继续使用独立 Playwright 配置，helper 与旧聚合入口不在发现范围内。
@@ -173,7 +179,7 @@ SDK 1.4.0 RpcClient 会将业务负响应抹成普通 Error。`agent/capability-
 
 ### SDK 与 CLI 能力边界
 
-Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP、codemode 和 tool-search factories，`runtime-host.ts` 与 `capabilities.ts` 共用此注册入口。三者沿用 `builtin` / `replaceable` 身份；未设置 Pion 能力偏好时不临时覆写 `defaultTools` 来开启 codemode/tool_search，两者遵循 Pi 原生默认 inactive；用户显式 `defaultTools`（如 `["+codemode", "+tool_search"]`）、MCP 的 codemode/deferred 曝光或 Pion 单项开关可请求激活，但能力开关不扩大显式 SDK 执行范围；旧 `pi-mcp-adapter` 注册的 `/mcp` 可以替换原生 builtin，不能双启或仅凭原生注册宣称原生 MCP 已活动。用户禁用扩展、`noExtensions` 和显式工具集合（包括空集）必须持续生效，不能只依赖启动时的 `defaultTools`。能力扫描仅加载 factory 注册，不连接 MCP 服务器、不读取认证凭据，也不是服务器可用性检查。`ExtensionToolContext.executeTool` / `tools` 是执行上下文契约，不自动新增工具。
+Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP、codemode 和 tool-search factories，`runtime-host.ts` 使用此注册入口；`capabilities.ts` 仅读取 catalogue 及所属既有 runtime 的已核验元数据，沿 desired/trust/来源身份过滤，扫描不构造 ResourceLoader 或执行 factory。三者沿用 `builtin` / `replaceable` 身份；未设置 Pion 能力偏好时不临时覆写 `defaultTools` 来开启 codemode/tool_search，两者遵循 Pi 原生默认 inactive；用户显式 `defaultTools`（如 `["+codemode", "+tool_search"]`）、MCP 的 codemode/deferred 曝光或 Pion 单项开关可请求激活，但能力开关不扩大显式 SDK 执行范围；旧 `pi-mcp-adapter` 注册的 `/mcp` 可以替换原生 builtin，不能双启或仅凭原生注册宣称原生 MCP 已活动。用户禁用扩展、`noExtensions` 和显式工具集合（包括空集）必须持续生效，不能只依赖启动时的 `defaultTools`。能力扫描仅读取已安装资源元数据，跳过缺失包，不执行 factory、不连接 MCP 服务器或读取认证凭据；动态未登记项保持未知。`ExtensionToolContext.executeTool` / `tools` 是执行上下文契约，不自动新增工具。
 
 #### 原生 MCP 配置与启动边界
 
@@ -289,6 +295,12 @@ typed IPC 校验主窗口、主帧、会话 ID/路径及预期叶节点。`Agent
 平台能力参考：[原生窗口材质](https://www.electronjs.org/docs/latest/api/browser-window#winsetbackgroundmaterialmaterial-windows)、[透明窗口限制](https://www.electronjs.org/docs/latest/tutorial/custom-window-styles#limitations)。
 
 ## 分支操作
+
+新建 worktree 使用 `<主项目>/.pion-worktrees/<清洗分支名>/`（重名加后缀），即使从关联工作树创建也放到主项目内，但仍从请求工作树的 HEAD 开始。创建前保留原内容地追加 Git 本地 `info/exclude` 根锚定规则，并检查忽略确实生效，不改项目 `.gitignore`；特殊路径通过 NUL 登记解析。已有外部 worktree 不自动搬迁。分支菜单的项目内删除仅放行管理目录的真实直接子工作树，其余目录与生命周期安全门不放宽。
+
+多 Agent 工作流的所有新增角色使用 `<主项目>/.pion-workflow-worktrees/<UUID>/<角色>/`，共用主根定位与本地排除；工作流 JSON 和角色权限配置仍在原应用数据目录。已有工作流目录和历史不搬迁，缺失角色只在项目内创建。角色重建/清理只接受精确路径、真实登记及目录身份；非 force 移除，保留 dirty（含 ignored）和无分支/标签保护的 detached 提交，部分成功保留失败路径与提示，不标记全部清理完成。
+
+普通分支权限继续继承主项目：新布局不误用同名子目录策略，旧 flat 路径沿标准 Git 管理文件与回指确认主根，而不拆分项目/分支名称猜测。非标准外置 Git 元数据不推断归属；不迁移权限配置，独立工作流目录保留角色策略。
 
 ### 提交图（GitCommitTree）
 
@@ -442,7 +454,7 @@ src/
 ## 说明
 
 - 本项目采用 MIT License，完整条款见根目录 `LICENSE`。
-- 本机安装使用 `scripts/install-local.sh`；分发包配置位于 `electron-builder.yml`，推送 v* 标签触发 GitHub Release 工作流。
+- 本机安装使用 `scripts/install-local.sh`，支持 `XDG_DATA_HOME`，生成启动器绑定实际安装绝对路径并处理 shell/desktop 转义；分发包配置位于 `electron-builder.yml`，推送 v* 标签触发 GitHub Release 工作流。
 - 模型/思考等级切换、会话树、fork、斜杠命令、计划模式、手动压缩与 HTML 导出均已接入。
 - 工具策略保存在 Electron userData 下的 `pion-tool-permissions.json`；运行时生成的全局 Pi 权限门扩展位于 `runtime/` 子目录。
 - 会话文件由 pi SDK 管理（JSONL，按目录分桶），列表扫描保持只读；消息撤销在旧写入者退出后用 SDK 追加持久分支标记。跨项目点击会话时交给对应的 pi 后台加载。

@@ -73,6 +73,47 @@ describe('tool image state', () => {
     expect(rejected.imageNotice).toBeTruthy()
   })
 
+  it.each(['read', 'pion_task'])('retains %s state for identical visible partials without consuming images, tasks or usage', (name) => {
+    const collect = vi.spyOn(toolImages, 'collectToolImages')
+    const decode = vi.spyOn(globalThis, 'atob')
+    const started = event(initialState, { type: 'tool_execution_start', toolCallId: 'partial', toolName: name, args: {} })
+    const text = 'x'.repeat(2000)
+    const update = (state: AgentState, suffix: string) => event(state, {
+      type: 'tool_execution_update', toolCallId: 'partial', toolName: name,
+      partialResult: { content: [{ type: 'text', text: text + suffix }, previewPart],
+        details: { tasks: [{ id: 1, title: 'Ignored partial task', status: 'in_progress' }] },
+        usage: { totalTokens: 100 } }
+    })
+    const partial = update(started, 'first suffix')
+    expect(toolRow(started).tool.outputText).toBeUndefined()
+    expect(toolRow(partial).tool.outputText).toBe(text + '…')
+    expect(update(partial, 'second suffix')).toBe(partial)
+    expect(partial.tasks).toBe(started.tasks)
+    expect(partial.taskRevision).toBe(started.taskRevision)
+    expect(partial.taskResultIds).toBe(started.taskResultIds)
+    expect(toolRow(partial).tool).not.toHaveProperty('usage')
+    expect(collect).not.toHaveBeenCalled()
+    expect(decode).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('accepts full and empty finals after unchanged partials (isError=%s), then ignores late progress', (isError) => {
+    let state = event(initialState, { type: 'tool_execution_start', toolCallId: 'partial', toolName: 'edit', args: { path: 'file.ts' } })
+    const update: WireEventInput = { type: 'tool_execution_update', toolCallId: 'partial', toolName: 'edit',
+      partialResult: { content: [{ type: 'text', text: 'same text' }] } }
+    state = event(state, update)
+    expect(event(state, update)).toBe(state)
+    const done = event(state, { type: 'tool_execution_end', toolCallId: 'partial', toolName: 'edit', isError: false,
+      result: { content: [{ type: 'text', text: 'same text' }], details: { diff: '-1 old\n+1 new' } } })
+    expect(done).not.toBe(state)
+    expect(toolRow(done).tool).toMatchObject({ status: 'done', resultReceived: true, diff: '-1 old\n+1 new' })
+    const final = event(done, { type: 'message_end', message: { role: 'toolResult', toolCallId: 'partial', toolName: 'edit',
+      isError, content: [] } })
+    expect(toolRow(final).tool).toMatchObject({ status: isError ? 'error' : 'done', outputText: '', resultSource: 'message' })
+    expect(toolRow(final).tool.diff).toBeUndefined()
+    expect(event(final, update)).toBe(final)
+    expect(toolRow(state).tool).toMatchObject({ status: 'running', outputText: 'same text' })
+  })
+
   it('keeps partial updates text-only and validates previews once at the final result', () => {
     const collect = vi.spyOn(toolImages, 'collectToolImages')
     const decode = vi.spyOn(globalThis, 'atob')

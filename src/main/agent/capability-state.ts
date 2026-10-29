@@ -4,6 +4,7 @@ import {
   CAPABILITY_RUNTIME_COMMAND, CAPABILITY_RUNTIME_MAX_CHARS, CAPABILITY_RUNTIME_SOURCE,
   type CapabilityApplication, type CapabilityItem, type CapabilityRuntimeNotice
 } from '../../shared/capability-settings'
+import { parseCapabilityItem } from '../../shared/capability-item'
 import type { BackendRecord } from './types'
 
 export type CapabilityCommands = Awaited<ReturnType<RpcClient['getCommands']>>
@@ -141,22 +142,6 @@ export function capabilityCommandFrom(commands: CapabilityCommands, name: string
     && command.sourceInfo.scope === 'temporary' && command.sourceInfo.origin === 'top-level')
 }
 
-function item(value: unknown): CapabilityItem {
-  if (!record(value) || !text(value.id, 160) || !text(value.name, 128) || !text(value.label, 128)
-    || !text(value.description, 1024) || typeof value.enabled !== 'boolean' || typeof value.available !== 'boolean'
-    || !['pi', 'pion', 'user', 'project', 'extension', 'mcp'].includes(String(value.origin))
-    || !['tool', 'subagent', 'mcp', 'skill', 'extension'].includes(String(value.kind))
-    || (value.unavailableReason !== undefined && !text(value.unavailableReason, 256))) throw new Error('能力运行时条目无效')
-  const kind = value.kind as CapabilityItem['kind']
-  if ((kind === 'tool' || kind === 'subagent')
-    ? !/^tool:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(value.id) || value.id !== `tool:${value.name}`
-      || (kind === 'subagent') !== (value.id === 'tool:pion_subagents')
-    : !new RegExp(`^${kind}:[a-f0-9]{64}$`).test(value.id)) throw new Error('能力运行时条目标识无效')
-  return { id: value.id, name: value.name, label: value.label, description: value.description,
-    kind, origin: value.origin as CapabilityItem['origin'], enabled: value.enabled, available: value.available,
-    ...(value.unavailableReason !== undefined ? { unavailableReason: value.unavailableReason as string } : {}) }
-}
-
 /** Return only the explicit public whitelist; never spread a runtime payload. */
 export function readCapabilityRuntimeNotice(commands: CapabilityCommands, scope: {
   cwd: string; sessionPath?: string; revision?: number; runtimeId?: string; retiredRuntimeIds?: readonly string[]
@@ -176,7 +161,12 @@ export function readCapabilityRuntimeNotice(commands: CapabilityCommands, scope:
     || !Array.isArray(value.notices) || value.notices.length > 65 || !value.notices.every(notice => text(notice, 512))) {
     throw new Error('能力运行时回执身份或修订不匹配')
   }
-  const items = value.items.map(item)
+  const items = value.items.map(entry => {
+    const item = parseCapabilityItem(entry)
+    // A private receipt is atomic: one malformed entry rejects the whole notice.
+    if (!item) throw new Error('能力运行时条目无效')
+    return item
+  })
   if (new Set(items.map(entry => entry.id)).size !== items.length) throw new Error('能力运行时条目重复')
   return { version: 1, revision: value.revision as number, runtimeId: value.runtimeId, cwd: value.cwd,
     ...(value.sessionPath !== undefined ? { sessionPath: value.sessionPath as string } : {}),

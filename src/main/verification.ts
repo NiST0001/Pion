@@ -40,6 +40,13 @@ function cloneRun(run: VerificationRun): VerificationRun {
   return structuredClone(run)
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return
+  const error = new Error('验证已取消')
+  error.name = 'AbortError'
+  throw error
+}
+
 function cleanOutput(text: string): string {
   return text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\r/g, '')
 }
@@ -138,7 +145,8 @@ export class VerificationService {
   private readonly runs = new Map<string, VerificationRun>()
   private readonly policies = new Map<string, VerificationPolicy>()
   private readonly activeByCwd = new Map<string, string>()
-  private readonly executions = new Map<string, string>()
+  private readonly executions = new Map<string, { cwd: string; controller: AbortController; settled: Promise<void> }>()
+  private readonly cancellations = new Map<string, Promise<VerificationRun>>()
   private pendingStarts = 0
   private commandExitUnconfirmed = false
   private mutationGuard?: () => void
@@ -154,10 +162,11 @@ export class VerificationService {
     }
   }
   private readonly planCache = new Map<string, VerificationPlan>()
-  private readonly autoRepairAgentAttempts = new Map<string, number>()
-  private autoRepairHandler?: (run: VerificationRun, prompt: string) => Promise<RunOperation | null>
+  private readonly autoRepairAgentAttempts = new Map<string, { attempt: number; signal?: AbortSignal }>()
+  private autoRepairHandler?: (run: VerificationRun, prompt: string, signal?: AbortSignal) => Promise<RunOperation | null>
   private win: BrowserWindow | null = null
-  private loaded = false
+  private loading?: Promise<void>
+  private storageError?: Error
   private logSequence = 0
   private writeTimer: ReturnType<typeof setTimeout> | null = null
   private writeQueue: Promise<void> = Promise.resolve()
@@ -176,26 +185,46 @@ export class VerificationService {
   }
 
   setAutoRepairHandler(
-    handler: (run: VerificationRun, prompt: string) => Promise<RunOperation | null>
+    handler: (run: VerificationRun, prompt: string, signal?: AbortSignal) => Promise<RunOperation | null>
   ): void {
     this.autoRepairHandler = handler
   }
 
-  async load(): Promise<void> {
-    if (this.loaded) return
-    this.loaded = true
+  load(): Promise<void> {
+    return this.loading ??= this.loadStorage()
+  }
+
+  private async loadStorage(): Promise<void> {
     try {
-      const parsed = JSON.parse(await readFile(this.filePath, 'utf8')) as Partial<VerificationFile>
-      for (const [cwd, policy] of Object.entries(parsed.policies ?? {})) {
-        this.policies.set(resolve(cwd), normalizePolicy(cwd, policy))
+      let source: string
+      try { source = await readFile(this.filePath, 'utf8') } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+        throw error
       }
-      for (const value of parsed.runs ?? []) {
+      const parsed = JSON.parse(source) as Partial<VerificationFile> | null
+      if (!parsed || parsed.version !== 1 || !parsed.policies || typeof parsed.policies !== 'object'
+        || Array.isArray(parsed.policies) || !Array.isArray(parsed.runs)) throw new Error('验证文件格式无效')
+      const policies = new Map<string, VerificationPolicy>()
+      const runs = new Map<string, VerificationRun>()
+      for (const [cwd, policy] of Object.entries(parsed.policies)) {
+        if (!policy || typeof policy !== 'object' || Array.isArray(policy)) throw new Error('验证策略无效')
+        policies.set(resolve(cwd), normalizePolicy(cwd, policy))
+      }
+      for (const value of parsed.runs) {
         const run = normalizeRun(value)
-        if (run) this.runs.set(run.id, run)
+        if (!run || runs.has(run.id)) throw new Error('验证记录无效或重复')
+        runs.set(run.id, run)
       }
-      await this.flush()
+      for (const [cwd, policy] of policies) this.policies.set(cwd, policy)
+      for (const [id, run] of runs) this.runs.set(id, run)
     } catch {
-      // Missing or malformed state starts empty.
+      this.storageError = new Error('验证存储读取失败，已保留原文件并停止后续写入')
+      console.error('[pion] verification storage unavailable:', this.storageError)
+      return
+    }
+    try { await this.persist() } catch {
+      this.storageError = new Error('验证存储保存失败，已停止后续写入并保留现场')
+      console.error('[pion] verification storage unavailable:', this.storageError)
     }
   }
 
@@ -300,6 +329,8 @@ export class VerificationService {
   }
 
   async setPolicy(cwd: string, updates: Partial<Omit<VerificationPolicy, 'cwd'>>): Promise<VerificationPolicy> {
+    if (this.loading) await this.loading
+    if (this.storageError) throw this.storageError
     const root = resolve(cwd)
     const policy = normalizePolicy(root, { ...this.getPolicy(root), ...updates })
     this.policies.set(root, policy)
@@ -318,69 +349,119 @@ export class VerificationService {
       .map(cloneRun)
   }
 
-  async start(cwd: string, options: StartVerificationOptions = {}): Promise<VerificationRun> {
+  async start(cwd: string, options: StartVerificationOptions = {}, signal?: AbortSignal): Promise<VerificationRun> {
+    throwIfAborted(signal)
     this.mutationGuard?.()
+    throwIfAborted(signal)
+    if (this.commandExitUnconfirmed) throw new Error('验证命令实际收尾尚未确认')
     this.pendingStarts += 1
-    try { return await this.startReserved(cwd, options) }
-    finally { this.pendingStarts -= 1 }
+    try {
+      if (this.loading) await this.loading
+      throwIfAborted(signal)
+      if (this.storageError) throw this.storageError
+      this.mutationGuard?.()
+      return await this.startReserved(cwd, options, signal)
+    } finally { this.pendingStarts -= 1 }
   }
 
-  private async startReserved(cwd: string, options: StartVerificationOptions): Promise<VerificationRun> {
+  private async startReserved(cwd: string, options: StartVerificationOptions, signal?: AbortSignal): Promise<VerificationRun> {
     const root = resolve(cwd)
-    const activeId = this.activeByCwd.get(root)
-    if (activeId) {
-      const active = this.runs.get(activeId)
-      if (active && (active.state === 'queued' || active.state === 'running')) return cloneRun(active)
+    let ownedRun: VerificationRun | undefined
+    const onAbort = (): void => {
+      if (ownedRun) void this.cancel(ownedRun.id).catch((error) => {
+        console.error('[pion] verification cancellation failed:', error)
+      })
     }
-    if ([...this.executions.values()].includes(root)) throw new Error('此前验证尚未实际结束')
-    const plan = await this.discover(root, true)
-    this.mutationGuard?.()
-    const concurrentId = this.activeByCwd.get(root)
-    if (concurrentId) {
-      const concurrent = this.runs.get(concurrentId)
-      if (concurrent) return cloneRun(concurrent)
-    }
-    if ([...this.executions.values()].includes(root)) throw new Error('此前验证尚未实际结束')
-    const policy = this.getPolicy(root)
-    const selectedKinds = options.kinds?.length ? options.kinds : policy.selectedKinds
-    const selected = plan.steps.filter((step) => selectedKinds.includes(step.kind))
-    if (selected.length === 0) throw new Error('项目中没有发现可运行的验证命令')
-
-    const run: VerificationRun = {
-      id: randomUUID(),
-      cwd: root,
-      sessionPath: options.sessionPath ? resolve(options.sessionPath) : undefined,
-      sourceRunId: options.sourceRunId,
-      state: 'queued',
-      createdAt: Date.now(),
-      steps: selected.map((step): VerificationStepResult => ({
-        ...step,
-        state: 'queued',
-        outputTail: '',
-        outputTruncated: false
-      })),
-      selectedKinds: [...new Set(selected.map((step) => step.kind))],
-      repairAttempt: Math.max(0, options.repairAttempt ?? 0),
-      revision: 0
-    }
-    this.runs.set(run.id, run)
-    this.activeByCwd.set(root, run.id)
-    this.trimRuns()
-    this.changed(run)
-    this.executions.set(run.id, root)
-    void this.execute(run.id).catch((error: unknown) => {
-      if (run.state !== 'cancelled') {
-        run.state = 'infrastructure-error'
-        run.error = error instanceof Error ? error.message : String(error)
-        run.finishedAt = Date.now()
-        run.revision += 1
-        this.changed(run)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      throwIfAborted(signal)
+      const activeId = this.activeByCwd.get(root)
+      if (activeId) {
+        const active = this.runs.get(activeId)
+        if (active && (active.state === 'queued' || active.state === 'running')) return cloneRun(active)
       }
-    }).finally(() => {
-      this.executions.delete(run.id)
-      if (this.activeByCwd.get(root) === run.id) this.activeByCwd.delete(root)
-    })
-    return cloneRun(run)
+      if ([...this.executions.values()].some((execution) => execution.cwd === root)) throw new Error('此前验证尚未实际结束')
+      const plan = await this.discover(root, true)
+      throwIfAborted(signal)
+      this.mutationGuard?.()
+      throwIfAborted(signal)
+      const concurrentId = this.activeByCwd.get(root)
+      if (concurrentId) {
+        const concurrent = this.runs.get(concurrentId)
+        if (concurrent && (concurrent.state === 'queued' || concurrent.state === 'running')) return cloneRun(concurrent)
+      }
+      if ([...this.executions.values()].some((execution) => execution.cwd === root)) throw new Error('此前验证尚未实际结束')
+      const policy = this.getPolicy(root)
+      const selectedKinds = options.kinds?.length ? options.kinds : policy.selectedKinds
+      const selected = plan.steps.filter((step) => selectedKinds.includes(step.kind))
+      if (selected.length === 0) throw new Error('项目中没有发现可运行的验证命令')
+
+      const run: VerificationRun = {
+        id: randomUUID(),
+        cwd: root,
+        sessionPath: options.sessionPath ? resolve(options.sessionPath) : undefined,
+        sourceRunId: options.sourceRunId,
+        state: 'queued',
+        createdAt: Date.now(),
+        steps: selected.map((step): VerificationStepResult => ({
+          ...step,
+          state: 'queued',
+          outputTail: '',
+          outputTruncated: false
+        })),
+        selectedKinds: [...new Set(selected.map((step) => step.kind))],
+        repairAttempt: Math.max(0, options.repairAttempt ?? 0),
+        revision: 0
+      }
+      // Reserve the identity, signal and actual execution before publishing any
+      // snapshot: a progress callback can synchronously revoke this start.
+      ownedRun = run
+      this.runs.set(run.id, run)
+      this.activeByCwd.set(root, run.id)
+      const controller = new AbortController()
+      const settled = Promise.resolve().then(() => this.execute(run.id, controller.signal)).catch(async (error: unknown) => {
+        if (run.state !== 'cancelled' && !signal?.aborted) {
+          run.state = 'infrastructure-error'
+          run.error = error instanceof Error ? error.message : String(error)
+          run.finishedAt = Date.now()
+          const current = run.steps.find((step) => step.id === run.currentStepId)
+          if (current?.state === 'running') {
+            current.state = 'infrastructure-error'
+            current.error = run.error
+            current.finishedAt = run.finishedAt
+          }
+          run.currentStepId = undefined
+          run.revision += 1
+          this.changed(run)
+        }
+        await this.flush()
+      }).finally(async () => {
+        try {
+          const cancellation = this.cancellations.get(run.id)
+          if (cancellation) await cancellation
+        } finally {
+          signal?.removeEventListener('abort', onAbort)
+          this.executions.delete(run.id)
+          if (this.activeByCwd.get(root) === run.id) this.activeByCwd.delete(root)
+        }
+      })
+      this.executions.set(run.id, { cwd: root, controller, settled })
+      void settled.catch((error) => { console.error('[pion] verification cleanup failed:', error) })
+      this.trimRuns()
+      this.changed(run)
+      return cloneRun(run)
+    } catch (error) {
+      if (!ownedRun) throwIfAborted(signal)
+      throw error
+    } finally {
+      if (!ownedRun) signal?.removeEventListener('abort', onAbort)
+    }
+  }
+
+  /** Main-process barrier; terminal snapshots alone do not settle execution. */
+  async waitForRun(runId: string): Promise<void> {
+    await this.executions.get(runId)?.settled
+    if (this.commandExitUnconfirmed) throw new Error('验证命令实际收尾尚未确认')
   }
 
   async rerun(runId: string): Promise<VerificationRun> {
@@ -395,24 +476,37 @@ export class VerificationService {
   }
 
   async cancel(runId: string): Promise<VerificationRun> {
+    const pending = this.cancellations.get(runId)
+    if (pending) return pending
     const run = this.runs.get(runId)
     if (!run) throw new Error('验证记录不存在')
-    if (run.state !== 'queued' && run.state !== 'running') return cloneRun(run)
+    if (run.state === 'cancelled' || (run.state !== 'queued' && run.state !== 'running' && !this.executions.has(runId))) return cloneRun(run)
     run.state = 'cancelled'
     run.finishedAt = Date.now()
     run.revision += 1
+    this.executions.get(runId)?.controller.abort()
     const current = run.currentStepId
-    if (current) await this.runner.cancel(`${run.id}:${current}`)
-    this.activeByCwd.delete(run.cwd)
+    const cancellation = Promise.resolve().then(async () => {
+      if (current) await this.runner.cancel(`${run.id}:${current}`)
+      await this.flush()
+      return cloneRun(run)
+    }).catch((error: unknown) => {
+      this.commandExitUnconfirmed = true
+      throw error
+    }).finally(() => { this.cancellations.delete(runId) })
+    this.cancellations.set(runId, cancellation)
+    // Keep activeByCwd/executions until the command, persistence and repair
+    // promises, including an in-flight cancellation request, actually settle.
     this.changed(run)
-    return cloneRun(run)
+    return cancellation
   }
 
   async handleAgentRunCompleted(run: RunOperation): Promise<void> {
-    const policy = this.getPolicy(run.cwd)
-    if (!policy.autoRun || run.state !== 'completed') return
-    const repairAttempt = this.autoRepairAgentAttempts.get(run.id) ?? 0
+    const repair = this.autoRepairAgentAttempts.get(run.id)
     this.autoRepairAgentAttempts.delete(run.id)
+    const policy = this.getPolicy(run.cwd)
+    if (repair?.signal?.aborted || !policy.autoRun || run.state !== 'completed') return
+    const repairAttempt = repair?.attempt ?? 0
     try {
       await this.start(run.cwd, {
         kinds: policy.selectedKinds,
@@ -425,23 +519,29 @@ export class VerificationService {
     }
   }
 
-  private async execute(runId: string): Promise<void> {
+  private async execute(runId: string, signal?: AbortSignal): Promise<void> {
     const run = this.runs.get(runId)
-    if (!run || run.state !== 'queued') return
+    if (!run) return
+    const cancelled = (): boolean => signal?.aborted === true || run.state === 'cancelled'
+    if (cancelled()) { await this.flush(); return }
+    if (run.state !== 'queued') return
     run.state = 'running'
     run.startedAt = Date.now()
     run.revision += 1
     this.changed(run)
 
     for (const step of run.steps) {
-      if (run.state !== 'running') break
+      if (cancelled() || run.state !== 'running') break
       step.state = 'running'
       step.startedAt = Date.now()
       run.currentStepId = step.id
       run.revision += 1
       this.changed(run)
+      if (cancelled()) { step.state = 'cancelled'; break }
       this.mutationGuard?.()
+      if (cancelled()) { step.state = 'cancelled'; break }
       const result = await this.runner.run(`${run.id}:${step.id}`, step, (chunk) => {
+        if (cancelled() || this.runs.get(runId) !== run || step.state !== 'running') return
         const text = cleanOutput(chunk.text)
         if (!text) return
         const combined = `${step.outputTail}${text}`
@@ -467,7 +567,7 @@ export class VerificationService {
       step.durationMs = result.durationMs
       step.exitCode = result.exitCode
       step.signal = result.signal
-      if (result.cancelled || this.runs.get(runId)?.state === 'cancelled') {
+      if (result.cancelled || cancelled()) {
         step.state = 'cancelled'
         run.state = 'cancelled'
         break
@@ -489,14 +589,15 @@ export class VerificationService {
       this.changed(run)
     }
 
-    if (run.state === 'running') run.state = 'passed'
+    if (cancelled()) run.state = 'cancelled'
+    else if (run.state === 'running') run.state = 'passed'
     run.finishedAt = Date.now()
     run.currentStepId = undefined
     if (run.state === 'failed') run.repairPrompt = this.buildRepairPrompt(run)
     run.revision += 1
-    this.activeByCwd.delete(run.cwd)
     this.changed(run)
     await this.flush()
+    if (cancelled()) return
 
     const policy = this.getPolicy(run.cwd)
     if (
@@ -508,8 +609,11 @@ export class VerificationService {
     ) {
       try {
         this.mutationGuard?.()
-        const agentRun = await this.autoRepairHandler(cloneRun(run), run.repairPrompt)
-        if (agentRun) this.autoRepairAgentAttempts.set(agentRun.id, run.repairAttempt + 1)
+        if (cancelled()) return
+        const agentRun = await this.autoRepairHandler(cloneRun(run), run.repairPrompt, signal)
+        // Retain the real repair identity even if it returns after revocation;
+        // its eventual completion must not restart an automatic verify loop.
+        if (agentRun) this.autoRepairAgentAttempts.set(agentRun.id, { attempt: run.repairAttempt + 1, signal })
       } catch (error) {
         console.error('[pion] automatic verification repair could not start:', error)
       }
@@ -540,7 +644,7 @@ export class VerificationService {
     const sorted = [...this.runs.values()].sort((left, right) => left.createdAt - right.createdAt)
     while (sorted.length > MAX_RUNS) {
       const victim = sorted.shift()
-      if (victim && victim.state !== 'running' && victim.state !== 'queued') this.runs.delete(victim.id)
+      if (victim && victim.state !== 'running' && victim.state !== 'queued' && !this.executions.has(victim.id)) this.runs.delete(victim.id)
     }
   }
 
@@ -557,6 +661,11 @@ export class VerificationService {
       clearTimeout(this.writeTimer)
       this.writeTimer = null
     }
+    return this.loading ? this.loading.then(() => this.persist()) : this.persist()
+  }
+
+  private persist(): Promise<void> {
+    if (this.storageError) return Promise.reject(this.storageError)
     const target = this.filePath
     const temp = `${target}.${randomUUID()}.tmp`
     const payload: VerificationFile = {
@@ -566,6 +675,7 @@ export class VerificationService {
     }
     const serialized = `${JSON.stringify(payload, null, 2)}\n`
     const write = this.writeQueue.then(async () => {
+      if (this.storageError) throw this.storageError
       await mkdir(dirname(target), { recursive: true })
       await writeFile(temp, serialized, 'utf8')
       await rename(temp, target)

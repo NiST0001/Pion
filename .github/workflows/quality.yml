@@ -27,7 +27,7 @@ jobs:
       - run: npm run test:coverage
       - run: npm run build
       - name: Electron E2E
-        run: xvfb-run -a npm run test:e2e
+        run: xvfb-run -a ./node_modules/.bin/playwright test
       - name: Upload test artifacts
         if: failure()
         uses: actions/upload-artifact@v4

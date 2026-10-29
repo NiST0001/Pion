@@ -2,13 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, DragEvent, ReactElement } from 'react'
 import { ChevronRight, Folder, FolderInput, FolderPlus, GripVertical, Loader2, PencilLine, Trash2 } from 'lucide-react'
 import type { SessionFolder, SessionOrganization, SessionOrganizationChange, SessionOrganizationItem } from '../../../../shared/session-organization'
-import { orderedSessionOrganizationItems, sessionOrganizationItemKey } from '../../../../shared/session-organization'
+import { sessionOrganizationItemKey } from '../../../../shared/session-organization'
 import { ConfirmDialog } from '../common/ConfirmDialog'
 import { TextInputDialog } from '../common/TextInputDialog'
 import { SessionFolderMoveDialog, SessionItems } from './SessionList'
 import { getSessionDrag, SESSION_DRAG_MIME } from '../../utils/sessionDrag'
 import { beginSessionFolderDrag, endSessionFolderDrag, getSessionFolderDrag, SESSION_FOLDER_DRAG_MIME } from '../../utils/sessionFolderDrag'
 import { moveSidebarKey } from '../project/SortableSidebarGroup'
+import { indexSessionFolderOrganization, projectSessionFolderTree, sessionFolderMoveOptions } from './session-folder-projection'
 
 export interface SessionFolderHeaderControls {
   disabled: boolean
@@ -75,53 +76,18 @@ export function SessionFolderTree({
   const [folderOver, setFolderOver] = useState<{ epoch: object; key: string; edge?: 'before' | 'after' } | null>(null)
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
 
-  const { folders, parents, options } = useMemo(() => {
-    // Keep exact worktree membership; broken ancestry projects at root.
-    const folders = new Map<string, SessionFolder>()
-    for (const folder of organization.folders) {
-      if (folder.cwd === cwd && folder.id && !folders.has(folder.id)) folders.set(folder.id, folder)
-    }
-    const parents = new Map<string, string | undefined>()
-    for (const folder of folders.values()) {
-      const seen = new Set([folder.id])
-      let parentId = folder.parentId
-      let broken = false
-      while (parentId) {
-        if (seen.has(parentId) || !folders.has(parentId)) { broken = true; break }
-        seen.add(parentId)
-        parentId = folders.get(parentId)?.parentId
-      }
-      parents.set(folder.id, broken ? undefined : folder.parentId || undefined)
-    }
-    const options = [{ value: '', label: '根目录' }]
-    const visit = (parentId: string | undefined, prefix: string): void => {
-      for (const folder of folders.values()) {
-        if (parents.get(folder.id) !== parentId) continue
-        const label = prefix ? `${prefix} / ${folder.name}` : folder.name
-        options.push({ value: folder.id, label })
-        visit(folder.id, label)
-      }
-    }
-    visit(undefined, '')
-    return { folders, parents, options }
-  }, [cwd, organization.folders])
-
-  const placements = useMemo(() => new Map(organization.sessions
-    .filter((placement) => placement.cwd === cwd)
-    .map((placement) => [placement.path, placement])), [cwd, organization.sessions])
-  const sessions = itemProps.sessions.filter((session) => (!session.projectCwd || session.projectCwd === cwd) && !placements.get(session.path)?.archived)
-  const sessionFolderIds = new Map(sessions.map((session) => {
-    const id = placements.get(session.path)?.folderId
-    return [session.path, id && folders.has(id) ? id : undefined] as const
-  }))
+  const folderIndex = useMemo(() => indexSessionFolderOrganization(organization, cwd), [cwd, organization])
+  const { folders, parents, placements, options } = folderIndex
+  const { sessionFolderIds, sessionsByPath, groups } = useMemo(() => projectSessionFolderTree(folderIndex, itemProps.sessions),
+    [folderIndex, itemProps.sessions])
   const activeDialog = dialog?.scope === owner ? dialog : null
   useEffect(() => {
     setCollapseIntent((intent) => {
       if (!intent) return intent
-      const folder = organization.folders.find((entry) => entry.id === intent.id && entry.cwd === cwd)
+      const folder = folders.get(intent.id)
       return intent.scope !== owner || !folder || Boolean(folder.collapsed) === intent.collapsed ? null : intent
     })
-  }, [cwd, organization.folders, owner])
+  }, [folders, owner])
   const currentFailure = failure?.scope === owner ? failure : null
   const error = currentFailure?.message ?? ''
   const canMutate = (): boolean => mounted.current && scope.current === owner && !disabled.current && !pending.current
@@ -179,21 +145,9 @@ export function SessionFolderTree({
   }, [epoch])
   const canReorderFolders = (): boolean => canMutate() && dragEpoch.current === epoch && window.pion === api
     && !busy && !searchActive && !hidden && !reorderDisabled.current
-  const groupItems = (parentId?: string): SessionOrganizationItem[] => {
-    const base: SessionOrganizationItem[] = [
-      ...sessions.filter((session) => sessionFolderIds.get(session.path) === parentId).map((session) => ({ kind: 'session' as const, path: session.path })),
-      ...[...folders.values()].filter((folder) => parents.get(folder.id) === parentId).map((folder) => ({ kind: 'folder' as const, id: folder.id }))
-    ]
-    const available = new Set(base.map(sessionOrganizationItemKey))
-    const ordered = orderedSessionOrganizationItems(organization, cwd, parentId, sessions.map((session) => session.path))
-      .filter((item) => available.has(sessionOrganizationItemKey(item)))
-    const known = new Set(ordered.map(sessionOrganizationItemKey))
-    // Keep the existing root projection for malformed ancestry.
-    return [...ordered, ...base.filter((item) => !known.has(sessionOrganizationItemKey(item)))]
-  }
+  const groupItems = (parentId?: string): SessionOrganizationItem[] => groups.get(parentId)!.items
   const canReorderItems = (parentId?: string): boolean => manualOrder && canReorderFolders()
-    && sessions.filter((session) => sessionFolderIds.get(session.path) === parentId)
-      .every((session) => !session.optimistic && !itemProps.pendingDeletePaths?.has(session.path))
+    && groups.get(parentId)!.sessions.every((session) => !session.optimistic && !itemProps.pendingDeletePaths?.has(session.path))
   const itemParent = (item: SessionOrganizationItem): string | undefined => item.kind === 'folder'
     ? parents.get(item.id) : sessionFolderIds.get(item.path)
   const mixedSource = (event: DragEvent<HTMLDivElement>, target: SessionOrganizationItem, phase: 'over' | 'drop'): SessionOrganizationItem | null => {
@@ -206,13 +160,13 @@ export function SessionFolderTree({
         && receipt.parentId === folder.parentId && parents.get(folder.id) === folder.parentId) source = { kind: 'folder', id: folder.id }
     } else if (event.dataTransfer.types.includes(SESSION_DRAG_MIME)) {
       const receipt = getSessionDrag(event.dataTransfer, cwd, phase, epoch)
-      const session = receipt && sessions.find((session) => session.path === receipt.path)
+      const session = receipt && sessionsByPath.get(receipt.path)
       if (session && !session.optimistic && !itemProps.pendingDeletePaths?.has(session.path)) source = { kind: 'session', path: session.path }
     }
     const parentId = itemParent(target)
     if (!source || !canReorderItems(parentId) || itemParent(source) !== parentId
       || sessionOrganizationItemKey(source) === sessionOrganizationItemKey(target)
-      || !groupItems(parentId).some((item) => sessionOrganizationItemKey(item) === sessionOrganizationItemKey(target))) return null
+      || !groups.get(parentId)?.itemKeys.has(sessionOrganizationItemKey(target))) return null
     return source
   }
   const reorderItems = (source: SessionOrganizationItem, target: SessionOrganizationItem, edge?: 'before' | 'after'): void => {
@@ -351,14 +305,10 @@ export function SessionFolderTree({
   }
 
   const renderLevel = (folderId?: string): ReactElement => {
-    const group = sessions.filter((session) => sessionFolderIds.get(session.path) === folderId)
-    const items = groupItems(folderId)
-    const refs: SessionOrganizationItem[] = manualOrder ? items : [
-      ...group.map((session) => ({ kind: 'session' as const, path: session.path })), ...items.filter((item) => item.kind === 'folder')
-    ]
-    const byPath = new Map(group.map((session) => [session.path, session]))
+    const group = groups.get(folderId)!
+    const refs = manualOrder ? group.items : group.automaticItems
     return <SessionItems key={cwd} {...itemProps}
-      sessions={group}
+      sessions={group.sessions}
       allowFolderDrag
       folderDragCwd={cwd}
       folderDragScope={epoch}
@@ -366,12 +316,13 @@ export function SessionFolderTree({
       sessionFolderIds={sessionFolderIds}
       organizationDisabled={mutationsDisabled}
       onArchive={(path) => {
-        const session = group.find((session) => session.path === path)
+        const session = group.byPath.get(path)
         if (!session || session.optimistic) return Promise.reject(new Error('会话尚未就绪。'))
         return commit({ type: 'setSession', cwd, path, archived: true, title: session.name || session.preview || '未命名会话' })
       }}
       onMoveToFolder={(path, targetId) => {
-        if (!group.some((session) => session.path === path && !session.optimistic) || (targetId && !folders.has(targetId))) {
+        const session = group.byPath.get(path)
+        if (!session || session.optimistic || (targetId && !folders.has(targetId))) {
           return Promise.reject(new Error('请重新选择会话和目标文件夹。'))
         }
         return commit({ type: 'setSession', cwd, path, folderId: targetId })
@@ -379,13 +330,12 @@ export function SessionFolderTree({
       reorderDisabled={mutationsDisabled || itemProps.reorderDisabled}
       onReorder={undefined}
       siblingDrag={{
-        targetPath: group.find((session) => folderOver?.epoch === epoch
-          && folderOver.key === sessionOrganizationItemKey({ kind: 'session', path: session.path }))?.path,
+        targetPath: folderOver?.epoch === epoch ? group.sessionPathsByKey.get(folderOver.key) : undefined,
         targetEdge: folderOver?.epoch === epoch ? folderOver.edge : undefined,
         onDragOver: sessionDragOver, onDragLeave: dragLeave, onDrop: sessionDrop
       }}
       renderWithSiblings={(renderSession) => refs.map((ref) => ref.kind === 'session'
-        ? renderSession(byPath.get(ref.path)!) : renderFolder(folders.get(ref.id)!))}
+        ? renderSession(group.byPath.get(ref.path)!) : renderFolder(folders.get(ref.id)!))}
     />
   }
 
@@ -434,17 +384,9 @@ export function SessionFolderTree({
       </div>
   }
 
-  const moveOptions = activeDialog?.kind === 'move' ? options.filter((option) => {
-    let id: string | undefined = option.value
-    const seen = new Set<string>()
-    while (id) {
-      if (id === activeDialog.folder.id || seen.has(id)) return false
-      seen.add(id)
-      // Check original ancestry too, so malformed cycles stay conservative.
-      id = folders.get(id)?.parentId
-    }
-    return true
-  }) : options
+  const movingFolderId = activeDialog?.kind === 'move' ? activeDialog.folder.id : undefined
+  const moveOptions = useMemo(() => movingFolderId === undefined ? options : sessionFolderMoveOptions(folderIndex, movingFolderId),
+    [folderIndex, movingFolderId, options])
 
   const rootDropProps: SessionFolderHeaderControls['rootDropProps'] = {
     'data-session-drop-target': 'root',

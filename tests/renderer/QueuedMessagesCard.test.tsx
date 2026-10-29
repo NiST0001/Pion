@@ -10,7 +10,7 @@ beforeEach(() => window.localStorage.clear())
 describe('QueuedMessagesCard', () => {
   it('shows waiting messages without auto-sending from the renderer', () => {
     const send = vi.fn()
-    const { container } = render(<QueuedMessagesCard sessionKey="waiting" followUp={['下一任务']} onSendItem={send} />)
+    const { container } = render(<QueuedMessagesCard sessionKey="waiting" followUp={['下一任务']} followUpRunIds={['waiting-run']} onSendItem={send} />)
     expect(container.querySelector<HTMLElement>('.queue-panel')?.style.getPropertyValue('--task-panel-expanded-height')).toBe('102px')
     expect(screen.queryByRole('button', { name: '继续当前任务' })).not.toBeInTheDocument()
     expect(send).not.toHaveBeenCalled()
@@ -27,6 +27,7 @@ describe('QueuedMessagesCard', () => {
         sessionKey="session-queue"
         steering={['先检查这个文件']}
         followUp={['完成当前任务后运行测试']}
+        followUpRunIds={['follow-up-run']}
       />
     )
 
@@ -38,21 +39,25 @@ describe('QueuedMessagesCard', () => {
     expect(container.querySelector('[data-queue-kind="followUp"]')).toBeInTheDocument()
   })
 
-  it('exposes a direct-send action for each queued message', () => {
+  it('allows direct-send only for an identified local follow-up', () => {
     const onSendItem = vi.fn()
     render(
       <QueuedMessagesCard
         sessionKey="session-direct"
         steering={['插入当前运行']}
         followUp={['稍后继续']}
+        followUpRunIds={['direct-run']}
         onSendItem={onSendItem}
       />
     )
 
     const buttons = screen.getAllByRole('button', { name: /直接发送第/ })
     expect(buttons).toHaveLength(2)
+    expect(buttons[0]).toBeDisabled()
+    fireEvent.click(buttons[0])
+    expect(onSendItem).not.toHaveBeenCalled()
     fireEvent.click(buttons[1])
-    expect(onSendItem).toHaveBeenCalledWith('followUp', 0)
+    expect(onSendItem).toHaveBeenCalledWith('followUp', 0, 'direct-run')
   })
 
   it('keeps direct sending disabled without a handler and while an item is in flight', async () => {
@@ -62,20 +67,24 @@ describe('QueuedMessagesCard', () => {
       sessionKey: 'direct-send',
       steering: ['原生插入'],
       followUp: ['原生稍后', '本地稍后'],
+      followUpRunIds: [null, 'local-send-run'],
       nativeFollowUpCount: 1
     }
     const { container, rerender } = render(<QueuedMessagesCard {...props} />)
     expect(screen.getAllByRole('button', { name: /直接发送第/ }).every((button) => button.hasAttribute('disabled'))).toBe(true)
 
     rerender(<QueuedMessagesCard {...props} onSendItem={send} />)
-    fireEvent.click(screen.getByRole('button', { name: '直接发送第 2 条排队消息' }))
-    expect(send).toHaveBeenCalledExactlyOnceWith('followUp', 0)
+    expect(screen.getByRole('button', { name: '直接发送第 2 条排队消息' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: '直接发送第 3 条排队消息' }))
+    expect(send).toHaveBeenCalledExactlyOnceWith('followUp', 1, 'local-send-run')
     expect(screen.getAllByRole('button', { name: /直接发送第/ }).every((button) => button.hasAttribute('disabled'))).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: '直接发送第 3 条排队消息' }))
     expect(send).toHaveBeenCalledTimes(1)
 
     await act(async () => { finishSend() })
-    expect(screen.getAllByRole('button', { name: /直接发送第/ }).every((button) => !button.hasAttribute('disabled'))).toBe(true)
+    expect(screen.getByRole('button', { name: '直接发送第 1 条排队消息' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '直接发送第 2 条排队消息' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '直接发送第 3 条排队消息' })).toBeEnabled()
     expect(screen.queryByText('已暂停，等待处理当前任务')).not.toBeInTheDocument()
     expect(container.querySelector('.task-panel-caption')).toHaveTextContent('1 条插入 · 2 条稍后')
     expect(screen.queryByRole('button', { name: '继续当前任务' })).not.toBeInTheDocument()
@@ -106,7 +115,7 @@ describe('QueuedMessagesCard', () => {
     expect(onEditItem).toHaveBeenCalledWith(expect.objectContaining({ kind: 'followUp', index: 1, text: '本地稍后', runId: 'local-real-id' }))
 
     fireEvent.click(screen.getByRole('button', { name: '删除第 3 条排队消息' }))
-    expect(onRemoveItem).toHaveBeenCalledWith('followUp', 1)
+    expect(onRemoveItem).toHaveBeenCalledWith('followUp', 1, 'local-real-id')
   })
 
   it('retains the waiting caption, FIFO text, image references, identities and actions', async () => {
@@ -129,9 +138,9 @@ describe('QueuedMessagesCard', () => {
     fireEvent.click(screen.getByRole('button', { name: '编辑第 1 条排队消息' }))
     expect(onEditItem).toHaveBeenCalledExactlyOnceWith({ kind: 'followUp', index: 0, text: originalText, runId: 'image-run' })
     fireEvent.click(screen.getByRole('button', { name: '删除第 2 条排队消息' }))
-    expect(onRemoveItem).toHaveBeenCalledExactlyOnceWith('followUp', 1)
+    expect(onRemoveItem).toHaveBeenCalledExactlyOnceWith('followUp', 1, 'next-run')
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '直接发送第 1 条排队消息' })) })
-    expect(onSendItem).toHaveBeenCalledExactlyOnceWith('followUp', 0)
+    expect(onSendItem).toHaveBeenCalledExactlyOnceWith('followUp', 0, 'image-run')
     expect(container.querySelector('.task-panel-caption')).toHaveTextContent('等待本轮完成')
   })
 
@@ -149,11 +158,43 @@ describe('QueuedMessagesCard', () => {
     expect(screen.getByRole('button', { name: '编辑第 1 条排队消息' })).toBeDisabled()
   })
 
+  it('preserves run identity for send and remove after identical rows shift', async () => {
+    const send = vi.fn(), remove = vi.fn()
+    const { rerender } = render(<QueuedMessagesCard sessionKey="shifted"
+      followUp={['same', 'same']} followUpRunIds={['first-run', 'second-run']}
+      onSendItem={send} onRemoveItem={remove} />)
+    fireEvent.click(screen.getByRole('button', { name: '删除第 2 条排队消息' }))
+    expect(remove).toHaveBeenLastCalledWith('followUp', 1, 'second-run')
+    rerender(<QueuedMessagesCard sessionKey="shifted" followUp={['same']}
+      followUpRunIds={['second-run']} onSendItem={send} onRemoveItem={remove} />)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '直接发送第 1 条排队消息' })) })
+    expect(send).toHaveBeenCalledExactlyOnceWith('followUp', 0, 'second-run')
+    fireEvent.click(screen.getByRole('button', { name: '删除第 1 条排队消息' }))
+    expect(remove).toHaveBeenLastCalledWith('followUp', 0, 'second-run')
+  })
+
+  it('keeps unidentified and native rows visible with unsupported controls disabled', () => {
+    const send = vi.fn(), remove = vi.fn(), edit = vi.fn()
+    render(<QueuedMessagesCard sessionKey="unsupported" steering={['native steer']}
+      followUp={['native follow-up', 'missing identity']} nativeFollowUpCount={1}
+      followUpRunIds={['native-untrusted-id', null]}
+      onSendItem={send} onRemoveItem={remove} onEditItem={edit} />)
+    expect(screen.getAllByRole('listitem')).toHaveLength(3)
+    for (const button of screen.getAllByRole('button', { name: /直接发送第|删除第|编辑第/ })) {
+      expect(button).toBeDisabled()
+      fireEvent.click(button)
+    }
+    expect(send).not.toHaveBeenCalled()
+    expect(remove).not.toHaveBeenCalled()
+    expect(edit).not.toHaveBeenCalled()
+  })
+
   it('can collapse the message list and persists the session preference', () => {
     render(
       <QueuedMessagesCard
         sessionKey="session-collapse"
         followUp={['等待当前运行完成']}
+        followUpRunIds={['collapse-run']}
       />
     )
 

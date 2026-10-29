@@ -134,6 +134,46 @@ async function harness(persisted = false) {
 }
 
 describe('capability Bridge read and source receipts', () => {
+  it('projects desired preferences and only existing verified runtime metadata without RPC or startup', async () => {
+    const h = await harness()
+    await h.bridge.getCapabilitySettings(h.cwd) // Establish the actual named source receipt.
+    h.client.getCommands.mockClear()
+    h.client.getState.mockClear()
+    expect((await h.bridge.getCapabilities()).tools.map((tool: { name: string }) => tool.name)).toEqual(['dynamic'])
+    h.backend.capability!.epoch = {} // Cached commands alone never renew their original receipt.
+    expect((await h.bridge.getCapabilities()).tools).toEqual([])
+    h.backend.capabilityNoticeEpoch = h.backend.capability!.epoch
+    h.backend.busy = true
+    await h.save({ type: 'preset', preset: 'minimal' })
+    expect((await h.bridge.getCapabilities()).tools).toEqual([])
+    expect(h.client.getCommands).not.toHaveBeenCalled()
+    expect(h.client.getState).not.toHaveBeenCalled()
+    expect(h.client.prompt).not.toHaveBeenCalled()
+    expect(h.bridge.ensureActiveBackend).not.toHaveBeenCalled()
+    h.pool.delete(h.backend.key)
+    expect((await h.bridge.getCapabilities()).tools).toEqual([])
+  })
+
+  it.each(['client', 'path', 'trust', 'epoch', 'window'])('rejects a late legacy catalogue after its %s changes', async (kind) => {
+    const h = await harness()
+    await h.bridge.getCapabilitySettings(h.cwd)
+    const pending = deferred<void>()
+    const catalogue = vi.mocked(readCapabilityResources)
+    const read = catalogue.getMockImplementation()!
+    catalogue.mockImplementationOnce(async (options) => { await pending.promise; return read(options) })
+    const reading = h.bridge.getCapabilities()
+    const rejected = expect(reading).rejects.toThrow('已改变')
+    await gap()
+    if (kind === 'client') h.backend.client = { ...h.client } as unknown as BackendRecord['client']
+    if (kind === 'path') h.backend.sessionPath = h.bridge.activeSessionPath = join(h.cwd, 'other.jsonl')
+    if (kind === 'trust') h.bridge.getProjectTrust.mockReturnValue({ cwd: h.cwd, decision: 'untrusted', source: 'not-required', requiresTrust: true })
+    if (kind === 'epoch') h.backend.capability!.epoch = {}
+    if (kind === 'window') h.bridge.win = { webContents: { id: 8, mainFrame: {}, send: vi.fn() } }
+    pending.resolve()
+    await rejected
+    expect(h.client.prompt).not.toHaveBeenCalled()
+  })
+
   it('reads only existing getCommands, hides the private command and never reloads from a getter', async () => {
     const h = await harness()
     const result = await h.bridge.getCapabilitySettings(h.cwd)
@@ -261,6 +301,85 @@ describe('capability Bridge control rejection receipts', () => {
     await h.save()
     await h.waitApply()
     expect(h.client.newSession).not.toHaveBeenCalled()
+  })
+})
+
+describe('queue admission and verification repair receipts', () => {
+  it('rechecks cancellation after mode source discovery, before its control prompt', async () => {
+    const h = await harness()
+    h.backend.modePrimed = 'plan'
+    const commands = deferred<CapabilityCommands>()
+    h.client.getCommands.mockReturnValueOnce(commands.promise)
+    const controller = new AbortController()
+    const repairing = h.bridge.startVerificationRepair(h.path, h.cwd, 'repair', controller.signal)
+    const result = repairing.catch((error: Error) => error)
+    await gap()
+    expect(h.client.getCommands).toHaveBeenCalledTimes(1)
+    controller.abort()
+    commands.resolve(h.commands())
+    expect(await result).toMatchObject({ name: 'AbortError' })
+    expect(h.client.prompt).not.toHaveBeenCalled()
+    expect(h.backend.capability?.quarantined).not.toBe(true)
+    expect(h.backend.busy).toBe(false)
+    await h.runStore.flush()
+  })
+
+  it.each(['state', 'preparation'])('retains an unsent queued run with a visible %s error without retrying', async (stage) => {
+    const h = await harness()
+    const run = h.bridge.createRun(h.backend, null, 'unsent', [], 'follow-up', 'queued')
+    h.backend.localFollowUps!.push({ runId: run.id, text: 'unsent', images: [] })
+    if (stage === 'state') h.client.getState.mockRejectedValueOnce(new Error('state read failed'))
+    else vi.spyOn(h.bridge, 'applyDesiredMode').mockRejectedValueOnce(new Error('mode preparation failed'))
+    h.bridge.dispatchNextLocalFollowUp(h.backend)
+    await h.backend.localQueueDispatchPromise
+    expect(h.runStore.get(run.id)).toMatchObject({ state: 'queued', error: expect.stringContaining('failed') })
+    expect(h.runStore.get(run.id)?.dispatchedAt).toBeUndefined()
+    expect(h.backend.localFollowUps!.map(item => item.runId)).toEqual([run.id])
+    expect(h.backend.queueAutoReady).toBe(false)
+    h.bridge.dispatchNextLocalFollowUp(h.backend)
+    await gap()
+    expect(h.client.getState).toHaveBeenCalledTimes(1)
+    expect(h.client.prompt).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
+  it.each(['before-start', 'starting', 'state', 'mode', 'prompt'])('checks repair cancellation at %s while retaining actual RPC ownership', async (stage) => {
+    const h = await harness()
+    const controller = new AbortController()
+    const pending = deferred<void>()
+    const start = vi.spyOn(h.bridge, 'startBackendWithLimit')
+    if (stage === 'before-start') { h.pool.delete(h.backend.key); controller.abort() }
+    if (stage === 'starting') h.backend.startPromise = pending.promise
+    if (stage === 'state') h.client.getState.mockImplementationOnce(async () => { await pending.promise; return { ...h.state } })
+    if (stage === 'mode') vi.spyOn(h.bridge, 'applyDesiredMode').mockReturnValueOnce(pending.promise)
+    if (stage === 'prompt') h.client.prompt.mockImplementationOnce(async () => { await pending.promise; return 'started' })
+    const operation = h.bridge.startVerificationRepair(h.path, h.cwd, 'repair', controller.signal)
+    const observed = operation.then((value: unknown) => ({ value }), (error: Error) => ({ error }))
+    await gap()
+    controller.abort()
+    if (stage === 'prompt') {
+      expect(h.backend.promptDispatch).toBeDefined()
+      expect(h.backend.busy).toBe(true)
+      let settled = false
+      void observed.then(() => { settled = true })
+      await gap()
+      expect(settled).toBe(false)
+    }
+    pending.resolve()
+    const result = await observed
+    if (stage === 'prompt') {
+      expect(result).toMatchObject({ value: { kind: 'verification-repair', state: 'dispatching' } })
+      expect(h.backend.promptDispatch).toBeUndefined()
+      expect(h.backend.activeRunId).toBeDefined()
+      expect(h.backend.busy).toBe(true) // Acceptance/cancellation does not invent agent_settled.
+      expect(h.client.prompt).toHaveBeenCalledTimes(1)
+    } else {
+      expect(result).toMatchObject({ error: { name: 'AbortError' } })
+      expect(h.client.prompt).not.toHaveBeenCalled()
+      expect(h.backend.busy).toBe(false)
+    }
+    expect(start).not.toHaveBeenCalled()
+    await h.runStore.flush()
   })
 })
 

@@ -7,6 +7,7 @@
 #   ~/.local/share/pion/icon.png    应用图标
 #   ~/.local/bin/pion               命令行启动器
 #   ~/.local/share/applications/pion.desktop  桌面快捷方式
+# 数据目录遵循 XDG_DATA_HOME，以上为默认路径。
 #
 # 用法:
 #   ./scripts/install-local.sh            # 递增补丁版本号 + 编译 + 安装
@@ -60,6 +61,8 @@ echo "[install] 安装应用到 $APP_DIR ..."
 # Limit deletion to generated files; never mirror/delete the application root
 # or Chromium/user configuration directories during an upgrade.
 mkdir -p "$APP_DIR/out"
+PREFIX="$(cd "$PREFIX" && pwd -P)"
+APP_DIR="$(cd "$APP_DIR" && pwd -P)"
 rsync -a --delete out/ "$APP_DIR/out/"
 cp package.json "$APP_DIR/package.json"
 
@@ -99,23 +102,41 @@ fi
 
 echo "[install] 创建启动器 $BIN_DIR/pion ..."
 mkdir -p "$BIN_DIR"
-cat > "$BIN_DIR/pion" <<'EOF'
-#!/bin/sh
-# Pion 本机启动器
-exec "$HOME/.local/share/pion/app/node_modules/.bin/electron" "$HOME/.local/share/pion/app" "$@"
+{
+  printf '#!/bin/sh\n# Pion 本机启动器\n'
+  # Capture the installed path; launch-time HOME/XDG changes must not retarget it.
+  printf "APP_DIR='%s'\n" "${APP_DIR//\'/\'\\\'\'}"
+  cat <<'EOF'
+exec "$APP_DIR/node_modules/.bin/electron" "$APP_DIR" "$@"
 EOF
+} > "$BIN_DIR/pion"
 chmod +x "$BIN_DIR/pion"
 
 echo "[install] 创建桌面快捷方式..."
 mkdir -p "$DESKTOP_DIR"
+# Desktop string escaping is applied after Exec's quoted-argument escaping.
+desktop_escape_string() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+DESKTOP_EXEC="$BIN_DIR/pion"
+DESKTOP_EXEC="${DESKTOP_EXEC//\\/\\\\}"
+DESKTOP_EXEC="${DESKTOP_EXEC//\"/\\\"}"
+DESKTOP_EXEC="${DESKTOP_EXEC//\$/\\\$}"
+DESKTOP_EXEC="${DESKTOP_EXEC//\`/\\\`}"
+DESKTOP_EXEC="${DESKTOP_EXEC//%/%%}"
 cat > "$DESKTOP_DIR/pion.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Pion
 GenericName=AI Coding Workbench
 Comment=Electron desktop GUI for the pi coding agent
-Exec=$BIN_DIR/pion
-Icon=$PREFIX/icon.png
+Exec=$(desktop_escape_string "\"$DESKTOP_EXEC\"")
+Icon=$(desktop_escape_string "$PREFIX/icon.png")
 Terminal=false
 Categories=Development;Utility;
 Keywords=ai;coding;agent;pi;

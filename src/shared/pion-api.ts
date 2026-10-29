@@ -82,12 +82,15 @@ import type {
 export interface ComputerUseLocalApi {
   /** Cached metadata only; never probes the OS or starts a helper. */
   getState(): Promise<import('./computer-use').ComputerUseStatus>
-  /** Explicit manual capture consent; upload/control must both be false.
+  /** Explicit manual consent; upload is always false. Control additionally needs
+   * display scope and the host development gate; default window capture is unchanged.
    * retention is intent only: this local workflow never writes SDK history. */
   start(consent: import('./computer-use').ComputerUseConsent): Promise<import('./computer-use').ComputerUseStatus>
   /** Exact current scopeRevision from getState/onState. At most one independent
    * static PNG thumbnail (512px/96KiB); never returns the original/model PNG. */
   capture(request: { scopeRevision: number }): Promise<{ state: import('./computer-use').ComputerUseStatus; preview?: string; previewUnavailable?: 'thumbnail-not-supported' }>
+  /** Development-gated local manual submission, not an SDK success receipt. */
+  act(request: import('./computer-use').ComputerUseLocalActRequest): Promise<import('./computer-use').ComputerUseStatus>
   stop(): Promise<import('./computer-use').ComputerUseStatus>
   onState(listener: (state: import('./computer-use').ComputerUseStatus) => void): () => void
 }
@@ -115,10 +118,10 @@ export interface PionApi {
   send(message: string, images?: ImageContent[]): Promise<void>
   /** Queue a follow-up message for after the current run. */
   queue(message: string, images?: ImageContent[]): Promise<void>
-  /** Promote one visible queued message to immediate delivery. */
-  sendQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void>
-  /** Remove a Pion-owned queued message; native Pi queue entries are rejected. */
-  removeQueuedMessage(kind: 'steering' | 'followUp', index: number): Promise<void>
+  /** Promote one genuinely unsent local prompt by its captured identity. */
+  sendQueuedMessage(request: QueuedMessageEditRequest): Promise<void>
+  /** Remove one genuinely unsent local prompt; native Pi entries are rejected. */
+  removeQueuedMessage(request: QueuedMessageEditRequest): Promise<void>
   /** Atomically take one genuinely unsent local prompt back into the draft. */
   editQueuedMessage(request: QueuedMessageEditRequest): Promise<QueuedMessageEditResult>
   /** Move the active session into another project's bucket; returns the new path. */
@@ -323,7 +326,7 @@ export interface PionApi {
   renameBranch(cwd: string, oldName: string, newName: string): Promise<BranchInfo>
   addProject(cwd: string): Promise<ProjectMeta[]>
   removeProject(cwd: string): Promise<ProjectMeta[]>
-  /** List sessions recorded for a working directory. */
+  /** List persisted rows; optional token totals may arrive later via onSessions. */
   listSessions(cwd: string): Promise<SessionMeta[]>
 
   // misc --------------------------------------------------------------------
@@ -363,7 +366,7 @@ export interface PionApi {
   onGitSnapshot(listener: (update: GitSnapshotUpdate) => void): () => void
   /** Subscribe to session info pushes; returns an unsubscribe function. */
   onState(listener: (state: SessionInfo | null) => void): () => void
-  /** Subscribe to session-list pushes for the active cwd. */
+  /** List snapshots may belong to background cwds; nonempty rows carry projectCwd. */
   onSessions(listener: (sessions: SessionMeta[]) => void): () => void
   /** Subscribe whenever any retained session starts or finishes a run. */
   onRunningSessionPaths(listener: (sessionPaths: string[]) => void): () => void

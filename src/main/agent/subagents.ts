@@ -309,6 +309,28 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
     })
     await loader.reload()
     if (signal.aborted) throw new Error('子代理已中止')
+    type BeforeToolCall = NonNullable<AgentSession['agent']['beforeToolCall']>
+    type ToolCallContext = Parameters<BeforeToolCall>[0]
+    type WriteCall = { context: ToolCallContext; state: 'prepared' | 'claimed' | 'executed' }
+    // The SDK prepares all parallel calls before executing them, preserving the
+    // validated args object. Defer write admission without holding a slot here.
+    let writeCalls = new WeakMap<object, WriteCall>()
+    const blockedReason = (name: string, toolSignal?: AbortSignal) => signal.aborted || toolSignal?.aborted
+      ? '子代理已中止' : !parent.getActiveToolNames().includes(name) ? '主会话已禁用此工具' : undefined
+    const beforeToolCall: BeforeToolCall = async (context, toolSignal) => {
+      const reason = blockedReason(context.toolCall.name, toolSignal)
+      if (reason) return { block: true, reason }
+      // A non-serialized signal reaches the built-in permission extension;
+      // siblings can cancel their own dialogs without aborting the parent.
+      if (!context.args || typeof context.args !== 'object') return { block: true, reason: '子代理工具调用上下文不可用' }
+      // SDK tool_call handlers may mutate validated input. Gate and execution
+      // must share that object so approval never describes different arguments.
+      const args = context.args
+      const gateSignal = toolSignal ? AbortSignal.any([signal, toolSignal]) : signal
+      Object.defineProperty(args, Symbol.for('pion.subagent.abort'), { value: gateSignal })
+      if (!parent.agent.beforeToolCall) return { block: true, reason: '主会话权限钩子不可用' }
+      return parent.agent.beforeToolCall({ ...context, args, toolCall: { ...context.toolCall, id: prefix + context.toolCall.id } }, gateSignal)
+    }
     const { session } = await createAgentSession({
       cwd, agentDir, model: selectedModel, thinkingLevel: parent.thinkingLevel,
       modelRuntime, settingsManager, resourceLoader: loader,
@@ -316,12 +338,26 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
       tools: tools.map((tool) => tool.name),
       customTools: tools.map((tool) => ({ ...tool,
         execute: async (id, args, toolSignal, update) => {
+          const readOnly = READ_ONLY.has(tool.name)
+          const call = args && typeof args === 'object' ? writeCalls.get(args) : undefined
+          if (!readOnly) {
+            if (!call || call.state !== 'prepared' || call.context.toolCall.id !== id || call.context.toolCall.name !== tool.name) throw new Error('子代理工具调用上下文不可用')
+            call.state = 'claimed'
+          }
           const execute = async () => {
-            if (signal.aborted || toolSignal?.aborted) throw new Error('子代理已中止')
-            if (!parent.getActiveToolNames().includes(tool.name)) throw new Error('主会话已禁用此工具')
+            if (!readOnly) {
+              // Mutable policy/checkpoint admission belongs to the same sibling
+              // write slot as execution. An allow-once is consumed only here.
+              const decision = await beforeToolCall(call!.context, toolSignal)
+              if (decision?.block) return { content: [{ type: 'text' as const, text: decision.reason || '子代理工具调用未获授权' }], details: {}, isError: true,
+                ...(decision.terminate === true ? { terminate: true } : {}) }
+            }
+            const reason = blockedReason(tool.name, toolSignal)
+            if (reason) throw new Error(reason)
+            if (!readOnly) call!.state = 'executed'
             return tool.execute(prefix + id, args, toolSignal, update)
           }
-          if (READ_ONLY.has(tool.name)) return execute()
+          if (readOnly) return execute()
           const pending = writeTail.then(execute, execute)
           writeTail = pending.catch(() => {})
           return pending
@@ -330,17 +366,22 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
     })
     childCreated = true
     session.agent.beforeToolCall = async (context, toolSignal) => {
-      if (signal.aborted || toolSignal?.aborted) return { block: true, reason: '子代理已中止' }
-      if (!parent.getActiveToolNames().includes(context.toolCall.name)) return { block: true, reason: '主会话已禁用此工具' }
-      // A non-serialized signal reaches the built-in permission extension;
-      // siblings can cancel their own dialogs without aborting the parent.
-      const args = { ...(context.args && typeof context.args === 'object' ? context.args : {}) }
-      const gateSignal = toolSignal ? AbortSignal.any([signal, toolSignal]) : signal
-      Object.defineProperty(args, Symbol.for('pion.subagent.abort'), { value: gateSignal })
-      if (!parent.agent.beforeToolCall) return { block: true, reason: '主会话权限钩子不可用' }
-      return parent.agent.beforeToolCall({ ...context, args, toolCall: { ...context.toolCall, id: prefix + context.toolCall.id } }, gateSignal)
+      const reason = blockedReason(context.toolCall.name, toolSignal)
+      if (reason) return { block: true, reason }
+      if (READ_ONLY.has(context.toolCall.name)) return beforeToolCall(context, toolSignal)
+      if (!context.args || typeof context.args !== 'object') return { block: true, reason: '子代理工具调用上下文不可用' }
+      writeCalls.set(context.args, { context, state: 'prepared' })
     }
-    session.agent.afterToolCall = (context, toolSignal) => parent.agent.afterToolCall?.({ ...context, toolCall: { ...context.toolCall, id: prefix + context.toolCall.id } }, toolSignal) ?? Promise.resolve(undefined)
+    session.agent.afterToolCall = (context, toolSignal) => {
+      if (!READ_ONLY.has(context.toolCall.name)) {
+        const call = context.args && typeof context.args === 'object' ? writeCalls.get(context.args) : undefined
+        if (context.args && typeof context.args === 'object') writeCalls.delete(context.args)
+        // Match SDK hook semantics: denied/unstarted calls have no tool_result
+        // hook; every actual execution, including a thrown error, has one.
+        if (call?.state !== 'executed') return Promise.resolve(undefined)
+      }
+      return parent.agent.afterToolCall?.({ ...context, toolCall: { ...context.toolCall, id: prefix + context.toolCall.id } }, toolSignal) ?? Promise.resolve(undefined)
+    }
     // Retain the actual abort promise, not just an abort signal or a stopped
     // wait. A rejected/hung shutdown never produces a terminal display/TTL.
     let abortPromise: Promise<void> | undefined
@@ -364,6 +405,8 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
     const unsubscribe = session.subscribe((event) => {
       observe((value) => value.event(event))
       if (event.type === 'turn_start' && ++turns > settings.maxTurns) { limited = true; abort() }
+      // Cancellation may skip execute/afterToolCall for prepared SDK calls.
+      if (event.type === 'turn_end') writeCalls = new WeakMap()
       if (event.type === 'tool_execution_start') progress(`正在调用 ${event.toolName}`)
       if (event.type === 'message_end' && (event.message.role === 'assistant' || event.message.role === 'toolResult') && event.message.usage) {
         addUsage(usage, event.message.usage)
@@ -406,6 +449,7 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
         observe((value) => value.cancelling())
       } finally {
         signal.removeEventListener('abort', abort)
+        writeCalls = new WeakMap()
         unsubscribe()
       }
     }
