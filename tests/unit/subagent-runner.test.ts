@@ -436,14 +436,17 @@ it.each(['default', 'override', 'parent-null', 'legacy'] as const)('resolves %s 
   const fixture = modelRuntimeFixture()
   const h = setup(false, 'off', fixture.runtime)
   const original = h.parent.model
-  const settings = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'provider-a', id: 'same-id' } }
+  Object.assign(h.parent, { thinkingLevel: 'high' })
+  const settings = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'provider-a', id: 'same-id' }, defaultThinkingLevel: 'minimal' as const }
   const task = { name: 'worker', task: 'inspect', ...(mode === 'override' ? { model: { provider: 'provider-b', id: 'same-id' } }
     : mode === 'parent-null' ? { model: null } : {}) }
-  await h.run(task, new AbortController().signal, () => {}, mode === 'legacy' ? DEFAULT_SUBAGENT_SETTINGS : settings)
+  const { defaultModel: _defaultModel, defaultThinkingLevel: _defaultThinkingLevel, ...legacy } = DEFAULT_SUBAGENT_SETTINGS
+  await h.run(task, new AbortController().signal, () => {}, mode === 'legacy' ? legacy : settings)
   const options = mocks.create.mock.calls[0][0]
   expect(options.model).toBe(mode === 'default' ? fixture.models[0] : mode === 'override' ? fixture.models[1] : original)
   expect(options.modelRuntime).toBe(fixture.runtime)
-  expect(options.thinkingLevel).toBe(h.parent.thinkingLevel)
+  expect(options.thinkingLevel).toBe(mode === 'legacy' ? 'high' : 'minimal')
+  expect(h.parent.thinkingLevel).toBe('high')
   expect(h.parent.model).toBe(original)
   expect(h.parent.messages).toEqual([])
   if (mode === 'legacy' || mode === 'parent-null') {
@@ -453,7 +456,7 @@ it.each(['default', 'override', 'parent-null', 'legacy'] as const)('resolves %s 
   expect(fixture.getAuth).not.toHaveBeenCalled()
 })
 
-it('captures selected model and its existing runtime before asynchronous loader work', async () => {
+it.each([null, 'max'] as const)('captures selected model, thinking %s and existing runtime before asynchronous loader work', async (defaultThinkingLevel) => {
   const fixture = modelRuntimeFixture()
   const h = setup()
   let activeRuntime = fixture.runtime
@@ -462,15 +465,18 @@ it('captures selected model and its existing runtime before asynchronous loader 
   let release!: () => void
   mocks.reload.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve }))
   const selection = { provider: 'provider-b', id: 'same-id' }
-  const pending = run({ name: 'worker', task: 'inspect', model: selection }, new AbortController().signal, () => {})
+  const settings = { ...DEFAULT_SUBAGENT_SETTINGS, defaultThinkingLevel }
+  const pending = run({ name: 'worker', task: 'inspect', model: selection }, new AbortController().signal, () => {}, settings)
+  Object.assign(settings, { defaultThinkingLevel: 'high' })
   selection.provider = 'provider-a'
   activeRuntime = {} as ModelRuntime
-  Object.assign(h.parent, { model: { provider: 'changed-parent', id: 'later' } })
+  Object.assign(h.parent, { model: { provider: 'changed-parent', id: 'later' }, thinkingLevel: 'high' })
   release()
   await pending
   expect(getModels).toHaveBeenCalledOnce()
   expect(mocks.create.mock.calls[0][0].model).toBe(fixture.models[1])
   expect(mocks.create.mock.calls[0][0].modelRuntime).toBe(fixture.runtime)
+  expect(mocks.create.mock.calls[0][0].thinkingLevel).toBe(defaultThinkingLevel ?? 'off')
 })
 
 it.each(['unknown', 'unavailable', 'missing-snapshot', 'missing-getModel', 'api-confusion', 'display-confusion'] as const)(
@@ -488,6 +494,20 @@ it.each(['unknown', 'unavailable', 'missing-snapshot', 'missing-getModel', 'api-
     expect(fixture.getAuth).not.toHaveBeenCalled()
     expect(h.parent.model).toEqual({ provider: 'fixture', id: 'fixture' })
   })
+
+it.each(['unavailable', 'sdk-error'] as const)('rejects an %s configured default without a parent or alternate-model fallback', async (failure) => {
+  const fixture = modelRuntimeFixture()
+  const h = setup(false, 'off', fixture.runtime)
+  if (failure === 'unavailable') fixture.getAvailableSnapshot.mockReturnValue([])
+  else mocks.create.mockRejectedValueOnce(new Error('selected model/thinking rejected'))
+  await expect(h.run({ name: 'worker', task: 'inspect' }, new AbortController().signal, () => {}, {
+    ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'provider-b', id: 'same-id' }, defaultThinkingLevel: 'max'
+  })).rejects.toThrow(failure === 'unavailable' ? '未启动' : 'selected model/thinking rejected')
+  expect(mocks.create).toHaveBeenCalledTimes(failure === 'unavailable' ? 0 : 1)
+  if (failure === 'sdk-error') expect(mocks.create).toHaveBeenCalledWith(expect.objectContaining({ model: fixture.models[1], thinkingLevel: 'max' }))
+  expect(fixture.getAuth).not.toHaveBeenCalled()
+  expect(h.parent.model).toEqual({ provider: 'fixture', id: 'fixture' })
+})
 
 it('accounts actual selected-child usage without charging parent context or altering model', async () => {
   const fixture = modelRuntimeFixture()

@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SubagentSettings } from '../../src/renderer/src/features/settings/SubagentSettings'
-import { DEFAULT_SUBAGENT_SETTINGS } from '../../src/shared/subagents'
+import { DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_THINKING_LEVELS, validateSubagentSettings, type SubagentSettings as Settings } from '../../src/shared/subagents'
 import type { PionApi } from '../../src/shared/pion-api'
 
 describe('SubagentSettings', () => {
@@ -96,14 +96,11 @@ it('normalizes legacy settings to inherit and saves exact provider/id without mo
   expect(screen.getByRole('option', { name: 'Same One' })).toBeInTheDocument()
   expect(screen.queryByRole('option', { name: 'Duplicate Same One' })).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('option', { name: 'Same Two' }))
-  expect(screen.queryByRole('status')).not.toBeInTheDocument()
-  fireEvent.click(screen.getByRole('button', { name: '保存子代理设置' }))
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('下一批'))
-  expect(save).toHaveBeenLastCalledWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'two', id: 'same' } })
+  expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'two', id: 'same' } })
   await waitFor(() => expect(select).toBeEnabled())
   fireEvent.click(select)
   fireEvent.click(screen.getByRole('option', { name: 'two/three' }))
-  fireEvent.click(screen.getByRole('button', { name: '保存子代理设置' }))
   await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
   expect(save).toHaveBeenLastCalledWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'one', id: 'two/three' } })
   await waitFor(() => expect(select).toBeEnabled())
@@ -279,7 +276,6 @@ it('uses the independent SDK directory with empty or stale parent candidates', a
   rerender(<SubagentSettings models={[{ provider: 'stale', id: 'parent' }]} />)
   expect(screen.queryByRole('option', { name: 'parent' })).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('option', { name: 'SDK Child' }))
-  fireEvent.click(screen.getByRole('button', { name: '保存子代理设置' }))
   await waitFor(() => expect(save).toHaveBeenCalledWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'configured', id: 'child' } }))
   expect(getSubagentModels).toHaveBeenCalledOnce()
   expect(getAvailableModels).not.toHaveBeenCalled()
@@ -350,18 +346,202 @@ it('reports an empty independent directory instead of silently showing only inhe
   expect(await screen.findByText(/暂无已配置的可用模型/)).toBeInTheDocument()
 })
 
-it('allows explicit repair after a load failure without automatically saving defaults', async () => {
-  const save = vi.fn().mockImplementation(async (settings) => settings)
-  window.pion = { getSubagentSettings: vi.fn().mockRejectedValue(new Error('invalid config')), setSubagentSettings: save } as unknown as PionApi
-  render(<SubagentSettings models={[{ provider: 'chosen', id: 'model' }]} />)
-  const select = screen.getByRole('combobox', { name: '默认子代理模型' })
-  await waitFor(() => expect(select).toBeEnabled())
+it.each(['read error', 'invalid thinking'] as const)('requires a successful read before any write after %s', async (reason) => {
+  const saved = { ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 7, defaultThinkingLevel: 'max' as const }
+  const load = reason === 'read error'
+    ? vi.fn().mockRejectedValueOnce(new Error('invalid config')).mockResolvedValue(saved)
+    : vi.fn().mockResolvedValueOnce({ ...saved, defaultThinkingLevel: 'invalid' }).mockResolvedValue(saved)
+  const save = vi.fn(async (value: Settings) => value)
+  window.pion = { getSubagentSettings: load, setSubagentSettings: save } as unknown as PionApi
+  const { container } = render(<SubagentSettings models={[{ provider: 'chosen', id: 'model' }]} />)
+  expect(await screen.findByRole('alert')).toHaveTextContent('读取失败，已有配置保持不变，请重试')
+  expect(screen.getByRole('combobox', { name: '默认子代理模型' })).toBeDisabled()
+  expect(screen.getByRole('combobox', { name: '默认子代理思考等级' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '恢复默认值' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: '保存子代理设置' })).toBeDisabled()
+  fireEvent.submit(container.querySelector('form')!)
   expect(save).not.toHaveBeenCalled()
-  expect(screen.getByRole('alert')).toHaveTextContent('可修改后保存以修复')
-  fireEvent.click(select)
-  fireEvent.click(screen.getByRole('option', { name: 'model' }))
-  fireEvent.click(screen.getByRole('button', { name: '保存子代理设置' }))
+  fireEvent.click(screen.getByRole('button', { name: '重试读取子代理设置' }))
+  await waitFor(() => expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toBeEnabled())
+  expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toHaveValue(7)
+  expect(screen.getByRole('combobox', { name: '默认子代理思考等级' })).toHaveTextContent('max')
+  expect(load).toHaveBeenCalledTimes(2)
+  expect(save).not.toHaveBeenCalled()
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+
+it('restores both automatic selections through persisted storage and a fresh API after remount', async () => {
+  let stored = JSON.stringify(DEFAULT_SUBAGENT_SETTINGS)
+  const makeApi = () => ({
+    getSubagentSettings: vi.fn(async () => JSON.parse(stored)),
+    setSubagentSettings: vi.fn(async (value: Settings) => {
+      const saved = validateSubagentSettings(value)
+      stored = JSON.stringify(saved)
+      return saved
+    })
+  })
+  const firstApi = makeApi()
+  window.pion = firstApi as unknown as PionApi
+  const first = render(<SubagentSettings models={[{ provider: 'exact', id: 'child', name: 'Child' }]} />)
+  const model = screen.getByRole('combobox', { name: '默认子代理模型' })
+  await waitFor(() => expect(model).toBeEnabled())
+  fireEvent.click(model)
+  fireEvent.click(screen.getByRole('option', { name: 'Child' }))
+  await waitFor(() => expect(model).toBeEnabled())
+  const thinking = screen.getByRole('combobox', { name: '默认子代理思考等级' })
+  fireEvent.click(thinking)
+  fireEvent.click(screen.getByRole('option', { name: 'xhigh' }))
+  await waitFor(() => expect(thinking).toBeEnabled())
+  expect(firstApi.setSubagentSettings).toHaveBeenCalledTimes(2)
+  expect(JSON.parse(stored)).toEqual({ ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'exact', id: 'child' }, defaultThinkingLevel: 'xhigh' })
+  first.unmount()
+  const nextApi = makeApi()
+  window.pion = nextApi as unknown as PionApi
+  render(<SubagentSettings />)
+  await waitFor(() => expect(screen.getByRole('combobox', { name: '默认子代理模型' })).toBeEnabled())
+  expect(screen.getByRole('combobox', { name: '默认子代理模型' })).toHaveTextContent('exact/child（当前列表未显示）')
+  expect(screen.getByRole('combobox', { name: '默认子代理思考等级' })).toHaveTextContent('xhigh')
+  expect(nextApi.getSubagentSettings).toHaveBeenCalledOnce()
+  expect(nextApi.setSubagentSettings).not.toHaveBeenCalled()
+})
+
+it('automatically saves only baseline numbers and keeps invalid numeric drafts until an explicit validated save', async () => {
+  const save = vi.fn(async (value: Settings) => value)
+  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(DEFAULT_SUBAGENT_SETTINGS), setSubagentSettings: save } as unknown as PionApi
+  const { container } = render(<SubagentSettings models={[{ provider: 'one', id: 'child' }]} />)
+  const count = screen.getByRole('spinbutton', { name: '每批最大子代理数' })
+  const model = screen.getByRole('combobox', { name: '默认子代理模型' })
+  await waitFor(() => expect(count).toBeEnabled())
+  fireEvent.change(count, { target: { value: '101' } })
+  fireEvent.click(model)
+  fireEvent.click(screen.getByRole('option', { name: 'child' }))
+  await waitFor(() => expect(model).toBeEnabled())
+  expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'one', id: 'child' } })
+  expect(count).toHaveValue(101)
+  // Automatic replies update selections without submitting or replacing numeric drafts.
+  expect(screen.getByRole('spinbutton', { name: '每个子代理最多轮数' })).toHaveValue(24)
+  fireEvent.click(screen.getByRole('combobox', { name: '默认子代理思考等级' }))
+  fireEvent.click(screen.getByRole('option', { name: 'high' }))
+  await waitFor(() => expect(count).toBeEnabled())
+  expect(save).toHaveBeenLastCalledWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'one', id: 'child' }, defaultThinkingLevel: 'high' })
+  expect(count).toHaveValue(101)
+  fireEvent.submit(container.querySelector('form')!)
+  expect(save).toHaveBeenCalledTimes(2)
+  expect(screen.getByRole('alert')).toHaveTextContent('1–100')
+  fireEvent.change(count, { target: { value: '9' } })
+  fireEvent.submit(container.querySelector('form')!)
+  await waitFor(() => expect(count).toBeEnabled())
+  expect(save).toHaveBeenLastCalledWith({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 9, defaultModel: { provider: 'one', id: 'child' }, defaultThinkingLevel: 'high' })
+  expect(screen.getByRole('spinbutton', { name: '每个子代理最多轮数' })).toHaveValue(24)
+})
+
+it.each(['auto', 'manual'] as const)('retains %s selections across remount when the save receipt disagrees, then permits explicit retry', async (kind) => {
+  const stored: Settings = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'exact', id: 'child' } }
+  const save = vi.fn().mockImplementationOnce(async (value: Settings) => kind === 'auto'
+    ? { ...value, defaultThinkingLevel: null }
+    : { ...value, defaultModel: { provider: 'other', id: 'wrong' } })
+    .mockImplementation(async (value: Settings) => value)
+  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(stored), setSubagentSettings: save } as unknown as PionApi
+  const first = render(<SubagentSettings />)
+  await waitFor(() => expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toBeEnabled())
+  if (kind === 'auto') {
+    fireEvent.click(screen.getByRole('combobox', { name: '默认子代理思考等级' }))
+    fireEvent.click(screen.getByRole('option', { name: 'high' }))
+  } else {
+    fireEvent.change(screen.getByRole('spinbutton', { name: '每批最大子代理数' }), { target: { value: '4' } })
+    fireEvent.submit(first.container.querySelector('form')!)
+  }
+  first.unmount()
+  render(<SubagentSettings />)
+  await waitFor(() => expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toBeEnabled())
+  expect(screen.getByRole('alert')).toHaveTextContent('保存回执与提交配置不一致')
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  expect(screen.getByRole('combobox', { name: '默认子代理模型' })).toHaveTextContent('exact/child')
+  expect(screen.getByRole('combobox', { name: '默认子代理思考等级' })).toHaveTextContent(kind === 'auto' ? 'high' : '继承主会话思考等级')
+  expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toHaveValue(kind === 'auto' ? 3 : 4)
+  fireEvent.click(screen.getByRole('button', { name: kind === 'auto' ? '重试保存模型与思考等级' : '保存子代理设置' }))
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('下一批'))
-  expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'chosen', id: 'model' } })
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(save).toHaveBeenCalledTimes(2)
+  expect(save).toHaveBeenLastCalledWith({ ...stored, maxParallel: kind === 'auto' ? 3 : 4, defaultThinkingLevel: kind === 'auto' ? 'high' : null })
+})
+
+it('offers the shared thinking whitelist and null inheritance while the independent model directory is pending', async () => {
+  const { defaultModel: _model, defaultThinkingLevel: _thinking, ...legacy } = DEFAULT_SUBAGENT_SETTINGS
+  const save = vi.fn(async (value: Settings) => validateSubagentSettings(value))
+  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(legacy), setSubagentSettings: save,
+    getSubagentModels: vi.fn(() => new Promise(() => {})) } as unknown as PionApi
+  render(<SubagentSettings models={[{ provider: 'parent', id: 'limited', reasoning: false }]} />)
+  const thinking = screen.getByRole('combobox', { name: '默认子代理思考等级' })
+  await waitFor(() => expect(thinking).toBeEnabled())
+  expect(screen.getByRole('combobox', { name: '默认子代理模型' })).toBeDisabled()
+  expect(thinking).toHaveTextContent('继承主会话思考等级')
+  fireEvent.click(thinking)
+  expect(screen.getAllByRole('option')).toHaveLength(SUBAGENT_THINKING_LEVELS.length + 1)
+  for (const level of SUBAGENT_THINKING_LEVELS) expect(screen.getByRole('option', { name: level, exact: true })).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('option', { name: 'max', exact: true }))
+  await waitFor(() => expect(thinking).toBeEnabled())
+  expect(save).toHaveBeenLastCalledWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultThinkingLevel: 'max' })
+  fireEvent.click(thinking)
+  fireEvent.click(screen.getByRole('option', { name: '继承主会话思考等级' }))
+  await waitFor(() => expect(thinking).toBeEnabled())
+  expect(save).toHaveBeenLastCalledWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultThinkingLevel: null })
+  expect(save).toHaveBeenCalledTimes(2)
+})
+
+it.each(['resolve', 'reject'] as const)('retains automatic drafts across closed pending saves that %s and retries without submitting numeric drafts', async (outcome) => {
+  let resolve!: (value: Settings) => void
+  let reject!: (reason: Error) => void
+  let stored = { ...DEFAULT_SUBAGENT_SETTINGS }
+  const pending = new Promise<Settings>((done, fail) => { resolve = done; reject = fail })
+  const save = vi.fn().mockReturnValueOnce(pending).mockImplementation(async (value: Settings) => {
+    stored = validateSubagentSettings(value)
+    return stored
+  })
+  const load = vi.fn(async () => stored)
+  window.pion = { getSubagentSettings: load, setSubagentSettings: save } as unknown as PionApi
+  const first = render(<SubagentSettings models={[{ provider: 'one', id: 'child' }]} />)
+  await waitFor(() => expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toBeEnabled())
+  fireEvent.change(screen.getByRole('spinbutton', { name: '每批最大子代理数' }), { target: { value: '8' } })
+  fireEvent.click(screen.getByRole('combobox', { name: '默认子代理模型' }))
+  fireEvent.click(screen.getByRole('option', { name: 'child' }))
+  const submitted = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'one', id: 'child' } }
+  expect(save).toHaveBeenCalledExactlyOnceWith(submitted)
+  // A repeated manual dispatch in the same pending slot has no effect.
+  fireEvent.submit(first.container.querySelector('form')!)
+  expect(save).toHaveBeenCalledTimes(1)
+  first.unmount()
+  const waiting = render(<SubagentSettings />)
+  expect(screen.getByRole('button', { name: '等待上次保存结束…' })).toBeDisabled()
+  fireEvent.submit(waiting.container.querySelector('form')!)
+  expect(load).toHaveBeenCalledTimes(1)
+  waiting.unmount()
+  const reopened = render(<SubagentSettings />)
+  await act(async () => {
+    if (outcome === 'resolve') { stored = submitted; resolve(submitted) }
+    else reject(new Error('automatic write failed'))
+  })
+  await waitFor(() => expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toBeEnabled())
+  expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toHaveValue(8)
+  expect(screen.getByRole('combobox', { name: '默认子代理模型' })).toHaveTextContent('one/child（当前列表未显示）')
+  expect(load).toHaveBeenCalledTimes(2)
+  expect(save).toHaveBeenCalledTimes(1)
+  expect(stored.maxParallel).toBe(3)
+  if (outcome === 'reject') {
+    expect(screen.getByRole('alert')).toHaveTextContent('automatic write failed')
+    reopened.unmount()
+    render(<SubagentSettings />)
+    const count = screen.getByRole('spinbutton', { name: '每批最大子代理数' })
+    await waitFor(() => expect(count).toBeEnabled())
+    expect(count).toHaveValue(8)
+    expect(screen.getByRole('alert')).toHaveTextContent('automatic write failed')
+    fireEvent.change(count, { target: { value: '9' } })
+    fireEvent.click(screen.getByRole('button', { name: '重试保存模型与思考等级' }))
+    await waitFor(() => expect(count).toBeEnabled())
+    expect(save).toHaveBeenLastCalledWith(submitted)
+    expect(count).toHaveValue(9)
+    expect(stored.maxParallel).toBe(3)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  }
 })
 })

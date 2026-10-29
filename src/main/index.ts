@@ -560,6 +560,7 @@ app.on('before-quit', (event) => {
         await windowShutdown
         await bridge.stop()
         await appSettings.shutdown()
+        await subagentSettings.shutdown()
         await projects.shutdown()
         await sessionOrganization.shutdown()
         try { await usageLedger.flush() } catch (error) {

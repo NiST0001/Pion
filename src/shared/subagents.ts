@@ -16,7 +16,11 @@ export function validateSubagentModelSelection(value: unknown): SubagentModelSel
   return { provider: input.provider, id: input.id }
 }
 
-/** User-tunable limits/default model, snapshotted once per batch. */
+/** Locked SDK ThinkingLevel values; individual model support is resolved by the SDK. */
+export const SUBAGENT_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+export type SubagentThinkingLevel = typeof SUBAGENT_THINKING_LEVELS[number]
+
+/** User-tunable limits/defaults, snapshotted once per batch. */
 export interface SubagentSettings {
   maxParallel: number
   timeoutMinutes: number
@@ -24,6 +28,8 @@ export interface SubagentSettings {
   maxResultChars: number
   /** Missing in legacy files; null inherits the main session model. */
   defaultModel?: SubagentModelSelection | null
+  /** Missing in legacy files; null inherits the main session thinking level. */
+  defaultThinkingLevel?: SubagentThinkingLevel | null
 }
 
 export const SUBAGENT_LIMITS = {
@@ -36,7 +42,7 @@ export const SUBAGENT_LIMITS = {
 export const DEFAULT_SUBAGENTS_ENABLED = true
 
 export const DEFAULT_SUBAGENT_SETTINGS: Readonly<SubagentSettings> = Object.freeze({
-  maxParallel: 3, timeoutMinutes: 10, maxTurns: 24, maxResultChars: 16000, defaultModel: null
+  maxParallel: 3, timeoutMinutes: 10, maxTurns: 24, maxResultChars: 16000, defaultModel: null, defaultThinkingLevel: null
 })
 
 export function validateSubagentSettings(value: unknown): SubagentSettings {
@@ -52,5 +58,11 @@ export function validateSubagentSettings(value: unknown): SubagentSettings {
     result[key] = number
   }
   result.defaultModel = input.defaultModel === undefined ? null : validateSubagentModelSelection(input.defaultModel)
+  const thinking = input.defaultThinkingLevel
+  if (thinking !== undefined && thinking !== null
+    && (typeof thinking !== 'string' || !SUBAGENT_THINKING_LEVELS.includes(thinking as SubagentThinkingLevel))) {
+    throw new Error('子代理思考等级无效')
+  }
+  result.defaultThinkingLevel = (thinking as SubagentThinkingLevel | null | undefined) ?? null
   return result
 }

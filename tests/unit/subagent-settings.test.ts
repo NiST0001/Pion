@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { assertSubagentSettingsOwner, SubagentSettingsStore } from '../../src/main/subagent-settings'
-import { DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, validateSubagentModelSelection, validateSubagentSettings } from '../../src/shared/subagents'
+import { DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, SUBAGENT_THINKING_LEVELS, validateSubagentModelSelection, validateSubagentSettings } from '../../src/shared/subagents'
 import { readRuntimeSubagentSettings } from '../../src/main/agent/subagents'
 
 vi.mock('electron', () => ({ app: { getPath: () => '/unused' } }))
@@ -44,9 +44,9 @@ it.each(Object.keys(SUBAGENT_LIMITS) as (keyof typeof SUBAGENT_LIMITS)[])('valid
   expect(validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, [key]: SUBAGENT_LIMITS[key].max })[key]).toBe(SUBAGENT_LIMITS[key].max)
 })
 
-it('normalizes legacy settings to inherited model and clones exact model identities', () => {
-  const { defaultModel: _defaultModel, ...legacy } = DEFAULT_SUBAGENT_SETTINGS
-  expect(validateSubagentSettings(legacy)).toEqual({ ...legacy, defaultModel: null })
+it('normalizes legacy settings to inherited model/thinking and clones exact model identities', () => {
+  const { defaultModel: _defaultModel, defaultThinkingLevel: _defaultThinkingLevel, ...legacy } = DEFAULT_SUBAGENT_SETTINGS
+  expect(validateSubagentSettings(legacy)).toEqual({ ...legacy, defaultModel: null, defaultThinkingLevel: null })
   const model = { provider: 'provider-a', id: 'model-a' }
   const normalized = validateSubagentSettings({ ...legacy, defaultModel: model })
   expect(normalized.defaultModel).toEqual(model)
@@ -57,6 +57,17 @@ it('normalizes legacy settings to inherited model and clones exact model identit
   expect(validateSubagentModelSelection({ provider: 'p'.repeat(128), id: 'i'.repeat(256) })).toEqual({ provider: 'p'.repeat(128), id: 'i'.repeat(256) })
 })
 
+it('accepts the locked SDK thinking levels and inheritance, rejecting arbitrary values', () => {
+  expect(SUBAGENT_THINKING_LEVELS).toEqual(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+  for (const defaultThinkingLevel of [...SUBAGENT_THINKING_LEVELS, null, undefined]) {
+    expect(validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, defaultThinkingLevel }).defaultThinkingLevel)
+      .toBe(defaultThinkingLevel ?? null)
+  }
+  for (const defaultThinkingLevel of ['', 'auto', 'HIGH', 'high ', 0, false, [], {}]) {
+    expect(() => validateSubagentSettings({ ...DEFAULT_SUBAGENT_SETTINGS, defaultThinkingLevel })).toThrow('思考等级无效')
+  }
+})
+
 it.each([undefined, '', [], { provider: 'p' }, { provider: 'p', id: '' },
   { provider: 'p'.repeat(129), id: 'm' }, { provider: 'p', id: 'i'.repeat(257) },
   { provider: 'p ', id: 'm' }, { provider: 'p', id: 'm\n' },
@@ -65,21 +76,23 @@ it.each([undefined, '', [], { provider: 'p' }, { provider: 'p', id: '' },
   expect(() => validateSubagentModelSelection(model)).toThrow()
 })
 
-it('saves the captured nested model without aliasing queued input or returned values', async () => {
+it('persists captured model/thinking across store reopening without aliasing queued input or returned values', async () => {
   const root = await mkdtemp(join(tmpdir(), 'pion-subagent-model-settings-'))
   roots.push(root)
   const path = join(root, 'settings.json')
   const store = new SubagentSettingsStore(() => path)
   vi.stubEnv('PION_SUBAGENT_SETTINGS_FILE', path)
-  const input = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'provider-a', id: 'model-a' } }
+  const input = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'provider-a', id: 'model-a' }, defaultThinkingLevel: 'high' as const }
   const savedPromise = store.set(input)
   input.defaultModel.id = 'changed-before-write'
+  Object.assign(input, { defaultThinkingLevel: 'off' })
   const saved = await savedPromise
   expect(saved.defaultModel).toEqual({ provider: 'provider-a', id: 'model-a' })
   saved.defaultModel!.id = 'changed-after-return'
   expect((await store.get()).defaultModel).toEqual({ provider: 'provider-a', id: 'model-a' })
-  expect((await readRuntimeSubagentSettings()).defaultModel).toEqual({ provider: 'provider-a', id: 'model-a' })
-  expect(JSON.parse(await readFile(path, 'utf8')).defaultModel).toEqual({ provider: 'provider-a', id: 'model-a' })
+  expect(await readRuntimeSubagentSettings()).toMatchObject({ defaultModel: { provider: 'provider-a', id: 'model-a' }, defaultThinkingLevel: 'high' })
+  expect(await new SubagentSettingsStore(() => path).get()).toMatchObject({ defaultModel: { provider: 'provider-a', id: 'model-a' }, defaultThinkingLevel: 'high' })
+  expect(JSON.parse(await readFile(path, 'utf8'))).toMatchObject({ defaultModel: { provider: 'provider-a', id: 'model-a' }, defaultThinkingLevel: 'high' })
 })
 
 it('persists global defaults atomically and existing runtimes read the next saved configuration', async () => {
@@ -100,6 +113,7 @@ it('persists global defaults atomically and existing runtimes read the next save
   expect(await store.get()).toEqual(last)
   await writeFile(path, '{broken', 'utf8')
   await expect(readRuntimeSubagentSettings()).rejects.toThrow('无法读取子代理设置')
-  await store.set(first)
-  expect(await readRuntimeSubagentSettings()).toEqual(first)
+  await expect(store.set(first)).rejects.toThrow()
+  expect(await readFile(path, 'utf8')).toBe('{broken')
+  await expect(store.get()).rejects.toThrow()
 })

@@ -207,6 +207,7 @@ it('validates settings and batch width before requesting display admission', asy
   const run = vi.fn(async (task: { name: string }) => ({ name: task.name, status: 'completed' as const, text: 'done' }))
   await expect(setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 0 }), publisher).execute()).rejects.toThrow()
   await expect(setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 1 }), publisher).execute()).rejects.toThrow('每批最多 1')
+  await expect(setup(run, () => ({ ...DEFAULT_SUBAGENT_SETTINGS, defaultThinkingLevel: 'unknown' as never }), publisher).execute()).rejects.toThrow('思考等级无效')
   expect(publisher.reserve).not.toHaveBeenCalled()
   expect(publisher.begin).not.toHaveBeenCalled()
   expect(run).not.toHaveBeenCalled()
@@ -479,8 +480,8 @@ it.each(['off', 'parent', 'shutdown', 'timeout'])('cancels children through %s',
   expect((result.details as { results: SubagentResult[] }).results.every((child) => child.status === 'aborted')).toBe(true)
 })
 
-it('snapshots global settings per batch and applies changed limits only to the next batch', async () => {
-  let settings = { ...DEFAULT_SUBAGENT_SETTINGS }
+it('snapshots global settings per batch and applies changed limits/thinking only to the next batch', async () => {
+  let settings: SubagentSettings = { ...DEFAULT_SUBAGENT_SETTINGS, defaultThinkingLevel: 'high' }
   const release: (() => void)[] = []
   const snapshots: Readonly<SubagentSettings>[] = []
   const h = setup((task, _signal, _progress, limits) => {
@@ -490,16 +491,24 @@ it('snapshots global settings per batch and applies changed limits only to the n
   await h.toggle('on')
   const pending = h.execute()
   await Promise.resolve()
+  settings.defaultThinkingLevel = 'off'
   settings = { ...settings, maxParallel: 1, maxTurns: 5 }
   expect(snapshots).toHaveLength(2)
+  expect(snapshots.every((snapshot) => snapshot.defaultThinkingLevel === 'high')).toBe(true)
   expect(snapshots[0].maxTurns).toBe(24)
   expect(Object.isFrozen(snapshots[0])).toBe(true)
   release.forEach((done) => done())
   await pending
   await expect(h.execute()).rejects.toThrow('最多 1 个')
   expect(snapshots).toHaveLength(2)
+  const next = h.control.tool.execute('next', { tasks: [{ name: 'next', task: 'inspect' }] }, undefined, undefined, context)
+  await Promise.resolve()
+  expect(snapshots[2]).toMatchObject({ defaultThinkingLevel: 'off', maxTurns: 5 })
+  release.at(-1)!()
+  await next
   const prompt = await h.handlers.get('before_agent_start')!({ systemPrompt: 'base' })
   expect(prompt.systemPrompt).toContain('1 children per batch')
+  expect(prompt.systemPrompt).toContain('Configured default thinking level: "off"')
 })
 
 it('rejects overlapping calls while settings are loading and releases the batch lock on failure', async () => {
