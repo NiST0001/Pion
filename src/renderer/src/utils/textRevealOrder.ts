@@ -12,9 +12,16 @@ type Subscription = { wait: (request: Request | null) => void; dispose: () => vo
 type Group = { subscribe: (element: HTMLElement) => Subscription }
 type Bounds = { top: number; right: number; bottom: number; left: number }
 const groups = new WeakMap<Element, Group>()
-// A gate may temporarily remove every subscriber while the last admitted tail
-// has not started yet. Keep only its absolute clock, never observers or timers.
-const tails = new WeakMap<Element, { scope: string | null; at: number }>()
+// A gate may temporarily remove every subscriber while admitted tails are
+// still in the future. Weak sources preserve clocks without retaining old DOM.
+const tails = new WeakMap<Element, { scope: string | null; sources: Map<WeakRef<HTMLElement>, number> }>()
+const sourceRefs = new WeakMap<HTMLElement, WeakRef<HTMLElement>>()
+
+function sourceRef(element: HTMLElement): WeakRef<HTMLElement> {
+  let source = sourceRefs.get(element)
+  if (!source) { source = new WeakRef(element); sourceRefs.set(element, source) }
+  return source
+}
 const attributes = ['class', 'style', 'hidden', 'aria-hidden', 'open',
   'data-text-reveal-ready', 'data-text-reveal-open', 'data-line-reveal-ready', 'data-line-reveal-start', 'data-line-reveal-scope']
 const OPENING_GATE_SELECTOR = '[data-text-reveal-open="true"][data-text-reveal-ready="false"]'
@@ -42,6 +49,16 @@ function hasPendingLineClock(element: HTMLElement, time: number): boolean {
       || !Number.isFinite(Number(start)) || Number(start) > time) return true
   }
   return false
+}
+
+/** Retire only this element's obsolete admitted text, even during a gate pause. */
+export function retireTextRevealTail(element: HTMLElement): void {
+  const root = revealRoot(element)
+  const source = sourceRefs.get(element)
+  const tail = root && tails.get(root)
+  if (!root || !source || !tail) return
+  tail.sources.delete(source)
+  if (!tail.sources.size) tails.delete(root)
 }
 
 /** IO is only a wakeup: every wake admits current visible chunks in DOM order. */
@@ -75,7 +92,8 @@ function createGroup(root: Element): Group {
   const resize = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(schedule)
   resize?.observe(root)
   const mutations = new MutationObserver(schedule)
-  mutations.observe(root, { subtree: true, attributes: true, attributeFilter: attributes })
+  // Removing a preceding barrier may leave pending geometry unchanged.
+  mutations.observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: attributes })
   // Root visibility may change without another intersection (e.g. a retained
   // hidden panel). Observe ancestor attributes, not arbitrary DOM/text changes.
   for (let ancestor = root.parentElement; ancestor; ancestor = ancestor.parentElement) {
@@ -88,6 +106,19 @@ function createGroup(root: Element): Group {
 
   const scan = (): void => {
     if (!root.isConnected) return
+    const currentTime = performance.now()
+    const scope = root.getAttribute('data-line-reveal-scope')
+    let tail = tails.get(root)
+    if (tail && tail.scope !== scope) { tails.delete(root); tail = undefined }
+    if (tail) {
+      for (const [source, at] of tail.sources) {
+        const element = source.deref()
+        if (at <= currentTime || !element || !element.isConnected || !root.contains(element) || revealRoot(element) !== root) {
+          tail.sources.delete(source)
+        }
+      }
+      if (!tail.sources.size) { tails.delete(root); tail = undefined }
+    }
     const rects = new Map<Element, DOMRect>()
     const styles = new Map<Element, CSSStyleDeclaration>()
     const rectFor = (node: Element): DOMRect => {
@@ -103,7 +134,6 @@ function createGroup(root: Element): Group {
     const rootRect = rectFor(root)
     if (rootRect.width <= 0 || rootRect.height <= 0) return
     const viewport = clip(rootRect, { top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight })
-    const currentTime = performance.now()
     const pending: Array<{ element: HTMLElement; record?: Record }> = [...records.values()]
       .filter(record => record.request).map(record => ({ element: record.element, record }))
     // Headers/compaction rows can be siblings rather than ancestors. They must
@@ -157,9 +187,8 @@ function createGroup(root: Element): Group {
     }
     // Measure everything before admitting React updates. A visible earlier
     // parent's unassigned clock blocks later chunks; offscreen chunks do not.
-    const scope = root.getAttribute('data-line-reveal-scope')
-    const tail = tails.get(root)
-    let cursor = Math.max(currentTime, tail?.scope === scope ? tail.at : 0)
+    let cursor = currentTime
+    if (tail) for (const at of tail.sources.values()) cursor = Math.max(cursor, at)
     const origin = Math.max(currentTime, candidates[0]?.lineStart ?? currentTime)
     for (const { record, request, lineStart } of candidates) {
       if (!active) break
@@ -174,7 +203,9 @@ function createGroup(root: Element): Group {
       // A later parent's future start can exceed it, but never move backwards.
       const remaining = Math.max(0, origin + cap - start)
       cursor = start + Math.min(request.count * stagger, remaining)
-      tails.set(root, { scope, at: cursor })
+      if (!tail) { tail = { scope, sources: new Map() }; tails.set(root, tail) }
+      const source = sourceRef(record.element)
+      tail.sources.set(source, Math.max(cursor, tail.sources.get(source) ?? 0))
       record.request = null
       intersection?.unobserve(record.element)
       resize?.unobserve(record.element)

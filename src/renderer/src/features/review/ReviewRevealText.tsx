@@ -1,7 +1,7 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useDisclosureRevealReady } from '../common/DisclosureRevealGate'
 import { RevealText, type TextRevealMode } from '../../utils/screenTextReveal'
-import { subscribeTextRevealOrder, type OrderedTextReveal } from '../../utils/textRevealOrder'
+import { retireTextRevealTail, subscribeTextRevealOrder, type OrderedTextReveal } from '../../utils/textRevealOrder'
 
 // Bound both initial character DOM and geometry work, including single-line
 // JSON/minified output. Invisible chunks remain inexpensive ordinary text.
@@ -37,7 +37,10 @@ const RevealChunk = memo(function RevealChunk({ text, mode }: {
   }, [animation])
 
   useLayoutEffect(() => {
-    if (admitted && !append) setAdmitted(null)
+    if (admitted && !append) {
+      if (ref.current) retireTextRevealTail(ref.current)
+      setAdmitted(null)
+    }
   }, [admitted, append])
 
   useLayoutEffect(() => {

@@ -51,7 +51,6 @@ type RevealStart = { at: number; static: boolean }
 export function watchLineReveals(container: HTMLElement): () => void {
   let active = true
   let frame: number | null = null
-  let nextStart = 0
   const observed = new Set<Element>()
 
   const schedule = (): void => {
@@ -145,11 +144,12 @@ export function watchLineReveals(container: HTMLElement): () => void {
     }
     observeSizes(sizeTargets)
     const currentTime = performance.now()
-    nextStart = Math.max(nextStart, currentTime)
-    // A retained viewport can hide/rebind while its earlier lines are still
-    // queued. New rows must stay behind those starts without replaying them.
+    let nextStart = currentTime
+    // Rebuild the queue from owned, retained DOM on every batch: removed rows
+    // must not delay a replacement window, while hidden/rebound rows keep their starts.
     for (const element of lines) {
-      if (element.dataset.lineRevealReady !== 'true' || element.dataset.lineRevealContainer === 'true'
+      if (element.dataset.lineRevealReady !== 'true'
+        || (element.dataset.lineRevealContainer === 'true' && element.dataset.lineRevealOwnSlot !== 'true')
         || element.classList.contains(SCREEN_TEXT_REVEAL_STATIC_CLASS)) continue
       const start = Number(element.dataset.lineRevealStart)
       if (Number.isFinite(start)) nextStart = Math.max(nextStart, start + (
@@ -157,6 +157,7 @@ export function watchLineReveals(container: HTMLElement): () => void {
           ? SCREEN_TEXT_REVEAL_LINE_LIVE_STAGGER_MS : SCREEN_TEXT_REVEAL_LINE_STAGGER_MS))
     }
     const starts = new Map<HTMLElement, RevealStart>()
+    const ownSlots = new Set<HTMLElement>()
     const startFor = (line: MeasuredLine): RevealStart => {
       const { element } = line
       const assigned = starts.get(element)
@@ -173,6 +174,7 @@ export function watchLineReveals(container: HTMLElement): () => void {
         if (firstChild) start = startFor(firstChild)
         else {
           start = { at: nextStart, static: false }
+          ownSlots.add(element)
           nextStart += element.classList.contains(SCREEN_TEXT_REVEAL_LINE_LIVE_CLASS)
             ? SCREEN_TEXT_REVEAL_LINE_LIVE_STAGGER_MS : SCREEN_TEXT_REVEAL_LINE_STAGGER_MS
         }
@@ -197,6 +199,7 @@ export function watchLineReveals(container: HTMLElement): () => void {
     for (const { element, start } of writes) {
       element.style.setProperty('--screen-text-reveal-delay', `${Math.max(0, start.at - currentTime)}ms`)
       element.dataset.lineRevealStart = String(start.at)
+      if (element.dataset.lineRevealContainer === 'true') element.dataset.lineRevealOwnSlot = String(ownSlots.has(element))
       if (start.static) element.classList.add(SCREEN_TEXT_REVEAL_STATIC_CLASS)
       element.dataset.lineRevealReady = 'true'
     }

@@ -12,7 +12,7 @@ import type { TimelineItem } from '../../src/renderer/src/agent/types'
 import { REVIEW_REVEAL_CHUNK_SIZE } from '../../src/renderer/src/features/review/ReviewRevealText'
 import {
   SCREEN_TEXT_REVEAL_MAX_DELAY_MS, SCREEN_TEXT_REVEAL_DURATION_MS, SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS,
-  SCREEN_TEXT_REVEAL_LIVE_DURATION_MS, SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS
+  SCREEN_TEXT_REVEAL_LIVE_DURATION_MS, SCREEN_TEXT_REVEAL_LIVE_STAGGER_MS, SCREEN_TEXT_REVEAL_LINE_LIVE_STAGGER_MS
 } from '../../src/renderer/src/utils/screenTextReveal'
 
 function emptyTimelineProps(): ChatTimelineProps {
@@ -214,6 +214,86 @@ describe('ChatTimeline viewport reveal scheduling', () => {
     expect(liveLine.querySelector('.screen-text-reveal-live')).toBeNull()
     expect(view.container.querySelector('.bubble-user')).toBe(oldBubble)
     expect(liveBubble.querySelector('.screen-text-reveal-line')).toBe(liveLine)
+    expect(p.onScroll).not.toHaveBeenCalled()
+  })
+
+  it('rebuilds a same-scope history window around a retained live Markdown row without restarting its fade', async () => {
+    const p = props()
+    const removed = { kind: 'assistant' as const, id: 10, text: '旧一\n\n旧二\n\n旧三', thinking: '', streaming: false, historical: true }
+    const retained = { kind: 'assistant' as const, id: 11, text: '保留输出', thinking: '', streaming: true, live: true }
+    const appended = { kind: 'assistant' as const, id: 12, text: '新的输出', thinking: '', streaming: true, live: true }
+    const view = render(<ChatTimeline {...p} timeline={[removed, retained]} />)
+    const main = p.scrollRef.current
+    await flushFrame()
+    await flushFrame()
+    const [removedBubble, retainedBubble] = [...view.container.querySelectorAll<HTMLElement>('.bubble-assistant')]
+    const retainedLine = retainedBubble.querySelector<HTMLElement>('.screen-text-reveal-line')!
+    const retainedCharacter = retainedLine.querySelector<HTMLElement>('.screen-text-reveal-live')!
+    expect(retainedLine).toHaveAttribute('data-line-reveal-ready', 'true')
+    expect(retainedCharacter.style.animationPlayState).not.toBe('paused')
+    const retainedStart = Number(retainedLine.dataset.lineRevealStart)
+    const retainedLineDelay = retainedLine.style.getPropertyValue('--screen-text-reveal-delay')
+    const retainedCharacterDelay = retainedCharacter.style.getPropertyValue('--screen-text-reveal-delay')
+
+    const upper = history(20)
+    view.rerender(<ChatTimeline {...p} timeline={[upper, retained, appended]} />)
+    expect(removedBubble.isConnected).toBe(false)
+    const upperBubble = view.container.querySelector<HTMLElement>('.bubble-user')!
+    const newBubble = view.container.querySelectorAll<HTMLElement>('.bubble-assistant')[1]
+    const newLine = newBubble.querySelector<HTMLElement>('.screen-text-reveal-line')!
+    await flushFrame()
+    expect(upperBubble).toHaveAttribute('data-line-reveal-ready', 'true')
+    expect(Number(upperBubble.dataset.lineRevealStart)).toBeGreaterThanOrEqual(retainedStart + SCREEN_TEXT_REVEAL_LINE_LIVE_STAGGER_MS)
+    expect(upperBubble.querySelector('[data-text-reveal-pending="true"]')).not.toBeNull()
+    expect(newLine).not.toHaveAttribute('data-line-reveal-ready')
+    await flushFrame() // The upper user text must actually commit before the lower row enters.
+    const upperChunk = upperBubble.querySelector<HTMLElement>('[data-text-reveal-start]')!
+    expect(upperChunk).not.toHaveAttribute('data-text-reveal-pending')
+    for (let index = 0; index < 4; index++) await flushFrame()
+    expect(newLine).toHaveAttribute('data-line-reveal-ready', 'true')
+    expect(Number(newLine.dataset.lineRevealStart)).toBeGreaterThanOrEqual(Number(upperChunk.dataset.textRevealStart))
+    const newCharacter = newLine.querySelector<HTMLElement>('.screen-text-reveal-live')!
+    expect(newCharacter).not.toBeNull()
+    expect(newCharacter.style.animationPlayState).not.toBe('paused')
+    expect(p.scrollRef.current).toBe(main)
+    expect(view.container.querySelector('.bubble-assistant')).toBe(retainedBubble)
+    expect(retainedBubble.querySelector('.screen-text-reveal-line')).toBe(retainedLine)
+    expect(retainedLine.querySelector('.screen-text-reveal-live')).toBe(retainedCharacter)
+    expect(retainedLine.dataset.lineRevealStart).toBe(String(retainedStart))
+    expect(retainedLine.style.getPropertyValue('--screen-text-reveal-delay')).toBe(retainedLineDelay)
+    expect(retainedCharacter.style.getPropertyValue('--screen-text-reveal-delay')).toBe(retainedCharacterDelay)
+    expect(p.onScroll).not.toHaveBeenCalled()
+  })
+
+  it('releases retained pending rows when a preceding uncommitted text barrier leaves the history window', async () => {
+    const p = props()
+    const first = history(1)
+    const retained = history(2)
+    const answer = { kind: 'assistant' as const, id: 3, text: '后续回复', thinking: '', streaming: true, live: true }
+    const view = render(<ChatTimeline {...p} timeline={[first, retained, answer]} />)
+    const [firstBubble, retainedBubble] = [...view.container.querySelectorAll<HTMLElement>('.bubble-user')]
+    const answerBubble = view.container.querySelector<HTMLElement>('.bubble-assistant')!
+    const answerLine = answerBubble.querySelector<HTMLElement>('.screen-text-reveal-line')!
+    await flushFrame()
+    expect(firstBubble).toHaveAttribute('data-line-reveal-ready', 'true')
+    expect(firstBubble.querySelector('[data-text-reveal-pending="true"]')).not.toBeNull()
+    expect(retainedBubble).not.toHaveAttribute('data-line-reveal-ready')
+    expect(answerLine).not.toHaveAttribute('data-line-reveal-ready')
+
+    view.rerender(<ChatTimeline {...p} timeline={[retained, answer]} />)
+    expect(firstBubble.isConnected).toBe(false)
+    expect(view.container.querySelector('.bubble-user')).toBe(retainedBubble)
+    expect(view.container.querySelector('.bubble-assistant')).toBe(answerBubble)
+    for (let index = 0; index < 8; index++) await flushFrame()
+    const retainedChunk = retainedBubble.querySelector<HTMLElement>('[data-text-reveal-start]')!
+    expect(retainedBubble).toHaveAttribute('data-line-reveal-ready', 'true')
+    expect(retainedChunk).not.toHaveAttribute('data-text-reveal-pending')
+    expect(retainedChunk.querySelector('[data-screen-reveal-character]')).not.toBeNull()
+    expect(answerLine).toHaveAttribute('data-line-reveal-ready', 'true')
+    expect(Number(answerLine.dataset.lineRevealStart)).toBeGreaterThanOrEqual(Number(retainedChunk.dataset.textRevealStart))
+    const answerCharacter = answerLine.querySelector<HTMLElement>('.screen-text-reveal-live')!
+    expect(answerCharacter).not.toBeNull()
+    expect(answerCharacter.style.animationPlayState).not.toBe('paused')
     expect(p.onScroll).not.toHaveBeenCalled()
   })
 

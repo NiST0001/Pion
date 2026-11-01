@@ -424,6 +424,68 @@ describe('viewport-owned line reveal order', () => {
     expect(start(appended)).toBe(580)
   })
 
+  it.each(['all', 'tail'] as const)('rebuilds the queue when the %s of a queued window is replaced', async replaced => {
+    const container = root()
+    const queued = [line(container), ...Array.from({ length: 4 }, () => line(container, 'live'))]
+    watch(container)
+    await flush()
+    expect(queued.map(start)).toEqual([100, 120, 160, 200, 240])
+    const retained = replaced === 'all' ? [] : queued.slice(0, 2)
+    const previous = retained.map(element => ({
+      start: start(element), delay: element.style.getPropertyValue('--screen-text-reveal-delay')
+    }))
+    queued.slice(retained.length).forEach(element => element.remove())
+    vi.mocked(performance.now).mockReturnValue(110)
+    const first = line(container)
+    const second = line(container, 'live')
+    await flush()
+    const expectedStart = replaced === 'all' ? 110 : 160
+    expect([first, second].map(start)).toEqual([expectedStart, expectedStart + 20])
+    expect([first, second].map(element => element.style.getPropertyValue('--screen-text-reveal-delay')))
+      .toEqual([`${expectedStart - 110}ms`, `${expectedStart - 90}ms`])
+    retained.forEach((element, index) => {
+      expect(container.children[index]).toBe(element)
+      expect(start(element)).toBe(previous[index].start)
+      expect(element.style.getPropertyValue('--screen-text-reveal-delay')).toBe(previous[index].delay)
+    })
+  })
+
+  it.each(['history', 'live'] as const)('retains an independent %s bubble slot when its only child is in closed thinking details', async mode => {
+    const container = root()
+    line(container)
+    const bubble = line(container, mode)
+    bubble.dataset.lineRevealContainer = 'true'
+    const details = document.createElement('details')
+    details.append(document.createElement('summary'))
+    bubble.append(details)
+    const thinking = line(details, mode)
+    watch(container)
+    await flush()
+    expect(start(bubble)).toBe(120)
+    expect(bubble).toHaveAttribute('data-line-reveal-own-slot', 'true')
+    expect(thinking).not.toHaveAttribute('data-line-reveal-ready')
+    const delay = bubble.style.getPropertyValue('--screen-text-reveal-delay')
+    const appended = line(container)
+    await flush()
+    expect(start(appended)).toBe(120 + (mode === 'live' ? SCREEN_TEXT_REVEAL_LINE_LIVE_STAGGER_MS : 20))
+    expect(start(bubble)).toBe(120)
+    expect(bubble.style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+  })
+
+  it('does not charge a live shell a second slot when it borrowed a history child start', async () => {
+    const container = root()
+    const bubble = line(container, 'live')
+    bubble.dataset.lineRevealContainer = 'true'
+    const child = line(bubble)
+    watch(container)
+    await flush()
+    expect([bubble, child].map(start)).toEqual([100, 100])
+    expect(bubble).toHaveAttribute('data-line-reveal-own-slot', 'false')
+    const appended = line(container)
+    await flush()
+    expect(start(appended)).toBe(120)
+  })
+
   it('keeps rows appended while hidden behind retained future starts after rebinding the watcher', async () => {
     const container = root()
     const queued = [line(container), line(container, 'live'), line(container, 'live')]

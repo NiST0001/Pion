@@ -8,6 +8,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.102',
+    changes: [
+      '修复历史跳转或分页替换内容后部分输出被渐显队列遮住的问题，清理失效时钟并在阻塞内容移除后唤醒文字。',
+      '同节点正文替换或缩短时退休旧文字尾部时钟，保留渐显顺序和阅读位置。'
+    ]
+  },
+  {
     version: '0.1.101',
     changes: [
       '默认子代理模型选择后自动保存；新增默认思考等级选项，支持继承主会话，重开设置及重启应用后读取原配置。',
