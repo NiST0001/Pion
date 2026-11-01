@@ -223,13 +223,14 @@ describe('shell startup, settings IPC and shutdown wiring', () => {
     expect(mocks.publish).not.toHaveBeenCalled()
   })
 
-  it('waits for bridge and both actual store shutdown promises before quitting', async () => {
-    const blocked = [deferred(), deferred(), deferred()]
-    const entered = [deferred(), deferred(), deferred()]
+  it('waits for bridge and all three store shutdown promises before quitting', async () => {
+    const blocked = [deferred(), deferred(), deferred(), deferred()]
+    const entered = [deferred(), deferred(), deferred(), deferred()]
     const shutdown = (index: number) => vi.fn(() => { entered[index].resolve(); return blocked[index].promise })
     const context = {
       windowShutdown: Promise.resolve(), bridge: { stop: shutdown(0) },
-      appSettings: { shutdown: shutdown(1) }, projects: { shutdown: shutdown(2) },
+      appSettings: { shutdown: shutdown(1) }, subagentSettings: { shutdown: shutdown(2) },
+      projects: { shutdown: shutdown(3) },
       sessionOrganization: { shutdown: vi.fn(async () => {}) }, usageLedger: { flush: vi.fn(async () => {}) },
       captureQuitSettled: false, app: { quit: vi.fn() }
     }
@@ -240,15 +241,25 @@ describe('shell startup, settings IPC and shutdown wiring', () => {
     expect(context.bridge.stop).not.toHaveBeenCalled()
     expect(context.app.quit).not.toHaveBeenCalled()
     const pending = quit({ actualPending: false })
-    await entered[0].promise
+    const waitEntered = (index: number) => Promise.race([
+      entered[index].promise,
+      pending.then(() => { throw new Error(`Quit completed before shutdown ${index} started`) })
+    ])
+    await waitEntered(0)
     expect(context.appSettings.shutdown).not.toHaveBeenCalled()
+    expect(context.app.quit).not.toHaveBeenCalled()
     blocked[0].resolve()
-    await entered[1].promise
-    expect(context.projects.shutdown).not.toHaveBeenCalled()
+    await waitEntered(1)
+    expect(context.subagentSettings.shutdown).not.toHaveBeenCalled()
+    expect(context.app.quit).not.toHaveBeenCalled()
     blocked[1].resolve()
-    await entered[2].promise
+    await waitEntered(2)
+    expect(context.projects.shutdown).not.toHaveBeenCalled()
     expect(context.app.quit).not.toHaveBeenCalled()
     blocked[2].resolve()
+    await waitEntered(3)
+    expect(context.app.quit).not.toHaveBeenCalled()
+    blocked[3].resolve()
     await pending
     expect(context.captureQuitSettled).toBe(true)
     expect(context.app.quit).toHaveBeenCalledTimes(1)

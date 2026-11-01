@@ -196,6 +196,17 @@ describe('message revert navigation', () => {
     expect(h.loadNewer).toHaveBeenCalledTimes(height > 0 && height < 400 ? 1 : 0)
   })
 
+  it('keeps undo follow independent of reading persistence when readiness is unavailable', () => {
+    const h = setup({ persistReadingPosition: false, timelineReady: false })
+    h.scrollUp()
+    h.update({ timeline: [shared], height: 900, historyResetRevision: 1 })
+    expect(h.element.scrollTop).toBe(500)
+    h.element.scrollTop = 20
+    fireEvent.scroll(h.element)
+    h.update({ timeline: [shared, tail], height: 1200, historyResetRevision: 2 })
+    expect(h.element.scrollTop).toBe(800)
+  })
+
   it.each([undefined, 7])('preserves ordinary same-session replacement reading with revision %s', (historyResetRevision) => {
     const h = setup({ historyResetRevision })
     h.scrollUp()

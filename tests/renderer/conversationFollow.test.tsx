@@ -22,13 +22,25 @@ function setup() {
   })
   const settle = () => { for (let n = 0; n < 40; n++) frame() }
   let height = 2000, top = 0
-  let resize = () => {}
-  vi.stubGlobal('ResizeObserver', class {
-    constructor(callback: () => void) { resize = callback }
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  })
+  const observers = new Set<FakeResizeObserver>()
+  class FakeResizeObserver implements ResizeObserver {
+    private readonly targets = new Set<Element>()
+    constructor(private readonly callback: ResizeObserverCallback) { observers.add(this) }
+    observe(target: Element) { this.targets.add(target); observers.add(this) }
+    unobserve(target: Element) { this.targets.delete(target) }
+    disconnect() { this.targets.clear(); observers.delete(this) }
+    deliver(target: Element) {
+      if (!this.targets.has(target)) return
+      const rect = target.getBoundingClientRect()
+      const contentRect = new DOMRect(rect.x, rect.y, rect.width, rect.height)
+      const size = { inlineSize: contentRect.width, blockSize: contentRect.height }
+      const entry: ResizeObserverEntry = {
+        target, contentRect, borderBoxSize: [size], contentBoxSize: [size], devicePixelContentBoxSize: [size]
+      }
+      this.callback([entry], this)
+    }
+  }
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver)
   const element = document.createElement('div')
   document.body.append(element)
   const readClientHeight = vi.fn(() => 400)
@@ -55,9 +67,28 @@ function setup() {
   }
   return { ...hook, props, element, scroll, append, frame, settle, readClientHeight, readScrollHeight,
     pendingFrame: () => [...frames.values()],
-    layout: (size: number) => { height += size; act(() => resize()) }
+    layout: (size: number) => { height += size; act(() => { for (const observer of [...observers]) observer.deliver(element) }) }
   }
 }
+
+it('delivers resize entries to each active observer of the viewport', () => {
+  const h = setup()
+  const firstCallback = vi.fn()
+  const secondCallback = vi.fn()
+  const first = new ResizeObserver(firstCallback)
+  const second = new ResizeObserver(secondCallback)
+  first.observe(h.element)
+  second.observe(h.element)
+  h.layout(0)
+  expect(firstCallback).toHaveBeenCalledWith([expect.objectContaining({ target: h.element, contentRect: expect.any(DOMRect) })], first)
+  expect(secondCallback).toHaveBeenCalledWith([expect.objectContaining({ target: h.element, contentRect: expect.any(DOMRect) })], second)
+  first.unobserve(h.element)
+  second.disconnect()
+  h.layout(0)
+  expect(firstCallback).toHaveBeenCalledTimes(1)
+  expect(secondCallback).toHaveBeenCalledTimes(1)
+  first.disconnect()
+})
 
 it('does not follow new messages or delayed output while the user is above the end', () => {
   vi.useFakeTimers()

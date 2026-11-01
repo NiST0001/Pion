@@ -102,8 +102,12 @@ export function useConversationNavigation({
   const lastScrollTop = useRef(0)
   const loadingRef = useRef(timelineLoading)
   const hasContentRef = useRef(timeline.length > 0)
-  const followScope = useRef({ viewportActive, sessionPath, projectCwd, historyResetRevision, historyScopeRevision, hasNewerHistory })
-  followScope.current = { viewportActive, sessionPath, projectCwd, historyResetRevision, historyScopeRevision, hasNewerHistory }
+  // A selected persisted session can briefly display the previous owner's
+  // timeline before its own history is accepted. That geometry has no follow
+  // authority; keep the intent and wait for the selected history to be ready.
+  const historyReadyForFollow = !persistReadingPosition || !projectCwd || !sessionPath || (timelineReady && !timelineError)
+  const followScope = useRef({ viewportActive, sessionPath, projectCwd, historyResetRevision, historyScopeRevision, hasNewerHistory, historyReadyForFollow })
+  followScope.current = { viewportActive, sessionPath, projectCwd, historyResetRevision, historyScopeRevision, hasNewerHistory, historyReadyForFollow }
   const endFollow = useRef<{
     element: HTMLElement; sessionPath?: string; projectCwd?: string; reset: number; scope: number
     controller: ReturnType<typeof createEndFollowAnimator>
@@ -255,7 +259,7 @@ export function useConversationNavigation({
           return current.viewportActive && scrollRef.current === element
             && current.sessionPath === session && current.projectCwd === project && current.historyResetRevision === reset
             && current.historyScopeRevision === revision
-            && nearBottomRef.current && !manualScroll.current && !readingHistory.current
+            && current.historyReadyForFollow && nearBottomRef.current && !manualScroll.current && !readingHistory.current
             && pendingJumpNonce.current === null && !current.hasNewerHistory()
             && !(loadingRef.current && !hasContentRef.current)
         },
@@ -311,7 +315,7 @@ export function useConversationNavigation({
       const request = (event as CustomEvent<DisclosureRevealRequest>).detail
       if (!(target instanceof Element) || target.closest('.chat-scroll') !== element
         || typeof request?.waitUntil !== 'function' || !current()
-        || !nearBottomRef.current || manualScroll.current || readingHistory.current
+        || !followScope.current.historyReadyForFollow || !nearBottomRef.current || manualScroll.current || readingHistory.current
         || pendingJumpNonce.current !== null || followScope.current.hasNewerHistory()
         || (loadingRef.current && !hasContentRef.current)) return
       // The disclosure's 180 ms layout has settled. Finish the remaining curve
@@ -476,7 +480,7 @@ export function useConversationNavigation({
       element.scrollTop += displacement
     } else if (timelineMutation === 'replace') {
       // Cache refreshes and new array references are not a request to go live.
-      if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)) {
+      if (historyReadyForFollow && pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)) {
         // Same-session STATE/cache replacement may contain live growth. It must
         // not finish an in-flight curve by snapping to the new end.
         if (previousHeight > 0 && previousTimelineLength.current > 0 && !wasLoading && !timelineLoading
@@ -486,7 +490,7 @@ export function useConversationNavigation({
     } else if (timelineMutation === 'append') {
       // Follow the newest message only while the user is already near the
       // bottom; never yank someone away who is reading older history.
-      if (pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)) {
+      if (historyReadyForFollow && pendingJumpNonce.current === null && nearBottomRef.current && !(timelineLoading && timelineLength === 0)) {
         if (previousHeight > 0 && previousTimelineLength.current > 0 && !timelineLoading && lastItem?.kind !== 'user') {
           requestEndFollow(element)
         } else {
@@ -503,7 +507,7 @@ export function useConversationNavigation({
       ? { element: firstRow, top: firstRow.offsetTop, parent: firstRow.offsetParent }
       : null
     lastScrollTop.current = element.scrollTop
-  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, historyResetRevision, historyScopeRevision, sessionPath, projectCwd, reserveSpace, hasNewerHistory, followEnd, viewportActive, requestEndFollow, cancelEndFollow, cancelHistoryMotion, readingPositionBlocked, holdReading, isRestoreJump, retireReadingPosition])
+  }, [lastGrow, lastItemId, busy, timelineLoading, timelineLength, timelineMutation, scrollRef, timeline, historyJump?.nonce, historyResetRevision, historyScopeRevision, sessionPath, projectCwd, reserveSpace, hasNewerHistory, followEnd, viewportActive, requestEndFollow, cancelEndFollow, cancelHistoryMotion, readingPositionBlocked, holdReading, isRestoreJump, retireReadingPosition, historyReadyForFollow])
 
   // Banners resize the viewport; floating summary/composer rows change its
   // padding. Preserve follow intent for both instead of deriving it again
@@ -582,7 +586,7 @@ export function useConversationNavigation({
         scrollSurfaceRef.current?.style.setProperty('--chat-viewport-height', `${next.clientHeight}px`)
       }
       if (loadingRef.current && !hasContentRef.current) return
-      if (pendingJumpNonce.current === null && nearBottomRef.current && !readingHistory.current && !hasNewerHistory()) {
+      if (followScope.current.historyReadyForFollow && pendingJumpNonce.current === null && nearBottomRef.current && !readingHistory.current && !hasNewerHistory()) {
         if (viewportChanged || shrink > 0 || loadingRef.current) {
           element.scrollTop = element.scrollHeight
           lastScrollTop.current = element.scrollTop
@@ -611,11 +615,11 @@ export function useConversationNavigation({
     // this immediate pin can overwrite the smooth frame just scheduled above.
     if (previous && previous.element === element && previous.panelsVisible === panelsVisible
       && previous.height === snapshot.height && previous.top === snapshot.top && previous.bottom === snapshot.bottom && previous.scope === scope) return
-    if (pendingJumpNonce.current !== null || !nearBottomRef.current || hasNewerHistory() || (loadingRef.current && !hasContentRef.current)) return
+    if (!historyReadyForFollow || pendingJumpNonce.current !== null || !nearBottomRef.current || hasNewerHistory() || (loadingRef.current && !hasContentRef.current)) return
     cancelEndFollow()
     element.scrollTop = element.scrollHeight
     lastScrollTop.current = element.scrollTop
-  }, [scrollRef, panelsVisible, hasNewerHistory, viewportActive, projectCwd, sessionPath, historyResetRevision, historyScopeRevision, cancelEndFollow])
+  }, [scrollRef, panelsVisible, hasNewerHistory, viewportActive, projectCwd, sessionPath, historyResetRevision, historyScopeRevision, cancelEndFollow, historyReadyForFollow])
 
   useEffect(() => {
     scheduleVisibleHistoryUpdate()

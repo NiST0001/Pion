@@ -209,7 +209,7 @@ export function useConversationReadingPosition(options: Options) {
     if (changed) {
       const undo = !!previous && previous.cwd === options.cwd && previous.path === options.path && previous.reset !== options.reset
       const key = options.cwd && options.path ? JSON.stringify([options.cwd, options.path]) : undefined
-      if (undo && key) {
+      if (undo && key && (previous.persist || options.persist)) {
         invalidatedPositions.current.add(key)
         // A successful undo explicitly selects a new branch. Persist only its
         // end intent, never the former branch's captured DOM position.
@@ -225,7 +225,7 @@ export function useConversationReadingPosition(options: Options) {
       const stored = options.persist && options.cwd && options.path && !undo
         ? readConversationReadingPosition(options.cwd, options.path)
         : { ok: undo ? previous?.writable ?? true : true, position: null }
-      const position: ConversationReadingPosition | null = key && invalidatedPositions.current.has(key)
+      const position: ConversationReadingPosition | null = options.persist && key && invalidatedPositions.current.has(key)
         ? { version: 1, end: true, offset: 0 } : stored.position
       owner.current = {
         api, cwd: options.cwd, path: options.path, reset: options.reset, scope: options.scope,

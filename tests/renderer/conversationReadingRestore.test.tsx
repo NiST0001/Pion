@@ -142,6 +142,8 @@ describe('conversation reading restoration', () => {
     expect(checks[0]()).toBe(true)
     const oldToken = vi.mocked(f.props().restoreHistoryReadingPosition!).mock.calls[0][3]
     f.update({ sessionPath: '/sessions/b', historyScopeRevision: 1, timelineReady: false, historyIndex: null })
+    f.finish() // B's unaccepted A-shaped DOM has no authority to follow.
+    expect(f.element.scrollTop).toBe(0)
     expect(checks[0]()).toBe(false)
     f.update({ sessionPath: path, historyScopeRevision: 2, timelineReady: true, historyIndex: indexFor() })
     expect(checks).toHaveLength(2)
@@ -159,6 +161,22 @@ describe('conversation reading restoration', () => {
     expect(f.element.scrollTop).toBe(700)
     f.persist()
     expect(read(cwd, path).position?.offset).toBe(-452)
+  })
+
+  it('waits for an accepted selected history before following a fresh session', () => {
+    const f = fixture({ timelineReady: false })
+    f.finish()
+    expect(f.element.scrollTop).toBe(0)
+    f.update({ timelineReady: true, timelineError: 'read failed' })
+    f.finish()
+    expect(f.element.scrollTop).toBe(0)
+    f.update({ timelineError: null })
+    f.finish()
+    expect(f.element.scrollTop).toBe(2600)
+    f.gesture(700)
+    f.update({ timeline: [...f.props().timeline], timelineMutation: 'append' })
+    f.finish()
+    expect(f.element.scrollTop).toBe(700)
   })
 
   it('rejects a replaced API immediately and starts a fresh owner on the next render', async () => {
