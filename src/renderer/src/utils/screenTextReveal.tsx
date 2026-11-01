@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react'
+import { subscribeRevealDeadline } from './revealDeadline'
 
 export const SCREEN_TEXT_REVEAL_ATTRIBUTE = 'data-screen-reveal-character'
 export const SCREEN_TEXT_REVEAL_CHARACTER_CLASS = 'screen-text-reveal-character'
@@ -159,7 +160,8 @@ export function RevealText({
   text,
   mode,
   revealCount,
-  ordered
+  ordered,
+  cleanupRoot
 }: {
   text: string
   mode: TextRevealMode
@@ -167,6 +169,8 @@ export function RevealText({
   revealCount?: number
   /** Already admitted visible text: freeze this suffix's shared root schedule. */
   ordered?: { delay: number; maxDelay: number }
+  /** Share cleanup with other admitted chunks in this scroll root. */
+  cleanupRoot?: Element | null
 }): ReactElement {
   const characters = Array.from(text)
   const committed = useRef({ text: '', mode, length: 0 })
@@ -217,14 +221,23 @@ export function RevealText({
 
   useLayoutEffect(() => {
     if (!ranges.length) return
-    // One timer per component, not one timer per character or token. Expired
-    // ranges become plain text; still-fading ranges keep their keys and delay.
-    const timer = window.setTimeout(() => {
+    // Expired ranges become plain text; still-fading ranges keep their keys
+    // and original deadlines, including when a shorter suffix finishes first.
+    const deadline = ranges.reduce((earliest, range) => Math.min(earliest, range.expiresAt), Infinity)
+    let active = true
+    const cleanup = (): void => {
+      if (!active) return
       const currentTime = now()
       setRanges((current) => current.filter((range) => range.expiresAt > currentTime))
-    }, Math.max(0, Math.ceil(ranges.reduce((earliest, range) => Math.min(earliest, range.expiresAt), Infinity) - now())))
-    return () => window.clearTimeout(timer)
-  }, [ranges])
+    }
+    if (cleanupRoot) {
+      const dispose = subscribeRevealDeadline(cleanupRoot, deadline, cleanup)
+      return () => { active = false; dispose() }
+    }
+    // Standalone callers retain their existing per-component timer.
+    const timer = window.setTimeout(cleanup, Math.max(0, Math.ceil(deadline - now())))
+    return () => { active = false; window.clearTimeout(timer) }
+  }, [ranges, cleanupRoot])
 
   const nodes: Array<ReactElement | string> = []
   let plain = ''

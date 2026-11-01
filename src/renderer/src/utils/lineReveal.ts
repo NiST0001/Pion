@@ -9,6 +9,7 @@ import {
 const OWNER_SELECTOR = '[data-line-reveal-owner="true"]'
 const LINE_SELECTOR = `.${SCREEN_TEXT_REVEAL_LINE_CLASS}`
 const OPENING_GATE_SELECTOR = '[data-text-reveal-open="true"][data-text-reveal-ready="false"]'
+const PENDING_CONTAINER_SELECTOR = `${LINE_SELECTOR}[data-line-reveal-container="true"]:not([data-line-reveal-ready="true"])`
 
 type LayoutReads = {
   style: (element: HTMLElement) => CSSStyleDeclaration
@@ -108,15 +109,19 @@ export function watchLineReveals(container: HTMLElement): () => void {
     const windowTop = bounds.top - bounds.height
     const items = [...container.querySelectorAll<HTMLElement>(`${LINE_SELECTOR}, ${OPENING_GATE_SELECTOR}, [data-text-reveal-pending="true"], [data-text-reveal-start]`)]
       .filter(owns)
-    const pendingContainers = pending.filter(element => element.dataset.lineRevealContainer === 'true')
+    const pendingContainers = new Set(pending.filter(element => element.dataset.lineRevealContainer === 'true'))
     const measured = new Map<HTMLElement, MeasuredLine>()
+    const firstChildren = new Map<HTMLElement, MeasuredLine>()
     const visibleText = new Set<HTMLElement>()
     const openingGates = new Set<HTMLElement>()
     // Finish all layout reads before assigning any ready flag, class or delay.
     // Ready children are only measured if a new bubble needs to follow them.
     for (const element of items) {
       const isLine = element.classList.contains(SCREEN_TEXT_REVEAL_LINE_CLASS)
-      if (isLine && element.dataset.lineRevealReady === 'true' && !pendingContainers.some(parent => parent.contains(element))) continue
+      if (isLine && element.dataset.lineRevealReady === 'true') {
+        const parent = pendingContainers.size ? element.parentElement?.closest<HTMLElement>(PENDING_CONTAINER_SELECTOR) : null
+        if (!parent || !pendingContainers.has(parent)) continue
+      }
       const openingGate = element.matches(OPENING_GATE_SELECTOR)
       const textStart = Number(element.dataset.textRevealStart)
       // A committed text start in the past cannot delay any new row. Pending
@@ -139,8 +144,14 @@ export function watchLineReveals(container: HTMLElement): () => void {
         }
         continue
       }
-      measured.set(element, { element, static: element.classList.contains(SCREEN_TEXT_REVEAL_STATIC_CLASS)
-        || rect.bottom < windowTop })
+      const line = { element, static: element.classList.contains(SCREEN_TEXT_REVEAL_STATIC_CLASS)
+        || rect.bottom < windowTop }
+      measured.set(element, line)
+      // Index first descendants once in DOM order instead of rescanning all
+      // measured lines for every bubble. Nested/zero-size shells keep that order.
+      for (let parent = element.parentElement; parent && parent !== container; parent = parent.parentElement) {
+        if (pendingContainers.has(parent) && !firstChildren.has(parent)) firstChildren.set(parent, line)
+      }
     }
     observeSizes(sizeTargets)
     const currentTime = performance.now()
@@ -169,8 +180,7 @@ export function watchLineReveals(container: HTMLElement): () => void {
       } else if (line.static) {
         start = { at: currentTime, static: true }
       } else {
-        const firstChild = element.dataset.lineRevealContainer === 'true'
-          ? [...measured.values()].find(child => child.element !== element && element.contains(child.element)) : undefined
+        const firstChild = firstChildren.get(element)
         if (firstChild) start = startFor(firstChild)
         else {
           start = { at: nextStart, static: false }

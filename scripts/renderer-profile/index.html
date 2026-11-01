@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'" />
+  <title>Pion isolated renderer profile</title>
+  <style>
+    html, body, #root { width: 100%; height: 100%; margin: 0; }
+    .profile-shell { height: 100%; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; box-sizing: border-box; }
+    .profile-controls { width: min(1100px, 100%); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .profile-controls h1 { margin: 0 auto 0 0; font-size: 17px; }
+    .profile-scenarios { display: flex; flex-wrap: wrap; gap: 6px; }
+    .profile-shell > .profile-viewport { position: relative; inset: auto; flex: 0 0 640px; width: min(1100px, 100%); height: 640px; min-height: 0; max-height: 640px; box-sizing: border-box; border: 1px solid var(--border); overflow: auto; }
+    .profile-wrapped { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; font: 12px/1.5 var(--mono); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="./fixture.tsx"></script>
+</body>
+</html>

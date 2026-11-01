@@ -2,11 +2,11 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DisclosureRevealGate } from '../../src/renderer/src/features/common/DisclosureRevealGate'
-import { REVIEW_REVEAL_CHUNK_SIZE, ReviewRevealText } from '../../src/renderer/src/features/review/ReviewRevealText'
-import { subscribeTextRevealOrder } from '../../src/renderer/src/utils/textRevealOrder'
+import { REVIEW_REVEAL_CHUNK_SIZE, REVIEW_REVEAL_COARSE_SIZE, ReviewRevealText } from '../../src/renderer/src/features/review/ReviewRevealText'
+import { subscribeTextRevealOrder, TEXT_REVEAL_FRAME_CHARACTER_BUDGET } from '../../src/renderer/src/utils/textRevealOrder'
 import {
   SCREEN_TEXT_REVEAL_STAGGER_MS, SCREEN_TEXT_REVEAL_MAX_DELAY_MS,
-  SCREEN_TEXT_REVEAL_DURATION_MS, SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS
+  SCREEN_TEXT_REVEAL_DURATION_MS, SCREEN_TEXT_REVEAL_LIVE_DURATION_MS, SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS
 } from '../../src/renderer/src/utils/screenTextReveal'
 
 let bounds: WeakMap<Element, DOMRect>
@@ -43,21 +43,25 @@ function historyDeadline(count: number): number {
 }
 
 function observeReveals() {
-  let intersect!: (entries: Array<{ target: Element; isIntersecting: boolean }>) => void
+  let intersect!: (entries: Array<{ target: Element; isIntersecting: boolean; time: number }>) => void
   const targets: Element[] = []
   const created = vi.fn()
   const disconnect = vi.fn()
   vi.stubGlobal('IntersectionObserver', class {
+    private seen = new Set<Element>()
     constructor(callback: typeof intersect) { intersect = callback; created() }
-    observe(target: Element) { targets.push(target); bounds.set(target, new DOMRect(0, 1200, 200, 20)) }
+    observe(target: Element) {
+      if (!this.seen.has(target)) { this.seen.add(target); targets.push(target); bounds.set(target, new DOMRect(0, 1200, 200, 20)) }
+    }
     unobserve() {}
     disconnect = disconnect
   })
   return { created, disconnect, targets,
-    notify: (...entries: Element[]) => act(() => intersect(entries.map(target => ({ target, isIntersecting: true })))),
+    hide: (...entries: Element[]) => act(() => intersect(entries.map(target => ({ target, isIntersecting: false, time: performance.now() + 1 })))),
+    notify: (...entries: Element[]) => act(() => intersect(entries.map(target => ({ target, isIntersecting: true, time: performance.now() + 1 })))),
     reveal: (...entries: Element[]) => {
       entries.forEach(target => bounds.set(target, new DOMRect(10, 10, 200, 20)))
-      act(() => intersect(entries.map(target => ({ target, isIntersecting: true }))))
+      act(() => intersect(entries.map(target => ({ target, isIntersecting: true, time: performance.now() + 1 }))))
     }
   }
 }
@@ -569,6 +573,586 @@ it('does not inherit future character delays when a new scope reuses the same ro
     .toBeCloseTo(index * SCREEN_TEXT_REVEAL_STAGGER_MS))
 })
 
+it.each([['history', 180], ['live', 360]] as const)(
+  'budgets visible %s requests in DOM order across frames with one absolute cap', (mode, cap) => {
+    vi.stubGlobal('IntersectionObserver', undefined)
+    const root = document.createElement('div')
+    root.className = 'chat-scroll'
+    document.body.append(root)
+    const elements = Array.from({ length: 5 }, () => document.createElement('span'))
+    root.append(...elements)
+    const calls: Array<{ index: number; delay: number; maxDelay: number; at: number }> = []
+    const subscriptions = elements.map(element => subscribeTextRevealOrder(element))
+    const count = Math.floor(TEXT_REVEAL_FRAME_CHARACTER_BUDGET / 2)
+    // Reverse registration order to exercise DOM ordering, independent of IO.
+    subscriptions.forEach((_, index) => {
+      const i = subscriptions.length - index - 1
+      subscriptions[i].wait({ count, mode, admit: ordered => calls.push({ index: i, ...ordered, at: performance.now() }) })
+    })
+    const origin = performance.now()
+    advanceFrame()
+    expect(calls.map(call => call.index)).toEqual([0, 1])
+    expect(frames.size).toBe(1)
+    act(() => vi.advanceTimersByTime(40))
+    advanceFrame()
+    expect(calls.map(call => call.index)).toEqual([0, 1, 2, 3])
+    expect(calls[2].delay).toBe(cap - 40)
+    expect(calls[2].maxDelay).toBe(0)
+    act(() => vi.advanceTimersByTime(cap + 1))
+    advanceFrame()
+    expect(calls.map(call => call.index)).toEqual([0, 1, 2, 3, 4])
+    expect(calls[4].delay).toBe(0)
+    expect(calls[4].maxDelay).toBe(0)
+    expect(calls.slice(0, 4).every(call => call.at + call.delay <= origin + cap)).toBe(true)
+    expect(frames.size).toBe(0)
+    subscriptions.forEach(subscription => subscription.dispose())
+    root.remove()
+  }
+)
+
+it.each([['history', 180, SCREEN_TEXT_REVEAL_DURATION_MS], ['live', 360, SCREEN_TEXT_REVEAL_LIVE_DURATION_MS]] as const)(
+  'keeps the original %s continuation cap when pending tail content grows', (mode, cap, duration) => {
+    vi.stubGlobal('IntersectionObserver', undefined)
+    const original = 'a'.repeat(960) + 'b'.repeat(80)
+    const view = (text: string) => <div className="chat-scroll"><ReviewRevealText text={text} mode={mode} /></div>
+    const { container, rerender } = render(view(original))
+    advanceFrame()
+    const first = [...container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+    const firstDelays = first.map(node => node.style.getPropertyValue('--screen-text-reveal-delay'))
+    expect(first).toHaveLength(960)
+    const tail = container.querySelector('.chat-scroll > span:last-child')!
+    expect(tail).toHaveAttribute('data-text-reveal-pending', 'true')
+    act(() => vi.advanceTimersByTime(40))
+    rerender(view(original + 'c'.repeat(20)))
+    advanceFrame()
+    const characters = [...tail.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+    expect(characters).toHaveLength(100)
+    expect(characters.map(node => node.textContent).join('')).toBe('b'.repeat(80) + 'c'.repeat(20))
+    expect(characters.map(node => parseFloat(node.style.getPropertyValue('--screen-text-reveal-delay'))))
+      .toEqual(Array(100).fill(cap - 40))
+    expect([...container.querySelectorAll('[data-screen-reveal-character]')].slice(0, 960)).toEqual(first)
+    expect(first.map(node => node.style.getPropertyValue('--screen-text-reveal-delay'))).toEqual(firstDelays)
+    const remaining = cap - 40 + duration + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS
+    act(() => vi.advanceTimersByTime(remaining - 1))
+    expect(first.every(node => node.isConnected)).toBe(true)
+    expect([...tail.querySelectorAll('[data-screen-reveal-character]')]).toEqual(characters)
+    act(() => vi.advanceTimersByTime(1))
+    expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+    expect(container.textContent).toBe(original + 'c'.repeat(20))
+  }
+)
+
+it.each([['history', 180], ['live', 360]] as const)(
+  'gives an independently replaced %s pending tail a new horizon', (mode, cap) => {
+    vi.stubGlobal('IntersectionObserver', undefined)
+    const prefix = 'a'.repeat(960)
+    const view = (text: string) => <div className="chat-scroll"><ReviewRevealText text={text} mode={mode} /></div>
+    const { container, rerender } = render(view(prefix + 'b'.repeat(80)))
+    advanceFrame()
+    act(() => vi.advanceTimersByTime(40))
+    rerender(view(prefix + 'c'.repeat(80)))
+    advanceFrame()
+    const tail = container.querySelector('.chat-scroll > span:last-child')!
+    const characters = [...tail.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+    expect(characters.map(node => node.textContent).join('')).toBe('c'.repeat(80))
+    expect(parseFloat(characters.at(-1)!.style.getPropertyValue('--screen-text-reveal-delay'))).toBe(cap)
+  }
+)
+
+it.each([['history', 180, 1.2], ['live', 360, 2.4]] as const)(
+  'starts a fresh %s horizon for a suffix after its previous request was admitted', (mode, cap, stagger) => {
+    vi.stubGlobal('IntersectionObserver', undefined)
+    const view = (suffix: string, waiting: boolean) => <div className="chat-scroll">
+      <ReviewRevealText text={'a' + suffix} mode={mode} />
+      {waiting && <ReviewRevealText text={'b'.repeat(1040)} mode={mode} />}
+    </div>
+    const { container, rerender } = render(view('', true))
+    advanceFrame()
+    const first = container.querySelector('[data-screen-reveal-character]')!
+    expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(961)
+    act(() => vi.advanceTimersByTime(40))
+    rerender(view('c'.repeat(150), false))
+    advanceFrame()
+    const characters = [...container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+    expect(characters[0]).toBe(first)
+    expect(characters.slice(1).map(node => node.textContent).join('')).toBe('c'.repeat(150))
+    expect(parseFloat(characters.at(-1)!.style.getPropertyValue('--screen-text-reveal-delay')))
+      .toBeCloseTo(Math.min(149 * stagger, cap))
+  }
+)
+
+it('retains the continuation characters until their original absolute fade deadline', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const chunks = Math.floor(TEXT_REVEAL_FRAME_CHARACTER_BUDGET / REVIEW_REVEAL_CHUNK_SIZE) + 1
+  const text = 'a'.repeat(chunks * REVIEW_REVEAL_CHUNK_SIZE)
+  const { container } = render(<div className="chat-scroll"><ReviewRevealText text={text} /></div>)
+  advanceFrame()
+  expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength((chunks - 1) * REVIEW_REVEAL_CHUNK_SIZE)
+  act(() => vi.advanceTimersByTime(40))
+  advanceFrame()
+  const lastChunk = container.querySelector('.chat-scroll > span:last-child')!
+  const characters = [...lastChunk.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+  expect(characters).toHaveLength(REVIEW_REVEAL_CHUNK_SIZE)
+  expect(parseFloat(characters[0].style.getPropertyValue('--screen-text-reveal-delay')))
+    .toBe(SCREEN_TEXT_REVEAL_MAX_DELAY_MS - 40)
+  const deadline = SCREEN_TEXT_REVEAL_MAX_DELAY_MS - 40 + SCREEN_TEXT_REVEAL_DURATION_MS + SCREEN_TEXT_REVEAL_CLEANUP_GRACE_MS
+  act(() => vi.advanceTimersByTime(deadline - 1))
+  expect([...lastChunk.querySelectorAll('[data-screen-reveal-character]')]).toEqual(characters)
+  act(() => vi.advanceTimersByTime(1))
+  expect(lastChunk.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+  expect(container.textContent).toBe(text)
+})
+
+it('advances an oversized first request and waits at an unready barrier without polling', async () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const root = document.createElement('div')
+  root.className = 'chat-scroll'
+  const first = document.createElement('span'), barrier = document.createElement('div'), later = document.createElement('span')
+  barrier.className = 'screen-text-reveal-line'
+  root.append(first, barrier, later)
+  document.body.append(root)
+  const firstSubscription = subscribeTextRevealOrder(first), laterSubscription = subscribeTextRevealOrder(later)
+  const firstAdmit = vi.fn(), laterAdmit = vi.fn()
+  firstSubscription.wait({ count: TEXT_REVEAL_FRAME_CHARACTER_BUDGET + 1, mode: 'history', admit: firstAdmit })
+  laterSubscription.wait({ count: 1, mode: 'history', admit: laterAdmit })
+  advanceFrame()
+  expect(firstAdmit).toHaveBeenCalledOnce()
+  expect(laterAdmit).not.toHaveBeenCalled()
+  expect(frames.size).toBe(0)
+  await act(async () => { barrier.remove() })
+  expect(frames.size).toBe(1)
+  advanceFrame()
+  expect(laterAdmit).toHaveBeenCalledOnce()
+  firstSubscription.dispose()
+  laterSubscription.dispose()
+  root.remove()
+})
+
+it.each(['hidden', 'scope', 'dispose'] as const)('revalidates a queued continuation after %s', async change => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const root = document.createElement('div')
+  root.className = 'chat-scroll'
+  root.dataset.lineRevealScope = 'old'
+  const first = document.createElement('span'), second = document.createElement('span')
+  root.append(first, second)
+  document.body.append(root)
+  const a = subscribeTextRevealOrder(first), b = subscribeTextRevealOrder(second)
+  const firstAdmit = vi.fn(), secondAdmit = vi.fn()
+  a.wait({ count: TEXT_REVEAL_FRAME_CHARACTER_BUDGET, mode: 'history', admit: firstAdmit })
+  b.wait({ count: 1, mode: 'history', admit: secondAdmit })
+  advanceFrame()
+  expect(firstAdmit).toHaveBeenCalledOnce()
+  expect(frames.size).toBe(1)
+  await act(async () => {
+    if (change === 'hidden') root.hidden = true
+    if (change === 'scope') root.dataset.lineRevealScope = 'new'
+    if (change === 'dispose') b.dispose()
+  })
+  advanceFrame()
+  if (change === 'scope') expect(secondAdmit).toHaveBeenCalledWith({ delay: 0, maxDelay: SCREEN_TEXT_REVEAL_MAX_DELAY_MS })
+  else expect(secondAdmit).not.toHaveBeenCalled()
+  expect(frames.size).toBe(0)
+  if (change === 'hidden') {
+    await act(async () => { root.hidden = false })
+    expect(frames.size).toBe(1)
+    advanceFrame()
+    expect(secondAdmit).toHaveBeenCalledOnce()
+  }
+  a.dispose()
+  b.dispose()
+  root.remove()
+})
+
+it('skips known offscreen pending geometry during scroll and measures an entered target immediately', () => {
+  const observer = observeReveals()
+  const root = document.createElement('div')
+  root.className = 'chat-scroll'
+  const elements = Array.from({ length: 120 }, () => document.createElement('span'))
+  root.append(...elements)
+  document.body.append(root)
+  const admits = elements.map(() => vi.fn())
+  const subscriptions = elements.map((element, index) => {
+    const subscription = subscribeTextRevealOrder(element)
+    subscription.wait({ count: 1, mode: 'history', admit: admits[index] })
+    return subscription
+  })
+  observer.hide(...elements)
+  const reads = vi.mocked(HTMLElement.prototype.getBoundingClientRect)
+  const styles = vi.spyOn(window, 'getComputedStyle')
+  reads.mockClear()
+  styles.mockClear()
+  root.dispatchEvent(new Event('scroll'))
+  advanceFrame()
+  expect(reads.mock.contexts.some(node => elements.includes(node as HTMLSpanElement))).toBe(false)
+  expect(styles.mock.calls.some(([node]) => elements.includes(node as HTMLSpanElement))).toBe(false)
+  observer.reveal(elements[42])
+  advanceFrame()
+  expect(admits[42]).toHaveBeenCalledOnce()
+  expect(admits.filter(admit => admit.mock.calls.length)).toHaveLength(1)
+  subscriptions.forEach(subscription => subscription.dispose())
+  observer.reveal(elements[43])
+  expect(frames.size).toBe(0)
+  root.remove()
+})
+
+it('ignores a stale negative after a new request while preserving other queued receipts', () => {
+  let callback!: (entries: IntersectionObserverEntry[]) => void
+  let queued: IntersectionObserverEntry[] = []
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(cb: typeof callback) { callback = cb }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords() { const entries = queued; queued = []; return entries }
+  })
+  const root = document.createElement('div'), first = document.createElement('span'), second = document.createElement('span')
+  root.className = 'chat-scroll'
+  root.append(first, second); document.body.append(root)
+  const a = subscribeTextRevealOrder(first), b = subscribeTextRevealOrder(second)
+  const calls: string[] = []
+  a.wait({ count: 1, mode: 'history', admit: () => calls.push('old') })
+  b.wait({ count: 1, mode: 'history', admit: () => calls.push('second') })
+  act(() => vi.advanceTimersByTime(10))
+  const entry = (target: Element, isIntersecting: boolean, time: number) => ({ target, isIntersecting, time }) as IntersectionObserverEntry
+  queued = [entry(second, false, performance.now())]
+  a.wait({ count: 1, mode: 'history', admit: () => calls.push('first') })
+  act(() => callback([entry(first, false, performance.now() - 1)]))
+  advanceFrame()
+  expect(calls).toEqual(['first'])
+  act(() => callback([entry(second, true, performance.now() + 1)]))
+  advanceFrame()
+  expect(calls).toEqual(['first', 'second'])
+  a.dispose(); b.dispose()
+  act(() => callback([entry(second, true, performance.now() + 1)]))
+  expect(frames.size).toBe(0)
+  root.remove()
+})
+
+it('keeps offscreen eligibility indexed while an admitted chunk changes its characters', async () => {
+  const observer = observeReveals()
+  const root = document.createElement('div'), first = document.createElement('span'), later = document.createElement('span')
+  root.className = 'chat-scroll'
+  first.textContent = 'a'
+  root.append(first, later)
+  document.body.append(root)
+  const firstSubscription = subscribeTextRevealOrder(first), laterSubscription = subscribeTextRevealOrder(later)
+  const firstAdmit = vi.fn(), laterAdmit = vi.fn()
+  firstSubscription.wait({ count: 1, mode: 'history', admit: firstAdmit })
+  laterSubscription.wait({ count: 1, mode: 'history', admit: laterAdmit })
+  observer.hide(later)
+  observer.reveal(first)
+  advanceFrame()
+  expect(firstAdmit).toHaveBeenCalledOnce()
+  bounds.set(later, new DOMRect(10, 10, 200, 20))
+  await act(async () => {
+    const character = document.createElement('span')
+    character.dataset.screenRevealCharacter = 'true'
+    character.textContent = 'a'
+    first.replaceChildren(character)
+  })
+  const reads = vi.mocked(HTMLElement.prototype.getBoundingClientRect)
+  reads.mockClear()
+  advanceFrame()
+  expect(reads.mock.contexts).not.toContain(later)
+  expect(laterAdmit).not.toHaveBeenCalled()
+  firstSubscription.dispose()
+  laterSubscription.dispose()
+  root.remove()
+})
+
+it.each(['child', 'style'] as const)('wakes negative candidates on ordinary admitted-owner %s changes', async change => {
+  const observer = observeReveals()
+  const root = document.createElement('div'), first = document.createElement('span'), later = document.createElement('span')
+  root.className = 'chat-scroll'; first.textContent = 'a'; root.append(first, later); document.body.append(root)
+  const a = subscribeTextRevealOrder(first), b = subscribeTextRevealOrder(later), admit = vi.fn()
+  a.wait({ count: 1, mode: 'history', admit: () => {} })
+  b.wait({ count: 1, mode: 'history', admit })
+  observer.hide(later); observer.reveal(first); advanceFrame()
+  bounds.set(later, new DOMRect(10, 10, 200, 20))
+  await act(async () => {
+    if (change === 'child') first.append(document.createElement('b'))
+    else first.style.width = '20px'
+  })
+  advanceFrame()
+  expect(admit).toHaveBeenCalledOnce()
+  a.dispose(); b.dispose(); root.remove()
+})
+
+it('rebinds moved roots and wakes detached pending work on reconnection', async () => {
+  const observer = observeReveals()
+  const old = document.createElement('section'), fresh = document.createElement('section')
+  const root = document.createElement('div'), target = document.createElement('span')
+  root.className = 'chat-scroll'; root.append(target); old.append(root); document.body.append(old, fresh)
+  const subscription = subscribeTextRevealOrder(target), admit = vi.fn()
+  subscription.wait({ count: 1, mode: 'history', admit }); observer.hide(target)
+  await act(async () => { root.remove() })
+  advanceFrame()
+  fresh.hidden = true
+  await act(async () => { fresh.append(root) })
+  bounds.set(target, new DOMRect(10, 10, 200, 20))
+  advanceFrame()
+  expect(admit).not.toHaveBeenCalled()
+  await act(async () => { old.hidden = true })
+  expect(frames.size).toBe(0)
+  await act(async () => { fresh.hidden = false })
+  advanceFrame()
+  expect(admit).toHaveBeenCalledOnce()
+  subscription.dispose(); old.remove(); fresh.remove()
+})
+
+it('keeps a moved pending element bound to its original semantic root', async () => {
+  const observer = observeReveals()
+  const old = document.createElement('div'), fresh = document.createElement('div'), target = document.createElement('span')
+  old.className = fresh.className = 'chat-scroll'
+  old.append(target); document.body.append(old, fresh)
+  const subscription = subscribeTextRevealOrder(target), admit = vi.fn()
+  subscription.wait({ count: 1, mode: 'history', admit }); observer.hide(target)
+  await act(async () => { fresh.append(target) })
+  observer.reveal(target); advanceFrame()
+  expect(admit).not.toHaveBeenCalled()
+  subscription.dispose(); old.remove(); fresh.remove()
+})
+
+it.each(['hidden', 'style', 'remove barrier', 'reparent'] as const)(
+  'invalidates affected offscreen eligibility on %s without another intersection', async change => {
+    const observer = observeReveals()
+    const outer = document.createElement('div'), root = document.createElement('div')
+    root.className = 'chat-scroll'
+    const branch = document.createElement('section'), target = document.createElement('span')
+    const barrier = document.createElement('div')
+    barrier.className = 'screen-text-reveal-line'
+    branch.append(target)
+    root.append(barrier, branch)
+    outer.append(root)
+    document.body.append(outer)
+    const admit = vi.fn(), subscription = subscribeTextRevealOrder(target)
+    subscription.wait({ count: 1, mode: 'history', admit })
+    observer.hide(target)
+    bounds.set(target, new DOMRect(10, 10, 200, 20))
+    advanceFrame()
+    expect(admit).not.toHaveBeenCalled()
+    await act(async () => {
+      if (change === 'hidden') outer.hidden = true
+      if (change === 'style') outer.style.display = 'none'
+      if (change === 'remove barrier') barrier.remove()
+      if (change === 'reparent') { barrier.remove(); root.append(target) }
+    })
+    if (change === 'hidden' || change === 'style') {
+      advanceFrame()
+      expect(admit).not.toHaveBeenCalled()
+      await act(async () => {
+        barrier.remove()
+        if (change === 'hidden') outer.hidden = false
+        else outer.style.display = ''
+      })
+    }
+    advanceFrame()
+    expect(admit).toHaveBeenCalledOnce()
+    subscription.dispose()
+    outer.remove()
+  }
+)
+
+it('falls back to all pending geometry for an unknown mutation and ignores late callbacks', () => {
+  const observer = observeReveals()
+  let callback!: MutationCallback
+  vi.stubGlobal('MutationObserver', class {
+    constructor(receive: MutationCallback) { callback = receive }
+    observe() {}
+    disconnect() {}
+    takeRecords() { return [] }
+  })
+  const root = document.createElement('div'), target = document.createElement('span')
+  root.className = 'chat-scroll'
+  root.append(target)
+  document.body.append(root)
+  const admit = vi.fn(), subscription = subscribeTextRevealOrder(target)
+  subscription.wait({ count: 1, mode: 'history', admit })
+  observer.hide(target)
+  bounds.set(target, new DOMRect(10, 10, 200, 20))
+  advanceFrame()
+  expect(admit).not.toHaveBeenCalled()
+  callback([{ type: 'unknown' } as unknown as MutationRecord], {} as MutationObserver)
+  advanceFrame()
+  expect(admit).toHaveBeenCalledOnce()
+  subscription.dispose()
+  callback([{ type: 'unknown' } as unknown as MutationRecord], {} as MutationObserver)
+  observer.reveal(target)
+  expect(frames.size).toBe(0)
+  root.remove()
+})
+
+it('does not schedule idle subscribers, including a replaced pending subscription', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const root = document.createElement('div'), element = document.createElement('span')
+  root.className = 'chat-scroll'
+  root.append(element)
+  document.body.append(root)
+  const old = subscribeTextRevealOrder(element)
+  old.wait({ count: 1, mode: 'history', admit: vi.fn() })
+  const replacement = subscribeTextRevealOrder(element)
+  advanceFrame()
+  root.dispatchEvent(new Event('scroll'))
+  expect(frames.size).toBe(0)
+  old.dispose()
+  replacement.dispose()
+  root.remove()
+})
+
+it.each([['history', 180], ['live', 360]] as const)(
+  'preserves a single coarse %s wake across a slow frame and plain pre root', (mode, cap) => {
+    vi.stubGlobal('IntersectionObserver', undefined)
+    const start = performance.now() + 1000
+    const { container } = render(<pre className="screen-text-reveal-line" data-line-reveal-ready="true"
+      data-line-reveal-start={start}><ReviewRevealText mode={mode} text={'a'.repeat(REVIEW_REVEAL_COARSE_SIZE)} deferOffscreen /></pre>)
+    advanceFrame()
+    expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+    act(() => vi.advanceTimersByTime(1100))
+    advanceFrame()
+    const chars = [...container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+    expect(chars.length).toBeGreaterThan(0)
+    expect(Math.max(...chars.map(node => parseFloat(node.style.getPropertyValue('--screen-text-reveal-delay')))))
+      .toBeLessThanOrEqual(cap - 100)
+  }
+)
+
+it('refines only an entered coarse block while preserving all text', () => {
+  const observer = observeReveals()
+  const text = '🙂a'.repeat(REVIEW_REVEAL_COARSE_SIZE * 2)
+  const { container } = render(<div className="chat-scroll"><pre><ReviewRevealText text={text} deferOffscreen /></pre></div>)
+  const coarse = [...container.querySelectorAll('pre > span')]
+  expect(coarse).toHaveLength(4)
+  expect(observer.targets).toEqual(coarse)
+  expect(container.textContent).toBe(text)
+  observer.reveal(coarse[0])
+  advanceFrame()
+  expect(container.textContent).toBe(text)
+  expect(coarse[0].querySelectorAll(':scope > span')).toHaveLength(Math.ceil(REVIEW_REVEAL_COARSE_SIZE / REVIEW_REVEAL_CHUNK_SIZE))
+  expect(coarse[1].childNodes).toHaveLength(1)
+  expect(coarse[1].firstChild?.nodeType).toBe(Node.TEXT_NODE)
+  expect(observer.created).toHaveBeenCalledOnce()
+  observer.reveal(observer.targets[4])
+  advanceFrame()
+  expect(container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(REVIEW_REVEAL_CHUNK_SIZE)
+  expect(container.textContent).toBe(text)
+})
+
+it('waits for selection to leave a coarse block before refining without polling', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const text = 'a'.repeat(REVIEW_REVEAL_COARSE_SIZE)
+  const { container } = render(<div className="chat-scroll"><ReviewRevealText text={text} deferOffscreen /></div>)
+  const coarse = container.querySelector('.chat-scroll > span')!
+  const range = document.createRange()
+  range.setStart(coarse.firstChild!, 1)
+  range.setEnd(coarse.firstChild!, 10)
+  const selection = document.getSelection()!
+  selection.removeAllRanges()
+  selection.addRange(range)
+  advanceFrame()
+  expect(coarse.firstChild?.nodeType).toBe(Node.TEXT_NODE)
+  expect(frames.size).toBe(0)
+  expect(selection.toString()).toBe('a'.repeat(9))
+  act(() => { selection.removeAllRanges(); document.dispatchEvent(new Event('selectionchange')) })
+  advanceFrame()
+  expect(coarse.querySelectorAll(':scope > span')).toHaveLength(Math.ceil(REVIEW_REVEAL_COARSE_SIZE / REVIEW_REVEAL_CHUNK_SIZE))
+  expect(container.textContent).toBe(text)
+})
+
+it('hands the coarse barrier to fine requests before admitting later text', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const text = 'a'.repeat(REVIEW_REVEAL_COARSE_SIZE)
+  const { container } = render(<div className="chat-scroll">
+    <pre data-part="first"><ReviewRevealText text={text} deferOffscreen /></pre>
+    <pre data-part="later"><ReviewRevealText text="later" /></pre>
+  </div>)
+  const first = container.querySelector('[data-part="first"]')!
+  const later = container.querySelector('[data-part="later"]')!
+  expect(first.firstElementChild).toHaveAttribute('data-text-reveal-pending', 'true')
+  advanceFrame()
+  expect(first.querySelectorAll(':scope > span > span')).toHaveLength(Math.ceil(REVIEW_REVEAL_COARSE_SIZE / REVIEW_REVEAL_CHUNK_SIZE))
+  expect(later.querySelector('[data-screen-reveal-character]')).toBeNull()
+  expect(first.querySelector('[data-text-reveal-pending="true"]')).not.toBeNull()
+  advanceFrame()
+  expect(first.querySelector('[data-screen-reveal-character]')).not.toBeNull()
+  expect(later.querySelector('[data-screen-reveal-character]')).toBeNull()
+})
+
+it('preserves the same clock horizon across a preparation commit', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const { container } = render(<div className="chat-scroll">
+    <pre data-part="before"><ReviewRevealText text={'b'.repeat(160)} /></pre>
+    <pre data-part="coarse"><ReviewRevealText text={'a'.repeat(REVIEW_REVEAL_COARSE_SIZE)} deferOffscreen /></pre>
+  </div>)
+  advanceFrame()
+  const before = container.querySelectorAll('[data-part="before"] [data-screen-reveal-character]')
+  expect(before).toHaveLength(160)
+  expect(container.querySelector('[data-part="coarse"] [data-screen-reveal-character]')).toBeNull()
+  act(() => vi.advanceTimersByTime(40))
+  advanceFrame()
+  const fine = [...container.querySelectorAll<HTMLElement>('[data-part="coarse"] [data-screen-reveal-character]')]
+  expect(fine.length).toBeGreaterThan(0)
+  expect(fine.every(node => parseFloat(node.style.getPropertyValue('--screen-text-reveal-delay')) <= SCREEN_TEXT_REVEAL_MAX_DELAY_MS - 40)).toBe(true)
+})
+
+it('retains refined prefixes on append and handles surrogate completion and replacement', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const initial = 'a'.repeat(REVIEW_REVEAL_COARSE_SIZE - 1) + '\ud83d'
+  const view = (text: string) => <div className="chat-scroll"><ReviewRevealText text={text} mode="live" deferOffscreen /></div>
+  const { container, rerender } = render(view(initial))
+  advanceFrame()
+  advanceFrame()
+  const first = container.querySelector('[data-screen-reveal-character]')!
+  const delay = (first as HTMLElement).style.getPropertyValue('--screen-text-reveal-delay')
+  rerender(view(initial + '\ude42' + 'b'))
+  expect(container.textContent).toBe(initial + '\ude42' + 'b')
+  expect(container.querySelector('[data-screen-reveal-character]')).toBe(first)
+  expect((first as HTMLElement).style.getPropertyValue('--screen-text-reveal-delay')).toBe(delay)
+  rerender(view('new🙂'))
+  expect(container.textContent).toBe('new🙂')
+  expect(first.isConnected).toBe(false)
+  rerender(view('n'))
+  expect(container.textContent).toBe('n')
+})
+
+it('keeps initially short instances structurally stable and long reduced-motion text static', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const { container, rerender, unmount } = render(<ReviewRevealText text="short" />)
+  advanceFrame()
+  const first = container.firstElementChild
+  rerender(<ReviewRevealText text={'short' + 'x'.repeat(REVIEW_REVEAL_COARSE_SIZE)} />)
+  expect(container.firstElementChild).toBe(first)
+  unmount()
+  vi.stubGlobal('matchMedia', () => ({ matches: true }))
+  const observer = observeReveals()
+  const text = 'x'.repeat(REVIEW_REVEAL_COARSE_SIZE * 2)
+  const next = render(<div className="chat-scroll"><ReviewRevealText text={text} deferOffscreen /></div>)
+  expect(next.container.textContent).toBe(text)
+  expect(observer.created).not.toHaveBeenCalled()
+  expect(next.container.querySelector('[data-text-reveal-pending]')).toBeNull()
+})
+
+it('freezes the default fine structure for long text when the opt-in changes', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const text = 'x'.repeat(REVIEW_REVEAL_COARSE_SIZE)
+  const view = (deferOffscreen?: boolean) => <div className="chat-scroll">
+    <ReviewRevealText text={text} deferOffscreen={deferOffscreen} />
+  </div>
+  const { container, rerender } = render(view())
+  const chunks = [...container.querySelectorAll('.chat-scroll > span')]
+  expect(chunks).toHaveLength(Math.ceil(text.length / REVIEW_REVEAL_CHUNK_SIZE))
+  expect(container.querySelector('[data-text-reveal-coarse]')).toBeNull()
+  advanceFrame()
+  const characters = [...container.querySelectorAll<HTMLElement>('[data-screen-reveal-character]')]
+  const delays = characters.map(node => node.style.getPropertyValue('--screen-text-reveal-delay'))
+  expect(characters.length).toBeGreaterThan(0)
+  rerender(view(true))
+  expect([...container.querySelectorAll('.chat-scroll > span')]).toEqual(chunks)
+  expect(container.querySelector('[data-text-reveal-coarse]')).toBeNull()
+  expect([...container.querySelectorAll('[data-screen-reveal-character]')]).toEqual(characters)
+  expect(characters.map(node => node.style.getPropertyValue('--screen-text-reveal-delay'))).toEqual(delays)
+  expect(container.textContent).toBe(text)
+})
+
 function admittedFutureSources() {
   vi.stubGlobal('IntersectionObserver', undefined)
   const root = document.createElement('div')
@@ -811,6 +1395,26 @@ it('waits for earlier sibling headers instead of starting a detail from the midd
   expect(container.querySelector('pre')).toHaveTextContent('detail')
 })
 
+it('skips offscreen pending ancestors before style reads and wakes on geometry changes', () => {
+  vi.stubGlobal('IntersectionObserver', undefined)
+  const { container } = render(<div className="chat-scroll">
+    <section data-part="offscreen"><ReviewRevealText text="waiting" /></section>
+    <section data-part="visible"><ReviewRevealText text="visible" /></section>
+  </div>)
+  const offscreen = container.querySelector<HTMLElement>('[data-part="offscreen"]')!
+  const target = offscreen.firstElementChild!
+  bounds.set(target, new DOMRect(0, 1200, 100, 20))
+  const styles = vi.spyOn(window, 'getComputedStyle')
+  advanceFrame()
+  expect(styles.mock.calls.some(([node]) => node === target || node === offscreen)).toBe(false)
+  expect(target.querySelector('[data-screen-reveal-character]')).toBeNull()
+  expect(container.querySelector('[data-part="visible"] [data-screen-reveal-character]')).not.toBeNull()
+  bounds.set(target, new DOMRect(0, 10, 100, 20))
+  container.firstElementChild!.dispatchEvent(new Event('scroll'))
+  advanceFrame()
+  expect(target.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(7)
+})
+
 it('ignores zero geometry and nested clipping without allowing offscreen unready parents to block visible text', () => {
   const observer = observeReveals()
   const { container } = render(<div className="chat-scroll"><div style={{ overflowX: 'hidden', overflowY: 'hidden' }}>
@@ -840,7 +1444,8 @@ it('rechunks only the committed tail and appended suffix without splitting surro
   const from = vi.spyOn(Array, 'from')
   const suffix = '\ude42新'
   rerender(<div className="chat-scroll"><pre><ReviewRevealText text={prefix + tail + suffix} /></pre></div>)
-  expect(from.mock.calls.filter(([value]) => typeof value === 'string').map(([value]) => value)).toEqual([tail + suffix])
+  // Chunking walks code points directly, without copying the tail to an array.
+  expect(from.mock.calls.filter(([value]) => typeof value === 'string')).toHaveLength(0)
   expect(container.querySelector('pre > span')).toBe(first)
   expect([...container.querySelectorAll('pre > span')].map((node) => node.textContent)).toEqual([prefix, prefix, '新'])
   expect(container.textContent).toBe(prefix + tail + suffix)

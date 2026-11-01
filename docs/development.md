@@ -35,6 +35,10 @@ Pi Durable 的渐进替换提案见 [迁移方案](pi-durable-migration.md)；�
 
 `SessionDiscovery` 流式投影只读列表，成功元数据按文件快照复用，坏读拒新列表；`SessionTokenCache` 在重新打开并验证文件回执后跳过未变正文。两者只服务侧栏，完整账本仍独立采集。Markdown 按实例最新正文/管线缓存纯解析与高亮树，逐次克隆后执行渐显及安全转换；工具组按真实调用 ID 线性匹配原组身份。默认生图的私有单次 PNG 回执绑定独立字节及全部预算，注入输出仍完整校验。调用计数改善保持与实机耗时/帧率分开。
 
+## 渲染性能采样
+
+获准后使用 `node scripts/profile-renderer.mjs --label current --runs 3` 构建并启动独立的真实组件采样窗口，原 Pion 实例保持运行，临时 HOME/userData/Agent 目录及合成内容独立。该入口只构建临时 renderer，不启动 Agent 或模型，不安装应用。离线报告用 `node scripts/renderer-profile/report.mjs [--trace] <目录...>`；场景、隔离、GPU/计时边界和采样记录见 [渲染性能采样](renderer-performance.md)。
+
 ## 测试发现与覆盖率隔离
 
 - `vitest.config.ts` 与 `vitest.coverage.config.ts` 共用 `tests/test-files.ts` 的发现模式：`tests/unit/**/*.test.ts`、`tests/renderer/**/*.test.{ts,tsx}`。新增或移动符合模式的测试自动纳入普通测试和覆盖率，不维护手工 import 清单；E2E 继续使用独立 Playwright 配置，helper 与旧聚合入口不在发现范围内。

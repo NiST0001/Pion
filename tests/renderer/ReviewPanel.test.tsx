@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 
 import '@testing-library/jest-dom/vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { Suspense, startTransition, useState } from 'react'
 import type { ComponentProps } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { ReviewPanel } from '../../src/renderer/src/features/review/ReviewPanel'
-import type { GitFileStatus, GitWorkspaceSnapshot } from '../../src/shared/types'
+import type { GitFileDiff, GitFileStatus, GitWorkspaceSnapshot } from '../../src/shared/types'
 
 function file(path: string, overrides: Partial<GitFileStatus> = {}): GitFileStatus {
   return {
@@ -88,6 +89,98 @@ function expectFileStats(row: HTMLElement, additions: number, deletions: number)
 }
 
 describe('ReviewPanel', () => {
+  it('keeps hunk actions on the committed callback while a transition is suspended', async () => {
+    const props = { ...panelProps([file('file.ts')]), selectedPath: 'file.ts' }
+    const callbackB = vi.fn()
+    const diff: GitFileDiff = {
+      snapshotId: 'workspace-snapshot', path: 'file.ts', scope: 'unstaged', binary: false,
+      additions: 1, deletions: 0, selectable: true, rawPatch: '',
+      hunks: [{
+        id: 'original-hunk', header: '@@ -0,0 +1 @@', oldStart: 0, oldLines: 0, newStart: 1, newLines: 1,
+        lines: [{ id: 'line-0', kind: 'add', newLine: 1, text: 'line 1' }]
+      }]
+    }
+    let panelRenderedB = 0
+    const diffB = { ...diff, get additions() { panelRenderedB++; return 1 } }
+    let releaseGate!: () => void
+    const gate = new Promise<void>((resolve) => { releaseGate = resolve })
+    let released = false
+    let suspended = 0
+    let transitionToB!: () => void
+
+    function Sibling({ useB }: { useB: boolean }) {
+      if (useB && !released) {
+        suspended++
+        throw gate
+      }
+      return <span>{useB ? 'committed B' : 'committed A'}</span>
+    }
+    function Fixture() {
+      const [useB, setUseB] = useState(false)
+      transitionToB = () => startTransition(() => setUseB(true))
+      return (
+        <Suspense fallback={<span>loading</span>}>
+          <ReviewPanel {...props} diff={useB ? diffB : diff} onApplySelection={useB ? callbackB : props.onApplySelection} />
+          <Sibling useB={useB} />
+        </Suspense>
+      )
+    }
+
+    const { unmount } = render(<Fixture />)
+    try {
+      const button = screen.getByRole('button', { name: '暂存 hunk' })
+      await act(async () => { transitionToB() })
+      expect(panelRenderedB).toBeGreaterThan(0)
+      expect(suspended).toBeGreaterThan(0)
+      expect(screen.getByText('committed A')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '暂存 hunk' })).toBe(button)
+      fireEvent.click(button)
+      const selection = { path: 'file.ts', action: 'stage', hunkId: 'original-hunk' }
+      expect(props.onApplySelection).toHaveBeenCalledOnce()
+      expect(props.onApplySelection).toHaveBeenCalledWith(selection)
+      expect(callbackB).not.toHaveBeenCalled()
+
+      await act(async () => { released = true; releaseGate(); await gate })
+      expect(screen.getByText('committed B')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: '暂存 hunk' }))
+      expect(callbackB).toHaveBeenCalledOnce()
+      expect(callbackB).toHaveBeenCalledWith(selection)
+      expect(props.onApplySelection).toHaveBeenCalledOnce()
+    } finally {
+      unmount()
+      await act(async () => { released = true; releaseGate(); await gate })
+    }
+  })
+
+  it('applies real selected line IDs across pages and resets on a new snapshot', () => {
+    const files = [file('file.ts')]
+    const props = { ...panelProps(files), selectedPath: 'file.ts' }
+    const diff: GitFileDiff = {
+      snapshotId: 'workspace-snapshot', path: 'file.ts', scope: 'unstaged', binary: false,
+      additions: 125, deletions: 0, selectable: true, rawPatch: '',
+      hunks: [{
+        id: 'original-hunk', header: '@@ -0,0 +1,125 @@', oldStart: 0, oldLines: 0, newStart: 1, newLines: 125,
+        lines: Array.from({ length: 125 }, (_, index) => ({
+          id: `line-${index}`, kind: 'add', newLine: index + 1, text: `line ${index + 1}`
+        }))
+      }]
+    }
+    const { rerender } = render(<ReviewPanel {...props} diff={diff} />)
+    const untouched = screen.getByRole('checkbox', { name: '选择新增行 2' }).closest('tr')
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择新增行 1' }))
+    expect(screen.getByRole('checkbox', { name: '选择新增行 2' }).closest('tr')).toBe(untouched)
+    fireEvent.click(screen.getByRole('button', { name: '下一页' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择新增行 125' }))
+    fireEvent.click(screen.getByRole('button', { name: '暂存 hunk（完整 hunk）' }))
+    expect(props.onApplySelection).toHaveBeenLastCalledWith({ path: 'file.ts', action: 'stage', hunkId: 'original-hunk' })
+    fireEvent.click(screen.getByRole('button', { name: '应用 2 行' }))
+    expect(props.onApplySelection).toHaveBeenLastCalledWith({ path: 'file.ts', action: 'stage', lineIds: ['line-0', 'line-124'] })
+    rerender(<ReviewPanel {...props} snapshot={snapshot(files, 'next')} diff={{ ...diff, snapshotId: 'next' }} />)
+    expect(screen.getByText('第 1 / 2 页 · 共 125 行')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '选择新增行 1' })).not.toBeChecked()
+    expect(screen.queryByRole('button', { name: '应用 2 行' })).not.toBeInTheDocument()
+  })
+
   it('shows the captured tool diff when the live Git workspace is already clean', () => {
     const { container } = render(
       <ReviewPanel

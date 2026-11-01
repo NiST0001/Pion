@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactElement } from 'react'
 import {
   AlertTriangle,
@@ -125,8 +125,10 @@ export function ReviewPanel({
   const [abortConfirmOpen, setAbortConfirmOpen] = useState(false)
   const loadDiffRef = useRef(onLoadDiff)
   const readConflictRef = useRef(onReadConflict)
+  const applySelectionRef = useRef(onApplySelection)
   loadDiffRef.current = onLoadDiff
   readConflictRef.current = onReadConflict
+  useLayoutEffect(() => { applySelectionRef.current = onApplySelection }, [onApplySelection])
 
   const files = useMemo(() => snapshot?.files ?? [], [snapshot])
   const selected = files.find((file) => file.path === selectedPath) ?? null
@@ -167,10 +169,22 @@ export function ReviewPanel({
     onScopeChange(nextScope)
   }
 
-  const applySelection = (selection: Omit<GitSelectionRequest, 'cwd' | 'snapshotId'>): void => {
+  const applySelection = useCallback((selection: Omit<GitSelectionRequest, 'cwd' | 'snapshotId'>): void => {
     if (selection.action === 'discard') setPendingDiscard({ selection })
-    else onApplySelection(selection)
-  }
+    else applySelectionRef.current(selection)
+  }, [])
+  const toggleLine = useCallback((lineId: string): void => {
+    setSelectedLineIds((current) => {
+      const next = new Set(current)
+      if (next.has(lineId)) next.delete(lineId)
+      else next.add(lineId)
+      return next
+    })
+  }, [])
+  const selectedFilePath = selected?.path
+  const applyHunk = useCallback((hunkId: string): void => {
+    if (selectedFilePath) applySelection({ path: selectedFilePath, action: applyAction, hunkId })
+  }, [selectedFilePath, applyAction, applySelection])
 
   return (
     <aside className="review-panel" style={{ width, flexBasis: width }}>
@@ -321,13 +335,8 @@ export function ReviewPanel({
                           action={applyAction}
                           selectedLineIds={selectedLineIds}
                           disabled={gitBusy}
-                          onToggleLine={(lineId) => setSelectedLineIds((current) => {
-                            const next = new Set(current)
-                            if (next.has(lineId)) next.delete(lineId)
-                            else next.add(lineId)
-                            return next
-                          })}
-                          onApplyHunk={(hunkId) => applySelection({ path: selected.path, action: applyAction, hunkId })}
+                          onToggleLine={toggleLine}
+                          onApplyHunk={applyHunk}
                         />
                       </div>
                     ) : <div className="review-empty-detail"><FileDiff size={20} /><span>没有可显示的文本差异</span></div>}

@@ -209,6 +209,45 @@ describe('screen text reveal', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  it('shares cleanup by root and preserves a longer prefix after a short suffix expires', () => {
+    vi.useFakeTimers()
+    const root = document.createElement('div')
+    const view = render(<>
+      <RevealText text="ab" mode="history" ordered={{ delay: 600, maxDelay: 0 }} cleanupRoot={root} />
+      <RevealText text="z" mode="history" ordered={{ delay: 600, maxDelay: 0 }} cleanupRoot={root} />
+    </>)
+    const original = [...view.container.querySelectorAll('[data-screen-reveal-character]')]
+    expect(vi.getTimerCount()).toBe(1)
+    act(() => vi.advanceTimersByTime(100))
+    view.rerender(<>
+      <RevealText text="abc" mode="history" ordered={{ delay: 0, maxDelay: 0 }} cleanupRoot={root} />
+      <RevealText text="z" mode="history" ordered={{ delay: 600, maxDelay: 0 }} cleanupRoot={root} />
+    </>)
+    expect(vi.getTimerCount()).toBe(1)
+    act(() => vi.advanceTimersByTime(288))
+    expect([...view.container.querySelectorAll('[data-screen-reveal-character]')]).toEqual(original)
+    expect(view.container.textContent).toBe('abcz')
+    act(() => vi.advanceTimersByTime(500))
+    expect(view.container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(0)
+    view.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('retires shared subscriptions on unmount without updating a replacement', () => {
+    vi.useFakeTimers()
+    const root = document.createElement('div')
+    const timer = vi.spyOn(window, 'setTimeout')
+    const view = render(<RevealText text="old" mode="history" ordered={{ delay: 0, maxDelay: 0 }} cleanupRoot={root} />)
+    const stale = timer.mock.calls[0][0] as () => void
+    view.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+    const replacement = render(<RevealText text="new" mode="history" ordered={{ delay: 500, maxDelay: 0 }} cleanupRoot={root} />)
+    act(() => stale())
+    expect(replacement.container.querySelectorAll('[data-screen-reveal-character]')).toHaveLength(3)
+    replacement.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('gives a completed surrogate only the new ordered range while preserving its prior prefix', () => {
     vi.useFakeTimers()
     const view = render(<RevealText text={'a\ud83d'} mode="history" ordered={{ delay: 100, maxDelay: 180 }} />)

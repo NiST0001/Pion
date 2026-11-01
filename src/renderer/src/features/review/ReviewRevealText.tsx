@@ -1,11 +1,14 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { useDisclosureRevealReady } from '../common/DisclosureRevealGate'
 import { RevealText, type TextRevealMode } from '../../utils/screenTextReveal'
 import { retireTextRevealTail, subscribeTextRevealOrder, type OrderedTextReveal } from '../../utils/textRevealOrder'
+import { textRevealRoot } from '../../utils/textRevealRoot'
 
 // Bound both initial character DOM and geometry work, including single-line
 // JSON/minified output. Invisible chunks remain inexpensive ordinary text.
 export const REVIEW_REVEAL_CHUNK_SIZE = 160
+export const REVIEW_REVEAL_COARSE_SIZE = 8192
 
 /** A streamed low surrogate may complete the last committed code point. */
 function safePrefixLength(text: string, prefix: string): number {
@@ -27,6 +30,16 @@ const RevealChunk = memo(function RevealChunk({ text, mode }: {
   const append = admitted?.mode === mode && text.startsWith(admitted.text)
   const animation = append ? admitted : null
   const stamped = useRef<typeof admitted>(null)
+  const pending = useRef<{ text: string; mode: TextRevealMode; lineage: object } | null>(null)
+
+  // Track only committed pending content. An interrupted render must not
+  // replace the identity of the request currently awaiting admission.
+  useLayoutEffect(() => {
+    const previous = pending.current
+    if (!previous) return
+    if (previous.mode !== mode || !text.startsWith(previous.text)) pending.current = null
+    else previous.text = text
+  }, [text, mode])
 
   useLayoutEffect(() => {
     if (!animation || stamped.current === animation || !ref.current) return
@@ -62,7 +75,12 @@ const RevealChunk = memo(function RevealChunk({ text, mode }: {
     // prior code point must also get a slot, without replaying earlier text.
     let count = 0
     for (const _character of text.slice(animation ? safePrefixLength(text, animation.text) : 0)) count++
-    owned.wait({ count, mode, admit: ordered => setAdmitted({ text, mode, ordered }) })
+    const current = pending.current ?? { text, mode, lineage: {} }
+    pending.current = current
+    owned.wait({ count, mode, lineage: current.lineage, admit: ordered => {
+      if (pending.current === current) pending.current = null
+      setAdmitted({ text, mode, ordered })
+    } })
     return () => owned.wait(null)
   }, [text, mode, animation, ready, reducedMotion])
 
@@ -73,30 +91,113 @@ const RevealChunk = memo(function RevealChunk({ text, mode }: {
     data-text-reveal-pending={!reducedMotion && text !== '' && animation?.text !== text ? 'true' : undefined}
     style={{ opacity: !reducedMotion && !animation ? 0 : undefined }}>
     {reducedMotion ? text : animation ? <>
-      <RevealText text={animation.text} mode={animation.mode} ordered={animation.ordered} />
+      <RevealText text={animation.text} mode={animation.mode} ordered={animation.ordered}
+        cleanupRoot={ref.current ? textRevealRoot(ref.current) : null} />
       {text.length > animation.text.length && <span style={{ opacity: 0 }}>{text.slice(animation.text.length)}</span>}
     </> : text}
   </span>
 })
 
-/** Shared by review diffs and tool output; keep stable chunks on live append. */
-export const ReviewRevealText = memo(function ReviewRevealText({ text, mode = 'history' }: {
-  text: string; mode?: TextRevealMode
-}) {
+function useTextChunks(text: string, size: number): string[] {
   const committed = useRef({ text: '', chunks: [] as string[] })
   const chunks = useMemo(() => {
     const previous = committed.current
     const append = text.startsWith(previous.text)
     const result = append ? previous.chunks.slice(0, -1) : []
-    // Revisit only the old tail, even when full: its last high surrogate may
-    // combine with the appended low surrogate. Complete earlier chunks stay put.
-    const characters = Array.from(append
-      ? (previous.chunks.at(-1) ?? '') + text.slice(previous.text.length) : text)
-    for (let start = 0; start < characters.length; start += REVIEW_REVEAL_CHUNK_SIZE) {
-      result.push(characters.slice(start, start + REVIEW_REVEAL_CHUNK_SIZE).join(''))
+    // Revisit the old tail so a streamed low surrogate joins its high half.
+    const tail = append ? (previous.chunks.at(-1) ?? '') + text.slice(previous.text.length) : text
+    let start = 0, offset = 0, count = 0
+    for (const character of tail) {
+      offset += character.length
+      if (++count === size) {
+        result.push(tail.slice(start, offset))
+        start = offset
+        count = 0
+      }
     }
+    if (start < offset) result.push(tail.slice(start, offset))
     return result
-  }, [text])
+  }, [text, size])
   useLayoutEffect(() => { committed.current = { text, chunks } }, [text, chunks])
+  return chunks
+}
+
+function FineChunks({ text, mode }: { text: string; mode: TextRevealMode }) {
+  const chunks = useTextChunks(text, REVIEW_REVEAL_CHUNK_SIZE)
   return <>{chunks.map((chunk, index) => <RevealChunk key={index} text={chunk} mode={mode} />)}</>
+}
+
+function selectionIntersects(element: HTMLElement): boolean {
+  const selection = element.ownerDocument.getSelection()
+  if (!selection || selection.isCollapsed) return false
+  for (let i = 0; i < selection.rangeCount; i++) {
+    if (selection.getRangeAt(i).intersectsNode(element)) return true
+  }
+  return false
+}
+
+const CoarseChunk = memo(function CoarseChunk({ text, mode }: { text: string; mode: TextRevealMode }) {
+  const ready = useDisclosureRevealReady()
+  const ref = useRef<HTMLSpanElement>(null)
+  const [expanded, setExpanded] = useState(false)
+  const [reducedMotion] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false)
+
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (!element || expanded || reducedMotion || !ready) return
+    const owned = subscribeTextRevealOrder(element)
+    let active = true, listening = false
+    const stopListening = () => {
+      if (listening) element.ownerDocument.removeEventListener('selectionchange', onSelectionChange)
+      listening = false
+    }
+    const request = {
+      count: 0 as const, mode, prepare: true as const,
+      admit: () => {
+        if (!active || ref.current !== element) return false
+        if (selectionIntersects(element)) {
+          if (!listening) {
+            element.ownerDocument.addEventListener('selectionchange', onSelectionChange)
+            listening = true
+          }
+          return false
+        }
+        stopListening()
+        // Commit the fine pending markers before another root scan can run.
+        flushSync(() => setExpanded(true))
+        return true
+      }
+    }
+    function onSelectionChange() {
+      if (!element || !active || ref.current !== element || selectionIntersects(element)) return
+      stopListening()
+      owned.wait(request)
+    }
+    owned.wait(request)
+    return () => { active = false; stopListening(); owned.dispose() }
+  }, [expanded, mode, ready, reducedMotion])
+
+  return <span ref={ref} data-text-reveal-coarse="true"
+    data-text-reveal-pending={!reducedMotion && !expanded && text !== '' ? 'true' : undefined}
+    style={{ opacity: !reducedMotion && !expanded ? 0 : undefined }}>
+    {expanded ? <FineChunks text={text} mode={mode} /> : text}
+  </span>
+})
+
+/** Freeze the initial structure so later streaming never reparents active fades. */
+export const ReviewRevealText = memo(function ReviewRevealText({ text, mode = 'history', deferOffscreen = false }: {
+  text: string; mode?: TextRevealMode
+  /** Opt in only for the non-wrapping diff/code surfaces measured by the fixture. */
+  deferOffscreen?: boolean
+}) {
+  const [coarse] = useState(() => {
+    if (!deferOffscreen) return false
+    let count = 0
+    for (const _character of text) if (++count >= REVIEW_REVEAL_COARSE_SIZE) return true
+    return false
+  })
+  const chunks = useTextChunks(text, coarse ? REVIEW_REVEAL_COARSE_SIZE : REVIEW_REVEAL_CHUNK_SIZE)
+  return <>{chunks.map((chunk, index) => coarse
+    ? <CoarseChunk key={index} text={chunk} mode={mode} />
+    : <RevealChunk key={index} text={chunk} mode={mode} />)}</>
 })

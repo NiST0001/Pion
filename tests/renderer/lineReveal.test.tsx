@@ -114,6 +114,35 @@ describe('viewport-owned line reveal order', () => {
     elements.forEach(element => expect(element.getBoundingClientRect).toHaveBeenCalledTimes(1))
   })
 
+  it('indexes nested bubble descendants without pairwise containment scans over retained rows', async () => {
+    const container = root()
+    for (let index = 0; index < 80; index++) {
+      const retained = line(container)
+      retained.dataset.lineRevealReady = 'true'
+      retained.dataset.lineRevealStart = '90'
+    }
+    const first = line(container, 'live')
+    first.dataset.lineRevealContainer = 'true'
+    const nested = line(first)
+    nested.dataset.lineRevealContainer = 'true'
+    const child = line(nested, 'live')
+    child.dataset.lineRevealReady = 'true'
+    child.dataset.lineRevealStart = '140'
+    child.style.setProperty('--screen-text-reveal-delay', '40ms')
+    const next = line(nested)
+    const second = line(container, 'live')
+    second.dataset.lineRevealContainer = 'true'
+    const secondChild = line(second)
+    const after = line(container)
+    const contains = [first, nested, second].map(element => vi.spyOn(element, 'contains'))
+    watch(container)
+    await flush()
+    expect([first, nested, child, next, second, secondChild, after].map(start))
+      .toEqual([140, 140, 140, 180, 200, 200, 220])
+    contains.forEach(check => expect(check).not.toHaveBeenCalled())
+    expect(child.style.getPropertyValue('--screen-text-reveal-delay')).toBe('40ms')
+  })
+
   it('skips old text geometry on character cleanup and scroll with no pending rows, then wakes for a new future tail', async () => {
     const container = root()
     const parent = line(container)
