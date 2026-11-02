@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { posix, win32 } from 'node:path'
 import { deflateSync } from 'node:zlib'
 import { ComputerUseHelperClient, HelperPacketReader, encodeHelperPacket, waitForHelper, decodeHelperPreview, HELPER_JSON_MAX } from '../../src/main/computer-use/helper-client'
 import { WaylandComputerUseDriver } from '../../src/main/computer-use/wayland-driver'
@@ -36,6 +37,8 @@ function preview(width = 2, height = 1, raw = Buffer.alloc((width * 3 + 1) * hei
   const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), ...(extra ? [chunk('tEXt', Buffer.from('private'))] : []), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))])
 }
+// Git checkout may use CRLF on Windows; source contract assertions compare lines.
+function readNative(path: string): string { return readFileSync(path, 'utf8').replace(/\r\n/g, '\n') }
 const closeReceipts = [undefined, { version: 1, boundary: 'client-disconnected' }] as const
 function closedFields(receipt: typeof closeReceipts[number]) { return receipt ? { closeReceipt: receipt } : {} }
 function fake() {
@@ -43,6 +46,10 @@ function fake() {
   return { child: child as unknown as ChildProcessWithoutNullStreams, emit: child }
 }
 describe('private computer-use helper simulated protocol', () => {
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  // Exercise the Linux protocol using only fake child pipes, independent of the CI host.
+  beforeEach(() => { Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'linux' }) })
+  afterEach(() => { Object.defineProperty(process, 'platform', originalPlatform) })
   const owner = { ownerWindowId: 1, backendId: 'b', runtimeId: 'r', runId: 'run', generation: 1 }
   const limits = { maxFrameBytes: 4096, maxFramePixels: 10, maxFrameEdge: 10 }
   const controlOptions = { control: true, captureScope: 'display' } as const
@@ -60,6 +67,24 @@ describe('private computer-use helper simulated protocol', () => {
     return { child, emit, requests }
   }
   const noFrameReceipt = { version: 1, outcome: 'no-complete-png' } as const
+  it('uses rooted mock paths accepted by both host path implementations', () => {
+    for (const path of ['/explicit/mock', '/explicit/helper', '/explicit/mock-helper', '/explicit/project/helper']) {
+      expect(posix.isAbsolute(path)).toBe(true)
+      expect(win32.isAbsolute(path)).toBe(true)
+    }
+  })
+  it.each(['win32', 'darwin'] as const)('unavailable platform %s never spawns a helper', async platform => {
+    Object.defineProperty(process, 'platform', { ...originalPlatform, value: platform })
+    const start = vi.fn(() => fake().child)
+    const driver = new WaylandComputerUseDriver('/explicit/mock', false, start)
+    await expect(driver.open(owner, limits, new AbortController().signal)).resolves.toEqual({
+      platform: 'linux-wayland', method: 'unavailable', capture: false, control: false,
+      scope: 'unknown-window-or-display', unsupportedReason: 'capture-unavailable'
+    })
+    await expect(driver.capture(new AbortController().signal)).rejects.toThrow('unavailable')
+    await expect(driver.close()).resolves.toBeUndefined()
+    expect(start).not.toHaveBeenCalled()
+  })
   it.each([[false, false], [true, false], [false, true], [true, true]])('DMA opt-in is the last flag, not an open field or cleanup proof: control=%s accounting=%s', async (control, accounting) => {
     const { child, emit } = fake()
     builtinSpawn.mockReset().mockReturnValue(child)
@@ -813,7 +838,7 @@ describe('private computer-use helper simulated protocol', () => {
     expect(stopped.frame).toBeUndefined()
   })
   it('native diagnostic vocabulary and unconditional act/close branches match the shared request matrix', () => {
-    const main = readFileSync('native/computer-use/src/main.rs', 'utf8')
+    const main = readNative('native/computer-use/src/main.rs')
     const variants = main.match(/enum DiagnosticCode \{([\s\S]*?)\n\}/)?.[1] ?? ''
     const codes = [...variants.matchAll(/^\s*([A-Z]\w*),$/gm)]
       .map(([, name]) => name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`).slice(1))
@@ -835,9 +860,9 @@ describe('private computer-use helper simulated protocol', () => {
     expect(NATIVE_COMPUTER_USE_DIAGNOSTICS_BY_REQUEST.close).toEqual(closeCodes)
   })
   it('native negative accounting requires an actual worker error and keeps preview encoding ahead of the original', () => {
-    const main = readFileSync('native/computer-use/src/main.rs', 'utf8')
-    const capture = readFileSync('native/computer-use/src/capture.rs', 'utf8')
-    const pixels = readFileSync('native/computer-use/src/pixels.rs', 'utf8')
+    const main = readNative('native/computer-use/src/main.rs')
+    const capture = readNative('native/computer-use/src/capture.rs')
+    const pixels = readNative('native/computer-use/src/pixels.rs')
     const receive = capture.split('async fn receive_frame(')[1]?.split('// Crop validation')[0] ?? ''
     expect(receive).toContain('Ok(Err(_)) => Err(FrameError { no_complete_png: true })')
     expect(receive).toContain('Err(_) => Err(FrameError::unknown())')
@@ -849,9 +874,9 @@ describe('private computer-use helper simulated protocol', () => {
     expect(encoding).toContain('let preview = preview()?;\n    let original = original()?;\n    Ok((original, preview))')
   })
   it('native source preserves window default and explicit display input with fresh bounded encoding', () => {
-    const main = readFileSync('native/computer-use/src/main.rs', 'utf8')
-    const portal = readFileSync('native/computer-use/src/portal.rs', 'utf8')
-    const pixels = readFileSync('native/computer-use/src/pixels.rs', 'utf8')
+    const main = readNative('native/computer-use/src/main.rs')
+    const portal = readNative('native/computer-use/src/portal.rs')
+    const pixels = readNative('native/computer-use/src/pixels.rs')
     // The human chooser has its own 120s Response deadline, not a 30s
     // aggregate wrapper that disconnects before a user can finish selection.
     expect(main).not.toMatch(/client_connection::complete_operation\(\s*selecting,/)
@@ -860,7 +885,7 @@ describe('private computer-use helper simulated protocol', () => {
     expect(main).toMatch(/s\.select_window\((?:&mut )?cancelled\)\.await/)
     expect(main).toMatch(/s\.select_display\((?:&mut )?cancelled\)\.await/)
     expect(main).toContain('client_connection::ClientConnection::connect(cancelled.clone())')
-    const connection = readFileSync('native/computer-use/src/client_connection.rs', 'utf8')
+    const connection = readNative('native/computer-use/src/client_connection.rs')
     expect(connection).toContain('socket.shutdown(Shutdown::Both)')
     expect(connection).toContain('connection.graceful_shutdown().await')
     expect(main).toContain('capture::Capture::start')
@@ -878,7 +903,7 @@ describe('private computer-use helper simulated protocol', () => {
     expect(pixels).toContain('pixels > limits.max_frame_pixels')
     expect(pixels).toContain('png::Encoder::new')
     expect(portal).toContain('"org.freedesktop.portal.Session", "Closed"')
-    const capture = readFileSync('native/computer-use/src/capture.rs', 'utf8')
+    const capture = readNative('native/computer-use/src/capture.rs')
     expect(capture).toContain('context.connect_fd_rc(fd, None)')
     expect(capture).toContain('Drop for Return<F>')
     expect(portal + capture).not.toContain('org.freedesktop.portal.RemoteDesktop')

@@ -8,6 +8,12 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.104',
+    changes: [
+      '修复跨平台发布测试中的路径、文件打开标志及模拟平台适配，保留原有安全检查。'
+    ]
+  },
+  {
     version: '0.1.103',
     changes: [
       'Git 文件差异按页显示，保留跨页选择与完整差异块操作，减少大文件一次挂载的行数。',

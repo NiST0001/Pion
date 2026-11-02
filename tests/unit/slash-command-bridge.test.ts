@@ -33,9 +33,9 @@ vi.mock('../../src/main/agent/slash-command-files', () => ({
 type RpcState = Awaited<ReturnType<RpcClient['getState']>>
 type RpcHistory = Awaited<ReturnType<RpcClient['getEntries']>>
 const owner = 41
-const cwd = '/project/worktree'
-const sessionPath = '/sessions/current.jsonl'
-const scratch = '/project/worktree/.pion-session-export-private/session.html'
+const cwd = resolve('/project/worktree')
+const sessionPath = resolve('/sessions/current.jsonl')
+const scratch = resolve(cwd, '.pion-session-export-private/session.html')
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -211,8 +211,8 @@ describe('session slash-command bridge reads', () => {
     await Promise.resolve()
     if (change === 'window') h.internals.win = { ...h.win }
     if (change === 'frame') h.win.webContents.mainFrame = { detached: false }
-    if (change === 'cwd') h.internals.activeCwd = '/other'
-    if (change === 'path') h.internals.activeSessionPath = '/sessions/other.jsonl'
+    if (change === 'cwd') h.internals.activeCwd = resolve('/other')
+    if (change === 'path') h.internals.activeSessionPath = resolve('/sessions/other.jsonl')
     if (change === 'key') h.internals.activeKey = 'other-key'
     if (change === 'backend') h.pool.add({ ...h.backend })
     if (change === 'client') h.backend.client = {} as RpcClient
@@ -262,7 +262,7 @@ describe('session slash-command bridge reads', () => {
     if (condition === 'missing') h.pool.clear()
     if (condition === 'starting') h.backend.phase = 'starting'
     if (condition === 'destroyed') h.win.isDestroyed.mockReturnValue(true)
-    if (condition === 'target') h.target.cwd = '/other'
+    if (condition === 'target') h.target.cwd = resolve('/other')
     const requestedOwner = condition === 'owner' ? owner + 1 : owner
     await expect(h.bridge.getSessionCommandInfo(h.target, requestedOwner)).rejects.toThrow()
     await expect(h.bridge.copyLastAssistantText(h.target, requestedOwner)).rejects.toThrow()
@@ -301,9 +301,9 @@ describe('session slash-command bridge reads', () => {
 describe('explicit slash-command export', () => {
   it('defaults to HTML and only passes the helper-private scratch path to RPC', async () => {
     const h = setup()
-    await expect(h.exportSession()).resolves.toBe(`${cwd}/session-default.html`)
+    await expect(h.exportSession()).resolves.toBe(resolve(cwd, 'session-default.html'))
     expect(mocks.exportPath).toHaveBeenCalledExactlyOnceWith(cwd, undefined)
-    expect(mocks.publish).toHaveBeenCalledWith(`${cwd}/session-default.html`, expect.any(Function), expect.any(Function))
+    expect(mocks.publish).toHaveBeenCalledWith(resolve(cwd, 'session-default.html'), expect.any(Function), expect.any(Function))
     expect(h.client.exportHtml).toHaveBeenCalledExactlyOnceWith(scratch)
     expect(h.client.getEntries).not.toHaveBeenCalled()
     expect(h.backend.historyMutation).not.toBe(true)
@@ -325,7 +325,7 @@ describe('explicit slash-command export', () => {
     const h = setup()
     const history = { entries: [], leafId: null }
     h.client.getEntries.mockResolvedValueOnce(history)
-    await expect(h.exportSession('exports/current.JSONL')).resolves.toBe(`${cwd}/exports/current.JSONL`)
+    await expect(h.exportSession('exports/current.JSONL')).resolves.toBe(resolve(cwd, 'exports/current.JSONL'))
     expect(mocks.jsonl).toHaveBeenCalledExactlyOnceWith(cwd, 'session-a', history)
     expect(mocks.writeJsonl).toHaveBeenCalledWith(scratch, 'current-branch-jsonl\n', expect.any(Function))
     expect(h.client.exportHtml).not.toHaveBeenCalled()
@@ -358,7 +358,7 @@ describe('explicit slash-command export', () => {
     expect(h.backend.historyMutation).not.toBe(true)
     expect(h.backend.sessionExportPending).toBe(true)
     exported.resolve({ path: scratch })
-    await expect(pending).resolves.toBe(`${cwd}/explicit.html`)
+    await expect(pending).resolves.toBe(resolve(cwd, 'explicit.html'))
     expect(h.internals.sessionOperationsInFlight).toBe(0)
     expect(h.backend.historyMutation).not.toBe(true)
     expect(h.backend.sessionExportPending).toBe(false)
@@ -376,7 +376,7 @@ describe('explicit slash-command export', () => {
     await entered.promise
     await expect(h.exportSession()).rejects.toThrow('正在导出')
     expect(h.internals.sessionOperationsInFlight).toBe(1)
-    cleanup.resolve(`${cwd}/session-default.html`)
+    cleanup.resolve(resolve(cwd, 'session-default.html'))
     await pending
     expect(h.internals.sessionCommandExportInFlight).toBe(false)
   })
@@ -440,7 +440,7 @@ describe('explicit slash-command export', () => {
     const h = setup()
     h.state.messageCount = 0
     h.client.getEntries.mockResolvedValueOnce(treeWithSavedMessage())
-    await expect(h.exportSession()).resolves.toBe(`${cwd}/session-default.html`)
+    await expect(h.exportSession()).resolves.toBe(resolve(cwd, 'session-default.html'))
     expect(mocks.pathExists).toHaveBeenCalledExactlyOnceWith(sessionPath)
     expect(h.client.getEntries).toHaveBeenCalledExactlyOnceWith()
     expect(h.client.getState).toHaveBeenCalledTimes(3) // initial, after full-tree read, after export
@@ -528,7 +528,7 @@ describe('explicit slash-command export', () => {
     if (change === 'busy') h.backend.busy = true
     if (change === 'pending-rpc') h.backend.promptDispatch = { promise: new Promise(() => {}), runId: 'pending' }
     if (change === 'sdk-session') h.state.sessionId = 'other-session'
-    if (change === 'sdk-path') h.state.sessionFile = '/sessions/other.jsonl'
+    if (change === 'sdk-path') h.state.sessionFile = resolve('/sessions/other.jsonl')
     if (change === 'sdk-streaming') h.state.isStreaming = true
     if (change === 'sdk-compacting') h.state.isCompacting = true
     if (change === 'sdk-pending') h.state.pendingMessageCount = 1

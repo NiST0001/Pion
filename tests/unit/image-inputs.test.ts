@@ -12,6 +12,19 @@ import {
 } from '../../src/shared/image-generation'
 import { makeStaticPng } from '../fixtures/static-png'
 
+// The fake filesystem models strict no-follow/nonblocking opens on every host.
+// These flags are test-only and never touch the real filesystem.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return { ...actual, constants: { ...actual.constants, O_NOFOLLOW: 0x20000, O_NONBLOCK: 0x800 } }
+})
+function mockSafeFsConstants() {
+  vi.doMock('node:fs', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('node:fs')>()
+    return { ...actual, constants: { ...actual.constants, O_NOFOLLOW: 0x20000, O_NONBLOCK: 0x800 } }
+  })
+}
+
 const cwd = resolve('/pion-reference-project')
 const png = makeStaticPng()
 const privateDiagnostic = '/private/account/auth.json Bearer sk-private-content https://private.invalid/image'
@@ -472,7 +485,32 @@ it.each([
     expect(disk.files.open).not.toHaveBeenCalled()
     expect(disk.handles).toHaveLength(0)
   } finally {
-    vi.doUnmock('node:fs')
+    mockSafeFsConstants()
+    vi.resetModules()
+  }
+})
+
+it('uses actual host flags and rejects before filesystem access when strict flags are unavailable', async () => {
+  vi.resetModules()
+  vi.doUnmock('node:fs')
+  try {
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
+    const reader = (await import('../../src/main/agent/image-inputs')).readImageReferences
+    const disk = fakeDisk(reader)
+    disk.files.open.mockRejectedValue(fileError('ENOTSUP'))
+    await expect(disk.read()).rejects.toThrow('当前平台或文件系统不支持安全的只读参考图片打开方式，已拒绝读取。 尚未上传任何参考图片。')
+    const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = actual.constants
+    if (Number.isSafeInteger(O_NOFOLLOW) && O_NOFOLLOW > 0 && Number.isSafeInteger(O_NONBLOCK) && O_NONBLOCK > 0) {
+      expect(disk.files.open).toHaveBeenCalledTimes(1)
+      expect(disk.files.open).toHaveBeenCalledWith(resolve(cwd, 'reference.png'), O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    } else {
+      expect(disk.files.realpath).not.toHaveBeenCalled()
+      expect(disk.files.lstat).not.toHaveBeenCalled()
+      expect(disk.files.open).not.toHaveBeenCalled()
+    }
+    expect(disk.handles).toHaveLength(0)
+  } finally {
+    mockSafeFsConstants()
     vi.resetModules()
   }
 })
