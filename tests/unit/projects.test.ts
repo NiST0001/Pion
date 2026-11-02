@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { runInNewContext } from 'node:vm'
@@ -124,12 +124,15 @@ describe('canonical project registration', () => {
   })
 
   it('removes hidden registered aliases only on explicit removal, without removing files', async () => {
-    seed([meta(branch), meta(root), meta(ordinary)])
+    const records = [meta(branch), meta(root), meta(ordinary)]
+    seed(records)
     const store = new ProjectStore()
+    expect(await store.listGrouped()).toEqual([meta(root), meta(ordinary)])
+    expect(JSON.parse(disk())).toEqual({ projects: records })
     await store.removeCanonical(root)
     expect(await store.listGrouped()).toEqual([meta(ordinary)])
-    expect(JSON.parse(disk()).projects).toEqual([meta(ordinary)])
-    expect(readFileSync(join(mocks.userData, 'projects.json'), 'utf8')).toContain(ordinary)
+    expect(JSON.parse(disk())).toEqual({ projects: [meta(ordinary)] })
+    expect([root, branch, ordinary].every(existsSync)).toBe(true)
     expect(await canonicalProjectCwd(branch)).toBe(root)
     await store.removeCanonical(ordinary)
     expect(await store.listGrouped()).toEqual([])

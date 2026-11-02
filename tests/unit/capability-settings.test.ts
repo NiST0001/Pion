@@ -187,13 +187,46 @@ it('never defaults over a corrupt, oversized, non-file or unreadable configurati
   }
   const { root, path, store } = await fixture()
   await mkdir(path)
+  await writeFile(join(path, 'marker'), secret)
   await expect(store.get()).rejects.toThrow()
-  const blocker = join(root, 'not-a-directory')
-  await writeFile(blocker, secret)
-  await expect(readCapabilityPreferences(join(blocker, 'settings.json'))).rejects.toThrow('读取失败')
+  await expect(store.update(0, { type: 'preset', preset: 'standard' }, ITEMS)).rejects.toThrow()
+  expect(store.getSnapshot()).toBeUndefined()
+  expect(await readFile(join(path, 'marker'), 'utf8')).toBe(secret)
+  expect(await readdir(root)).toEqual(['pion-capabilities.json'])
   await rm(path, { recursive: true })
   await writeFile(path, JSON.stringify(DEFAULT_CAPABILITY_PREFERENCES).padEnd(256 * 1024, ' '))
   expect(await readCapabilityPreferences(path)).toEqual(DEFAULT_CAPABILITY_PREFERENCES)
+})
+
+it('preserves an unreadable configuration when opening it fails with EACCES', async () => {
+  const { root, path } = await fixture()
+  const content = JSON.stringify(DEFAULT_CAPABILITY_PREFERENCES)
+  await writeFile(path, content)
+  const fs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+  const denied = vi.fn()
+  vi.doMock('node:fs/promises', () => ({
+    ...fs,
+    open: async (...args: Parameters<typeof fs.open>) => {
+      if (args[0] === path && args[1] === 'r') {
+        denied()
+        throw Object.assign(new Error('private read failure'), { code: 'EACCES' })
+      }
+      return fs.open(...args)
+    }
+  }))
+  vi.resetModules()
+  const { CapabilitySettingsStore: DeniedStore, readCapabilityPreferences: readDenied } = await import('../../src/main/capability-settings')
+  const store = new DeniedStore(path)
+  const listener = vi.fn()
+  store.onChanged(listener)
+  await expect(readDenied(path)).rejects.toThrow('读取失败')
+  await expect(store.get()).rejects.toThrow('读取失败')
+  await expect(store.update(0, { type: 'preset', preset: 'standard' }, ITEMS)).rejects.toThrow('读取失败')
+  expect(denied).toHaveBeenCalledTimes(2)
+  expect(store.getSnapshot()).toBeUndefined()
+  expect(listener).not.toHaveBeenCalled()
+  expect(await readFile(path, 'utf8')).toBe(content)
+  expect(await readdir(root)).toEqual(['pion-capabilities.json'])
 })
 
 it('keeps the committed revision on write failure, cleans its private temp and allows a later retry', async () => {

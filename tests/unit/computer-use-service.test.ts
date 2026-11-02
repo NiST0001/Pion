@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -415,6 +415,11 @@ describe('ComputerUse cached diagnostics remain display-only and lease-owned', (
 })
 
 describe('ComputerUse durable coordination and actual ownership ledger', () => {
+  describe('synthetic Linux helper protocol', () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    beforeEach(() => { Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'linux' }) })
+    afterEach(() => { Object.defineProperty(process, 'platform', originalPlatform) })
+
   it.each(['window-selection-failed', 'pipewire-start-failed'] as const)('failed native open %s can release after client-disconnected receipt and actual close, without automatic restart', async diagnosticCode => {
     const children: Array<EventEmitter & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough }> = []
     const drivers: WaylandComputerUseDriver[] = []
@@ -567,6 +572,27 @@ describe('ComputerUse durable coordination and actual ownership ledger', () => {
     expect(commands).toEqual(['hello', 'open', 'close'])
     expect(f.coordination.claim).toHaveBeenCalledTimes(1)
     expect(f.coordination.release).toHaveBeenCalledExactlyOnceWith(f.receipt)
+  })
+
+  })
+
+  it('rejects Windows capture before helper spawn and releases the local mock claim', async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+    Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'win32' })
+    try {
+      const start = vi.fn(() => { throw new Error('unexpected helper spawn') })
+      const driver = new WaylandComputerUseDriver('/explicit/mock-helper', false, start)
+      const f = fixture({ driverFactory: () => driver })
+      await expect(f.service.start(A, consent)).rejects.toThrow('ComputerUse start failed or revoked')
+      await f.service.stop(A)
+      expect(start).not.toHaveBeenCalled()
+      expect(f.coordination.claim).toHaveBeenCalledTimes(1)
+      expect(f.coordination.release).toHaveBeenCalledExactlyOnceWith(f.receipt)
+      expect(f.service.getState()).toMatchObject({ state: 'stopped', actualPending: false, coordination: 'released' })
+      expect(f.publish.mock.calls.some(([state]) => state.state === 'ready')).toBe(false)
+    } finally {
+      Object.defineProperty(process, 'platform', originalPlatform)
+    }
   })
 
   it('never constructs or opens a chooser before the actual durable claim settles', async () => {

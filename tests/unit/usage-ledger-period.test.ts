@@ -1,10 +1,16 @@
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as sessionUsage from '../../src/main/agent/session-token-total'
 import { UsageLedger } from '../../src/main/usage-ledger'
+import { createUsageLedgerDirectoryIo } from '../fixtures/usage-ledger-directory-io'
 
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof import('node:fs/promises')>()
+  return { ...actual, open: vi.fn(actual.open) }
+})
+const directoryIo = createUsageLedgerDirectoryIo()
 const dirs: string[] = []
 const createdAt = '2020-01-01T00:00:00.000Z'
 const header = (id: string, cwd = '/project/a', parentSession?: string) => ({ type: 'session', version: 3, id, cwd,
@@ -18,6 +24,7 @@ const assistant = (id: string, timestamp: string, totalTokens = 10) => ({ type: 
 async function fixture() {
   const dir = await fs.mkdtemp(join(tmpdir(), 'pion-usage-period-'))
   dirs.push(dir)
+  directoryIo.register(dir)
   const sessionRoot = join(dir, 'sessions')
   await fs.mkdir(join(sessionRoot, 'bucket'), { recursive: true })
   const options = { ledgerPath: join(dir, 'ledger.json'), sessionRoot }
@@ -28,8 +35,13 @@ async function fixture() {
   } }
 }
 
+beforeEach(async () => {
+  const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+  vi.mocked(fs.open).mockReset().mockImplementation(directoryIo.open(actual))
+})
 afterEach(async () => {
   vi.restoreAllMocks()
+  directoryIo.reset()
   await Promise.all(dirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })))
 })
 

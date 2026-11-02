@@ -149,7 +149,7 @@ describe('screen text reveal', () => {
 
   it('keeps CSS fade durations aligned with cleanup constants and reduced-motion overrides', () => {
     // Static contract only: this does not claim real browser animation timing.
-    const css = readFileSync('src/renderer/src/styles/refinements.css', 'utf8')
+    const css = readFileSync('src/renderer/src/styles/refinements.css', 'utf8').replace(/\r\n/g, '\n')
     expect(css).toContain(`.screen-text-reveal-live {\n  animation-duration: ${SCREEN_TEXT_REVEAL_LIVE_DURATION_MS}ms;`)
     expect(css).toContain(`.screen-text-reveal-line-live[data-line-reveal-ready="true"] {\n  animation-duration: ${SCREEN_TEXT_REVEAL_LINE_LIVE_DURATION_MS}ms;`)
     expect(css).toContain(`animation: screen-text-reveal ${SCREEN_TEXT_REVEAL_LINE_DURATION_MS}ms linear`)

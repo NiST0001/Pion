@@ -1,4 +1,4 @@
-import { constants } from 'node:fs'
+import { constants, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve, sep, win32 } from 'node:path'
@@ -157,8 +157,8 @@ describe('tool permission policy resolution', () => {
     await store.setPolicy(worktree, { network: 'ask', write: 'ask' })
     expect((await store.allowProjectCategories(worktree, ['network', 'write'])).rules).toEqual({ ...base, network: 'allow', write: 'allow' })
     const projects = JSON.parse(await readFile(store.filePath, 'utf8')).projects
-    expect(projects[worktree]).toBeUndefined()
-    expect(projects[project]).toMatchObject({ shell: 'deny', network: 'allow', write: 'allow' })
+    expect(projects[realpathSync.native(worktree)]).toBeUndefined()
+    expect(projects[realpathSync.native(project)]).toMatchObject({ shell: 'deny', network: 'allow', write: 'allow' })
     expect((await new ToolPermissionStore().getPolicy(workflow)).rules).toEqual(role)
     expect((await store.setPolicy(worktree, null)).source).toBe('default')
     expect((await new ToolPermissionStore().getPolicy(project)).source).toBe('default')
@@ -1105,7 +1105,7 @@ describe('image reference permission boundary', () => {
 
   it('retains worktree policy inheritance without promising a wider image-reader root', async () => {
     const h = imageRuntime({ read: 'ask' })
-    const worktree = join(sep, 'repo', '.pion-worktrees', 'app', 'feature-x')
+    const worktree = resolve(sep, 'repo', '.pion-worktrees', 'app', 'feature-x')
     h.ctx.cwd = worktree
     h.event.input.referenced_image_paths = ['art/source.png']
     expect(await h.run()).toBeUndefined()
@@ -1194,13 +1194,14 @@ describe('image reference permission boundary', () => {
     await h.run()
     const metadata = h.permissions()[0]
     expect(metadata.detail.length).toBeLessThanOrEqual(4000)
-    expect(metadata.detail).toContain(output)
+    const absoluteOutput = resolve(cwd, output)
+    const displayedOutput = absoluteOutput.length > 1200 ? `${output}（项目相对）` : absoluteOutput
+    expect(metadata.detail).toContain(`目标路径：${displayedOutput}（输出·写入 PNG 新文件）`)
     for (const [index, reference] of references.entries()) {
       expect(metadata.detail).toContain(`参考输入 ${index + 1}（读取·项目相对）：${reference}`)
     }
     expect(metadata.detail).not.toContain('…')
-    if (resolve(cwd, output).length > 1200) expect(metadata.detail).not.toContain(cwd)
-    else expect(metadata.detail).toContain(resolve(cwd, output))
+    if (absoluteOutput.length > 1200) expect(metadata.detail).not.toContain(cwd)
     const title = h.select.mock.calls.find(([value]) => value.startsWith(TOOL_PERMISSION_MARKER))![0]
     expect(parseToolPermissionMetadata(title)?.detail).toBe(metadata.detail)
     expect(metadata.detail).toContain('无 API-key/付费 API 回退')

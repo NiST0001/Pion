@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -19,8 +19,9 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 async function repository(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'pion-workflow-'))
-  roots.push(root)
+  const temporary = await mkdtemp(join(tmpdir(), 'pion-workflow-'))
+  roots.push(temporary)
+  const root = await realpath(temporary)
   git(root, 'init', '-q')
   git(root, 'config', 'user.name', 'Pion Test')
   git(root, 'config', 'user.email', 'pion@example.invalid')

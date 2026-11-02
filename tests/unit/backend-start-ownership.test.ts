@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import { BackendPool } from '../../src/main/agent/backend-pool'
@@ -35,8 +36,8 @@ function harness() {
   sdk.state.mockReset().mockRejectedValue(new Error('initial state failed'))
   sdk.stop.mockReset().mockResolvedValue(undefined)
   const pool = new BackendPool()
-  const cwd = '/fixture/project'
-  const path = `${cwd}/saved.jsonl`
+  const cwd = resolve('/fixture/project')
+  const path = join(cwd, 'saved.jsonl')
   const bridge = Object.assign(Object.create(AgentBridge.prototype), {
     backendPool: pool, backendKeysBySessionPath: new Map(), activeKey: 'writer', activeCwd: cwd, activeSessionPath: path,
     toolPermissionStore: { filePath: '/fixture/permissions.json' }, backendArgs: vi.fn(async () => []),
@@ -79,7 +80,7 @@ describe('backend initialization child ownership', () => {
   it.each(['state-read', 'path-mismatch'])('quarantines the child, cwd and real paths after %s and unknown stop, despite late exit/close', async (stage) => {
     vi.useFakeTimers()
     const h = harness()
-    const actualPath = `${h.cwd}/actual.jsonl`
+    const actualPath = join(h.cwd, 'actual.jsonl')
     if (stage === 'path-mismatch') sdk.state.mockResolvedValueOnce({ sessionFile: actualPath })
     const child = new Child()
     sdk.start.mockImplementation((client: { process: unknown }) => { client.process = child; return Promise.resolve() })
@@ -102,7 +103,7 @@ describe('backend initialization child ownership', () => {
     child.close()
     await gap()
     expect(h.pool.get('writer')).toBe(backend)
-    await expect(h.bridge.createBackend('new', h.cwd, `${h.cwd}/different.jsonl`)).rejects.toThrow('writer')
+    await expect(h.bridge.createBackend('new', h.cwd, join(h.cwd, 'different.jsonl'))).rejects.toThrow('writer')
     expect(sdk.start).toHaveBeenCalledTimes(1)
     expect(sdk.stop).toHaveBeenCalledTimes(1)
   })

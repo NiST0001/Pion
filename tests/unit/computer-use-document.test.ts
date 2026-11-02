@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { transpileModule, ScriptTarget, ModuleKind } from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import { ComputerUseService } from '../../src/main/computer-use/service'
@@ -25,7 +25,8 @@ function harness(options: { open?: Promise<unknown>; close?: Promise<unknown>; p
   const windows: Array<{ isDestroyed: () => boolean; webContents: ReturnType<typeof makeContents> }> = []
   const driver = { open: vi.fn(() => options.open ?? Promise.resolve(capability)), close: vi.fn(() => options.close ?? Promise.resolve()), capture: vi.fn() }
   const makeDriver = vi.fn(function (_binary: string, _dmaBufReadback: boolean) { return driver })
-  const app = { isPackaged: options.packaged === true, getAppPath: vi.fn(() => '/fake') }
+  const appPath = resolve('fake')
+  const app = { isPackaged: options.packaged === true, getAppPath: vi.fn(() => appPath) }
   let id = 0
   const coordination: ComputerUseCoordination = {
     claim: vi.fn(async () => ({ kind: 'claimed', receipt: { kind: 'computer-use-coordination-receipt' } } as const)),
@@ -50,7 +51,7 @@ function harness(options: { open?: Promise<unknown>; close?: Promise<unknown>; p
   const contents = addWindow(7)
   const finish = () => contents.emit('did-finish-load')
   const start = () => host.service.start(host.create(contents.id), consent)
-  return { host, driver, makeDriver, app, coordination, contents, finish, start, addWindow }
+  return { host, driver, makeDriver, app, appPath, coordination, contents, finish, start, addWindow }
 }
 function makeContents(id: number) {
   return Object.assign(new EventEmitter(), { id, mainFrame: { detached: false }, isDestroyed: () => false, send: vi.fn() })
@@ -77,7 +78,7 @@ describe('ComputerUse host document ownership (mock only)', () => {
       expect(h.makeDriver).not.toHaveBeenCalled(); expect(h.coordination.claim).not.toHaveBeenCalled()
     } else {
       await h.start()
-      expect(h.makeDriver).toHaveBeenCalledExactlyOnceWith('/fake/native/computer-use/target/debug/pion-computer-use-helper', options.enabled)
+      expect(h.makeDriver).toHaveBeenCalledExactlyOnceWith(join(h.appPath, 'native', 'computer-use', 'target', 'debug', 'pion-computer-use-helper'), options.enabled)
       await h.host.stop(7)
       expect(h.host.service.getState().dmaBufDevelopmentEnabled).toBe(options.enabled)
     }

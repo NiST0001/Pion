@@ -2,6 +2,17 @@ import { constants } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import { PersistentComputerUseCoordination, type ComputerUseCoordinationReceipt } from '../../src/main/computer-use/coordination'
 
+// Exercise the Linux coordination protocol with synthetic paths and flags on
+// every host. The injected filesystem handles all operations; native IO is unused.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return { ...actual, constants: { ...actual.constants, O_DIRECTORY: 0x10000, O_NOFOLLOW: 0x20000, O_NONBLOCK: 0x800 } }
+})
+vi.mock('node:path', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:path')>()
+  return { ...actual, isAbsolute: actual.posix.isAbsolute, join: actual.posix.join }
+})
+
 // Entirely synthetic account and filesystem. No userInfo, OS probes, temporary
 // directories, Electron userData, desktop helpers, or actual marker operations.
 const HOME = '/synthetic-account-home'
@@ -188,7 +199,7 @@ describe('PersistentComputerUseCoordination (synthetic filesystem only)', () => 
     const g = gate(f, target)
     let settled = false
     const pending = coordinator.claim().then((result) => { settled = true; return result })
-    await g.entered
+    await Promise.race([g.entered, pending.then(() => { throw new Error(`claim settled before ${target}`) })])
     expect(settled).toBe(false)
     g.release()
     expect((await pending).kind).toBe('claimed')
@@ -363,7 +374,7 @@ describe('PersistentComputerUseCoordination (synthetic filesystem only)', () => 
     const g = gate(f, target)
     let settled = false
     const pending = coordinator.release(receipt).then(() => { settled = true })
-    await g.entered
+    await Promise.race([g.entered, pending.then(() => { throw new Error(`release settled before ${target}`) })])
     expect(settled).toBe(false)
     g.release()
     await pending

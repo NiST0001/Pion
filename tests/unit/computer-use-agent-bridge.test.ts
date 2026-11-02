@@ -1,3 +1,4 @@
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SessionManager, type AgentSession, type ExtensionCommandContext, type ExtensionToolContext, type ModelRuntime } from '@earendil-works/pi-coding-agent'
 import { createComputerUseAgentChannel, createComputerUseTools } from '../../src/main/agent/computer-use'
@@ -21,9 +22,10 @@ afterEach(() => vi.unstubAllGlobals())
 function fixture() {
   const model = { provider: 'openai-codex', id: 'exact-model', input: ['text', 'image'] }
   let document = { windowId: 7, generation: 1, frame: {} }
-  const state = { model, sessionFile: '/mock-project/session.jsonl', sessionId: 'actual-sdk-session' }
+  const cwd = resolve('mock-project')
+  const state = { model, sessionFile: join(cwd, 'session.jsonl'), sessionId: 'actual-sdk-session' }
   const client = { getState: vi.fn(async () => state) }
-  const backend = { key: 'actual-backend-key', cwd: '/mock-project', sessionPath: state.sessionFile, usageBackendId: 'actual-backend-id', activeRunId: 'run-1',
+  const backend = { key: 'actual-backend-key', cwd, sessionPath: state.sessionFile, usageBackendId: 'actual-backend-id', activeRunId: 'run-1',
     computerUseAgentNonce: 'main-created-nonce', client, phase: 'running', busy: true, compacting: false, pendingRunIds: [], startPromise: Promise.resolve() } as unknown as BackendRecord
   const run = { id: backend.activeRunId, cwd: backend.cwd, sessionPath: backend.sessionPath, state: 'running', usageBackendId: backend.usageBackendId, tools: [] }
   const pending = new PendingRequestStore({ pushToolPermissionRequests: vi.fn(), pushExtensionUiRequests: vi.fn() })
@@ -60,6 +62,10 @@ describe('Main ComputerUse real captured-source boundary (mock)', () => {
   it('binds an actual factory-decorated root receipt to existing backend/client/run and live document', async () => {
     const h = fixture()
     h.start({ [COMPUTER_USE_AGENT_SOURCE_FIELD]: h.source })
+    expect(h.backend.nativeToolReceipts!.get(h.request.toolCallId!)).toMatchObject({
+      backendId: h.backend.usageBackendId, runId: h.run.id, rootId: h.request.toolCallId,
+      name: COMPUTER_USE_OBSERVE_TOOL, state: 'running', computerUseSource: h.source
+    })
     const scope = await h.admit()
     expect(scope.owner).toEqual({ ownerWindowId: 7, backendId: 'actual-backend-id', runtimeId: 'factory-1', runId: 'run-1', generation: 0 })
     expect(scope.imageSupported).toBe(true)
@@ -118,7 +124,7 @@ describe('Main ComputerUse real captured-source boundary (mock)', () => {
     const replaced = await h.admit(egress)
     expect(replaced.sessionIdentity).not.toBe(first.sessionIdentity)
     expect(next.assertCurrent).toThrow('scope-revoked')
-    h.state.sessionFile = '/some-other/actual-session.jsonl'
+    h.state.sessionFile = resolve('some-other', 'actual-session.jsonl')
     await expect(h.admit(egress)).rejects.toThrow('source-unverified')
   })
 

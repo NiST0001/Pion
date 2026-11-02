@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RunOperation } from '../../src/shared/operations'
 import { EMPTY_TOKEN_USAGE, MAX_USAGE_RECEIPTS, RunStore } from '../../src/main/run-store'
@@ -119,21 +119,22 @@ describe('RunStore standalone SDK usage', () => {
 
 describe('RunStore', () => {
   it.each([
-    [{ cwd: '/tmp/project', sessionPath: '/tmp/session.jsonl', pause: { paused: true, revision: 9, pausedRunId: 'queued' } }],
-    [null, {}, { cwd: '/tmp/project', pause: { paused: 'invalid', revision: -1 } }],
+    [{ cwd: resolve('/tmp/project'), sessionPath: resolve('/tmp/session.jsonl'), pause: { paused: true, revision: 9, pausedRunId: 'queued' } }],
+    [null, {}, { cwd: resolve('/tmp/project'), pause: { paused: 'invalid', revision: -1 } }],
     { malformed: true }
   ])('ignores legacy queuePauses while preserving runs and original queue identities (%j)', async (queuePauses) => {
     const root = await mkdtemp(join(tmpdir(), 'pion-runs-'))
     roots.push(root)
     const file = join(root, 'runs.json')
-    const sessionPath = '/tmp/session.jsonl'
+    const cwd = resolve('/tmp/project')
+    const sessionPath = resolve('/tmp/session.jsonl')
     const images = [{ type: 'image' as const, data: 'first', mimeType: 'image/png' },
       { type: 'image' as const, data: 'second', mimeType: 'image/jpeg' }]
     const originalRuns = [
-      operation({ id: 'done', sessionPath, state: 'completed', recoveredFromRunId: 'previous-run',
+      operation({ id: 'done', cwd, sessionPath, state: 'completed', recoveredFromRunId: 'previous-run',
         usage: { ...EMPTY_TOKEN_USAGE, total: 42 }, tools: [{ toolCallId: 'tool-1', name: 'read', state: 'completed', startedAt: 1, endedAt: 2 }] }),
-      operation({ id: 'queued', sessionPath, state: 'queued', prompt: { message: 'same', images } }),
-      operation({ id: 'queued-other', sessionPath, state: 'queued', prompt: { message: 'same', images: [] } })
+      operation({ id: 'queued', cwd, sessionPath, state: 'queued', prompt: { message: 'same', images } }),
+      operation({ id: 'queued-other', cwd, sessionPath, state: 'queued', prompt: { message: 'same', images: [] } })
     ]
     const originalFile = JSON.stringify({ version: 1, runs: originalRuns, queuePauses })
     await writeFile(file, originalFile)
@@ -144,7 +145,10 @@ describe('RunStore', () => {
     expect(store.get('done')).toMatchObject(originalRuns[0])
     expect(store.get('queued')).toMatchObject({ id: 'queued', state: 'queued', prompt: { message: 'same', images } })
     expect(store.get('queued-other')).toMatchObject({ id: 'queued-other', state: 'queued' })
-    store.create(operation({ id: 'new-queue', sessionPath, state: 'queued', createdAt: 200 }))
+    expect(store.get('queued')).toMatchObject(originalRuns[1])
+    expect(store.get('queued-other')).toMatchObject(originalRuns[2])
+    expect(store.list({ cwd, sessionPath }).map((run) => run.id)).toEqual(['done', 'queued', 'queued-other'])
+    store.create(operation({ id: 'new-queue', cwd, sessionPath, state: 'queued', createdAt: 200 }))
     store.update('queued', (run) => { run.state = 'discarded'; run.stopReason = 'queue-edited' })
     expect(store.get('queued')?.prompt.images).toEqual(images)
     expect(store.get('queued-other')?.state).toBe('queued')
@@ -152,6 +156,8 @@ describe('RunStore', () => {
     await store.flush()
 
     const disk = JSON.parse(await readFile(file, 'utf8'))
+    expect(disk).toEqual({ version: 1, usageReceipts: [], usageReplayFloor: 0,
+      runs: ['done', 'queued', 'queued-other', 'new-queue'].map(id => store.get(id)) })
     expect(disk).not.toHaveProperty('queuePauses')
     const restored = new RunStore(file)
     await restored.load()

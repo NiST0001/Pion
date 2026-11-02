@@ -1,0 +1,2 @@
+# Keep the CLI hashbang compatible with Vite's Windows transform.
+/scripts/computer-use-maintenance.mjs text eol=lf

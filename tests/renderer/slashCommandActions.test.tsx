@@ -799,7 +799,7 @@ describe('real pending operation slots and late publication fences', () => {
 
 describe('App native command composition source contracts (no GUI)', () => {
   it('connects interception before ordinary send and separates preparation exceptions from all native names', () => {
-    const app = readFileSync('src/renderer/src/App.tsx', 'utf8')
+    const app = readFileSync('src/renderer/src/App.tsx', 'utf8').replace(/\r\n/g, '\n')
     const composer = app.slice(app.indexOf('<Composer\n'), app.indexOf('</div>', app.indexOf('<Composer\n')))
     expect(composer).toContain('commands={composerCommands}')
     expect(composer).toContain('localCommandNames={PREPARATION_SLASH_COMMAND_NAMES}')

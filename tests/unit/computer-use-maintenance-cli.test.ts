@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 
 // Dynamic module path avoids importing development .mjs as a typed product API.
@@ -10,6 +11,13 @@ function backend() {
   createRecoveryIO: vi.fn(() => io) }
 }
 describe('explicit maintenance CLI (mock operations only)', () => {
+  it('keeps the executable hashbang on an LF-only checkout', () => {
+    const attributes = readFileSync('.gitattributes', 'utf8').replace(/\r\n/g, '\n')
+    const source = readFileSync('scripts/computer-use-maintenance.mjs', 'utf8')
+    expect(attributes.split('\n')).toContain('/scripts/computer-use-maintenance.mjs text eol=lf')
+    expect(source.startsWith('#!/usr/bin/env node\n')).toBe(true)
+    expect(source).not.toContain('\r\n')
+  })
   it.each([{ args: [] }, { args: ['--help'] }, { args: ['-h'] }])('help does not load any recovery IO', async ({ args }) => {
     const load = vi.fn()
     const result = await (await cli())(args, load)

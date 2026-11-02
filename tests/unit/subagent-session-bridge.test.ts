@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { dirname, resolve, sep } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { AgentBridge as Bridge } from '../../src/main/agent/agent-bridge'
 import { LiveSessionProjection } from '../../src/main/agent/live-session-state'
@@ -9,7 +10,7 @@ import { IPC_EVENTS } from '../../src/shared/ipc'
 let AgentBridge: typeof import('../../src/main/agent/agent-bridge').AgentBridge
 let messageRevert: typeof import('../../src/main/agent/message-revert')
 const bridges: Bridge[] = []
-const cwd = '/project', path = '/sessions/parent.jsonl'
+const cwd = resolve('/project'), path = resolve('/sessions/parent.jsonl')
 interface Internals {
   attachBackendEvents(backend: BackendRecord): void
   subagentSessions(): SubagentSessionStore
@@ -178,13 +179,15 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
   })
   it('captured parent scope cannot use a different run path or silently alias source paths', () => {
     const h = fixture(false)
-    h.backend.sessionPath = '/sessions/alias/../parent.jsonl'
+    const alias = `${dirname(path)}${sep}alias${sep}..${sep}parent.jsonl`
+    expect(resolve(alias)).toBe(path)
+    h.backend.sessionPath = alias
     h.emit(admission())
     expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(h.client, 'admission', { value: 'denied' })
     h.backend.sessionPath = path
     h.emit(admission())
     expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(h.client, 'admission', { value: 'reserved' })
-    h.emit(h.packet({ parentSessionPath: '/sessions/alias/../parent.jsonl' }))
+    h.emit(h.packet({ parentSessionPath: alias }))
     expect(h.read()).toBeNull()
     h.emit(h.packet())
     expect(h.read()?.parentSessionPath).toBe(path)

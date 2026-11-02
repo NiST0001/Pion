@@ -1,8 +1,10 @@
+import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { SessionListCache } from '../../src/main/agent/session-list-cache'
 import type { SessionMeta } from '../../src/shared/types'
 
-const row = (id: string): SessionMeta => ({ path: `/tmp/${id}.jsonl`, id, timestamp: '', mtime: 0, preview: id, messageCount: 1 })
+const fixturePath = (...parts: string[]) => resolve('/tmp', ...parts)
+const row = (id: string): SessionMeta => ({ path: fixturePath(`${encodeURIComponent(id)}.jsonl`), id, timestamp: '', mtime: 0, preview: id, messageCount: 1 })
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (error: Error) => void
@@ -196,19 +198,19 @@ describe('session sidebar background token totals', () => {
     await Promise.all(Array.from({ length: 5 }, (_, index) => cache.list(`/tmp/project-${index}`)))
     await flushBackground()
     expect(read).toHaveBeenCalledTimes(16)
-    for (let i = 0; i < 4; i++) expect(pending.filter(({ cwd }) => cwd === `/tmp/project-${i}`)).toHaveLength(4)
-    expect(pending.some(({ cwd }) => cwd === '/tmp/project-4')).toBe(false)
+    for (let i = 0; i < 4; i++) expect(pending.filter(({ cwd }) => cwd === fixturePath(`project-${i}`))).toHaveLength(4)
+    expect(pending.some(({ cwd }) => cwd === fixturePath('project-4'))).toBe(false)
     pending[0].task.resolve(1)
     await flushBackground()
     expect(read).toHaveBeenCalledTimes(17) // same directory's fifth row, not a fifth directory
-    expect(pending[16].cwd).toBe('/tmp/project-0')
+    expect(pending[16].cwd).toBe(fixturePath('project-0'))
     pending[16].task.resolve(1)
     await flushBackground()
     expect(read).toHaveBeenCalledTimes(17) // three siblings still own the batch
     for (let i = 1; i < 4; i++) pending[i].task.resolve(1)
     await flushBackground()
     expect(read).toHaveBeenCalledTimes(21)
-    expect(pending.slice(17).every(({ cwd }) => cwd === '/tmp/project-4')).toBe(true)
+    expect(pending.slice(17).every(({ cwd }) => cwd === fixturePath('project-4'))).toBe(true)
     // Drain subsequent fifth-row workers as well as all original siblings.
     for (let i = 0; i < 5; i++) {
       for (const { task } of pending) task.resolve(1)
@@ -300,7 +302,7 @@ describe('session sidebar background token totals', () => {
     await flushBackground()
     expect(publish).not.toHaveBeenCalled()
     expect(read).toHaveBeenCalledTimes(2)
-    expect(read.mock.calls[1]).toEqual([row('scan-3'), '/tmp/project'])
+    expect(read.mock.calls[1]).toEqual([row('scan-3'), fixturePath('project')])
     newestTokens.resolve(3)
     await flushBackground()
     expect(publish).toHaveBeenCalledExactlyOnceWith([{ ...row('scan-3'), totalTokens: 3 }])
@@ -313,7 +315,7 @@ describe('session sidebar background token totals', () => {
     const aTokens = deferred<number | undefined>()
     const bTokens = deferred<number | undefined>()
     const load = vi.fn(async (cwd: string) => [row(cwd)])
-    const read = vi.fn((_session: SessionMeta, cwd: string) => cwd === '/tmp/a' ? aTokens.promise : bTokens.promise)
+    const read = vi.fn((_session: SessionMeta, cwd: string) => cwd === fixturePath('a') ? aTokens.promise : bTokens.promise)
     const cache = new SessionListCache(load, Date.now, 1500, 2, { read, capturePublish: () => undefined })
     await cache.list('/tmp/a')
     await cache.list('/tmp/b')
@@ -322,10 +324,10 @@ describe('session sidebar background token totals', () => {
     expect(load).toHaveBeenCalledTimes(2)
     aTokens.resolve(undefined)
     await flushBackground()
-    expect(await cache.list('/tmp/c')).toEqual([row('/tmp/c')])
+    expect(await cache.list('/tmp/c')).toEqual([row(fixturePath('c'))])
     expect(load).toHaveBeenCalledTimes(3)
     // The still-live b entry was not evicted just because a became evictable.
-    expect(await cache.list('/tmp/b')).toEqual([row('/tmp/b')])
+    expect(await cache.list('/tmp/b')).toEqual([row(fixturePath('b'))])
     expect(load).toHaveBeenCalledTimes(3)
     bTokens.resolve(undefined)
     await flushBackground()
@@ -334,7 +336,7 @@ describe('session sidebar background token totals', () => {
   it('preserves the default 64-cwd cap across real token work and queued SDK scans', async () => {
     const tokens = deferred<number | undefined>()
     const scans = deferred<SessionMeta[]>()
-    const load = vi.fn(async (cwd: string) => cwd.startsWith('/tmp/token-') ? [row(cwd)] : scans.promise)
+    const load = vi.fn(async (cwd: string) => cwd.startsWith(fixturePath('token-')) ? [row(cwd)] : scans.promise)
     const cache = new SessionListCache(load, undefined, undefined, undefined, {
       read: () => tokens.promise, capturePublish: () => undefined
     })
@@ -369,8 +371,8 @@ describe('session sidebar background token totals', () => {
   it('never reads expired queued sources and coalesces a queued cwd before taking a directory slot', async () => {
     const blockers = deferred<number | undefined>()
     let queuedScans = 0
-    const load = vi.fn(async (cwd: string) => [row(cwd === '/tmp/queued' ? `queued-${++queuedScans}` : cwd)])
-    const read = vi.fn((session: SessionMeta) => session.id.startsWith('/tmp/blocker') ? blockers.promise : Promise.resolve(5))
+    const load = vi.fn(async (cwd: string) => [row(cwd === fixturePath('queued') ? `queued-${++queuedScans}` : cwd)])
+    const read = vi.fn((session: SessionMeta) => session.id.startsWith(fixturePath('blocker')) ? blockers.promise : Promise.resolve(5))
     const publish = vi.fn()
     const cache = new SessionListCache(load, Date.now, 1500, 64, { read, capturePublish: () => publish })
     await Promise.all(Array.from({ length: 4 }, (_, i) => cache.list(`/tmp/blocker-${i}`)))
@@ -383,7 +385,7 @@ describe('session sidebar background token totals', () => {
     blockers.resolve(1)
     await flushBackground()
     expect(read.mock.calls.map(([session]) => session.id)).toEqual([
-      '/tmp/blocker-0', '/tmp/blocker-1', '/tmp/blocker-2', '/tmp/blocker-3', 'queued-2'
+      fixturePath('blocker-0'), fixturePath('blocker-1'), fixturePath('blocker-2'), fixturePath('blocker-3'), 'queued-2'
     ])
     expect(publish).toHaveBeenCalledTimes(5)
     expect(await cache.list('/tmp/queued')).toEqual([{ ...row('queued-2'), totalTokens: 5 }])
@@ -392,7 +394,7 @@ describe('session sidebar background token totals', () => {
   it('evicts only queued idle cwd sources and never reads their old entry identity', async () => {
     const blockers = deferred<number | undefined>()
     const load = vi.fn(async (cwd: string) => [row(cwd)])
-    const read = vi.fn((session: SessionMeta) => session.id.startsWith('/tmp/blocker') ? blockers.promise : Promise.resolve(5))
+    const read = vi.fn((session: SessionMeta) => session.id.startsWith(fixturePath('blocker')) ? blockers.promise : Promise.resolve(5))
     const cache = new SessionListCache(load, Date.now, 1500, 5, { read, capturePublish: () => undefined })
     await Promise.all(Array.from({ length: 4 }, (_, i) => cache.list(`/tmp/blocker-${i}`)))
     await cache.list('/tmp/evicted')
@@ -400,8 +402,8 @@ describe('session sidebar background token totals', () => {
     expect(load).toHaveBeenCalledTimes(6)
     blockers.resolve(1)
     await flushBackground()
-    expect(read.mock.calls.some(([session]) => session.id === '/tmp/evicted')).toBe(false)
-    expect(read.mock.calls.some(([session]) => session.id === '/tmp/replacement')).toBe(true)
+    expect(read.mock.calls.some(([session]) => session.id === fixturePath('evicted'))).toBe(false)
+    expect(read.mock.calls.some(([session]) => session.id === fixturePath('replacement'))).toBe(true)
   })
 
   it('clones SDK rows, reader inputs, caller results and published enriched rows independently', async () => {
@@ -434,7 +436,7 @@ describe('session sidebar background token totals', () => {
   it('does not release a batch on unknown/rejected rows while a started sibling is actually pending', async () => {
     const sibling = deferred<number | undefined>()
     const sessions = ['reject', 'pending', 'unknown', 'throw', 'last'].map(row)
-    const load = vi.fn(async (cwd: string) => cwd === '/tmp/project' ? sessions : [])
+    const load = vi.fn(async (cwd: string) => cwd === fixturePath('project') ? sessions : [])
     const read = vi.fn((session: SessionMeta) => {
       if (session.id === 'reject') return Promise.reject(new Error('unreadable'))
       if (session.id === 'throw') throw new Error('synchronous failure')
@@ -486,7 +488,7 @@ describe('session sidebar background token totals', () => {
     await flushBackground()
     expect(firstPublish).not.toHaveBeenCalled()
     expect(secondPublish).toHaveBeenCalledExactlyOnceWith([{ ...row('own'), totalTokens: 12 }])
-    expect(capturePublish.mock.calls).toEqual([['/tmp/project'], ['/tmp/project']])
+    expect(capturePublish.mock.calls).toEqual([[fixturePath('project')], [fixturePath('project')]])
     expect(read).toHaveBeenCalledTimes(1)
   })
 

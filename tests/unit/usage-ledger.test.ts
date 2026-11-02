@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as sessionUsage from '../../src/main/agent/session-token-total'
 import { UsageLedger } from '../../src/main/usage-ledger'
+import { createUsageLedgerDirectoryIo } from '../fixtures/usage-ledger-directory-io'
 
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof import('node:fs/promises')>()
@@ -23,10 +24,12 @@ const assistant = (id: string, totalTokens = 10, parentId: string | null = null)
 const independent = (id: string, totalTokens = 10) => ({ ...base('usage', id), provider: 'fixture', model: 'model', kind: 'cache_warm', usage: usage(totalTokens) })
 const jsonl = (entries: unknown[]) => entries.map(value => JSON.stringify(value)).join('\n') + '\n'
 const dirs: string[] = []
+const directoryIo = createUsageLedgerDirectoryIo()
 const ledgers: UsageLedger[] = []
 async function fixture() {
   const dir = await fs.mkdtemp(join(tmpdir(), 'pion-usage-ledger-'))
   dirs.push(dir)
+  directoryIo.register(dir)
   const root = join(dir, 'sessions')
   await fs.mkdir(join(root, 'bucket'), { recursive: true })
   const options = { ledgerPath: join(dir, 'ledger.json'), sessionRoot: root }
@@ -60,13 +63,14 @@ function backgroundClock() {
 
 beforeEach(async () => {
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
-  vi.mocked(fs.open).mockReset().mockImplementation(actual.open)
+  vi.mocked(fs.open).mockReset().mockImplementation(directoryIo.open(actual))
   vi.mocked(fs.lstat).mockReset().mockImplementation(actual.lstat)
   vi.mocked(fs.rename).mockReset().mockImplementation(actual.rename)
 })
 afterEach(async () => {
   for (const ledger of ledgers.splice(0)) ledger.stopBackgroundCollection()
   vi.restoreAllMocks()
+  directoryIo.reset()
   await Promise.all(dirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })))
 })
 
@@ -270,7 +274,7 @@ describe('durable local usage ledger', () => {
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     let reused = false
     vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
-      const handle = await actual.open(file, flags, mode)
+      const handle = await directoryIo.open(actual)(file, flags, mode)
       if (String(file).startsWith(`${f.ledgerPath}.tmp-`)) {
         const close = handle.close.bind(handle)
         vi.spyOn(handle, 'close').mockImplementation(async () => {
@@ -383,7 +387,7 @@ describe('durable local usage ledger', () => {
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     let sourceReads = 0
     vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
-      const handle = await actual.open(file, flags, mode)
+      const handle = await directoryIo.open(actual)(file, flags, mode)
       if (String(file) === path) sourceReads++
       if (String(file).startsWith(`${f.ledgerPath}.tmp-`)) {
         const close = handle.close.bind(handle)
@@ -443,7 +447,7 @@ describe('durable local usage ledger', () => {
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
       if (String(file) === path) throw Object.assign(new Error('PRIVATE-SDK-BODY'), { code: 'EACCES' })
-      return actual.open(file, flags, mode)
+      return directoryIo.open(actual)(file, flags, mode)
     })
     const value = await f.ledger.getOverview()
     expect(value).toMatchObject({ records: 1, totals: { total: 10 }, coverage: { unavailableSessions: 1 } })
@@ -471,7 +475,7 @@ describe('durable local usage ledger', () => {
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     let sourceReads = 0
     vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
-      const handle = await actual.open(file, flags, mode)
+      const handle = await directoryIo.open(actual)(file, flags, mode)
       if (String(file) === path && ++sourceReads === 1) {
         const close = handle.close.bind(handle)
         vi.spyOn(handle, 'close').mockImplementation(async () => { started.resolve(); await release.promise; await close() })
@@ -619,7 +623,7 @@ describe('durable local usage ledger', () => {
     const release = deferred()
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
-      const handle = await actual.open(file, flags, mode)
+      const handle = await directoryIo.open(actual)(file, flags, mode)
       if (String(file) === path) {
         const close = handle.close.bind(handle)
         vi.spyOn(handle, 'close').mockImplementation(async () => { started.resolve(); await release.promise; await close() })
@@ -650,7 +654,7 @@ describe('durable local usage ledger', () => {
     const release = deferred()
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
-      const handle = await actual.open(file, flags, mode)
+      const handle = await directoryIo.open(actual)(file, flags, mode)
       if (String(file) === path) {
         const close = handle.close.bind(handle)
         vi.spyOn(handle, 'close').mockImplementation(async () => { started.resolve(); await release.promise; await close() })
@@ -697,7 +701,7 @@ describe('durable local usage ledger', () => {
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     let closes = 0
     vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
-      const handle = await actual.open(file, flags, mode)
+      const handle = await directoryIo.open(actual)(file, flags, mode)
       if (String(file) === path) {
         const close = handle.close.bind(handle)
         vi.spyOn(handle, 'close').mockImplementation(async () => { closes++; await close(); throw new Error('private close status') })
