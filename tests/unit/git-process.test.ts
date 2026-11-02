@@ -64,7 +64,7 @@ describe('RPC process exit and stdio barrier', () => {
   it('rejects missing pipe handles, including sparse stdio arrays, before stopping', async () => {
     const { child, client, stop } = rpcClient()
     delete child.stdio[1]
-    await expect(stop()).rejects.toThrow(/Incompatible SDK/)
+    await expect(stop()).rejects.toThrow(/^incompatible SDK RpcClient process\/stdio adapter$/)
     expect(client.stop).not.toHaveBeenCalled()
   })
 

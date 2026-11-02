@@ -23,9 +23,25 @@ function admission(overrides = {}) {
   return { type: 'extension_ui_request', method: 'input', title: SUBAGENT_SESSION_ADMISSION_TITLE, id: 'admission',
     placeholder: JSON.stringify({ version: 1, nonce: 'nonce', runtimeId: 'runtime', parentToolCallId: 'call', count: 1, ...overrides }) }
 }
+// Pinned SDK child: close follows exit and all three pipe closes.
+class HistoryProcess extends EventEmitter {
+  exitCode: number | null = null
+  signalCode: NodeJS.Signals | null = null
+  stdio = Array.from({ length: 3 }, () => Object.assign(new EventEmitter(), { closed: false }))
+
+  finish(): void {
+    this.exitCode = 0
+    this.emit('exit', 0, null)
+    for (const stream of this.stdio) {
+      stream.closed = true
+      stream.emit('close')
+    }
+    this.emit('close', this.exitCode, this.signalCode)
+  }
+}
 function fixture(reserve = true, parentPath: string | null = path) {
   let listener!: (event: unknown) => void
-  const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null })
+  const child = new HistoryProcess()
   const forbidden = vi.fn(() => { throw new Error('Display read must not call SDK') })
   const client = { process: child, onEvent: (callback: typeof listener) => { listener = callback },
     start: forbidden, getState: forbidden, prompt: forbidden, stop: forbidden }
@@ -66,7 +82,7 @@ function fixture(reserve = true, parentPath: string | null = path) {
 }
 function replaceBackendWithoutReservation(h: ReturnType<typeof fixture>) {
   let listener!: (event: unknown) => void
-  const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null })
+  const child = new HistoryProcess()
   const client = { ...h.client, process: child, onEvent: (callback: typeof listener) => { listener = callback } }
   const backend = { ...h.backend, client, liveState: new LiveSessionProjection(), nativeToolReceipts: undefined,
     activeRunId: 'run', historyMutation: false, busy: false } as unknown as BackendRecord
@@ -91,7 +107,7 @@ function prepareUndo(h: ReturnType<typeof fixture>, backend: BackendRecord) {
       type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'request' }] } }] })),
     stop: vi.fn(async () => {
       const process = (backend.client as unknown as { process: typeof h.child }).process
-      process.exitCode = 0; process.emit('exit', 0, null)
+      process.finish()
     })
   } as unknown as BackendRecord['client']
   Object.assign(h.bridge, { activeSessionPath: path, sessionSelectionGeneration: 1, sessionOperationsInFlight: 0,
@@ -333,6 +349,9 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
     expect(h.bridge.getSubagentSessions(7).sessions).toHaveLength(2)
     const request = prepareUndo(h, current.backend)
     const commit = vi.spyOn(messageRevert, 'revertSessionMessage').mockImplementation(() => {
+      expect(current.backend.client.stop).toHaveBeenCalledOnce()
+      expect(current.child.exitCode).toBe(0)
+      expect(current.child.stdio.every((stream) => stream.closed)).toBe(true)
       expect(h.bridge.getSubagentSessions(7).sessions).toHaveLength(2)
       return { sessionPath: path, sessionId: 'parent-sdk', entryId: 'user', previousLeafId: 'user', leafId: 'marker', text: 'request', images: [] }
     })
@@ -352,8 +371,14 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
     const h = fixture()
     h.emit(h.packet({ status: 'completed' }))
     const request = prepareUndo(h, h.backend)
-    vi.spyOn(messageRevert, 'revertSessionMessage').mockImplementation(() => { throw new Error('commit failed') })
+    const commit = vi.spyOn(messageRevert, 'revertSessionMessage').mockImplementation(() => {
+      expect(h.backend.client.stop).toHaveBeenCalledOnce()
+      expect(h.child.exitCode).toBe(0)
+      expect(h.child.stdio.every((stream) => stream.closed)).toBe(true)
+      throw new Error('commit failed')
+    })
     await expect(h.bridge.revertMessage(request, 7)).rejects.toThrow('commit failed')
+    expect(commit).toHaveBeenCalledOnce()
     expect(h.bridge.getSubagentSessions(7).sessions).toHaveLength(1)
     expect(h.read()?.status).toBe('completed')
     expect(h.internals.hiddenSubagentBackends?.size ?? 0).toBe(0)
