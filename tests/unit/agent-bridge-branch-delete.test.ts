@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { basename, join, resolve, sep } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { AgentBridge as AgentBridgeType } from '../../src/main/agent/agent-bridge'
 import { BackendPool } from '../../src/main/agent/backend-pool'
@@ -7,7 +8,7 @@ let AgentBridge: typeof import('../../src/main/agent/agent-bridge').AgentBridge
 let branchDelete: typeof import('../../src/main/git/branch-delete')
 const realpath = vi.fn(async (path: unknown) => String(path))
 
-const request = { projectCwd: '/project', cwd: '/worktree', name: 'feature' }
+const request = { projectCwd: resolve('/project'), cwd: resolve('/worktree'), name: 'feature' }
 const result = { worktreeRemoved: true, branchDeleted: true }
 function deferred() {
   let resolve!: () => void
@@ -51,7 +52,7 @@ function fixture() {
     getState: vi.fn(async () => ({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 })),
     stop: vi.fn(async () => { child.exit(); client.process = null; child.close() })
   }
-  const backend = { key: 'target', cwd: request.cwd, sessionPath: '/history/target.jsonl',
+  const backend = { key: 'target', cwd: request.cwd, sessionPath: resolve('/history/target.jsonl'),
     phase: 'running', busy: false, compacting: false, pendingRunIds: [], localFollowUps: [],
     companionRunIds: [], directSteering: [], rawQueue: { steering: [], followUp: [] },
     client, startPromise: Promise.resolve() } as unknown as BackendRecord
@@ -109,6 +110,7 @@ describe('AgentBridge branch deletion lifecycle', () => {
     })
     await expect(h.bridge.deleteBranch(request, 7, h.idle)).resolves.toEqual(result)
     expect(h.prepare).toHaveBeenCalledTimes(1)
+    expect(h.prepare).toHaveBeenCalledWith(request.projectCwd, request.cwd, request.name, expect.any(Function))
     expect(h.prepare.mock.invocationCallOrder[0]).toBeLessThan(h.client.getState.mock.invocationCallOrder[0])
     expect(h.client.getState).toHaveBeenCalledTimes(1)
     expect(h.client.stop).toHaveBeenCalledTimes(1)
@@ -121,10 +123,10 @@ describe('AgentBridge branch deletion lifecycle', () => {
     const deletion = h.bridge.deleteBranch(request, 7, () => wait.promise)
     try {
       await expect(h.bridge.withSessionOperation(() => undefined)).rejects.toThrow('正在删除分支')
-      await expect(h.bridge.start('/other')).rejects.toThrow('正在删除分支')
+      await expect(h.bridge.start(resolve('/other'))).rejects.toThrow('正在删除分支')
       await expect(h.bridge.newSession()).rejects.toThrow('正在删除分支')
-      await expect(h.bridge.switchSession('/history/other')).rejects.toThrow('正在删除分支')
-      await expect(h.bridge.startVerificationRepair(undefined, '/other', 'repair')).rejects.toThrow('正在删除分支')
+      await expect(h.bridge.switchSession(resolve('/history/other'))).rejects.toThrow('正在删除分支')
+      await expect(h.bridge.startVerificationRepair(undefined, resolve('/other'), 'repair')).rejects.toThrow('正在删除分支')
       await expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow('正在删除分支')
     } finally { wait.resolve(); await deletion }
   })
@@ -305,7 +307,12 @@ describe('AgentBridge branch deletion lifecycle', () => {
     expect(h.fields.branchDeletionInFlight).toBe(false)
   })
 
-  it.each(['worktree', '/worktree/../worktree', '/worktree/', '/worktree/.git/child'])('rejects raw noncanonical path %s without querying or stopping', async (cwd) => {
+  it.each([
+    'worktree',
+    `${request.cwd}${sep}..${sep}${basename(request.cwd)}`,
+    `${request.cwd}${sep}`,
+    join(request.cwd, '.git', 'child')
+  ])('rejects raw noncanonical path %s without querying or stopping', async (cwd) => {
     const h = fixture()
     await expect(h.bridge.deleteBranch({ ...request, cwd }, 7, h.idle)).rejects.toThrow('路径无效')
     expect(h.client.getState).not.toHaveBeenCalled()
@@ -315,7 +322,7 @@ describe('AgentBridge branch deletion lifecycle', () => {
 
   it.each(['backend', 'active', 'quarantined', 'process'])('rejects %s directory aliases before state queries or shutdown', async (source) => {
     const h = fixture()
-    const alias = '/alias'
+    const alias = resolve('/alias')
     if (source === 'backend') h.backend.cwd = alias
     if (source === 'active') h.fields.activeCwd = alias
     if (source === 'quarantined') h.fields.unconfirmedStoppedWorktreeCwds.add(alias)
@@ -330,9 +337,10 @@ describe('AgentBridge branch deletion lifecycle', () => {
 
   it('fails closed for an unrelated missing quarantined cwd', async () => {
     const h = fixture()
-    h.fields.unconfirmedStoppedWorktreeCwds.add('/missing')
+    const missing = resolve('/missing')
+    h.fields.unconfirmedStoppedWorktreeCwds.add(missing)
     h.paths.mockImplementation(async (path) => {
-      if (String(path) === '/missing') throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+      if (String(path) === missing) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
       return String(path)
     })
     await expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow('无法确认 Agent 工作目录')
@@ -343,7 +351,7 @@ describe('AgentBridge branch deletion lifecycle', () => {
   it('rechecks cwd mappings immediately after external callbacks', async () => {
     const h = fixture()
     await expect(h.bridge.deleteBranch(request, 7, async () => {
-      h.paths.mockImplementation(async (path) => String(path) === request.cwd ? '/replacement' : String(path))
+      h.paths.mockImplementation(async (path) => String(path) === request.cwd ? resolve('/replacement') : String(path))
     })).rejects.toThrow('别名或符号链接')
     expect(h.client.getState).not.toHaveBeenCalled()
     expect(h.client.stop).not.toHaveBeenCalled()
@@ -353,7 +361,7 @@ describe('AgentBridge branch deletion lifecycle', () => {
   it('rechecks cwd mappings after SDK callbacks before shutdown', async () => {
     const h = fixture()
     h.client.getState.mockImplementation(async () => {
-      h.paths.mockImplementation(async (path) => String(path) === request.cwd ? '/replacement' : String(path))
+      h.paths.mockImplementation(async (path) => String(path) === request.cwd ? resolve('/replacement') : String(path))
       return { isStreaming: false, isCompacting: false, pendingMessageCount: 0 }
     })
     await expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow('别名或符号链接')

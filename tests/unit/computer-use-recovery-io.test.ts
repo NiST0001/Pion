@@ -1,13 +1,24 @@
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import { constants } from 'node:fs'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRecoveryIO, type RecoveryFS } from '../../src/main/computer-use/recovery-io'
 import { RECOVERY_FILES, finishRecovery, prepareRecovery, verifyRecovery } from '../../src/main/computer-use/recovery'
 import { PersistentComputerUseCoordination } from '../../src/main/computer-use/coordination'
 
 const children = vi.hoisted(() => ({ spawn: vi.fn() }))
 vi.mock('node:child_process', () => ({ spawn: children.spawn }))
+// Exercise the Linux FD protocol against the synthetic FS on every host. Keep
+// these flags and POSIX paths inside this module graph; native IO is never used.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>()
+  return { ...actual, constants: { ...actual.constants, O_DIRECTORY: 0x10000, O_NOFOLLOW: 0x20000, O_NONBLOCK: 0x800 } }
+})
+vi.mock('node:path', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:path')>()
+  return { ...actual, isAbsolute: actual.posix.isAbsolute, join: actual.posix.join }
+})
+afterEach(() => { vi.unstubAllGlobals() })
 // All accounts, files, boot generations and stat children below are synthetic.
 // No temporary directories, actual /proc, user home, Portal or OS reset is used.
 const HOME = '/synthetic-home'
@@ -227,7 +238,7 @@ describe('boot-bound maintenance IO (synthetic storage and process only)', () =>
     f.setHook(async (event) => { if (event === target && !held) { held = true; entered.resolve(); await wait.promise } })
     let settled = false
     const pending = prepareRecovery(f.io).then((r) => { settled = true; return r })
-    await entered.promise
+    await Promise.race([entered.promise, pending.then(() => { throw new Error(`prepare settled before ${target}`) })])
     expect(settled).toBe(false); expect(f.nodes.has(MARKER)).toBe(true)
     wait.resolve(); await pending
     expect(f.live.size).toBe(0)
@@ -295,7 +306,7 @@ describe('boot-bound maintenance IO (synthetic storage and process only)', () =>
     })
     let settled = false
     const pending = finishRecovery(f.io).then((r) => { settled = true; return r })
-    await entered.promise
+    await Promise.race([entered.promise, pending.then(() => { throw new Error(`finish settled before ${phase}`) })])
     expect(settled).toBe(false)
     expect(f.nodes.has(`${DIR}/${RECOVERY_FILES.consumed}`)).toBe(true)
     expect(f.nodes.has(MARKER)).toBe(phase !== 'completed')
@@ -318,6 +329,16 @@ describe('boot-bound maintenance IO (synthetic storage and process only)', () =>
     const another = new PersistentComputerUseCoordination({ account: f.account,
       fs: { ...f.fs, mkdir: async () => { throw error('EEXIST') } } })
     expect((await another.claim()).kind).toBe('claimed')
+  })
+
+  it.each(['prepare', 'verify', 'finish'])('Windows CLI rejects %s before loading maintenance IO', async (operation) => {
+    const cliModule = '../../scripts/computer-use-maintenance.mjs'
+    const { runMaintenance } = await import(cliModule)
+    const load = vi.fn()
+    vi.stubGlobal('process', Object.create(process, { platform: { value: 'win32' } }))
+    const result = await runMaintenance([operation, '--local-only-storage'], load)
+    expect(result.code).toBe(2)
+    expect(load).not.toHaveBeenCalled()
   })
 
   it('native metadata probe uses only fixed stat and waits for actual process/stdio close', async () => {

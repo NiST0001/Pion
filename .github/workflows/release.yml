@@ -15,7 +15,7 @@ jobs:
 
   build:
     needs: quality
-    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.quality.outputs.sha == github.sha
+    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.quality.result == 'success' && needs.quality.outputs.sha == github.sha
     permissions:
       contents: write
     strategy:
@@ -63,12 +63,6 @@ jobs:
           assert.ok(Array.isArray(latest.changes) && latest.changes.length > 0 && latest.changes.every(change => typeof change === 'string' && change.trim().length > 0), 'Release notes must contain changes')
           NODE
       - run: npm ci
-      - name: Windows typecheck
-        if: runner.os == 'Windows'
-        run: npm run typecheck
-      - name: Windows unit tests
-        if: runner.os == 'Windows'
-        run: npm test
       - run: npm run build
       - run: npx electron-builder --publish always
         env:

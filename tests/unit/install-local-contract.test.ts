@@ -1,9 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { parse } from 'yaml'
 
 // Source contracts only: no installer, Electron, package manager or shell is run.
-const install = readFileSync(new URL('../../scripts/install-local.sh', import.meta.url), 'utf8')
-const quality = readFileSync(new URL('../../.github/workflows/quality.yml', import.meta.url), 'utf8')
+const install = readFileSync(new URL('../../scripts/install-local.sh', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+const quality = readFileSync(new URL('../../.github/workflows/quality.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 
 describe('local installation and quality workflow contracts', () => {
   it('captures the actual XDG/default app path and quotes launcher paths and arguments', () => {
@@ -68,7 +69,8 @@ describe('local installation and quality workflow contracts', () => {
   })
 
   it('runs all quality gates and local Playwright against a single build, retaining failure artifacts', () => {
-    const commands = [...quality.matchAll(/^\s*(?:- )?run: (.+)$/gm)].map(match => match[1])
+    const linux = (parse(quality) as { jobs: { test: { steps: Array<{ run?: string }> } } }).jobs.test
+    const commands = linux.steps.flatMap(step => typeof step.run === 'string' ? [step.run] : [])
     expect(commands).toEqual([
       'npm ci',
       'npm run typecheck',

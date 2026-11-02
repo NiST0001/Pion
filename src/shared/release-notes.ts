@@ -8,6 +8,14 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.105',
+    changes: [
+      '发布前并行验证 Linux 与 Windows，两个平台通过同一提交的质量门后再生成安装包。',
+      '完善 Windows 测试路径和模拟环境，并提供测试、套件及未处理错误的失败汇总。',
+      '收紧导出暂存及 Pi 更新日志的安全读取标志校验，保留未知句柄隔离和私有恢复目录。'
+    ]
+  },
+  {
     version: '0.1.104',
     changes: [
       '修复跨平台发布测试中的路径、文件打开标志及模拟平台适配，保留原有安全检查。'

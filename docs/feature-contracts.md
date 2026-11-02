@@ -43,6 +43,7 @@
 - `/model [provider/model]` 使用当前会话模型目录和精确 ID；无精确匹配时展示可搜索选择器。`/thinking [level]` 按当前支持级别选择；提交前重查模型目录/级别及忙碌、压缩、流式/排队状态，准备期间不启动变更。`/name` 无参数只显示名称，有参数才重命名；`/resume` 仅列当前项目已保存会话，选择取消时保留候选列表；`/new`、`/clone`、`/compact` 沿现有原生生命周期，不造消息或虚构 SDK entry ID。
 - `/session` 直接投影现有 SDK 的完整会话统计，不以当前历史页、上下文占用或有限运行列表代替。`/copy` 从所属后端读取当前分支最后一条助手文字再写本地剪贴板；`/changelog` 仅读取内置 Pi 包的有界版本/日志，打包时沿真实解包目录避免 ASAR 虚拟路径与 FD 身份误判，不是 Pion 发布日志。新增 typed IPC 均核对所属主窗口/主帧；`SessionCommandTarget` 的 cwd、sessionId、sessionPath、backendId 只作为现有后端身份 fence，不请求加载或启动，异步前后复查 client/选择/事件 generation 与活窗口。
 - `/export [path.html|path.jsonl]` 是用户显式本地导出：HTML 使用 SDK 完整会话树，JSONL 使用 SDK 当前分支序列化；缺少已落盘消息的 HTML 在 RPC 前拒绝，但不能因当前分支为空否定完整树中的已保存消息；仅零计数歧义时有界读取全树并复查身份。路径只移除匹配的外层引号，支持捕获 cwd 的相对路径和 `~/`，不做 shell 解释；`.jsonl` 后缀导出 JSONL，其余路径导出 HTML，不覆盖已有目标。私有暂存完整写入、身份与预算复查后 hard-link no-replace 发布；拒绝符号链接/非普通文件、超限及变化的输入，不支持安全发布时报告恢复路径、不自动覆盖/换路径。检查不是 OS 沙箱或完整 TOCTOU 防护，导出可包含敏感提示词/工具输出，不能自动分享或上传。
+- 导出暂存与 Pi 内置更新日志读取要求 `O_NOFOLLOW`、`O_NONBLOCK` 为可完整参与位运算的正整数；缺失、零值、非整数或超出正 32 位范围时，在文件打开前拒绝，保留导出私有恢复目录，`O_RDONLY=0` 仍有效。
 - 导出真实 Promise 在途期间保留全局操作槽及后端池保留标记，阻止相冲突的会话变更/自动派发与驱逐；不能复用 `historyMutation` 屏蔽 SDK 事件，真实 `agent_start` 等事件照常处理并作废旧发布。逻辑关闭、切页或超时不解除真实 pending；SDK 导出返回失败无法区分业务拒绝和未知 writer 时保守保留私有暂存，后续导出隔离至重启，但不冻结普通会话/其他只读能力。日志未知 close 只保留日志读槽；释放已暴露 RPC Promise 不宣称底层 writer、远端请求或收费已物理停止。
 - 命令弹窗是独立 lazy/Suspense 受控槽位，不重挂载父时间线/设置；搜索结果有界展示并可继续翻页，纯文字信息不注入 HTML。cwd/路径/会话/backend/API/selection generation 或请求替换后拒绝迟到结果；观察到身份/API/可见性失效后永久退休该次弹窗，即使不变的 selection generation 下 A→B→A 也不能复活。连续同类命令及相冲突变更保留实际 pending，重复选择不重复调用。焦点仅由最上层 modal 处理，Enter/Tab/Escape 不穿透 Composer，IME/长按不执行；菜单仅滚动自身，原生命令不消费图片附件，后端准备例外不是变更授权。
 
@@ -313,7 +314,7 @@
 ## 安装与发布
 
 - scripts/install-local.sh 默认递增 patch 版本并构建，默认安装到 ~/.local/share/pion/app/；设置 XDG_DATA_HOME 时沿其 pion/app，启动器仍为 ~/.local/bin/pion。生成启动器绑定实际绝对安装路径，shell 与 desktop 入口各自转义并保参数转发。质量流程复用同一次构建产物运行 Electron E2E，保留独立 types、unit 和 coverage 检查。
-- 推送 v* 标签会触发 .github/workflows/release.yml，先通过同 SHA 的可复用 quality，再核质量输出、checkout、触发修订与 tag/package/latest release notes 一致，成功后构建 Windows NSIS、Linux AppImage/deb 并发布。Linux quality 保原 types/unit/coverage/build/E2E；Windows 发布另做 types/unit，未宣称 Windows E2E。质量失败/取消无成功 SHA；contents 写权限限发布 job，GH_TOKEN 仅交打包发布步骤，checkout 不持久化凭据。源码合同回归保留实际 GitHub/打包/平台验收的独立状态。
+- 推送 v* 标签会触发 .github/workflows/release.yml，先通过同 SHA 的可复用 quality，再核质量输出、checkout、触发修订与 tag/package/latest release notes 一致，成功后构建 Windows NSIS、Linux AppImage/deb 并发布。main/PR 与标签 quality 均独立执行 Linux types/完整测试/coverage/build/E2E 和 Windows types/完整测试，聚合门仅在两平台成功时输出同 SHA；失败、跳过或取消均拒绝发布。Windows 测试、文件、嵌套套件与未处理错误汇总写入 job summary，单条诊断限长并注明裁剪，两份 JSON 报告存 artifact；缺失、坏报告或 pending 结果使质量门失败。质量任务不传仓库 secrets，公开摘要仅做部分脱敏，完整控制台日志另见 job 日志；Windows E2E 保持未验收。contents 写权限限发布 job，GH_TOKEN 仅交打包发布步骤，checkout 不持久化凭据。源码合同回归保留实际 GitHub/打包/平台验收的独立状态。
 - 每次发布后，总结本版本实际交付的新增、修复及重要行为变化，核对并填写 src/shared/release-notes.ts 的更新日志（供设置 → 关于 Pion 展示），按版本倒序排列，不写未经验证的性能或测试结论，不将仅本机安装的版本当作正式发布。
 - 更新日志随安装包内置，因此打标签、打包前先准备本版本日志；发布完成后再核对最终发布内容并补充遗漏，同时同步 GitHub Release 说明。若打包后修改日志，不宣称已经生成的安装包包含该修改。
 - 构建通过不等同于类型检查、测试或真机验证通过。

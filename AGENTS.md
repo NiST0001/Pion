@@ -72,5 +72,5 @@ Pion 是 Electron + React + TypeScript + Vite 的 pi coding agent 桌面应用�
 
 ## 安装与发布
 
-- `scripts/install-local.sh` 默认递增 patch 并构建，安装到 `~/.local/share/pion/app/`，启动器 `~/.local/bin/pion`；自定义 `XDG_DATA_HOME` 时绑定实际安装绝对路径，保参数及 shell/desktop 转义。`v*` 标签触发 release workflow，发布先等同 SHA quality 并核 tag/package/latest notes，Windows 保独立 types/unit；质量失败/取消拒发行。
+- `scripts/install-local.sh` 默认递增 patch 并构建，安装到 `~/.local/share/pion/app/`，启动器 `~/.local/bin/pion`；自定义 `XDG_DATA_HOME` 时绑定实际安装绝对路径，保参数及 shell/desktop 转义。main/PR 与 `v*` 的 quality 均独立运行 Linux 完整检查及 Windows types/完整测试，Windows 失败列表写 job summary、完整 JSON 存 artifact；发布先等两平台同 SHA quality 成功并核 tag/package/latest notes，质量失败/取消拒发行，质量任务不传仓库 secrets。
 - 打包/打标签前准备 `src/shared/release-notes.ts`，按版本倒序，只写实际交付变化；发布后核对并同步 GitHub Release。不把本地安装当正式发布，包生成后改日志不能声称已进旧包。

@@ -1,6 +1,6 @@
 import { constants, type BigIntStats } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { SessionManager, VERSION } from '@earendil-works/pi-coding-agent'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -18,6 +18,17 @@ const io = vi.hoisted(() => ({
   lstat: vi.fn(), link: vi.fn(), mkdtemp: vi.fn(), open: vi.fn(), realpath: vi.fn(), rmdir: vi.fn(), unlink: vi.fn()
 }))
 const sdk = vi.hoisted(() => ({ getPackageDir: vi.fn() }))
+// These strict flags model the virtual filesystem only; they never reach real FS.
+vi.mock('node:fs', async (original) => {
+  const actual = await original<typeof import('node:fs')>()
+  return { ...actual, constants: { ...actual.constants, O_NOFOLLOW: 0x20000, O_NONBLOCK: 0x800 } }
+})
+function mockSafeFsConstants() {
+  vi.doMock('node:fs', async (original) => {
+    const actual = await original<typeof import('node:fs')>()
+    return { ...actual, constants: { ...actual.constants, O_NOFOLLOW: 0x20000, O_NONBLOCK: 0x800 } }
+  })
+}
 vi.mock('node:fs/promises', async (original) => ({ ...await original<typeof import('node:fs/promises')>(), ...io }))
 vi.mock('@earendil-works/pi-coding-agent', async (original) => ({
   ...await original<typeof import('@earendil-works/pi-coding-agent')>(), getPackageDir: sdk.getPackageDir
@@ -29,11 +40,11 @@ type VirtualFile = {
 const files = new Map<string, VirtualFile>()
 const handles: Array<ReturnType<typeof fileHandle>> = []
 let inode = 0n
-const parent = '/exports'
-const destination = `${parent}/session.html`
-const scratchDir = `${parent}/.pion-session-export-private`
-const scratchPath = `${scratchDir}/session.html`
-const packageDir = '/runtime/node_modules/@earendil-works/pi-coding-agent'
+const parent = resolve('/exports')
+const destination = join(parent, 'session.html')
+const scratchDir = join(parent, '.pion-session-export-private')
+const scratchPath = join(scratchDir, 'session.html')
+const packageDir = resolve('/runtime/node_modules/@earendil-works/pi-coding-agent')
 const changelogPath = join(packageDir, 'CHANGELOG.md')
 
 function deferred<T>() {
@@ -93,6 +104,8 @@ beforeEach(() => {
     if (flags === 'wx') {
       if (files.has(path)) throw errno('EEXIST')
       put(path, '', 'file', 0o100000n | BigInt(mode!))
+    } else if (flags !== (constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)) {
+      throw errno('EINVAL')
     }
     const file = files.get(path)
     if (!file) throw errno('ENOENT')
@@ -113,13 +126,14 @@ beforeEach(() => {
 
 describe('command export path and branch serialization (public SDK only)', () => {
   it('resolves relative/~/ paths without a shell and defaults to a fresh visible HTML filename', () => {
-    expect(sessionCommandExportPath(parent, 'a b/session.jsonl')).toBe(`${parent}/a b/session.jsonl`)
+    expect(sessionCommandExportPath(parent, 'a b/session.jsonl')).toBe(join(parent, 'a b/session.jsonl'))
     expect(sessionCommandExportPath(parent, '~/a b/session.html')).toBe(join(homedir(), 'a b/session.html'))
-    expect(sessionCommandExportPath(parent, '/other/session.html')).toBe('/other/session.html')
+    expect(sessionCommandExportPath(parent, resolve('/other/session.html'))).toBe(resolve('/other/session.html'))
     const first = sessionCommandExportPath(parent), second = sessionCommandExportPath(parent)
-    expect(first).toMatch(/^\/exports\/session-[^/]+\.html$/)
+    expect(dirname(first)).toBe(parent)
+    expect(basename(first)).toMatch(/^session-.+\.html$/)
     expect(second).not.toBe(first)
-    expect(sessionCommandExportPath(parent, '$(touch secret).html')).toBe(`${parent}/$(touch secret).html`)
+    expect(sessionCommandExportPath(parent, '$(touch secret).html')).toBe(join(parent, '$(touch secret).html'))
     expect(io.open).not.toHaveBeenCalled()
   })
 
@@ -130,7 +144,7 @@ describe('command export path and branch serialization (public SDK only)', () =>
 
   it('rejects noncanonical cwd rather than resolving it against the main-process cwd', () => {
     expect(() => sessionCommandExportPath('relative', 'file.html')).toThrow('工作目录无效')
-    expect(() => sessionCommandExportPath('/exports/../other', 'file.html')).toThrow('工作目录无效')
+    expect(() => sessionCommandExportPath(`${parent}${sep}..${sep}other`, 'file.html')).toThrow('工作目录无效')
   })
 
   it('selects the real RPC leaf, including metadata, without opening a disk manager or copying abandoned branches', () => {
@@ -290,6 +304,11 @@ describe('private no-replace command export publication (virtual filesystem)', (
     const exporting = publishSessionCommandExport(destination, async (path) => { put(path, 'output') }, () => {})
     const observed = expect(exporting).rejects.toBeInstanceOf(SessionCommandFileStateUnknownError)
     await entered.promise
+    let settled = false
+    void exporting.then(() => { settled = true }, () => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(handles[0].close).toHaveBeenCalledOnce()
     expect(io.link).not.toHaveBeenCalled()
     expect(io.unlink).not.toHaveBeenCalled()
     closed.resolve()
@@ -316,12 +335,13 @@ describe('private no-replace command export publication (virtual filesystem)', (
   })
 
   it('writes JSONL only with exclusive creation, private permissions, sync and actual close', async () => {
-    await expect(writeSessionCommandJsonl(`${parent}/private.jsonl`, 'jsonl\n', () => {})).resolves.toBeUndefined()
-    expect(io.open).toHaveBeenCalledExactlyOnceWith(`${parent}/private.jsonl`, 'wx', 0o600)
+    const path = join(parent, 'private.jsonl')
+    await expect(writeSessionCommandJsonl(path, 'jsonl\n', () => {})).resolves.toBeUndefined()
+    expect(io.open).toHaveBeenCalledExactlyOnceWith(path, 'wx', 0o600)
     expect(handles[0].sync).toHaveBeenCalledOnce()
     expect(handles[0].close).toHaveBeenCalledOnce()
-    await expect(writeSessionCommandJsonl(`${parent}/private.jsonl`, 'replacement', () => {})).rejects.toThrow('EEXIST')
-    expect(files.get(`${parent}/private.jsonl`)?.data.toString()).toBe('jsonl\n')
+    await expect(writeSessionCommandJsonl(path, 'replacement', () => {})).rejects.toThrow('EEXIST')
+    expect(files.get(path)?.data.toString()).toBe('jsonl\n')
   })
 
   it('preserves unknown JSONL write-handle close as an isolation error', async () => {
@@ -331,14 +351,87 @@ describe('private no-replace command export publication (virtual filesystem)', (
       handle.close.mockRejectedValueOnce(new Error('close rejected'))
       return handle
     })
-    await expect(writeSessionCommandJsonl(`${parent}/private.jsonl`, 'complete\n', () => {}))
+    const path = join(parent, 'private.jsonl')
+    await expect(writeSessionCommandJsonl(path, 'complete\n', () => {}))
       .rejects.toBeInstanceOf(SessionCommandFileStateUnknownError)
-    expect(files.get(`${parent}/private.jsonl`)?.data.toString()).toBe('complete\n')
+    expect(files.get(path)?.data.toString()).toBe('complete\n')
     expect(handles[0].close).toHaveBeenCalledOnce()
   })
 })
 
 describe('bundled Pi changelog bounded reads', () => {
+  it.each((['O_NOFOLLOW', 'O_NONBLOCK'] as const).flatMap((flag) =>
+    [undefined, 0, NaN, 0.5, -1, 2 ** 32, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1].map((value) => ({ flag, value }))
+  ))('rejects invalid $flag=$value for changelog and export before opening a file', async ({ flag, value }) => {
+    vi.resetModules()
+    try {
+      const mockConstants: Record<string, number> = { ...constants, O_NOFOLLOW: 0x20000, O_NONBLOCK: 0x800 }
+      if (value === undefined) delete mockConstants[flag]
+      else mockConstants[flag] = value
+      vi.doMock('node:fs', async (original) => {
+        const actual = await original<typeof import('node:fs')>()
+        return { ...actual, constants: mockConstants }
+      })
+      const commands = await import('../../src/main/agent/slash-command-files')
+      await expect(commands.readPiChangelog(() => {})).rejects.toThrow('当前系统不支持安全读取导出文件')
+      const error: unknown = await commands.publishSessionCommandExport(destination, async (path) => { put(path, 'private output') }, () => {})
+        .catch((failure: unknown) => failure)
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain('当前系统不支持安全读取导出文件')
+      expect((error as Error).message).toContain(`私有恢复目录：${scratchDir}`)
+      expect(files.get(scratchPath)?.data.toString()).toBe('private output')
+      expect(files.has(scratchDir)).toBe(true)
+      expect(files.has(destination)).toBe(false)
+      expect(io.open).not.toHaveBeenCalled()
+      expect(io.link).not.toHaveBeenCalled()
+      expect(io.unlink).not.toHaveBeenCalled()
+      expect(io.rmdir).not.toHaveBeenCalled()
+    } finally {
+      mockSafeFsConstants()
+      vi.resetModules()
+    }
+  })
+
+  it('uses actual host flags and rejects without opening when a strict flag is unavailable', async () => {
+    vi.resetModules()
+    vi.doUnmock('node:fs')
+    try {
+      const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
+      const commands = await import('../../src/main/agent/slash-command-files')
+      io.open.mockRejectedValue(errno('ENOTSUP'))
+      const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = actual.constants
+      if (Number.isSafeInteger(O_NOFOLLOW) && O_NOFOLLOW > 0 && O_NOFOLLOW <= 0x7fffffff
+        && Number.isSafeInteger(O_NONBLOCK) && O_NONBLOCK > 0 && O_NONBLOCK <= 0x7fffffff) {
+        await expect(commands.readPiChangelog(() => {})).rejects.toThrow('ENOTSUP')
+        expect(io.open).toHaveBeenCalledExactlyOnceWith(changelogPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+      } else {
+        await expect(commands.readPiChangelog(() => {})).rejects.toThrow('当前系统不支持安全读取导出文件')
+        expect(io.open).not.toHaveBeenCalled()
+      }
+      expect(handles).toHaveLength(0)
+    } finally {
+      mockSafeFsConstants()
+      vi.resetModules()
+    }
+  })
+
+  it('accepts O_RDONLY=0 when both strict flags are valid', async () => {
+    vi.resetModules()
+    try {
+      vi.doMock('node:fs', async (original) => {
+        const actual = await original<typeof import('node:fs')>()
+        return { ...actual, constants: { ...actual.constants, O_RDONLY: 0, O_NOFOLLOW: 0x20000, O_NONBLOCK: 0x800 } }
+      })
+      const commands = await import('../../src/main/agent/slash-command-files')
+      io.open.mockRejectedValue(errno('ENOTSUP'))
+      await expect(commands.readPiChangelog(() => {})).rejects.toThrow('ENOTSUP')
+      expect(io.open).toHaveBeenCalledExactlyOnceWith(changelogPath, 0x20000 | 0x800)
+    } finally {
+      mockSafeFsConstants()
+      vi.resetModules()
+    }
+  })
+
   it('reads only the fixed package CHANGELOG.md and returns public SDK VERSION', async () => {
     await expect(readPiChangelog(() => {})).resolves.toEqual({ version: VERSION, markdown: '# Bundled Pi changelog\n' })
     expect(io.open).toHaveBeenCalledExactlyOnceWith(changelogPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
@@ -347,8 +440,8 @@ describe('bundled Pi changelog bounded reads', () => {
   })
 
   it.each(['app.asar', 'app.asar.unpacked'])('reads the real unpacked package when SDK reports %s (virtual filesystem only)', async (archive) => {
-    const virtualPackage = join('/runtime/resources', 'app.asar', 'node_modules', '@earendil-works', 'pi-coding-agent')
-    const unpackedPackage = join('/runtime/resources', 'app.asar.unpacked', 'node_modules', '@earendil-works', 'pi-coding-agent')
+    const virtualPackage = resolve('/runtime/resources', 'app.asar', 'node_modules', '@earendil-works', 'pi-coding-agent')
+    const unpackedPackage = resolve('/runtime/resources', 'app.asar.unpacked', 'node_modules', '@earendil-works', 'pi-coding-agent')
     const virtualPath = join(virtualPackage, 'CHANGELOG.md')
     const unpackedPath = join(unpackedPackage, 'CHANGELOG.md')
     sdk.getPackageDir.mockReturnValue(archive === 'app.asar' ? virtualPackage : unpackedPackage)

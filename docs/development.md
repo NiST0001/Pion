@@ -462,7 +462,7 @@ src/
 ## 说明
 
 - 本项目采用 MIT License，完整条款见根目录 `LICENSE`。
-- 本机安装使用 `scripts/install-local.sh`，支持 `XDG_DATA_HOME`，生成启动器绑定实际安装绝对路径并处理 shell/desktop 转义；分发包配置位于 `electron-builder.yml`。v* 标签发布先等待同 SHA 的 reusable quality，再核 tag/package/latest notes；Windows 额外做 types/unit，Linux 沿完整 E2E。仅发布 job 持写权限，凭据不随 checkout 持久化。工作流合同使用显式 devDependency `yaml` 解析；本地源码回归保持与真实 GitHub、打包及 Windows 验收分开。
+- 本机安装使用 `scripts/install-local.sh`，支持 `XDG_DATA_HOME`，生成启动器绑定实际安装绝对路径并处理 shell/desktop 转义；分发包配置位于 `electron-builder.yml`。main、PR 与 v* 标签的 reusable quality 并行运行 Linux 完整检查和 Windows Node 24、`npm ci`、三套类型检查及完整 `npm test`；Linux 保 coverage/build/E2E。聚合门仅在两平台成功时输出同 SHA，发布构建再核 quality 结果、SHA、tag/package/latest notes。Windows 测试失败列表写入 job summary，单条诊断限长并注明裁剪；Vitest JSON 与任务错误报告作为 artifact，覆盖测试、文件、嵌套套件及未处理错误；完整控制台日志另见 job 日志，公开摘要仅做部分脱敏。报告缺失、无效或测试结果未知时质量门失败。公开摘要和报告使用无仓库 secrets 的质量任务，仍应避免在测试输出中写入真实凭据。仅发布 job 持写权限，凭据不随 checkout 持久化。工作流合同使用显式 devDependency `yaml` 解析；本地源码回归保持与真实 GitHub、打包及 Windows 验收分开。
 - 模型/思考等级切换、会话树、fork、斜杠命令、计划模式、手动压缩与 HTML 导出均已接入。
 - 工具策略保存在 Electron userData 下的 `pion-tool-permissions.json`；运行时生成的全局 Pi 权限门扩展位于 `runtime/` 子目录。
 - 会话文件由 pi SDK 管理（JSONL，按目录分桶），列表扫描保持只读；消息撤销在旧写入者退出后用 SDK 追加持久分支标记。跨项目点击会话时交给对应的 pi 后台加载。

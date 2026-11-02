@@ -48,12 +48,15 @@ interface Workflow {
 const quality = parse(qualitySource) as Workflow
 const release = parse(releaseSource) as Workflow
 const qualityJob = quality.jobs.test!
+const windowsJob = quality.jobs.windows!
+const gateJob = quality.jobs.gate!
 const buildJob = release.jobs.build!
 const qualitySteps = qualityJob.steps ?? []
+const windowsSteps = windowsJob.steps ?? []
 const buildSteps = buildJob.steps ?? []
 const admissionStep = buildSteps.find(step => step.name === 'Verify release revision, tag and bundled notes')!
 const admissionSource = admissionStep?.run?.match(/^node --input-type=module <<'NODE'\n([\s\S]*?)\nNODE\n?$/)?.[1] ?? ''
-const buildCondition = "github.event_name == 'push' && github.ref_type == 'tag' && needs.quality.outputs.sha == github.sha"
+const buildCondition = "github.event_name == 'push' && github.ref_type == 'tag' && needs.quality.result == 'success' && needs.quality.outputs.sha == github.sha"
 const sha = 'a'.repeat(40)
 const validEnv = {
   GITHUB_SHA: sha,
@@ -109,8 +112,11 @@ function admit({ env = {}, head = sha, version = packageVersion, notes = RELEASE
 describe('same-revision release workflow contracts', () => {
   it('retains push/PR quality defaults and exposes a SHA only after successful quality completion', () => {
     expect(quality.on).toMatchObject({ push: { branches: ['**'] }, pull_request: null })
-    expect(Object.keys(quality.jobs)).toEqual(['test'])
-    expect(quality.on.workflow_call?.outputs.sha?.value).toBe('${{ jobs.test.outputs.sha }}')
+    expect(Object.keys(quality.jobs)).toEqual(['test', 'windows', 'gate'])
+    expect(quality.on.workflow_call?.outputs.sha?.value).toBe('${{ jobs.gate.outputs.sha }}')
+    expect(gateJob.needs).toEqual(['test', 'windows'])
+    expect(gateJob.if).toBeUndefined()
+    expect(gateJob['continue-on-error']).toBeUndefined()
     expect(qualityJob['runs-on']).toBe('ubuntu-latest')
     expect(qualityJob.if).toBeUndefined()
     expect(qualityJob['continue-on-error']).toBeUndefined()
@@ -119,7 +125,7 @@ describe('same-revision release workflow contracts', () => {
       'npm ci', 'npm run typecheck', 'npm test', 'npm run test:coverage',
       'npm run build', 'xvfb-run -a ./node_modules/.bin/playwright test'
     ])
-    const output = qualityJob.outputs?.sha
+    const output = gateJob.outputs?.sha
     expect(output).toBe("${{ job.status == 'success' && github.sha || '' }}")
     for (const status of ['success', 'failure', 'cancelled', 'skipped']) {
       expect(expression(output!, { job: { status }, github: { sha } })).toBe(status === 'success' ? sha : '')
@@ -129,6 +135,32 @@ describe('same-revision release workflow contracts', () => {
       with: { name: 'playwright-results', path: 'playwright-report/\ntest-results/\n', 'if-no-files-found': 'ignore' }
     }])
     expect(qualitySource).not.toMatch(/secrets\.|inputs\.|workflow_run|test:e2e|rpc-smoke|test:legacy-ui|gui-cdp-test/)
+  })
+
+  it('runs full Windows checks on push, PR and reusable quality and fails closed', () => {
+    expect(windowsJob['runs-on']).toBe('windows-latest')
+    expect(windowsJob.if).toBeUndefined()
+    expect(windowsJob.needs).toBeUndefined()
+    expect(windowsJob['continue-on-error']).toBeUndefined()
+    expect(windowsSteps.every(step => step['continue-on-error'] === undefined)).toBe(true)
+    expect(windowsSteps.flatMap(step => step.run ? [step.run] : [])).toEqual([
+      'npm ci', 'npm run typecheck',
+      'npm test -- --reporter=default --reporter=json --reporter=./scripts/vitest-failure-reporter.mjs --outputFile.json=vitest-windows.json',
+      'node scripts/report-vitest-failures.mjs vitest-windows.json vitest-windows-failures.json'
+    ])
+    expect(windowsSteps.filter(step => step.if)).toEqual([
+      { name: 'Publish Windows failure summary', if: 'always()', env: { TEST_OUTCOME: '${{ steps.tests.outcome }}' }, run: 'node scripts/report-vitest-failures.mjs vitest-windows.json vitest-windows-failures.json' },
+      { name: 'Upload Windows test report', if: 'always()', uses: 'actions/upload-artifact@v4', with: { name: 'vitest-windows-report', path: 'vitest-windows.json\nvitest-windows-failures.json\n', 'if-no-files-found': 'ignore' } }
+    ])
+    expect(windowsSteps.find(step => step.name === 'Windows full test suite')).toMatchObject({ id: 'tests' })
+    // Model the implicit success() on the aggregate and reusable workflow.
+    for (const linux of ['success', 'failure', 'cancelled', 'skipped']) {
+      for (const windows of ['success', 'failure', 'cancelled', 'skipped']) {
+        const result = linux === 'success' && windows === 'success' ? 'success' : 'failure'
+        const admitted = expression(buildCondition, { github: { event_name: 'push', ref_type: 'tag', sha }, needs: { quality: { result, outputs: { sha } } } })
+        expect(Boolean(admitted)).toBe(linux === 'success' && windows === 'success')
+      }
+    }
   })
 
   it('requires the caller-local reusable workflow, a real dependency and matching trigger SHA', () => {
@@ -153,7 +185,7 @@ describe('same-revision release workflow contracts', () => {
         expect(admitted).toBe(result === 'success' && checkedSha === sha)
       }
     }
-    expect(releaseSource).not.toMatch(/workflow_run|secrets: inherit|always\(\)|needs\.quality\.result|head_sha/)
+    expect(releaseSource).not.toMatch(/workflow_run|secrets: inherit|always\(\)|head_sha/)
   })
 
   it('rejects disconnected jobs even when comments preserve the expected needs/if text', () => {
@@ -167,7 +199,7 @@ describe('same-revision release workflow contracts', () => {
     expect(quality.permissions).toEqual({ contents: 'read' })
     expect(release.permissions).toEqual({ contents: 'read' })
     expect(buildJob.permissions).toEqual({ contents: 'write' })
-    for (const steps of [qualitySteps, buildSteps]) {
+    for (const steps of [qualitySteps, windowsSteps, buildSteps]) {
       expect(steps[0]).toEqual({
         uses: 'actions/checkout@v4', with: { ref: '${{ github.sha }}', 'persist-credentials': false }
       })
@@ -175,15 +207,13 @@ describe('same-revision release workflow contracts', () => {
     }
     expect(buildSteps.map(step => step.run ? step.run.split('\n')[0] : step.uses)).toEqual([
       'actions/checkout@v4', 'actions/setup-node@v4', "node --input-type=module <<'NODE'",
-      'npm ci', 'npm run typecheck', 'npm test', 'npm run build', 'npx electron-builder --publish always'
+      'npm ci', 'npm run build', 'npx electron-builder --publish always'
     ])
-    expect(buildSteps.filter(step => step.if)).toEqual([
-      { name: 'Windows typecheck', if: "runner.os == 'Windows'", run: 'npm run typecheck' },
-      { name: 'Windows unit tests', if: "runner.os == 'Windows'", run: 'npm test' }
-    ])
+    expect(buildSteps.filter(step => step.if)).toEqual([])
     expect(buildSteps.at(-1)?.env).toEqual({ GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}' })
     expect(releaseSource.match(/GH_TOKEN|secrets\.GITHUB_TOKEN/g)).toHaveLength(2)
-    expect([...qualitySteps, ...buildSteps].flatMap(step => step.uses ? [step.uses] : [])).toEqual([
+    expect([...qualitySteps, ...windowsSteps, ...buildSteps].flatMap(step => step.uses ? [step.uses] : [])).toEqual([
+      'actions/checkout@v4', 'actions/setup-node@v4', 'actions/upload-artifact@v4',
       'actions/checkout@v4', 'actions/setup-node@v4', 'actions/upload-artifact@v4',
       'actions/checkout@v4', 'actions/setup-node@v4'
     ])

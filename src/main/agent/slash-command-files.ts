@@ -27,7 +27,8 @@ function sameSnapshot(a: BigIntStats, b: BigIntStats): boolean {
 /** Never follows a final symlink, reads a device, or allocates from an unchecked size. */
 async function readBoundedFile(path: string, maxBytes: number, assertOwned: AssertOwned, prepareExport = false) {
   assertOwned()
-  if (typeof constants.O_NOFOLLOW !== 'number' || typeof constants.O_NONBLOCK !== 'number') {
+  if (!Number.isSafeInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0 || constants.O_NOFOLLOW > 0x7fffffff
+    || !Number.isSafeInteger(constants.O_NONBLOCK) || constants.O_NONBLOCK <= 0 || constants.O_NONBLOCK > 0x7fffffff) {
     throw new Error('当前系统不支持安全读取导出文件')
   }
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)

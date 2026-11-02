@@ -8,7 +8,7 @@ on:
     outputs:
       sha:
         description: Commit that passed all quality gates
-        value: ${{ jobs.test.outputs.sha }}
+        value: ${{ jobs.gate.outputs.sha }}
 
 permissions:
   contents: read
@@ -16,8 +16,6 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    outputs:
-      sha: ${{ job.status == 'success' && github.sha || '' }}
     timeout-minutes: 30
     env:
       CI: '1'
@@ -47,3 +45,46 @@ jobs:
             playwright-report/
             test-results/
           if-no-files-found: ignore
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CI: '1'
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Windows full test suite
+        id: tests
+        run: npm test -- --reporter=default --reporter=json --reporter=./scripts/vitest-failure-reporter.mjs --outputFile.json=vitest-windows.json
+      - name: Publish Windows failure summary
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: node scripts/report-vitest-failures.mjs vitest-windows.json vitest-windows-failures.json
+      - name: Upload Windows test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-windows-report
+          path: |
+            vitest-windows.json
+            vitest-windows-failures.json
+          if-no-files-found: ignore
+
+  gate:
+    needs: [test, windows]
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ job.status == 'success' && github.sha || '' }}
+    steps:
+      - run: echo 'Linux and Windows quality gates passed'
