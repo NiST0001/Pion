@@ -63,12 +63,13 @@ class FakeVerification implements WorkflowVerificationRunner {
 }
 
 async function waitForState(manager: WorkflowManager, id: string, state: WorkflowState): Promise<void> {
-  const deadline = Date.now() + 5_000
-  while (Date.now() < deadline) {
-    if (manager.get(id)?.state === state) return
-    await new Promise((done) => setTimeout(done, 20))
+  // Await this workflow's actual task, including persistence and slot release.
+  // The unchanged Vitest timeout bounds the wait; an interim state alone is insufficient.
+  const running = (manager as unknown as { background: Map<string, Promise<void>> }).background.get(id)
+  if (running) await running
+  if (manager.get(id)?.state !== state) {
+    throw new Error(`workflow did not reach ${state}; current=${manager.get(id)?.state}`)
   }
-  throw new Error(`workflow did not reach ${state}; current=${manager.get(id)?.state}`)
 }
 
 // 状态先在内存中可见，后台操作的收尾（状态持久化）可能尚未完成；
@@ -133,6 +134,33 @@ describe('WorkflowManager', () => {
       createdAt: 1, updatedAt: 1, revision: 0, workers: [], worktrees: {},
       repairAttempts: 0, maxRepairAttempts: 2 }
   }
+
+  it('waits for the owned task to settle before accepting its state and still rejects a wrong final state', async () => {
+    const { workflows, internal } = isolatedManager()
+    const value = snapshot('state-waiter', 'preparing')
+    internal.workflows.set(value.id, value)
+    let finish!: () => void
+    const pending = new Promise<void>(resolve => { finish = resolve })
+    internal.launch(value, async () => {
+      value.state = 'awaiting_plan'
+      await pending
+    })
+    const task = (workflows as unknown as { background: Map<string, Promise<void>> }).background.get(value.id)
+    await Promise.resolve()
+    expect(workflows.get(value.id)?.state).toBe('awaiting_plan')
+    let settled = false
+    const waiting = waitForState(workflows, value.id, 'awaiting_plan').then(() => { settled = true })
+    try {
+      await Promise.resolve()
+      expect(settled).toBe(false)
+    } finally {
+      finish()
+      await task
+      await waiting
+    }
+    expect(settled).toBe(true)
+    await expect(waitForState(workflows, value.id, 'awaiting_merge')).rejects.toThrow('current=awaiting_plan')
+  })
 
   it.each(['completed', 'failed', 'cancelled'] as const)('does not release a %s workflow worktree without real exit evidence', (state) => {
     const { workflows, internal } = isolatedManager()
