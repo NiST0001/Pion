@@ -3,6 +3,7 @@ import { dirname, join, resolve } from 'node:path'
 import { homedir, release } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { AgentBridge } from './agent/agent-bridge'
+import { SqliteToolReceiptArchive } from './agent/tool-receipt-archive'
 import { AppSettings } from './app-settings'
 import { formatSessionCompletionNotification, formatToolPermissionNotification,
   type NotificationSessionContext, type SessionCompletionNotice } from './system-notifications'
@@ -180,6 +181,8 @@ const windowEffects = new WindowEffectsService(appSettings, {
 }, () => nativeTheme.shouldUseHighContrastColors)
 const providerVisibility = new ProviderVisibilityStore(join(app.getPath('userData'), 'pion-provider-visibility.json'))
 const bridge = new AgentBridge(runStore, appSettings, undefined, undefined, providerVisibility)
+const toolReceiptArchive = new SqliteToolReceiptArchive(join(app.getPath('userData'), 'tool-receipts', 'completed.sqlite'))
+bridge.configureToolReceiptArchive(toolReceiptArchive)
 const capabilitySettings = new CapabilitySettingsStore(join(app.getPath('userData'), 'pion-capabilities.json'))
 bridge.configureCapabilitySettings(capabilitySettings)
 bridge.configureUsageLedger(usageLedger)
@@ -568,6 +571,7 @@ app.on('before-quit', (event) => {
           if (error instanceof UsageLedgerError && error.closeUnknown) throw error
           console.warn('[pion] usage collection incomplete at quit:', error)
         }
+        toolReceiptArchive.close()
         captureQuitSettled = true
         app.quit()
       }).catch(error => console.error('[pion] shutdown unverified:', error))

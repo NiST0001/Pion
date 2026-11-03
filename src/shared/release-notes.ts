@@ -8,6 +8,13 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.106',
+    changes: [
+      '自动回收已完成且无后续依赖的工具执行回执，修复长会话因历史回执累积导致子代理无法启动的问题。',
+      '保留运行中和 ComputerUse 后续凭证；本地轻量去重索引继续防止旧事件重复记账，聊天历史、工具结果与既有权限规则保持。'
+    ]
+  },
+  {
     version: '0.1.105',
     changes: [
       '发布前并行验证 Linux 与 Windows，两个平台通过同一提交的质量门后再生成安装包。',

@@ -115,6 +115,8 @@ import { applyBackendEvent } from './backend-events'
 import { SessionNotificationTurn } from './session-notification'
 import type { NotificationSessionContext, SessionCompletionNotice } from '../system-notifications'
 import { LiveSessionProjection } from './live-session-state'
+import { reclaimCompletedToolReceipts } from './completed-tool-receipts'
+import type { ToolReceiptArchive } from './tool-receipt-archive'
 import { SubagentSessionStore } from './subagent-session-store'
 import { SUBAGENT_SESSION_WIDGET_KEY, SUBAGENT_SESSION_ADMISSION_TITLE } from '../../shared/subagent-sessions'
 import type { SubagentSessionAdmission, SubagentSessionList, SubagentSessionSnapshot } from '../../shared/subagent-sessions'
@@ -347,6 +349,51 @@ export class AgentBridge {
   private sessionInfoSnapshots?: WeakMap<BackendRecord, BackendSessionInfoSnapshot>
   private notificationTurns?: WeakMap<BackendRecord, SessionNotificationTurn>
   private notificationNameEpochs?: WeakMap<BackendRecord, { pending: boolean }>
+  private toolReceiptArchive?: ToolReceiptArchive
+  private toolReceiptScopes?: WeakMap<BackendRecord, { id: string; client: RpcClient; retired: boolean }>
+  private toolReceiptArchiveErrorReported = false
+
+  configureToolReceiptArchive(archive: ToolReceiptArchive): void {
+    if (this.toolReceiptArchive) throw new Error('工具回执回收已配置')
+    this.toolReceiptArchive = archive
+  }
+
+  private prepareToolReceipt(backend: BackendRecord, toolCallId: string): boolean {
+    const archive = this.toolReceiptArchive
+    if (!archive) return true // Legacy/test hosts retain the original conservative capacity gate.
+    try {
+      this.toolReceiptScopes ??= new WeakMap()
+      let scope = this.toolReceiptScopes.get(backend)
+      if (!scope) {
+        scope = { id: randomUUID(), client: backend.client, retired: false }
+        this.toolReceiptScopes.set(backend, scope)
+      }
+      if (scope.retired || scope.client !== backend.client || archive.has(scope.id, toolCallId)) return false
+      const receipts = backend.nativeToolReceipts!
+      // Batch only under pressure: avoid a durable transaction for every tool end.
+      if (receipts.size >= 384) reclaimCompletedToolReceipts(receipts, scope.id, archive)
+      if (receipts.size < 512) return true
+      // A rejected start must remain rejected if capacity is freed in a later run.
+      archive.remember(scope.id, [toolCallId])
+      return false
+    } catch {
+      this.reportToolReceiptArchiveError()
+      return false // Failed replay lookup/publication never grants a fresh source.
+    }
+  }
+
+  private retireToolReceiptScope(backend: BackendRecord): void {
+    const scope = this.toolReceiptScopes?.get(backend)
+    if (!scope || scope.retired) return
+    scope.retired = true
+    try { this.toolReceiptArchive?.forget(scope.id) } catch { this.reportToolReceiptArchiveError() }
+  }
+
+  private reportToolReceiptArchiveError(): void {
+    if (this.toolReceiptArchiveErrorReported) return
+    this.toolReceiptArchiveErrorReported = true
+    console.error('[pion] 已完成工具回执索引不可用，已保留原回执并拒绝新的来源准入。')
+  }
 
   private dispatchLifecycle(backend: BackendRecord): { generation: number; token?: symbol } {
     this.dispatchLifecycles ??= new WeakMap()
@@ -2167,7 +2214,7 @@ export class AgentBridge {
     const receipts = backend.nativeToolReceipts
     if (!receipts) return
     if (type === 'tool_execution_start') {
-      if (receipts.has(tool.toolCallId) || receipts.size >= 512) return
+      if (receipts.has(tool.toolCallId) || !this.prepareToolReceipt(backend, tool.toolCallId) || receipts.size >= 512) return
       const parent = receipts.get(parentId)
       const root = parent && receipts.get(parent.rootId)
       if (!parent || !root || parent.state !== 'running' || root.state !== 'running') return
@@ -2284,12 +2331,13 @@ export class AgentBridge {
       const tool = event as { toolCallId?: unknown; toolName?: unknown }
       if (typeof tool.toolCallId !== 'string' || !tool.toolCallId || typeof tool.toolName !== 'string'
         || this.backendPool.get(backend.key) !== backend) return
-      // Retain completed receipts too: replay/late input cannot attach a known
-      // call to a newer run. Saturation fails closed rather than evicting receipts.
+      // Completed objects may be reclaimed only after their IDs are archived.
+      // Replay/late input stays rejected even after timing rows are evicted.
       const receipts = backend.nativeToolReceipts ??= new Map()
       const previous = receipts.get(tool.toolCallId)
       if (previous && (previous.runId !== runId || previous.backendId !== backend.usageBackendId
         || previous.name !== tool.toolName || previous.parentId || previous.state === 'ended')) return
+      if (!previous && !this.prepareToolReceipt(backend, tool.toolCallId)) return
       this.runStore.update(runId, (run) => {
         if (tool.toolCallId && !receipts.has(tool.toolCallId as string) && receipts.size < 512
           && backend.usageBackendId && run.usageBackendId === backend.usageBackendId) {
@@ -4746,6 +4794,8 @@ export class AgentBridge {
     this.clearBackendToolPermissionRequests(key)
     this.clearBackendExtensionUiRequests(key)
     this.backendPool.delete(key)
+    // This record is permanently detached; old client callbacks fail pool ownership.
+    this.retireToolReceiptScope(backend)
     this.pushRunningSessionPaths()
     if (backend.sessionPath && this.backendKeysBySessionPath.get(resolve(backend.sessionPath)) === key) {
       this.backendKeysBySessionPath.delete(resolve(backend.sessionPath))

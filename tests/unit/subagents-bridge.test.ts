@@ -4,6 +4,7 @@ import type { RunToolTiming, TokenUsage } from '../../src/shared/operations'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import type { BackendRecord } from '../../src/main/agent/types'
 import { applyBackendEvent } from '../../src/main/agent/backend-events'
+import type { ToolReceiptArchive } from '../../src/main/agent/tool-receipt-archive'
 
 function setup() {
   const backend = { key: 'a', startPromise: Promise.resolve(), client: {
@@ -194,11 +195,102 @@ function billingHarness() {
   }) as {
     trackBackendEvent: (backend: BackendRecord, event: unknown, type: string) => void
     attachBackendEvents: (backend: BackendRecord) => void
+    configureToolReceiptArchive: (archive: ToolReceiptArchive) => void
   }
   bridge.attachBackendEvents(backend)
   const emit = (type: string, fields: Record<string, unknown> = {}) => listener({ type, ...fields })
   return { bridge, backend, pool, run, runs, update, send, clearSubagentPermissions, recordUsageEntry, emit }
 }
+
+function recyclingHarness() {
+  const h = billingHarness()
+  const archived = new Set<string>()
+  const key = (scope: string, id: string) => JSON.stringify([scope, id])
+  const archive: ToolReceiptArchive = {
+    has: (scope, id) => archived.has(key(scope, id)),
+    remember: vi.fn((scope, ids) => { for (const id of ids) archived.add(key(scope, id)) }),
+    forget: vi.fn(), close: vi.fn()
+  }
+  h.bridge.configureToolReceiptArchive(archive)
+  return { ...h, archive, archived }
+}
+
+describe('completed native receipt recycling', () => {
+  it('keeps new subagent sources usable after 1200 completed roots and rejects archived cross-run replays', () => {
+    const h = recyclingHarness()
+    for (let i = 0; i < 1200; i++) {
+      const root = { toolCallId: `paid-${i}`, toolName: 'codemode' }
+      h.emit('tool_execution_start', root)
+      h.emit('tool_execution_end', { ...root, result: { usage: nativeUsage } })
+    }
+    expect(h.run.usage.total).toBe(1200 * 15)
+    expect(h.backend.nativeToolReceipts!.size).toBeLessThan(512)
+    expect(h.backend.nativeToolReceipts!.has('paid-0')).toBe(false)
+    const next = { ...h.run, tools: [], usage: { ...h.run.usage, total: 0, costUsd: 0 },
+      state: 'running', cwd: h.backend.cwd, sessionPath: h.backend.sessionPath }
+    h.runs.set('next', next)
+    h.backend.activeRunId = 'next'
+    h.emit('tool_execution_start', { toolCallId: 'paid-0', toolName: 'codemode' })
+    h.emit('tool_execution_end', { toolCallId: 'paid-0', toolName: 'codemode', result: { usage: nativeUsage } })
+    expect(next.usage.total).toBe(0)
+    expect(next.tools).toEqual([])
+    h.emit('tool_execution_start', { toolCallId: 'fresh-batch', toolName: 'pion_subagents' })
+    const source = AgentBridge.prototype as unknown as { hasSubagentSourceReceipt(backend: BackendRecord, id: string): boolean }
+    expect(source.hasSubagentSourceReceipt.call(h.bridge, h.backend, 'fresh-batch')).toBe(true)
+  })
+
+  it('recycles 800 completed nested leaves while retaining their running root and once-only usage', () => {
+    const h = recyclingHarness()
+    const root = { toolCallId: 'root', toolName: 'codemode' }
+    h.emit('tool_execution_start', root)
+    for (let i = 0; i < 800; i++) {
+      const child = { toolCallId: `child-${i}`, toolName: 'pion_subagents', parentToolCallId: 'root' }
+      h.emit('tool_execution_start', child)
+      h.emit('tool_execution_end', { ...child, result: { usage: nativeUsage } })
+    }
+    expect(h.run.usage.total).toBe(800 * 15)
+    expect(h.backend.nativeToolReceipts!.get('root')?.state).toBe('running')
+    expect(h.backend.nativeToolReceipts!.size).toBeLessThan(512)
+    const replay = { toolCallId: 'child-0', toolName: 'pion_subagents', parentToolCallId: 'root' }
+    h.emit('tool_execution_start', replay)
+    h.emit('tool_execution_end', { ...replay, result: { usage: nativeUsage } })
+    h.emit('tool_execution_end', { ...root, result: { usage: nativeUsage } })
+    expect(h.run.usage.total).toBe(801 * 15)
+  })
+
+  it('preserves every receipt and denies fresh sources when completion publication fails', () => {
+    const h = recyclingHarness()
+    for (let i = 0; i < 384; i++) {
+      const root = { toolCallId: `done-${i}`, toolName: 'read' }
+      h.emit('tool_execution_start', root)
+      h.emit('tool_execution_end', root)
+    }
+    const original = [...h.backend.nativeToolReceipts!]
+    vi.mocked(h.archive.remember).mockImplementation(() => { throw new Error('index unavailable') })
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      h.emit('tool_execution_start', { toolCallId: 'new', toolName: 'pion_subagents' })
+      expect([...h.backend.nativeToolReceipts!]).toEqual(original)
+      expect(h.backend.nativeToolReceipts!.has('new')).toBe(false)
+      expect(log).toHaveBeenCalledTimes(1)
+    } finally { log.mockRestore() }
+  })
+
+  it('keeps a capacity-denied start sealed after running records finish and capacity is reclaimed', () => {
+    const h = recyclingHarness()
+    for (let i = 0; i < 512; i++) h.emit('tool_execution_start', { toolCallId: `busy-${i}`, toolName: 'read' })
+    const denied = { toolCallId: 'denied', toolName: 'codemode' }
+    h.emit('tool_execution_start', denied)
+    expect(h.backend.nativeToolReceipts!.has('denied')).toBe(false)
+    for (let i = 0; i < 512; i++) h.emit('tool_execution_end', { toolCallId: `busy-${i}`, toolName: 'read' })
+    h.emit('tool_execution_start', { toolCallId: 'fresh', toolName: 'read' })
+    expect(h.backend.nativeToolReceipts!.size).toBe(1)
+    h.emit('tool_execution_start', denied)
+    h.emit('tool_execution_end', { ...denied, result: { usage: nativeUsage } })
+    expect(h.backend.nativeToolReceipts!.has('denied')).toBe(false)
+    expect(h.run.usage.total).toBe(0)
+  })
+})
 
 describe('native root tool billing', () => {
   it.each(['codemode', 'pion_subagents'])('keeps charged %s failure usage, context and duplicate final timing', (toolName) => {
