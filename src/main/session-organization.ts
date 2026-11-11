@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { app } from 'electron'
+import { writeAtomicJson } from './atomic-json-file'
 import {
-  applySessionOrganizationChange,
+  applyValidatedSessionOrganizationChange,
   validateSessionOrganization,
   validateSessionOrganizationChange,
   type SessionOrganization
@@ -50,28 +50,9 @@ export class SessionOrganizationStore {
       const path = this.path()
       const current = await this.read(path)
       assertCurrent()
-      const next = applySessionOrganizationChange(current, change)
-      const temporary = `${path}.${randomUUID()}.tmp`
-      await mkdir(dirname(path), { recursive: true })
-      let created = false
-      try {
-        assertCurrent()
-        const file = await open(temporary, 'wx', 0o600)
-        created = true
-        try {
-          await file.writeFile(`${JSON.stringify(next)}\n`, 'utf8')
-          await file.sync()
-        } finally { await file.close() }
-        // A vanished owner may finish staging, but cannot publish its stale patch.
-        assertCurrent()
-        await rename(temporary, path)
-      } finally {
-        if (created) {
-          try { await unlink(temporary) } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-          }
-        }
-      }
+      const next = applyValidatedSessionOrganizationChange(current, change)
+      assertCurrent()
+      await writeAtomicJson(path, next, assertCurrent)
       assertCurrent()
       return next
     })

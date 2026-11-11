@@ -34,14 +34,16 @@ export class SubagentSettingsStore {
     return this.enqueue(() => this.read(this.path()))
   }
 
-  set(value: unknown): Promise<SubagentSettings> {
+  set(value: unknown, assertCurrent: () => void = () => undefined): Promise<SubagentSettings> {
     // Capture nested identities before waiting for any earlier operation.
     const settings = validateSubagentSettings(value)
     return this.enqueue(async () => {
+      assertCurrent()
       const path = this.path()
       // Ordinary save requires a valid source; only a missing file initializes defaults.
       await this.read(path)
-      await writeAtomicJson(path, settings)
+      await writeAtomicJson(path, settings, assertCurrent)
+      assertCurrent()
       return validateSubagentSettings(settings)
     })
   }

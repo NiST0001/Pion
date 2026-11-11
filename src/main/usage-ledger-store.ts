@@ -36,19 +36,19 @@ export interface LedgerDocument {
   sessions: LedgerSession[]
 }
 export class UsageLedgerError extends Error {
-  constructor(readonly code: 'collection-failed', readonly closeUnknown = false) {
+  constructor(readonly code: 'collection-failed') {
     super('Usage ledger unavailable')
   }
 }
 
 type Handle = Awaited<ReturnType<typeof open>>
 type Snapshot = { dev: bigint; ino: bigint }
+type LedgerFile = { data: LedgerDocument; [field: string]: unknown }
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 const hash = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v)
 const count = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
 const date = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && Math.abs(v) <= 8_640_000_000_000_000
 const bounded = (v: unknown, max: number): v is string => typeof v === 'string' && v.length > 0 && v.length <= max && !v.includes('\0')
-const keys = (v: Record<string, unknown>, allowed: string[]): boolean => Object.keys(v).every(key => allowed.includes(key))
 const fields = ['input', 'output', 'cacheRead', 'cacheWrite', 'reasoning', 'total', 'costUsd'] as const
 
 export function addUsage(target: TokenUsage, value: TokenUsage): void {
@@ -60,33 +60,31 @@ export function addUsage(target: TokenUsage, value: TokenUsage): void {
 }
 
 function validUsage(v: unknown): v is TokenUsage {
-  return object(v) && keys(v, [...fields]) && fields.every(field => field === 'costUsd'
+  return object(v) && fields.every(field => field === 'costUsd'
     ? typeof v[field] === 'number' && Number.isFinite(v[field]) && v[field] >= 0 : count(v[field]))
 }
 
-/** Reject unknown fields as well as broken receipts; never rewrite a damaged ledger as empty. */
+/** Validate required fields and receipt identities while retaining extension fields. */
 function validate(v: unknown): asserts v is LedgerDocument {
-  if (!object(v) || !keys(v, ['version', 'revision', 'collectedAt', 'sessions']) || v.version !== 1
+  if (!object(v) || v.version !== 1
     || !count(v.revision) || !date(v.collectedAt) || !Array.isArray(v.sessions)) throw new UsageLedgerError('collection-failed')
   const sessions = new Set<string>()
   const paths = new Map<string, string>()
   for (const session of v.sessions) {
-    if (!object(session) || !keys(session, ['id', 'createdAt', 'cwd', 'parent', 'parentId', 'aliases', 'receipts'])
-      || !hash(session.id) || sessions.has(session.id) || !date(session.createdAt) || !bounded(session.cwd, 4096)
+    if (!object(session) || !hash(session.id) || sessions.has(session.id) || !date(session.createdAt) || !bounded(session.cwd, 4096)
       || (session.parent !== undefined && !hash(session.parent))
       || (session.parentId !== undefined && (!hash(session.parentId) || session.parent === undefined)) || !Array.isArray(session.aliases)
       || session.aliases.length === 0 || !Array.isArray(session.receipts)) throw new UsageLedgerError('collection-failed')
     sessions.add(session.id)
     for (const alias of session.aliases) {
-      if (!object(alias) || !keys(alias, ['path', 'receipt', 'stamp', 'conflict']) || !hash(alias.path) || !hash(alias.receipt) || !hash(alias.stamp)
+      if (!object(alias) || !hash(alias.path) || !hash(alias.receipt) || !hash(alias.stamp)
         || (alias.conflict !== undefined && !hash(alias.conflict))
         || paths.has(alias.path)) throw new UsageLedgerError('collection-failed')
       paths.set(alias.path, session.id)
     }
     const entries = new Set<string>()
     for (const receipt of session.receipts) {
-      if (!object(receipt) || !keys(receipt, ['entry', 'digest', 'event', 'eventDigest', 'source', 'provider', 'modelId', 'cwd', 'at', 'usage'])
-        || !hash(receipt.entry) || entries.has(receipt.entry) || !hash(receipt.digest) || !date(receipt.at)
+      if (!object(receipt) || !hash(receipt.entry) || entries.has(receipt.entry) || !hash(receipt.digest) || !date(receipt.at)
         || !bounded(receipt.cwd, 4096) || !validUsage(receipt.usage)
         || (receipt.source !== 'model' && receipt.source !== 'tool-summary')
         || (receipt.source === 'model' && (!bounded(receipt.provider, 256) || !bounded(receipt.modelId, 256)))
@@ -103,20 +101,14 @@ function validate(v: unknown): asserts v is LedgerDocument {
   }
 }
 
-/** Check each ancestor rather than following a directory symlink. Not an OS sandbox. */
-export async function directoryChain(path: string): Promise<{ path: string; dev: bigint; ino: bigint }[]> {
-  let current = resolve(path)
-  const snapshots: { path: string; dev: bigint; ino: bigint }[] = []
-  while (true) {
-    const value = await lstat(current, { bigint: true })
-    if (!value.isDirectory() || value.isSymbolicLink()) throw new UsageLedgerError('collection-failed')
-    snapshots.push({ path: current, dev: value.dev, ino: value.ino })
-    const parent = dirname(current)
-    if (parent === current) return snapshots
-    current = parent
-  }
+/** Capture a directly owned directory; callers add the SDK root/bucket as needed. */
+export async function directoryProof(path: string): Promise<{ path: string; dev: bigint; ino: bigint }[]> {
+  path = resolve(path)
+  const value = await lstat(path, { bigint: true })
+  if (!value.isDirectory() || value.isSymbolicLink()) throw new UsageLedgerError('collection-failed')
+  return [{ path, dev: value.dev, ino: value.ino }]
 }
-export async function checkDirectories(snapshots: Awaited<ReturnType<typeof directoryChain>>): Promise<void> {
+export async function checkDirectories(snapshots: Awaited<ReturnType<typeof directoryProof>>): Promise<void> {
   for (const previous of snapshots) {
     const current = await lstat(previous.path, { bigint: true })
     if (!current.isDirectory() || current.isSymbolicLink() || current.dev !== previous.dev || current.ino !== previous.ino) {
@@ -125,49 +117,21 @@ export async function checkDirectories(snapshots: Awaited<ReturnType<typeof dire
   }
 }
 
-async function ensureDirectory(path: string): Promise<void> {
-  const missing: string[] = []
-  let current = path
-  while (true) {
-    try { await directoryChain(current); break } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      missing.push(current)
-      const parent = dirname(current)
-      if (parent === current) throw new UsageLedgerError('collection-failed')
-      current = parent
-    }
-  }
-  for (const child of missing.reverse()) {
-    await directoryChain(dirname(child))
-    try { await mkdir(child, { mode: 0o700 }) } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    }
-    await directoryChain(child)
-  }
-}
 /** A short exclusive transaction, not an Electron-profile/PID/age-based lock. */
 export class UsageLedgerStore {
-  private poisoned = false
+  private retryRelease?: () => Promise<void>
   private readonly path: string
   constructor(path: string) { this.path = resolve(path) }
 
-  assertSettled(): void {
-    if (this.poisoned) throw new UsageLedgerError('collection-failed', true)
-  }
-
-  private async close(handle: Handle): Promise<void> {
-    try { await handle.close() } catch { this.poisoned = true; throw new UsageLedgerError('collection-failed', true) }
-  }
-
   private async syncDirectory(): Promise<void> {
     const directory = await open(dirname(this.path), constants.O_RDONLY | constants.O_NOFOLLOW)
-    try { await directory.sync() } finally { await this.close(directory) }
+    try { await directory.sync() } finally { await directory.close() }
   }
 
-  private async load(): Promise<LedgerDocument> {
+  private async load(): Promise<LedgerFile> {
     let file: Handle
     try { file = await open(this.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK) } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { version: 1, revision: 0, collectedAt: 0, sessions: [] }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { data: { version: 1, revision: 0, collectedAt: 0, sessions: [] } }
       throw error
     }
     let text: string
@@ -192,32 +156,36 @@ export class UsageLedgerStore {
       }
       if (BigInt(size) !== before.size) throw new UsageLedgerError('collection-failed')
       text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))
-    } finally { await this.close(file) }
+    } finally { await file.close() }
     const envelope: unknown = JSON.parse(text)
-    if (!object(envelope) || !keys(envelope, ['checksum', 'data']) || !hash(envelope.checksum)
-      || envelope.checksum !== usageHash(envelope.data)) throw new UsageLedgerError('collection-failed')
+    if (!object(envelope)) throw new UsageLedgerError('collection-failed')
     validate(envelope.data)
-    return envelope.data
+    // Legacy checksum and extension fields remain opaque and round-trip unchanged.
+    return envelope as LedgerFile
   }
 
-  private async save(data: LedgerDocument, verify?: () => Promise<void>): Promise<void> {
-    validate(data)
-    const content = JSON.stringify({ checksum: usageHash(data), data }) + '\n'
+  private async save(envelope: LedgerFile, verify?: () => Promise<void>): Promise<void> {
+    validate(envelope.data)
+    const content = JSON.stringify(envelope) + '\n'
     const temporary = `${this.path}.tmp-${randomUUID()}`
     const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
-    try { await file.writeFile(content, 'utf8'); await file.sync() } finally { await this.close(file) }
+    try { await file.writeFile(content, 'utf8'); await file.sync() } finally { await file.close() }
     // A failed private temporary is retained for recovery, never mistaken for the ledger.
     // Source proofs must survive the actual write/sync/close, before publication.
     if (verify) await verify()
     await rename(temporary, this.path)
-    try { await this.syncDirectory() } catch (error) { this.poisoned = true; throw error }
   }
 
-  async transaction<T>(change: (data: LedgerDocument) => Promise<{ value: T; dirty: boolean }>, verify?: (value: T) => Promise<void>): Promise<{ data: LedgerDocument; value: T }> {
-    this.assertSettled()
+  async transaction<T>(change: (data: LedgerDocument) => Promise<{ value: T; dirty: boolean }>, verify?: (value: T) => Promise<void>, durable = false): Promise<{ data: LedgerDocument; value: T }> {
+    try { await this.retryRelease?.() } catch (error) {
+      throw error instanceof UsageLedgerError ? error : new UsageLedgerError('collection-failed')
+    }
     const parent = dirname(this.path)
-    let directories: Awaited<ReturnType<typeof directoryChain>>
-    try { await ensureDirectory(parent); directories = await directoryChain(parent) } catch (error) {
+    let directories: Awaited<ReturnType<typeof directoryProof>>
+    try {
+      await mkdir(parent, { recursive: true, mode: 0o700 })
+      directories = await directoryProof(parent)
+    } catch (error) {
       throw error instanceof UsageLedgerError ? error : new UsageLedgerError('collection-failed')
     }
     const lockPath = `${this.path}.lock`
@@ -229,42 +197,63 @@ export class UsageLedgerStore {
       // EEXIST is a hard refusal. Never probe a PID or delete another process's lock.
       lock = await open(lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
       lockSnapshot = await lock.stat({ bigint: true })
-      await lock.writeFile(randomUUID(), 'utf8')
-      await lock.sync()
       const ownedLock = lock
       lock = undefined
-      await this.close(ownedLock)
-      const data = await this.load()
+      await ownedLock.close()
+      const envelope = await this.load()
+      const { data } = envelope
       const changeResult = await change(data)
       if (changeResult.dirty) {
         if (!Number.isSafeInteger(data.revision + 1)) throw new UsageLedgerError('collection-failed')
         data.revision++
         data.collectedAt = Date.now()
-        await checkDirectories(directories)
-        await this.save(data, verify ? () => verify(changeResult.value) : undefined)
-      }
-      if (verify) await verify(changeResult.value)
-      await checkDirectories(directories)
+        await this.save(envelope, async () => {
+          if (verify) await verify(changeResult.value)
+          // Recheck the ledger destination after temporary write/sync/close and
+          // source verification, before rename can publish through a new parent.
+          await checkDirectories(directories)
+        })
+      } else if (verify) await verify(changeResult.value)
+      // Explicit archival still confirms directory durability for an unchanged source.
+      if (changeResult.dirty || durable) await this.syncDirectory()
+      // The finally block checks these same directories immediately before lock release.
       result = { data, value: changeResult.value }
     } catch (error) {
       failure = error
-      if (error instanceof UsageLedgerError && error.closeUnknown) this.poisoned = true
     } finally {
       if (lock) {
-        try { await this.close(lock) } catch (error) { failure = error }
+        try { await lock.close() } catch (error) { failure = error }
       }
-      if (lockSnapshot && !this.poisoned) {
-        try {
-          await checkDirectories(directories)
-          const current = await lstat(lockPath, { bigint: true })
-          if (!current.isFile() || current.dev !== lockSnapshot.dev || current.ino !== lockSnapshot.ino) throw new UsageLedgerError('collection-failed')
-          // Ledger rename/sync and all descriptors have settled before release.
-          // Unlink is last: a crash may leave a stale lock, which is safely refused.
-          await unlink(lockPath)
-        } catch (error) { this.poisoned = true; failure = error }
+      if (lockSnapshot) {
+        const snapshot = lockSnapshot
+        const release = async (retry = false) => {
+          try { await checkDirectories(directories) } catch (error) {
+            // Retiring old cleanup leaves the replacement directory and every lock untouched.
+            if (retry && (error instanceof UsageLedgerError || (error as NodeJS.ErrnoException).code === 'ENOENT')) return
+            throw error
+          }
+          try {
+            const current = await lstat(lockPath, { bigint: true })
+            if (!current.isFile() || current.dev !== snapshot.dev || current.ino !== snapshot.ino) throw new UsageLedgerError('collection-failed')
+            // Only this settled transaction's exact lock may be released.
+            await unlink(lockPath)
+          } catch (error) {
+            if (!retry || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          }
+        }
+        try { await release() } catch (error) {
+          if (!(error instanceof UsageLedgerError)) {
+            let pending: Promise<void> | undefined
+            this.retryRelease = () => pending ??= release(true).then(
+              () => { this.retryRelease = undefined },
+              error => { pending = undefined; throw error }
+            )
+          }
+          failure = error
+        }
       }
     }
-    if (failure || !result) throw failure instanceof UsageLedgerError ? failure : new UsageLedgerError('collection-failed', this.poisoned)
+    if (failure || !result) throw failure instanceof UsageLedgerError ? failure : new UsageLedgerError('collection-failed')
     return result
   }
 }

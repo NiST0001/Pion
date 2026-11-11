@@ -9,7 +9,7 @@ import type { ComputerUseDriver } from '../../src/main/computer-use/driver'
 import type { ComputerUseConsent, ComputerUseStatus } from '../../src/shared/computer-use'
 import type { PionApi, ComputerUseLocalApi } from '../../src/shared/pion-api'
 const consent = { capture: true, upload: false, control: false, retention: 'sdk-session' as const }
-const observing = (scope = 1, revision = 2): ComputerUseStatus => ({ ...createDisabledComputerUseStatus(), state: 'ready', coordination: 'held', revision, scopeRevision: scope, consent,
+const observing = (scope = 1, revision = 2): ComputerUseStatus => ({ ...createDisabledComputerUseStatus(), state: 'ready', coordination: 'not-checked', revision, scopeRevision: scope, consent,
   capability: { platform: 'linux-wayland', method: 'portal-screencast', capture: true, control: false, unsupportedReason: 'control-unavailable', scope: 'window' } })
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
 const descriptor = Object.getOwnPropertyDescriptor(window, 'pion')
@@ -27,7 +27,7 @@ const stoppedStatus = (scope = 2, revision = 4): ComputerUseStatus => ({ ...crea
 
 // Real service lifecycle with an in-memory coordinator/driver only. Terminal
 // metadata delivery is independently scheduled from the genuinely rejected RPC.
-function serviceApi(timing: 'metadata-first' | 'rejection-first', kind: 'occupied' | 'failed-clean' | 'claimed' = 'occupied') {
+function serviceApi(timing: 'metadata-first' | 'rejection-first', kind: 'occupied' | 'failed-clean' | 'claimed' = 'occupied', control = false) {
   let listener: (state: ComputerUseStatus) => void = () => {}
   let time = 10
   let rejected = false
@@ -38,16 +38,17 @@ function serviceApi(timing: 'metadata-first' | 'rejection-first', kind: 'occupie
     release: vi.fn(async () => {})
   }
   const driver: ComputerUseDriver = {
-    open: vi.fn(async () => ({ platform: 'linux-wayland' as const, method: 'portal-screencast' as const,
-      capture: true, control: false, scope: 'window' as const, unsupportedReason: 'control-unavailable' as const })),
-    capture: vi.fn(async () => { throw new Error('capture not used') }), close: vi.fn(async () => {})
+    open: vi.fn(async (...args: Parameters<ComputerUseDriver['open']>) => args[3]?.control
+      ? { platform: 'linux-wayland' as const, method: 'portal-screencast+wayland-virtual-input' as const, capture: true, control: true, scope: 'display' as const }
+      : { platform: 'linux-wayland' as const, method: 'portal-screencast' as const, capture: true, control: false, scope: 'window' as const, unsupportedReason: 'control-unavailable' as const }),
+    capture: vi.fn(async () => { throw new Error('capture not used') }), close: vi.fn(async () => {}), act: vi.fn(async () => {})
   }
   const driverFactory = vi.fn(() => driver)
   const project = (state: ComputerUseStatus) => {
     const { owner: _owner, receipt: _receipt, ...metadata } = state
     return metadata
   }
-  const service = new ComputerUseService({ coordination, driverFactory, clock: () => time, randomId: () => 'unused',
+  const service = new ComputerUseService({ coordination, driverFactory, clock: () => time, randomId: () => 'unused', allowVirtualInput: control, assertOwned: vi.fn(),
     publish: state => {
       const metadata = project(state)
       if (timing === 'rejection-first' && !state.actualPending
@@ -78,7 +79,8 @@ function serviceApi(timing: 'metadata-first' | 'rejection-first', kind: 'occupie
     deliver: () => { queued.splice(0).forEach(state => listener(state)) } }
 }
 it.each(['metadata-first', 'rejection-first'] as const)('closes the real rejected occupied start with exact zero-own proof: %s', async timing => {
-  const f = serviceApi(timing)
+  const f = serviceApi(timing, 'occupied', true)
+  const consent = displayConsent
   const view = renderHook(() => useComputerUse(true)); await flush()
   act(() => view.result.current.onStart(consent)); await flush()
   expect(f.rejected()).toBe(true)
@@ -104,7 +106,8 @@ it.each(['metadata-first', 'rejection-first'] as const)('closes the real rejecte
   view.unmount(); expect(f.api.stop).not.toHaveBeenCalled()
 })
 it.each(['metadata-first', 'rejection-first'] as const)('accepts only positive unclaimed close for the real failed-clean rejection: %s', async timing => {
-  const f = serviceApi(timing, 'failed-clean')
+  const f = serviceApi(timing, 'failed-clean', true)
+  const consent = displayConsent
   const view = renderHook(() => useComputerUse(true)); await flush()
   act(() => view.result.current.onStart(consent)); await flush()
   expect(f.rejected()).toBe(true)
@@ -117,7 +120,7 @@ it.each(['metadata-first', 'rejection-first'] as const)('accepts only positive u
   expect(f.api.start).toHaveBeenCalledTimes(2)
   expect(view.result.current.busy).toBe(false)
 })
-it.each(['stop', 'expired', 'expired-stop'] as const)('closes actual pre-claim %s with unclaimed and permits explicit retry', async reason => {
+it.each(['stop', 'expired', 'expired-stop'] as const)('closes actual pre-dispatch %s with unclaimed and permits explicit retry', async reason => {
   const f = serviceApi('rejection-first', 'claimed')
   const view = renderHook(() => useComputerUse(true)); await flush()
   act(() => {
@@ -135,7 +138,7 @@ it.each(['stop', 'expired', 'expired-stop'] as const)('closes actual pre-claim %
   expect(f.driverFactory).not.toHaveBeenCalled()
   act(() => view.result.current.onStart(consent)); await flush()
   expect(f.api.start).toHaveBeenCalledTimes(2)
-  expect(view.result.current.state).toMatchObject({ state: 'ready', coordination: 'held' })
+  expect(view.result.current.state).toMatchObject({ state: 'ready', coordination: 'not-checked' })
 })
 it('leaves a foreign blocked marker passive, permits only explicit retry, and never sends Stop for that marker', async () => {
   const { api, emit } = mock()
@@ -155,20 +158,22 @@ it('leaves a foreign blocked marker passive, permits only explicit retry, and ne
   expect(view.result.current.busy).toBe(false)
   view.unmount(); expect(api.stop).not.toHaveBeenCalled()
 })
-it('requires held ready metadata for capture, including legacy DTOs without coordination', async () => {
+it('allows unchecked read-only capture without making blocked, unknown or nonready metadata usable', async () => {
   const { api, emit } = mock()
   const view = renderHook(() => useComputerUse(true)); await flush()
   act(() => view.result.current.onStart(consent)); await flush()
-  const { coordination: _coordination, ...legacy } = observing(1, 3)
-  act(() => emit(legacy as ComputerUseStatus))
-  expect(view.result.current.state.coordination).toBe('not-checked')
-  act(() => view.result.current.onCapture()); expect(api.capture).not.toHaveBeenCalled()
-  for (const [revision, state] of [[4, 'observing'], [5, 'paused']] as const) {
+  for (const [revision, coordination] of [[3, 'blocked'], [4, 'unknown']] as const) {
+    act(() => emit({ ...observing(1, revision), coordination }))
+    act(() => view.result.current.onCapture()); expect(api.capture).not.toHaveBeenCalled()
+  }
+  for (const [revision, state] of [[5, 'observing'], [6, 'paused']] as const) {
     act(() => emit({ ...observing(1, revision), state }))
     act(() => view.result.current.onCapture()); expect(api.capture).not.toHaveBeenCalled()
   }
-  act(() => emit(observing(1, 6)))
-  api.capture.mockResolvedValue({ state: observing(1, 7) })
+  const { coordination: _coordination, ...legacy } = observing(1, 7)
+  act(() => emit(legacy as ComputerUseStatus))
+  expect(view.result.current.state.coordination).toBe('not-checked')
+  api.capture.mockResolvedValue({ state: observing(1, 8) })
   act(() => view.result.current.onCapture()); await flush()
   expect(api.capture).toHaveBeenCalledTimes(1)
 })
@@ -569,7 +574,7 @@ it('projects the development gate from configuration only and keeps backend reje
     }
   }
 })
-const displayReady = (): ComputerUseStatus => ({ ...observing(), inputDevelopmentEnabled: true, consent: displayConsent,
+const displayReady = (): ComputerUseStatus => ({ ...observing(), coordination: 'held', inputDevelopmentEnabled: true, consent: displayConsent,
   capability: { platform: 'linux-wayland', method: 'portal-screencast+wayland-virtual-input', capture: true, control: true, scope: 'display' } })
 it.each([
   { ...consent, captureScope: 'display' as const },
@@ -695,6 +700,85 @@ it('does not clear unknown release on a new mount reading old disabled metadata'
   expect(api.start).toHaveBeenCalledTimes(1)
   reopened.unmount(); expect(api.stop).toHaveBeenCalledTimes(1)
 })
+it('keeps the exact final-budget preview but refuses repeated capture admission', async () => {
+  const { api, emit } = mock()
+  const final: ComputerUseStatus = { ...observing(1, 3), budget: { actions: 0, captures: COMPUTER_USE_LIMITS.maxCaptures, frameBytes: 57, framePixels: 1 },
+    frame: { id: 'last-frame', width: 1, height: 1, createdAt: 1, scopeRevision: 1, captureScope: 'window', actualScope: 'window' } }
+  api.capture.mockResolvedValue({ state: final, preview: 'data:image/png;base64,AAAA' })
+  const view = renderHook(() => useComputerUse(true)); await flush()
+  act(() => view.result.current.onStart(consent)); await flush()
+  act(() => view.result.current.onCapture()); await flush()
+  expect(view.result.current.preview).toBe('data:image/png;base64,AAAA')
+  act(() => { emit(final); view.result.current.onCapture(); view.result.current.onCapture() })
+  expect(api.capture).toHaveBeenCalledTimes(1)
+  expect(view.result.current.state.budget.captures).toBe(COMPUTER_USE_LIMITS.maxCaptures)
+  expect(view.result.current.preview).toBe('data:image/png;base64,AAAA')
+  expect(view.result.current.busy).toBe(false)
+  expect(view.result.current.error).toBeUndefined()
+})
+
+it('maps a fixed budget rejection without exposing raw IPC details or inventing a stop', async () => {
+  const { api } = mock()
+  api.capture.mockRejectedValue(new Error("Error invoking remote method 'computer-use:capture': Error: ComputerUse capture budget exhausted"))
+  const view = renderHook(() => useComputerUse(true)); await flush()
+  act(() => view.result.current.onStart(consent)); await flush()
+  act(() => view.result.current.onCapture()); await flush()
+  expect(view.result.current.error).toBe('本次截图预算已耗尽；停止后可重新确认。')
+  expect(view.result.current.state).toMatchObject({ state: 'ready', actualPending: false })
+  expect(view.result.current.busy).toBe(false)
+  expect(api.capture).toHaveBeenCalledTimes(1)
+  expect(api.stop).not.toHaveBeenCalled()
+})
+
+it('retains unknown image statistics separately from confirmed native closure', async () => {
+  const { api, emit } = mock()
+  const view = renderHook(() => useComputerUse(true)); await flush()
+  act(() => view.result.current.onStart(consent)); await flush()
+  const closed: ComputerUseStatus = { ...stoppedStatus(2, 5), coordination: 'unclaimed',
+    budget: { actions: 0, captures: 1, frameBytes: 0, framePixels: 0 } }
+  api.capture.mockImplementation(async () => {
+    emit({ ...closed, revision: 3, state: 'stopping', actualPending: true, coordination: 'not-checked' })
+    throw new Error("Error invoking remote method 'computer-use:capture': Error: computer-use-capture-unknown")
+  })
+  act(() => view.result.current.onCapture()); await flush()
+  expect(view.result.current.error).toBe('本次截图产图统计未知；字节/像素计数仅含已确认值，本轮后续截图已停用。')
+  act(() => emit({ ...closed, revision: 4, state: 'stopping', actualPending: true, coordination: 'not-checked' }))
+  expect(view.result.current.error).toBe('本次截图产图统计未知；字节/像素计数仅含已确认值，本轮后续截图已停用。')
+  expect(view.result.current.busy).toBe(true)
+  act(() => emit(closed))
+  expect(view.result.current.state).toMatchObject({ state: 'stopped', actualPending: false, coordination: 'unclaimed' })
+  expect(view.result.current.busy).toBe(false)
+  expect(view.result.current.error).toBe('本次截图产图统计未知；字节/像素计数仅含已确认值，本轮后续截图已停用。')
+  expect(view.result.current.state.budget).toEqual(closed.budget)
+  act(() => view.result.current.onCapture())
+  expect(api.capture).toHaveBeenCalledTimes(1)
+  expect(view.result.current.preview).toBeUndefined()
+  view.unmount()
+  expect(api.stop).not.toHaveBeenCalled()
+})
+
+it('keeps a failed screenshot visible after confirmed native closure without inventing pending work', async () => {
+  const { api, emit } = mock()
+  const view = renderHook(() => useComputerUse(true)); await flush()
+  act(() => view.result.current.onStart(consent)); await flush()
+  const closed = { ...stoppedStatus(2, 4), coordination: 'unclaimed' as const,
+    budget: { actions: 0, captures: 1, frameBytes: 0, framePixels: 0 }, diagnostics: { capture: 'capture-frame-failed' as const } }
+  api.capture.mockImplementation(async () => {
+    emit({ ...closed, revision: 3, state: 'stopping', actualPending: true, coordination: 'not-checked' })
+    emit(closed)
+    throw new Error('private screenshot outcome unknown')
+  })
+  act(() => view.result.current.onCapture()); await flush()
+  expect(view.result.current.state).toMatchObject({ state: 'stopped', coordination: 'unclaimed', actualPending: false, budget: { captures: 1 } })
+  expect(view.result.current.busy).toBe(false)
+  expect(view.result.current.error).toBe('无法获取本地静态截图。')
+  act(() => emit({ ...closed, revision: 5 }))
+  expect(view.result.current.error).toBe('无法获取本地静态截图。')
+  expect(view.result.current.preview).toBeUndefined()
+  view.unmount()
+  expect(api.stop).not.toHaveBeenCalled()
+})
+
 it('clears previews on frame changes and inactive close; sanitizes unknown stop failure', async () => {
   const { api, emit } = mock()
   const ready = { ...observing(1, 3), state: 'ready' as const, frame: { id: 'frame-a', width: 1, height: 1, createdAt: 1, scopeRevision: 1, captureScope: 'window' as const, actualScope: 'window' as const } }

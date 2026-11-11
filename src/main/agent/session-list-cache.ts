@@ -107,14 +107,6 @@ export class SessionListCache {
       })().finally(() => {
         captured.pending = undefined
         this.queueTotals(key, captured)
-        // Bound settled entries even if many different cwd requests overlapped.
-        for (const [oldKey, oldEntry] of this.entries) {
-          if (this.entries.size <= this.maxEntries) break
-          if (!oldEntry.pending && !oldEntry.totalsPending) {
-            this.entries.delete(oldKey)
-            this.totalsQueue.delete(oldEntry)
-          }
-        }
       })
     }
     // Failures reject rather than disguising a stale/unknown list as empty.

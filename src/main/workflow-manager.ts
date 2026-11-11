@@ -150,7 +150,8 @@ function normalizeLoaded(value: unknown): WorkflowSnapshot | null {
     || workflow.workers.some((worker) => !worker || typeof worker.id !== 'string'
       || !WORKFLOW_ROLES.includes(worker.role) || !['agent', 'command'].includes(worker.kind)
       || !['queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(worker.status)
-      || (worker.worktreePath !== undefined && typeof worker.worktreePath !== 'string')))) return null
+      || (worker.worktreePath !== undefined && typeof worker.worktreePath !== 'string')
+      || (worker.exitConfirmed !== undefined && typeof worker.exitConfirmed !== 'boolean')))) return null
   if (workflow.worktrees !== undefined && (!workflow.worktrees || typeof workflow.worktrees !== 'object'
     || Array.isArray(workflow.worktrees) || Object.entries(workflow.worktrees).some(([role, path]) =>
       !WORKFLOW_ROLES.includes(role as WorkflowRole) || typeof path !== 'string'))) return null
@@ -183,6 +184,15 @@ function normalizeLoaded(value: unknown): WorkflowSnapshot | null {
   }
 }
 
+class WorkflowStorageWriteError extends Error {
+  readonly closeUnknown?: true
+
+  constructor(cause: unknown) {
+    super(`工作流存储保存失败，已保留现场：${errorMessage(cause)}`, { cause })
+    if ((cause as { closeUnknown?: boolean } | null)?.closeUnknown === true) this.closeUnknown = true
+  }
+}
+
 export class WorkflowManager {
   private readonly filePath: string
   private readonly worktreeRoot: string
@@ -194,13 +204,18 @@ export class WorkflowManager {
   private readonly background = new Map<string, Promise<void>>()
   private readonly cancellations = new Map<string, AbortController>()
   private readonly unconfirmedWorkers = new Map<string, string>()
+  private readonly workerExitObservers = new Map<string, () => void>()
   private storageError?: Error
-  private pendingMutations = 0
+  private readonly pendingMutations = new Map<string, number>()
+  private readonly pendingTasks = new Set<Promise<void>>()
+  private closed = false
+  private shutdownPromise?: Promise<void>
   private mutationGuard?: () => void
 
   setMutationGuard(guard: () => void): void { this.mutationGuard = guard }
 
   assertWorktreeDeletionIdle(cwd: string): void {
+    this.refreshWorkerExits()
     const target = resolve(cwd)
     // Worker RPC stop is not an OS-exit barrier. Never release registered
     // workflow worktrees merely because a snapshot says completed/cancelled.
@@ -213,21 +228,42 @@ export class WorkflowManager {
       || workflow.workers.some((worker) => Boolean(worker.worktreePath && related(worker.worktreePath))))) {
       throw new Error('此目录由工作流管理，不能通过分支菜单删除')
     }
-    if (this.pendingMutations || this.operations.size || this.unconfirmedWorkers.size
-      || [...this.workflows.values()].some((workflow) => isWorkflowRunning(workflow.state)
-        || workflow.state === 'waiting_permission'
-        || workflow.workers.some((worker) => worker.status === 'running'))) {
+    if ([...this.pendingMutations.keys()].some(related)
+      || [...this.unconfirmedWorkers.values()].some(related)
+      || [...this.workflows.values()].some((workflow) => related(workflow.cwd)
+        && (this.operations.has(workflow.id) || isWorkflowRunning(workflow.state)
+          || workflow.state === 'waiting_permission'
+          || workflow.workers.some((worker) => worker.status === 'running' && worker.exitConfirmed !== true)))) {
       throw new Error('工作流操作尚未结束，不能删除工作树')
     }
+    this.runner.assertWorktreeDeletionIdle?.(cwd)
+    this.verification.assertWorktreeDeletionIdle?.(cwd)
   }
 
-  private async mutate<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.loading) await this.loading
-    if (this.storageError) throw this.storageError
-    this.mutationGuard?.()
-    this.pendingMutations += 1
+  private async trackTask<T>(operation: () => Promise<T>): Promise<T> {
+    let finish!: () => void
+    const settled = new Promise<void>((done) => { finish = done })
+    this.pendingTasks.add(settled)
     try { return await operation() }
-    finally { this.pendingMutations -= 1 }
+    finally { this.pendingTasks.delete(settled); finish() }
+  }
+
+  private mutate<T>(scope: () => string, operation: () => Promise<T>): Promise<T> {
+    return this.trackTask(async () => {
+      if (this.closed) throw new Error('工作流服务已关闭')
+      if (this.loading) await this.loading
+      if (this.closed) throw new Error('工作流服务已关闭')
+      if (this.storageError) throw this.storageError
+      this.mutationGuard?.()
+      const cwd = resolve(scope())
+      this.pendingMutations.set(cwd, (this.pendingMutations.get(cwd) ?? 0) + 1)
+      try { return await operation() }
+      finally {
+        const remaining = this.pendingMutations.get(cwd)! - 1
+        if (remaining) this.pendingMutations.set(cwd, remaining)
+        else this.pendingMutations.delete(cwd)
+      }
+    })
   }
 
   private git(cwd: string, args: string[]): Promise<string> {
@@ -262,11 +298,19 @@ export class WorkflowManager {
   }
 
   load(): Promise<void> {
-    return this.loading ??= this.loadStorage()
+    if (this.loading) return this.loading
+    const loading = this.loadStorage()
+    this.loading = loading
+    void loading.catch(() => {
+      // Reads were accepted before the recovery save; retain that in-memory state.
+      if (this.loading === loading) this.loading = Promise.resolve()
+    })
+    return loading
   }
 
   private async loadStorage(): Promise<void> {
     const recovered = new Map<string, WorkflowSnapshot>()
+    const unconfirmed = new Map<string, string>()
     let reconciled = false
     try {
       let text: string
@@ -280,8 +324,10 @@ export class WorkflowManager {
         const workflow = normalizeLoaded(item)
         if (!workflow || recovered.has(workflow.id)) throw new Error('工作流条目无效或重复')
         for (const worker of workflow.workers) {
-          if (worker.status === 'running' || worker.status === 'interrupted') {
-            this.unconfirmedWorkers.set(worker.id, worker.worktreePath ?? workflow.cwd)
+          if (worker.exitConfirmed === false || (worker.exitConfirmed === undefined
+            && (worker.status === 'running' || worker.status === 'interrupted'))) {
+            worker.exitConfirmed = false
+            unconfirmed.set(worker.id, resolve(worker.worktreePath ?? workflow.cwd))
           }
         }
         if (isWorkflowRunning(workflow.state) || workflow.state === 'waiting_permission') {
@@ -303,6 +349,7 @@ export class WorkflowManager {
       return
     }
     for (const [id, workflow] of recovered) this.workflows.set(id, workflow)
+    for (const [id, cwd] of unconfirmed) this.unconfirmedWorkers.set(id, cwd)
     if (reconciled) await this.persist()
   }
 
@@ -321,7 +368,7 @@ export class WorkflowManager {
   }
 
   async create(request: CreateWorkflowRequest): Promise<WorkflowSnapshot> {
-    return this.mutate(() => this.createReserved(request))
+    return this.mutate(() => request.cwd, () => this.createReserved(request))
   }
 
   private async createReserved(request: CreateWorkflowRequest): Promise<WorkflowSnapshot> {
@@ -329,6 +376,7 @@ export class WorkflowManager {
     if (!goal) throw new Error('请输入多 Agent 工作流目标')
     if (goal.length > MAX_GOAL) throw new Error(`工作流目标不能超过 ${MAX_GOAL} 个字符`)
     const root = resolve(await this.git(resolve(request.cwd), ['rev-parse', '--show-toplevel']))
+    if (this.closed) throw new Error('工作流服务已关闭')
     this.mutationGuard?.()
     const now = Date.now()
     const workflow: WorkflowSnapshot = {
@@ -351,7 +399,7 @@ export class WorkflowManager {
   }
 
   async start(id: string): Promise<WorkflowSnapshot> {
-    return this.mutate(() => this.startReserved(id))
+    return this.mutate(() => this.require(id).cwd, () => this.startReserved(id))
   }
 
   private async startReserved(id: string): Promise<WorkflowSnapshot> {
@@ -363,30 +411,26 @@ export class WorkflowManager {
     if (!this.projectTrusted(workflow.cwd)) {
       throw new Error('多 Agent 与自动验证会执行仓库代码；请先信任项目资源或移除不受信任的项目配置')
     }
-    workflow.state = 'preparing'
-    workflow.error = undefined
-    await this.changed(workflow)
+    await this.changePhase(workflow, { state: 'preparing', error: undefined })
     this.launch(workflow, () => this.plan(workflow))
     return clone(workflow)
   }
 
   async approvePlan(id: string): Promise<WorkflowSnapshot> {
-    return this.mutate(() => this.approvePlanReserved(id))
+    return this.mutate(() => this.require(id).cwd, () => this.approvePlanReserved(id))
   }
 
   private async approvePlanReserved(id: string): Promise<WorkflowSnapshot> {
     const workflow = this.require(id)
     if (workflow.state !== 'awaiting_plan' || !workflow.plan) throw new Error('没有可批准的计划')
     this.ensureIdle(workflow)
-    workflow.state = 'implementing'
-    workflow.error = undefined
-    await this.changed(workflow)
+    await this.changePhase(workflow, { state: 'implementing', error: undefined })
     this.launch(workflow, () => this.implementReviewTest(workflow, false))
     return clone(workflow)
   }
 
   async repair(id: string): Promise<WorkflowSnapshot> {
-    return this.mutate(() => this.repairReserved(id))
+    return this.mutate(() => this.require(id).cwd, () => this.repairReserved(id))
   }
 
   private async repairReserved(id: string): Promise<WorkflowSnapshot> {
@@ -395,16 +439,13 @@ export class WorkflowManager {
     if (workflow.repairAttempts >= workflow.maxRepairAttempts) throw new Error('此工作流已达到自动修复上限')
     if (!workflow.worktrees.implementer || !workflow.plan) throw new Error('候选 worktree 不可用')
     this.ensureIdle(workflow)
-    workflow.repairAttempts += 1
-    workflow.state = 'implementing'
-    workflow.error = undefined
-    await this.changed(workflow)
+    await this.changePhase(workflow, { state: 'implementing', error: undefined, repairAttempts: workflow.repairAttempts + 1 })
     this.launch(workflow, () => this.implementReviewTest(workflow, true))
     return clone(workflow)
   }
 
   async waiveTests(id: string): Promise<WorkflowSnapshot> {
-    return this.mutate(() => this.waiveTestsReserved(id))
+    return this.mutate(() => this.require(id).cwd, () => this.waiveTestsReserved(id))
   }
 
   private async waiveTestsReserved(id: string): Promise<WorkflowSnapshot> {
@@ -427,7 +468,7 @@ export class WorkflowManager {
   }
 
   async resume(id: string): Promise<WorkflowSnapshot> {
-    return this.mutate(() => this.resumeReserved(id))
+    return this.mutate(() => this.require(id).cwd, () => this.resumeReserved(id))
   }
 
   private async resumeReserved(id: string): Promise<WorkflowSnapshot> {
@@ -435,26 +476,32 @@ export class WorkflowManager {
     if (workflow.state !== 'interrupted') throw new Error('此工作流不处于中断状态')
     this.ensureIdle(workflow)
     const previous = workflow.interruptedFrom
-    workflow.error = undefined
     if (!workflow.baseOid || previous === 'preparing' || previous === 'planning') {
-      workflow.state = 'preparing'
-      await this.changed(workflow)
+      await this.changePhase(workflow, { state: 'preparing', error: undefined })
       this.launch(workflow, () => this.plan(workflow))
     } else if (previous === 'merging') {
-      const head = await this.git(workflow.cwd, ['rev-parse', 'HEAD'])
-      if (workflow.state !== 'interrupted') return clone(workflow)
-      workflow.state = head === workflow.candidateOid ? 'completed' : 'awaiting_merge'
-      if (head === workflow.candidateOid) workflow.mergeOid = head
-      await this.changed(workflow)
+      this.operations.add(workflow.id)
+      try {
+        const head = await this.git(workflow.cwd, ['rev-parse', 'HEAD'])
+        if (this.closed || workflow.state !== 'interrupted') return clone(workflow)
+        await this.changePhase(workflow, {
+          state: head === workflow.candidateOid ? 'completed' : 'awaiting_merge', error: undefined,
+          mergeOid: head === workflow.candidateOid ? head : workflow.mergeOid
+        })
+      } finally { this.operations.delete(workflow.id) }
     } else {
-      workflow.state = 'implementing'
-      await this.changed(workflow)
+      await this.changePhase(workflow, { state: 'implementing', error: undefined })
       this.launch(workflow, () => this.implementReviewTest(workflow, true))
     }
     return clone(workflow)
   }
 
-  async cancel(id: string): Promise<WorkflowSnapshot> {
+  cancel(id: string): Promise<WorkflowSnapshot> {
+    if (this.closed) return Promise.reject(new Error('工作流服务已关闭'))
+    return this.trackTask(() => this.cancelReserved(id))
+  }
+
+  private async cancelReserved(id: string): Promise<WorkflowSnapshot> {
     const workflow = this.require(id)
     if (workflow.state === 'merging') throw new Error('快进合并已开始，不能安全中断 Git 操作')
     if (!isWorkflowRunning(workflow.state) && workflow.state !== 'waiting_permission') {
@@ -468,20 +515,23 @@ export class WorkflowManager {
     workflow.state = 'cancelling'
     // Revoke execution authority before storage or extension preparation waits.
     const cancellation = this.cancelWorkers(workflow)
-    void cancellation.catch(() => undefined)
-    await this.changed(workflow)
-    await cancellation
-    workflow.workers = workflow.workers.map((worker) => worker.status === 'running'
-      ? { ...worker, status: 'cancelled', finishedAt: Date.now(), error: '用户取消' }
-      : worker)
-    workflow.state = 'cancelled'
-    workflow.error = undefined
+    const results = await Promise.allSettled([this.changed(workflow), cancellation])
+    for (const result of results) if (result.status === 'rejected') throw result.reason
+    const interrupted = this.closed
+    for (const worker of workflow.workers) {
+      if (worker.status !== 'running') continue
+      worker.status = interrupted ? 'interrupted' : 'cancelled'
+      worker.finishedAt = Date.now()
+      worker.error = interrupted ? '应用退出' : '用户取消'
+    }
+    workflow.state = interrupted ? 'interrupted' : 'cancelled'
+    workflow.error = interrupted ? 'Pion 退出时中断了工作流；不会自动续跑。' : undefined
     await this.changed(workflow)
     return clone(workflow)
   }
 
   async merge(id: string): Promise<WorkflowSnapshot> {
-    return this.mutate(() => this.mergeReserved(id))
+    return this.mutate(() => this.require(id).cwd, () => this.mergeReserved(id))
   }
 
   private async mergeReserved(id: string): Promise<WorkflowSnapshot> {
@@ -495,9 +545,8 @@ export class WorkflowManager {
       throw new Error('验证尚未通过或明确豁免')
     }
     this.ensureIdle(workflow)
-    workflow.state = 'merging'
-    workflow.error = undefined
-    await this.changed(workflow)
+    await this.changePhase(workflow, { state: 'merging', error: undefined })
+    this.checkWorktreeMutation(workflow)
     try {
       const [branch, head, dirty, candidate] = await Promise.all([
         this.git(workflow.cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
@@ -523,6 +572,7 @@ export class WorkflowManager {
       await this.changed(workflow)
       return clone(workflow)
     } catch (error) {
+      if (error instanceof WorkflowStorageWriteError) throw error
       workflow.state = 'failed'
       workflow.error = errorMessage(error)
       await this.changed(workflow)
@@ -531,7 +581,7 @@ export class WorkflowManager {
   }
 
   async cleanup(id: string): Promise<WorkflowSnapshot> {
-    return this.mutate(() => this.cleanupReserved(id))
+    return this.mutate(() => this.require(id).cwd, () => this.cleanupReserved(id))
   }
 
   private async cleanupReserved(id: string): Promise<WorkflowSnapshot> {
@@ -592,14 +642,27 @@ export class WorkflowManager {
 
   private cancelWorkers(workflow: WorkflowSnapshot): Promise<void> {
     this.cancellations.get(workflow.id)?.abort()
-    return Promise.all(workflow.workers.filter((worker) => worker.status === 'running').map((worker) => {
-      if (worker.kind === 'agent') return this.runner.cancel(worker.id)
-      if (workflow.verification?.runId) return this.verification.cancel(workflow.verification.runId)
-      return Promise.resolve()
-    })).then(() => undefined)
+    return Promise.allSettled(workflow.workers.filter((worker) => worker.status === 'running').map((worker) => {
+      return Promise.resolve().then(() => {
+        if (worker.kind === 'agent') return this.runner.cancel(worker.id)
+        if (workflow.verification?.runId) return this.verification.cancel(workflow.verification.runId)
+      })
+    })).then((results) => {
+      for (const result of results) if (result.status === 'rejected') throw result.reason
+    })
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise
+    this.closed = true
+    this.shutdownPromise = this.shutdownReserved().catch((error: unknown) => {
+      this.shutdownPromise = undefined
+      throw error
+    })
+    return this.shutdownPromise
+  }
+
+  private async shutdownReserved(): Promise<void> {
     const active = [...this.workflows.values()].filter((workflow) => isWorkflowRunning(workflow.state) || workflow.state === 'waiting_permission')
     for (const workflow of active) {
       workflow.interruptedFrom = workflow.state
@@ -607,15 +670,44 @@ export class WorkflowManager {
       workflow.error = 'Pion 退出时中断了工作流；不会自动续跑。'
       this.cancellations.get(workflow.id)?.abort()
     }
-    for (const workflow of active) {
-      await this.cancelWorkers(workflow)
-      workflow.workers = workflow.workers.map((item) => item.status === 'running'
-        ? { ...item, status: 'interrupted', finishedAt: Date.now(), error: '应用退出' }
-        : item)
-      if (!this.storageError) await this.changed(workflow)
+    const results = await Promise.allSettled([
+      ...active.map((workflow) => this.cancelWorkers(workflow)),
+      ...this.pendingTasks,
+      ...this.background.values(),
+      ...(this.loading ? [this.loading] : [])
+    ])
+    // An admitted start can publish its background task after its last save.
+    while (this.pendingTasks.size || this.background.size) {
+      results.push(...await Promise.allSettled([...this.pendingTasks, ...this.background.values()]))
     }
-    await Promise.allSettled(this.background.values())
-    if (!this.storageError) await this.flush()
+    this.refreshWorkerExits()
+    for (const workflow of active) {
+      for (const worker of workflow.workers) {
+        if (worker.status !== 'running') continue
+        worker.status = 'interrupted'
+        worker.finishedAt = Date.now()
+        worker.error = '应用退出'
+        worker.exitConfirmed ??= false
+        if (!worker.exitConfirmed) this.unconfirmedWorkers.set(worker.id, resolve(worker.worktreePath ?? workflow.cwd))
+      }
+    }
+    results.push(...await Promise.allSettled(active.map((workflow) => this.changed(workflow))))
+    results.push(...await Promise.allSettled([this.flush()]))
+    const failed = results.find((result) => result.status === 'rejected')
+    if (this.unconfirmedWorkers.size) {
+      throw Object.assign(new Error('工作流 worker 实际收尾尚未确认'), {
+        closeUnknown: true,
+        cause: failed?.status === 'rejected' ? failed.reason : undefined
+      })
+    }
+    if (failed?.status === 'rejected') {
+      // A prior bounded stop error can outlive its unknown-close condition.
+      // The runner receipts above remain authoritative for this shutdown.
+      if (!(failed.reason instanceof WorkflowStorageWriteError) && failed.reason?.closeUnknown === true) {
+        throw Object.assign(new Error(errorMessage(failed.reason)), { cause: failed.reason })
+      }
+      throw failed.reason
+    }
   }
 
   flush(): Promise<void> {
@@ -631,9 +723,10 @@ export class WorkflowManager {
       await mkdir(dirname(this.filePath), { recursive: true })
       await writeFile(temp, snapshot, 'utf8')
       await rename(temp, this.filePath)
-    }).catch((error) => {
-      this.storageError ??= new Error(`工作流存储保存失败，已停止后续写入并保留现场：${errorMessage(error)}`)
-      throw this.storageError
+    }).catch((error: unknown) => {
+      const failure = error instanceof WorkflowStorageWriteError ? error : new WorkflowStorageWriteError(error)
+      if (failure.closeUnknown) this.storageError = failure
+      throw failure
     })
     this.writeQueue = write.catch(() => undefined)
     return write
@@ -651,6 +744,7 @@ export class WorkflowManager {
   }
 
   private assertWorkersIdle(workflow: WorkflowSnapshot): void {
+    this.refreshWorkerExits()
     if (workflow.workers.some((worker) => this.unconfirmedWorkers.has(worker.id))) {
       throw new Error('工作流 worker 退出尚未确认，工作树已隔离保留')
     }
@@ -670,15 +764,20 @@ export class WorkflowManager {
   private launch(workflow: WorkflowSnapshot, operation: () => Promise<void>): void {
     this.operations.add(workflow.id)
     const running: Promise<void> = Promise.resolve().then(() => {
-      if (this.wasStopped(workflow)) return
+      if (this.closed || this.wasStopped(workflow)) return
       this.mutationGuard?.()
       return operation()
     })
       .catch(async (error) => {
-        if (workflow.state === 'cancelled' || workflow.state === 'cancelling' || workflow.state === 'interrupted') return
+        if (workflow.state === 'cancelled' || workflow.state === 'cancelling' || workflow.state === 'interrupted') {
+          if (error instanceof WorkflowStorageWriteError) throw error
+          return
+        }
         workflow.state = 'failed'
         workflow.error = errorMessage(error)
-        await this.changed(workflow)
+        // Saving the failure snapshot must preserve the original save rejection.
+        try { await this.changed(workflow) }
+        finally { if (error instanceof WorkflowStorageWriteError) throw error }
       })
       .finally(() => {
         this.operations.delete(workflow.id)
@@ -826,6 +925,8 @@ export class WorkflowManager {
   private async test(workflow: WorkflowSnapshot): Promise<void> {
     if (this.wasStopped(workflow)) return
     if (!workflow.candidateOid) throw new Error('缺少候选提交')
+    const stoppedStatus = (): 'interrupted' | 'cancelled' | undefined => workflow.state === 'interrupted'
+      ? 'interrupted' : this.wasStopped(workflow) ? 'cancelled' : undefined
     workflow.state = 'testing'
     await this.changed(workflow)
     const tester = await this.recreateDetachedWorktree(workflow, 'tester', workflow.candidateOid)
@@ -849,15 +950,24 @@ export class WorkflowManager {
           console.error('[pion] workflow progress persistence failed:', error)
         })
       }, controller.signal)
+      this.confirmWorkerExit(worker)
     } catch (error) {
       if (invoked) this.retainUnknownWorker(worker, this.verification)
+      else this.confirmWorkerExit(worker)
+      worker.status = stoppedStatus() ?? 'failed'
+      worker.finishedAt = Date.now()
+      worker.error = errorMessage(error)
+      await this.changed(workflow)
       throw error
     } finally {
       if (this.cancellations.get(workflow.id) === controller) this.cancellations.delete(workflow.id)
     }
-    if (this.wasStopped(workflow)) return
-    worker.status = result.state === 'passed' ? 'completed' : result.state === 'cancelled' ? 'cancelled' : 'failed'
+    worker.status = stoppedStatus() ?? (result.state === 'passed' ? 'completed' : result.state === 'cancelled' ? 'cancelled' : 'failed')
     worker.finishedAt = Date.now()
+    if (this.wasStopped(workflow)) {
+      await this.changed(workflow)
+      return
+    }
     this.appendWorkerOutput(worker, result.summary)
     workflow.verification = {
       runId: result.runId,
@@ -914,6 +1024,7 @@ export class WorkflowManager {
         })
       })
       finished = true
+      this.confirmWorkerExit(worker)
       this.checkWorktreeMutation(workflow)
       worker.status = 'completed'
       worker.finishedAt = Date.now()
@@ -925,6 +1036,7 @@ export class WorkflowManager {
       return result.output
     } catch (error) {
       if (invoked && !finished) this.retainUnknownWorker(worker, this.runner)
+      else this.confirmWorkerExit(worker)
       worker.status = workflow.state === 'interrupted'
         ? 'interrupted'
         : workflow.state === 'cancelling' || workflow.state === 'cancelled'
@@ -939,12 +1051,34 @@ export class WorkflowManager {
     }
   }
 
-  private retainUnknownWorker(worker: WorkflowWorker, runner: { assertWorktreeDeletionIdle?(cwd: string): void }): void {
-    if (!worker.worktreePath) return
-    if (runner.assertWorktreeDeletionIdle) {
-      try { runner.assertWorktreeDeletionIdle(worker.worktreePath); return } catch { /* Retain unknown shutdown. */ }
+  private confirmWorkerExit(worker: WorkflowWorker): void {
+    worker.exitConfirmed = true
+    this.unconfirmedWorkers.delete(worker.id)
+    this.workerExitObservers.delete(worker.id)
+  }
+
+  private refreshWorkerExits(): void {
+    // Only this runtime's runner can confirm a late close. Loaded unknowns
+    // have no observer; a fresh runner's empty registry proves nothing for them.
+    for (const observe of this.workerExitObservers.values()) {
+      try { observe() } catch { /* The actual runner still retains this cwd. */ }
     }
-    this.unconfirmedWorkers.set(worker.id, resolve(worker.worktreePath))
+  }
+
+  private retainUnknownWorker(worker: WorkflowWorker, runner: { assertWorktreeDeletionIdle?(cwd: string): void }): void {
+    worker.exitConfirmed = false
+    const path = worker.worktreePath
+    if (!path) return
+    const assertIdle = runner.assertWorktreeDeletionIdle?.bind(runner)
+    if (assertIdle) {
+      const observe = (): void => {
+        assertIdle(path)
+        this.confirmWorkerExit(worker)
+      }
+      this.workerExitObservers.set(worker.id, observe)
+      try { observe(); return } catch { /* Retain unknown shutdown. */ }
+    }
+    this.unconfirmedWorkers.set(worker.id, resolve(path))
   }
 
   private newWorker(role: WorkflowRole, kind: 'agent' | 'command', worktreePath: string): WorkflowWorker {
@@ -954,6 +1088,7 @@ export class WorkflowManager {
       status: 'running',
       kind,
       worktreePath,
+      exitConfirmed: false,
       startedAt: Date.now(),
       outputTail: '',
       outputTruncated: false,
@@ -979,7 +1114,7 @@ export class WorkflowManager {
 
   private checkWorktreeMutation(workflow: WorkflowSnapshot): void {
     this.mutationGuard?.()
-    if (this.wasStopped(workflow)) throw new Error('工作流已停止，未继续执行')
+    if (this.closed || this.wasStopped(workflow)) throw new Error('工作流已停止，未继续执行')
   }
 
   private async checkLocationUnchanged(location: WorkflowWorktreeLocation, removed = false): Promise<void> {
@@ -1145,6 +1280,26 @@ export class WorkflowManager {
 
   private wasStopped(workflow: WorkflowSnapshot): boolean {
     return workflow.state === 'cancelling' || workflow.state === 'cancelled' || workflow.state === 'interrupted'
+  }
+
+  // Only saves before dispatch use this rollback; issued workers/Git retain their actual state.
+  private async changePhase(
+    workflow: WorkflowSnapshot,
+    changes: Pick<WorkflowSnapshot, 'state'> & Partial<Pick<WorkflowSnapshot, 'error' | 'repairAttempts' | 'mergeOid'>>
+  ): Promise<void> {
+    const previous = { state: workflow.state, error: workflow.error,
+      repairAttempts: workflow.repairAttempts, mergeOid: workflow.mergeOid }
+    Object.assign(workflow, changes)
+    const saving = this.changed(workflow)
+    const revision = workflow.revision
+    try { await saving } catch (error) {
+      if (error instanceof WorkflowStorageWriteError && !error.closeUnknown && !this.closed
+        && this.workflows.get(workflow.id) === workflow
+        && workflow.revision === revision && workflow.state === changes.state) {
+        Object.assign(workflow, previous)
+      }
+      throw error
+    }
   }
 
   private async changed(workflow: WorkflowSnapshot): Promise<void> {

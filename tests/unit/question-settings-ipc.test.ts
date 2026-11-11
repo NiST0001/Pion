@@ -31,8 +31,8 @@ it('wires settings through the injected store and rejects owner/main-frame and l
   const pending = read(event)
   owner = undefined
   finish({ timeoutMinutes: 10 })
-  await expect(pending).rejects.toThrow('窗口已变更')
+  await expect(pending).rejects.toThrow('所属主窗口的活主帧')
   owner = 10
   set.mockImplementation(async (_value, assertCurrent) => { owner = undefined; assertCurrent() })
-  await expect(save(event, { timeoutMinutes: null })).rejects.toThrow('窗口已变更')
+  await expect(save(event, { timeoutMinutes: null })).rejects.toThrow('所属主窗口的活主帧')
 })

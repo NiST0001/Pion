@@ -25,9 +25,11 @@ import {
   orderTimelineAroundAnchors,
   parseToolArgs,
   preserveTimelineToolState,
+  readSnapshotFields,
   reconcileCompletedAssistantRows,
   reconcileNewerTimelineItems,
   reconcileOlderTimelineItems,
+  supplementAssistantFields,
   toolResultMatches,
   wireMessageTimestamp
 } from './timeline'
@@ -79,6 +81,8 @@ function queueSnapshot(state: AgentState, input: Partial<QueuedMessagesSnapshot>
 
 export function reducer(state: AgentState, action: Action): AgentState {
   switch (action.type) {
+    case 'statusError':
+      return state.status.error === action.error ? state : { ...state, status: { ...state.status, error: action.error } }
     case 'status': {
       const dead = action.status.phase === 'stopped' || action.status.phase === 'error'
       // Re-selecting a retained backend publishes its descriptor again; that
@@ -323,7 +327,7 @@ export function reducer(state: AgentState, action: Action): AgentState {
           && item.kind === 'assistant' && row.messageTimestamp === item.messageTimestamp) : candidates
         if (candidates.length !== 1 || sourceCopies.length !== 1 || cachedCopies.length !== 1) return item
         const current = candidates[0]
-        const replacement = { ...current,
+        let replacement: TimelineItem = { ...current,
           ...((item.kind === 'user' || item.kind === 'assistant') && (current.kind === 'user' || current.kind === 'assistant')
             ? { entryId: current.entryId ?? item.entryId, liveMessageId: current.liveMessageId ?? item.liveMessageId } : {}),
           ...(item.kind === 'user' && current.kind === 'user'
@@ -332,8 +336,9 @@ export function reducer(state: AgentState, action: Action): AgentState {
           historical: item.historical, noReveal: item.noReveal }
         const fields = cachedSnapshotFields(state, current)
         if (replacement.kind === 'assistant' && item.kind === 'assistant') {
-          if (fields.has('text') && item.text.length > replacement.text.length) replacement.text = item.text
-          if (fields.has('thinking') && item.thinking.length > replacement.thinking.length) replacement.thinking = item.thinking
+          const supplementsFinal = Boolean(replacement.partialFields?.length && !item.streaming)
+          replacement = supplementAssistantFields(replacement, item)
+          if (supplementsFinal) replacement.streaming = false
           if (fields.has('error') && (item.error?.length ?? 0) > (replacement.error?.length ?? 0)) replacement.error = item.error
         }
         if (replacement.kind === 'tool' && item.kind === 'tool' && fields.has('subagentBatch')
@@ -551,14 +556,7 @@ function uniqueStreamingAssistant(items: TimelineItem[], timestamp?: number): Ex
   return candidates.length === 1 ? candidates[0] : undefined
 }
 
-function readSnapshotFields(payload: unknown): Set<string> {
-  const value = payload && typeof payload === 'object'
-    ? (payload as Record<string, unknown>)._pionLiveTruncatedFields : undefined
-  return new Set(Array.isArray(value) ? value.filter((field) =>
-    typeof field === 'string' && ['text', 'thinking', 'error', 'diff', 'outputText', 'subagentBatch'].includes(field)) : [])
-}
-
-/** Only the exact accepted snapshot may explain why its current row is short. */
+/** Other display fields supplement only from the exact accepted snapshot. */
 function cachedSnapshotFields(state: AgentState, row: TimelineItem): Set<string> {
   return readSnapshotFields(cachedSnapshotPayload(state, row))
 }
@@ -742,8 +740,11 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
     if (fields.has('text') || fields.has('thinking') || fields.has('error')) {
       const current = matched[0] ?? fallback
       if (current?.kind === 'assistant') {
+        const partialFields = (['text', 'thinking'] as const).filter((field) => fields.has(field)
+          && (current.streaming || current.partialFields?.includes(field)))
         replay.timeline.push({ ...current, text: fields.has('text') ? current.text : '',
           thinking: fields.has('thinking') ? current.thinking : '',
+          partialFields: partialFields.length ? partialFields : undefined,
           error: fields.has('error') ? current.error : undefined, streaming: false })
         truncatedFields.set(current.id, fields)
       }
@@ -776,12 +777,14 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
           && (item.messageTimestamp === undefined || row.messageTimestamp === undefined)).at(-1) : undefined)
     if (!current) return item
     matched.add(current.id)
-    if ((current.historyReconciled && current.kind === 'assistant' && item.kind === 'assistant'
-      && current.entryId && !current.streaming && item.streaming)
+    // A persisted final outranks a replayed start. A live ID alone identifies
+    // the cache row; fresh complete fields still come from the new snapshot.
+    if ((current.kind === 'assistant' && item.kind === 'assistant' && !current.streaming && item.streaming
+      && current.historyReconciled && current.entryId)
       || (current.kind === 'tool' && item.kind === 'tool' && current.tool.resultReceived && !item.tool.resultReceived)) {
       return revealHistory ? { ...current, historical: true, noReveal: false } : current
     }
-    const replacement = { ...item, id: current.id,
+    let replacement: TimelineItem = { ...item, id: current.id,
       historical: revealHistory ? true : current.historical,
       noReveal: revealHistory ? false : current.noReveal,
       historyReconciled: current.historyReconciled }
@@ -794,10 +797,12 @@ function applyLiveSnapshot(state: AgentState, live: LiveSessionState, active = s
     // Only explicit per-field budget loss can protect cached longer output.
     const fields = truncatedFields.get(item.id) ?? new Set<string>()
     if (replacement.kind === 'assistant' && current.kind === 'assistant') {
-      if (fields.has('text') && replacement.text.length < current.text.length) replacement.text = current.text
-      if (fields.has('thinking') && replacement.thinking.length < current.thinking.length) replacement.thinking = current.thinking
+      const supplementsFinal = Boolean(replacement.partialFields?.length && !current.streaming)
+      replacement = supplementAssistantFields(replacement, current)
+      if (supplementsFinal) replacement.streaming = false
       if (fields.has('error') && (replacement.error?.length ?? 0) < (current.error?.length ?? 0)) replacement.error = current.error
       if (replacement.text === current.text && replacement.thinking === current.thinking
+        && replacement.partialFields?.join() === current.partialFields?.join()
         && replacement.streaming === current.streaming && replacement.error === current.error
         && replacement.entryId === current.entryId && replacement.liveMessageId === current.liveMessageId
         && replacement.messageTimestamp === current.messageTimestamp
@@ -968,9 +973,12 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
         if (existing) return { ...state, timeline: state.timeline.map((row) => row === existing
           ? { ...existing, entryId: existing.entryId ?? identity.entryId,
             liveMessageId: existing.liveMessageId ?? identity.liveMessageId } : row) }
+        const fields = readSnapshotFields(message)
+        const partialFields = (['text', 'thinking'] as const).filter((field) => fields.has(field))
         return { ...state, timeline: [...state.timeline, {
           kind: 'assistant', id: nextTimelineId(), ...identity,
-          messageTimestamp: wireMessageTimestamp(message), text: '', thinking: '', streaming: true, live: true
+          messageTimestamp: wireMessageTimestamp(message), text: '', thinking: '',
+          ...(partialFields.length ? { partialFields } : {}), streaming: true, live: true
         }] }
       }
       return state
@@ -1057,12 +1065,15 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
       const text = messageText(message)
       const thinking = messageThinking(message)
       const error = assistantErrorText(message)
+      const fields = readSnapshotFields(message)
       const timeline = state.timeline.flatMap((item) => {
         if (item !== target) return [item]
-        // Extensions may replace a nonempty draft with an empty final message.
-        // Empty text/thinking is authoritative too, not a missing update.
-        const nextText = text
-        const nextThinking = thinking
+        // Display loss preserves complete fields even when a placeholder is longer.
+        // A delta extends the same loss; unmarked/empty finals remain authoritative.
+        const partialFields = (['text', 'thinking'] as const).filter((field) => fields.has(field)
+          && (!item[field] || item.partialFields?.includes(field)))
+        const nextText = fields.has('text') && (!partialFields.includes('text') || item.text.length > text.length) ? item.text : text
+        const nextThinking = fields.has('thinking') && (!partialFields.includes('thinking') || item.thinking.length > thinking.length) ? item.thinking : thinking
         // message_end is the authoritative assistant result. Do not retain a
         // provisional update error when the final message succeeds or aborts.
         const nextError = error
@@ -1076,6 +1087,8 @@ function reduceEvent(state: AgentState, input: WireEventInput, replay = false): 
           thinking: nextThinking,
           streaming: false
         }
+        if (partialFields.length) nextItem.partialFields = partialFields
+        else delete nextItem.partialFields
         if (nextError) nextItem.error = nextError
         else delete nextItem.error
         return [nextItem]

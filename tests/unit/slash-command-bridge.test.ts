@@ -1,5 +1,5 @@
 import { resolve } from 'node:path'
-import type { RpcClient, SessionStats } from '@earendil-works/pi-coding-agent'
+import { RpcClient, type SessionStats } from '@earendil-works/pi-coding-agent'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import { BackendPool } from '../../src/main/agent/backend-pool'
@@ -67,6 +67,8 @@ function setup() {
   const forbidden = () => { throw new Error('Unexpected backend/model mutation') }
   let eventListener: Parameters<RpcClient['onEvent']>[0] | undefined
   const client = {
+    requestId: 0,
+    getData: (RpcClient.prototype as unknown as { getData(response: unknown): { path: string } }).getData,
     onEvent: vi.fn<RpcClient['onEvent']>((listener) => { eventListener = listener; return () => {} }),
     getState: vi.fn(async () => ({ ...state })), getSessionStats: vi.fn(async () => stats),
     getLastAssistantText: vi.fn<() => Promise<string | null>>().mockResolvedValue('  full assistant text\n'),
@@ -281,20 +283,35 @@ describe('session slash-command bridge reads', () => {
     h.noModel()
   })
 
-  it('rejects late changelog results after owner replacement and latches unknown FD closure', async () => {
+  it('holds the changelog read slot until the actual Promise settles after owner replacement', async () => {
     const h = setup()
     const read = deferred<{ version: string; markdown: string }>()
     mocks.readChangelog.mockReturnValueOnce(read.promise)
     const result = h.bridge.getPiChangelog(owner)
     const observed = expect(result).rejects.toThrow('所属主窗口')
+    await expect(h.bridge.getPiChangelog(owner)).rejects.toThrow('仍在读取')
     h.internals.win = { ...h.win }
+    await expect(h.bridge.getPiChangelog(owner)).rejects.toThrow('仍在读取')
+    expect(mocks.readChangelog).toHaveBeenCalledTimes(1)
     read.resolve({ version: 'old', markdown: 'old' })
     await observed
-    mocks.readChangelog.mockRejectedValueOnce(new mocks.UnknownFileState('close unknown'))
-    await expect(h.bridge.getPiChangelog(owner)).rejects.toThrow('close unknown')
+    await expect(h.bridge.getPiChangelog(owner)).resolves.toHaveProperty('version', 'sdk-fixture')
+    expect(mocks.readChangelog).toHaveBeenCalledTimes(2)
+    h.noModel()
+  })
+
+  it('allows a later explicit changelog read after an ordinary read failure', async () => {
+    const h = setup()
+    const error = new Error('EACCES: changelog read denied')
+    mocks.readChangelog.mockRejectedValueOnce(error)
+    await expect(h.bridge.getPiChangelog(owner)).rejects.toBe(error)
+    expect(mocks.readChangelog).toHaveBeenCalledTimes(1)
     await expect(h.bridge.withSessionOperation(() => 'unrelated operation')).resolves.toBe('unrelated operation')
     await expect(h.bridge.getSessionCommandInfo(h.target, owner)).resolves.toHaveProperty('sessionId', 'session-a')
-    await expect(h.bridge.getPiChangelog(owner)).rejects.toThrow('收尾未知')
+    await expect(h.bridge.getPiChangelog(owner)).resolves.toEqual({ version: 'sdk-fixture', markdown: '# Pi changelog' })
+    expect(mocks.readChangelog).toHaveBeenCalledTimes(2)
+    expect(h.internals.sessionCommandFilesUnknown).toBe(false)
+    h.noModel()
   })
 })
 
@@ -397,9 +414,36 @@ describe('explicit slash-command export', () => {
     expect(h.client.exportHtml).toHaveBeenCalledTimes(1)
   })
 
-  it('isolates unknown scratch writers without blocking unrelated sessions or retrying the export', async () => {
+  it.each(['EACCES: export denied', 'Timeout waiting for response / process gone'])
+  ('allows a later export after the matching SDK negative response (%s)', async (message) => {
     const h = setup()
-    h.client.exportHtml.mockRejectedValueOnce(new Error('Timeout waiting for response / process gone'))
+    h.client.exportHtml.mockImplementationOnce(async () => h.client.getData({
+      type: 'response', id: `req_${++h.client.requestId}`, command: 'export_html', success: false, error: message
+    }))
+    await expect(h.exportSession()).rejects.toThrow(message)
+    expect(h.internals.sessionCommandFilesUnknown).toBe(false)
+    expect(h.internals.sessionCommandExportInFlight).toBe(false)
+    expect(h.backend.sessionExportPending).toBe(false)
+    await expect(h.exportSession()).resolves.toBe(resolve(cwd, 'session-default.html'))
+    expect(h.client.exportHtml).toHaveBeenCalledTimes(2)
+    h.noModel()
+  })
+
+  it('keeps a decoded negative from another request isolated as an unknown export', async () => {
+    const h = setup()
+    h.client.exportHtml.mockImplementationOnce(async () => h.client.getData({
+      type: 'response', id: 'req_99', command: 'export_html', success: false, error: 'EACCES: export denied'
+    }))
+    await expect(h.exportSession()).rejects.toBeInstanceOf(mocks.UnknownFileState)
+    expect(h.internals.sessionCommandFilesUnknown).toBe(true)
+    await expect(h.exportSession()).rejects.toThrow('收尾未知')
+    expect(h.client.exportHtml).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['EACCES: export denied', 'Timeout waiting for response', 'process gone', 'broken pipe'])
+  ('isolates unknown scratch writers without blocking unrelated sessions or retrying (%s)', async (message) => {
+    const h = setup()
+    h.client.exportHtml.mockRejectedValueOnce(new Error(message))
     await expect(h.exportSession()).rejects.toBeInstanceOf(mocks.UnknownFileState)
     expect(h.internals.sessionCommandFilesUnknown).toBe(true)
     expect(h.internals.sessionCommandExportInFlight).toBe(false)

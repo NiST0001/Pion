@@ -1,8 +1,8 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { app } from 'electron'
 import { isThemeId, type ThemeId } from '../shared/theme'
+import { writeAtomicJson } from './atomic-json-file'
 
 export function assertThemeSettingsOwner(event: Electron.IpcMainInvokeEvent, ownerId: number | undefined): void {
   if (event.sender.id !== ownerId || event.senderFrame !== event.sender.mainFrame) {
@@ -13,13 +13,13 @@ export function assertThemeSettingsOwner(event: Electron.IpcMainInvokeEvent, own
 /** Separate from both Chromium cache and application files replaced by installs.
  * Older application versions cannot erase this key when saving other settings. */
 export class ThemeSettingsStore {
-  private writes: Promise<unknown> = Promise.resolve()
+  private operations: Promise<void> = Promise.resolve()
+  private closed = false
   constructor(private readonly path: () => string = () => join(app.getPath('userData'), 'pion-theme.json')) {}
 
-  async get(): Promise<ThemeId | null> {
-    await this.writes.catch(() => undefined)
+  private async read(path: string): Promise<ThemeId | null> {
     try {
-      const value: unknown = JSON.parse(await readFile(this.path(), { encoding: 'utf8', signal: AbortSignal.timeout(5000) }))
+      const value: unknown = JSON.parse(await readFile(path, 'utf8'))
       if (!isThemeId(value)) throw new Error('主题配置无效')
       return value
     } catch (error) {
@@ -28,19 +28,32 @@ export class ThemeSettingsStore {
     }
   }
 
-  set(value: unknown): Promise<ThemeId> {
+  get(): Promise<ThemeId | null> {
+    return this.enqueue(() => this.read(this.path()))
+  }
+
+  set(value: unknown, assertCurrent: () => void = () => undefined): Promise<ThemeId> {
     if (!isThemeId(value)) throw new Error('主题参数无效')
-    const write = this.writes.catch(() => undefined).then(async () => {
+    return this.enqueue(async () => {
+      assertCurrent()
       const path = this.path()
-      const temporary = `${path}.${randomUUID()}.tmp`
-      await mkdir(dirname(path), { recursive: true })
-      try {
-        await writeFile(temporary, `${JSON.stringify(value)}\n`, { encoding: 'utf8', mode: 0o600 })
-        await rename(temporary, path)
-      } finally { await unlink(temporary).catch(() => undefined) }
+      await this.read(path)
+      await writeAtomicJson(path, value, assertCurrent)
+      assertCurrent()
       return value
     })
-    this.writes = write
-    return write
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.closed) return Promise.reject(new Error('Theme settings are closed'))
+    const result = this.operations.then(operation)
+    this.operations = result.then(() => undefined, () => undefined)
+    return result
+  }
+
+  /** Close admission and wait for actual reads, writes and staging cleanup. */
+  shutdown(): Promise<void> {
+    this.closed = true
+    return this.operations
   }
 }

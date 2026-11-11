@@ -71,12 +71,14 @@ describe('reclaimCompletedToolReceipts', () => {
     expect(index.remember).toHaveBeenCalledTimes(600)
   })
 
-  it('preserves the entire original map when archiving fails', () => {
+  it('preserves the entire original map when archiving fails and permits retry', () => {
     const receipts: Receipts = new Map(['a', 'b', 'live'].map(id => [id, receipt(id, id === 'live' ? { state: 'running' } : {})]))
     const original = [...receipts.entries()]
     const index = archive()
-    vi.mocked(index.remember).mockImplementation(() => { throw new Error('archive failed') })
+    vi.mocked(index.remember).mockImplementationOnce(() => { throw new Error('archive failed') })
     expect(() => reclaimCompletedToolReceipts(receipts, 'scope', index)).toThrow('archive failed')
     expect([...receipts.entries()]).toEqual(original)
+    expect(reclaimCompletedToolReceipts(receipts, 'scope', index)).toBe(2)
+    expect([...receipts.keys()]).toEqual(['live'])
   })
 })

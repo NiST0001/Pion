@@ -35,12 +35,32 @@ export function topmostModalDialog(): HTMLElement | null {
   const dialogs = Array.from(document.querySelectorAll<HTMLElement>(
     '[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]'
   )).filter(isVisible)
-  return dialogs.reduce<HTMLElement | null>((current, candidate) => {
-    if (!current) return candidate
-    const currentLayer = modalLayer(current)
-    const candidateLayer = modalLayer(candidate)
-    return candidateLayer >= currentLayer ? candidate : current
-  }, null)
+  let topmost: HTMLElement | null = null
+  let topLayer = -Infinity
+  for (const dialog of dialogs) {
+    const layer = modalLayer(dialog)
+    if (layer >= topLayer) { topmost = dialog; topLayer = layer }
+  }
+  return topmost
+}
+
+// Shared dialogs resolve the top layer once per key, rather than each installing
+// a window handler that repeats the full document scan. Legacy modals still
+// participate through the same DOM/layer lookup.
+const modalKeyHandlers = new Map<HTMLElement, (event: KeyboardEvent) => void>()
+function dispatchModalKeydown(event: KeyboardEvent): void {
+  if (event.defaultPrevented || (event.key !== 'Tab' && event.key !== 'Escape')) return
+  const dialog = topmostModalDialog()
+  if (dialog) modalKeyHandlers.get(dialog)?.(event)
+}
+
+export function registerModalKeydown(dialog: HTMLElement, handler: (event: KeyboardEvent) => void): () => void {
+  if (modalKeyHandlers.size === 0) window.addEventListener('keydown', dispatchModalKeydown)
+  modalKeyHandlers.set(dialog, handler)
+  return () => {
+    if (modalKeyHandlers.get(dialog) === handler) modalKeyHandlers.delete(dialog)
+    if (modalKeyHandlers.size === 0) window.removeEventListener('keydown', dispatchModalKeydown)
+  }
 }
 
 export function isTopmostModalDialog(dialog: HTMLElement | null): boolean {

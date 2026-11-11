@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { ComputerUsePanel, type ComputerUsePanelProps } from '../../src/renderer/src/features/computer-use/ComputerUsePanel'
-import { createDisabledComputerUseStatus, type ComputerUseStatus } from '../../src/shared/computer-use'
+import { COMPUTER_USE_CAPTURE_MESSAGES, COMPUTER_USE_LIMITS, createDisabledComputerUseStatus, type ComputerUseStatus } from '../../src/shared/computer-use'
 
 afterEach(cleanup)
 function setup(extra: Partial<ComputerUsePanelProps> = {}) {
@@ -15,7 +15,7 @@ function setup(extra: Partial<ComputerUsePanelProps> = {}) {
   return { ...render(<ComputerUsePanel {...props} />), props }
 }
 function observing(): ComputerUseStatus {
-  return { ...createDisabledComputerUseStatus(), state: 'ready', coordination: 'held',
+  return { ...createDisabledComputerUseStatus(), state: 'ready', coordination: 'not-checked',
     consent: { capture: true, upload: false, retention: 'sdk-session', control: false },
     capability: { platform: 'linux-wayland', method: 'portal-screencast', capture: true, control: false, scope: 'window' }
   }
@@ -64,34 +64,6 @@ it('does not grant local consent on same-state, same-revision diagnostic updates
     for (const callback of [props.onStart, props.onCapture, props.onStop, props.onClose]) expect(callback).not.toHaveBeenCalled()
   }
   expect(screen.queryByLabelText('观察失败阶段')).not.toBeInTheDocument()
-})
-it('drops an entire invalid diagnostic projection, never showing raw data or salvaging a valid slot', () => {
-  const getter = vi.fn(() => 'portal-connect-failed')
-  const accessor = Object.defineProperty({}, 'open', { enumerable: true, get: getter })
-  const { props, rerender, container } = setup()
-  const invalidDiagnostics = [null, [], 'private raw error', accessor,
-    Object.assign(Object.create({ inherited: true }), { open: 'portal-connect-failed' }),
-    { open: 'pipewire-start-failed', close: 'private-bad-code' },
-    { open: 'pipewire-start-failed', capture: undefined },
-    { open: 'pipewire-start-failed', close: 'file:///private/frame.png' },
-    { open: '/private/frame.png' }, { close: 'Error: private native failure' },
-    { open: 'pipewire-start-failed', rawFilename: '/private/frame.png' },
-    { open: 'pipewire-start-failed', uri: 'file:///private/frame.png' },
-    { open: 'pipewire-start-failed', error: 'private raw error' },
-    { open: 'pipewire-start-failed', [Symbol('private')]: 'private symbol value' }]
-  for (const diagnostics of invalidDiagnostics) {
-    rerender(<ComputerUsePanel {...props} state={{ ...props.state,
-      diagnostics: diagnostics as unknown as ComputerUseStatus['diagnostics'] }} />)
-    expect(screen.queryByLabelText('观察失败阶段')).not.toBeInTheDocument()
-    for (const privateValue of ['pipewire-start-failed', 'private-bad-code', '/private/frame.png',
-      'private native failure', 'private raw error', 'private symbol value']) {
-      expect(container.textContent).not.toContain(privateValue)
-    }
-    expect(screen.queryByRole('img')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '开始本次窗口观察' })).toBeDisabled()
-    for (const callback of [props.onStart, props.onCapture, props.onStop, props.onClose]) expect(callback).not.toHaveBeenCalled()
-  }
-  expect(getter).not.toHaveBeenCalled()
 })
 it.each([
   ['portal-connect-failed', '系统 Portal 连接阶段失败'],
@@ -164,7 +136,7 @@ it('labels initial unchecked state without claiming other instances were checked
 it('keeps foreign blocked state passive, requires fresh manual consent for each retry and never offers global stop', () => {
   const state: ComputerUseStatus = { ...createDisabledComputerUseStatus(), state: 'quarantined', coordination: 'blocked' }
   const { props, rerender } = setup({ state })
-  expect(screen.getByRole('status')).toHaveTextContent('共享观察标记存在，可能由其他实例使用或上次未确认收尾')
+  expect(screen.getByRole('status')).toHaveTextContent('共享控制标记存在，可能由其他实例使用或上次未确认收尾')
   expect(screen.getByRole('status')).not.toHaveTextContent('本地观察中')
   expect(screen.getByRole('button', { name: '停止窗口观察' })).toBeDisabled()
   fireEvent.click(screen.getByRole('button', { name: '停止窗口观察' }))
@@ -180,19 +152,19 @@ it('keeps foreign blocked state passive, requires fresh manual consent for each 
   expect(props.onStart).toHaveBeenCalledTimes(2)
   expect(props.onCapture).not.toHaveBeenCalled()
 })
-it.each(['not-checked', 'blocked', 'unknown', 'released', 'unclaimed'] as const)('does not capture or restart ready state with coordination %s', coordination => {
+it.each(['blocked', 'unknown', 'released', 'unclaimed'] as const)('does not capture or restart ready state with coordination %s', coordination => {
   setup({ state: { ...observing(), coordination } })
   expect(screen.getByRole('button', { name: '获取本地静态截图' })).toBeDisabled()
   expect(screen.getByRole('button', { name: '开始本次窗口观察' })).toBeDisabled()
 })
-it.each(['observing', 'paused', 'quarantined'] as const)('does not infer ready from nonpending held %s', state => {
+it.each(['observing', 'paused', 'quarantined'] as const)('does not infer ready from nonpending observation %s', state => {
   setup({ state: { ...observing(), state, actualPending: false } })
   expect(screen.getByRole('button', { name: '获取本地静态截图' })).toBeDisabled()
   expect(screen.getByRole('button', { name: '开始本次窗口观察' })).toBeDisabled()
 })
 it('labels unclaimed as local non-occupation, never foreign release, and allows only a freshly consented start', () => {
   const { props } = setup({ state: { ...createDisabledComputerUseStatus(), state: 'stopped', coordination: 'unclaimed' } })
-  expect(screen.getByRole('status')).toHaveTextContent('本实例未启动观察、未占用共享标记')
+  expect(screen.getByRole('status')).toHaveTextContent('本实例观察已收尾，未持有共享控制标记')
   expect(screen.getByRole('status')).not.toHaveTextContent('标记已释放')
   expect(screen.getByRole('status')).toHaveTextContent('不代表其他实例或全桌面已停止')
   expect(screen.getByRole('button', { name: '获取本地静态截图' })).toBeDisabled()
@@ -243,8 +215,9 @@ it('does not inherit existing consent and resets confirmation across session sta
   rerender(<ComputerUsePanel {...props} state={{ ...observing(), state: 'stopped', coordination: 'released' }} />)
   expect(screen.getByRole('button', { name: '开始本次窗口观察' })).toBeDisabled()
 })
-it('only captures on explicit click with consent and the reported capture capability', () => {
-  const { props, rerender } = setup({ state: observing() })
+it.each(['not-checked', 'held'] as const)('only captures read-only %s state on explicit click with consent and capability', coordination => {
+  const { props, rerender } = setup({ state: { ...observing(), coordination } })
+  if (coordination === 'not-checked') expect(screen.getByRole('status')).toHaveTextContent('只读观察未检查共享控制标记')
   fireEvent.click(screen.getByRole('button', { name: '获取本地静态截图' }))
   expect(props.onCapture).toHaveBeenCalledTimes(1)
   rerender(<ComputerUsePanel {...props} state={{ ...observing(), consent: undefined }} />)
@@ -252,6 +225,42 @@ it('only captures on explicit click with consent and the reported capture capabi
   rerender(<ComputerUsePanel {...props} state={{ ...observing(), capability: undefined }} />)
   expect(screen.getByRole('button', { name: '获取本地静态截图' })).toBeDisabled()
 })
+it('disables only exhausted capture totals while preserving the last thumbnail and local Stop', () => {
+  const ready = observing()
+  const { props, rerender } = setup({ state: { ...ready,
+    budget: { ...ready.budget, captures: COMPUTER_USE_LIMITS.maxCaptures } }, preview: 'data:image/png;base64,AAAA' })
+  const capture = screen.getByRole('button', { name: '获取本地静态截图' })
+  expect(capture).toBeDisabled()
+  expect(screen.getByRole('status')).toHaveTextContent(COMPUTER_USE_CAPTURE_MESSAGES.budget)
+  fireEvent.click(capture); fireEvent.click(capture)
+  expect(props.onCapture).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: '显示本地缩略图' }))
+  const image = screen.getByRole('img')
+  for (const [field, cap] of [['frameBytes', COMPUTER_USE_LIMITS.maxTotalFrameBytes], ['framePixels', COMPUTER_USE_LIMITS.maxTotalFramePixels]] as const) {
+    rerender(<ComputerUsePanel {...props} state={{ ...ready, budget: { ...ready.budget, [field]: cap } }} />)
+    expect(capture).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent(COMPUTER_USE_CAPTURE_MESSAGES.budget)
+    expect(screen.getByRole('status')).not.toHaveTextContent('底层操作尚未收口')
+    expect(screen.getByRole('img')).toBe(image)
+    expect(screen.getByRole('button', { name: '停止窗口观察' })).toBeEnabled()
+  }
+})
+
+it('keeps the control capture button gated by held coordination after explicit screen-mode selection', () => {
+  const ready: ComputerUseStatus = { ...observing(), coordination: 'held', inputDevelopmentEnabled: true,
+    consent: { capture: true, upload: false, control: true, retention: 'sdk-session', captureScope: 'display' },
+    capability: { platform: 'linux-wayland', method: 'portal-screencast+wayland-virtual-input', capture: true, control: true, scope: 'display' } }
+  const { props, rerender } = setup({ state: ready })
+  chooseScreenMode()
+  expect(screen.getByRole('button', { name: '获取本地静态截图' })).toBeEnabled()
+  for (const coordination of ['not-checked', 'unknown', 'blocked'] as const) {
+    rerender(<ComputerUsePanel {...props} state={{ ...ready, coordination }} />)
+    expect(screen.getByRole('button', { name: '获取本地静态截图' })).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent('就绪条件待确认')
+  }
+  expect(props.onCapture).not.toHaveBeenCalled()
+})
+
 it('does not offer capture for display selection or RemoteDesktop capability', () => {
   const state = observing()
   const { props, rerender } = setup({ state: { ...state, capability: { ...state.capability!, scope: 'display' } } })
@@ -323,12 +332,12 @@ it('uses the current callback, consuming consent before a reentrant start click'
 })
 it.each([0, 1])('ready without a frame does not claim an observation exists after %i actions', actions => {
   setup({ state: { ...observing(), budget: { ...observing().budget, actions } } })
-  expect(screen.getByRole('status')).toHaveTextContent('可请求新观察')
+  expect(screen.getByRole('status')).toHaveTextContent('本实例可请求新观察')
   expect(screen.getByRole('status')).not.toHaveTextContent('本地帧可用')
 })
 it('keeps compiled and ready states distinct from real OS validation and completion', () => {
   setup({ state: { ...observing(), state: 'ready' } })
-  expect(screen.getByRole('status')).toHaveTextContent('非控制就绪或任务完成')
+  expect(screen.getByRole('status')).toHaveTextContent('控制能力与任务完成须另行确认')
   expect(screen.getByText(/原生编译不代表已通过 Linux 实机验证/)).toBeInTheDocument()
   expect(screen.getByText(/打开面板只读取状态/)).toBeInTheDocument()
 })

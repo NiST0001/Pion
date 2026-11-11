@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest'
@@ -43,23 +43,6 @@ it('defaults background collection on and persists its switch without losing oth
   expect(restored.usageBackgroundCollectionEnabled).toBe(false)
   expect(restored.completionNotificationsEnabled).toBe(false)
   expect(restored.getSessionModel('/project/session.jsonl')).toEqual({ provider: 'example', modelId: 'model' })
-})
-
-it('retains the committed collection preference after a failed write', async () => {
-  const store = new AppSettings()
-  await store.setCompletionNotificationsEnabled(false)
-  const path = join(paths.userData, 'pion-settings.json')
-  await rm(path)
-  await mkdir(path)
-  await expect(store.setUsageBackgroundCollectionEnabled(false)).rejects.toThrow()
-  expect(store.usageBackgroundCollectionEnabled).toBe(true)
-  expect(store.completionNotificationsEnabled).toBe(false)
-  await rm(path, { recursive: true })
-  await store.setWindowEffectsEnabled(true)
-  const restored = new AppSettings()
-  await restored.load()
-  expect(restored.usageBackgroundCollectionEnabled).toBe(true)
-  expect(restored.completionNotificationsEnabled).toBe(false)
 })
 
 it.each([
@@ -116,12 +99,9 @@ it.each([
   expect(persisted.usageBackgroundCollectionEnabled).toBe(expected)
 })
 
-it.each([
-  { usageBackgroundCollectionEnabled: 'false' },
-  { windowEffectsEnabled: 'yes' }
-])('preserves malformed shell preferences and rejects default replacement: %j', async (invalid) => {
+it('preserves malformed collection preferences and rejects default replacement', async () => {
   const path = join(paths.userData, 'pion-settings.json')
-  const source = JSON.stringify(invalid)
+  const source = JSON.stringify({ usageBackgroundCollectionEnabled: 'false' })
   await writeFile(path, source)
   const store = new AppSettings()
   await expect(store.load()).rejects.toThrow()

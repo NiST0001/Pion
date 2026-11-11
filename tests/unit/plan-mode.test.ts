@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import { nativePlanModeExtensionSource } from '../../src/main/agent/plan-mode'
-import { nativeTaskExtensionSource } from '../../src/main/agent/task-planning'
 import { IMAGE_GENERATION_TOOL_NAME } from '../../src/shared/image-generation'
 
 type PlanState = { version?: number; enabled: boolean; toolsBeforePlanMode?: string[] }
@@ -44,31 +43,18 @@ function runtime(saved?: PlanState, options: { activeTools?: string[]; imageAvai
 }
 
 describe('Pion native plan mode', () => {
-  it('uses a command and execution gate instead of model-facing plan tools', () => {
-    const source = nativePlanModeExtensionSource()
-
-    expect(source).toContain('registerCommand("plan"')
-    expect(source).toContain('READ_ONLY_TOOL_NAMES')
-    expect(source).toContain('tool_call')
-    expect(source).toContain('pion_task')
-    expect(source).not.toContain('registerTool')
-    expect(source).not.toContain('plan_mode_question')
-    expect(source).not.toContain('plan_mode_complete')
-  })
-
-  it('restores the previous active tools after leaving plan mode', () => {
-    const source = nativePlanModeExtensionSource()
-
-    expect(source).toContain('toolsBeforePlanMode = pi.getActiveTools()')
-    expect(source).toContain('const restored = previous ?? normalTools()')
-    expect(source).toContain('...restored, ...nativeAsk')
-    expect(source).toContain('只有用户明确切换回构建模式并发送执行请求后')
-  })
-
-  it('allows only the SDK-owned question tool alongside read-only built-ins', () => {
-    const source = nativePlanModeExtensionSource()
-    expect(source).toContain('if (name === "pion_ask_user") return tool?.sourceInfo?.source === "sdk"')
-    expect(source).toContain('[...READ_ONLY_TOOL_NAMES, "pion_ask_user"]')
+  it('allows all four read-only builtins and only the SDK question source', async () => {
+    const h = runtime(undefined, { activeTools: ['read'] })
+    for (const name of ['grep', 'find', 'ls']) h.registered.push({ name,
+      sourceInfo: { source: 'builtin' }, exposure: 'direct', annotations: { readOnlyHint: false } })
+    await h.command('start')
+    expect(h.tools()).toEqual(['read', 'grep', 'find', 'ls', 'pion_ask_user'])
+    for (const toolName of h.tools()) expect(await h.event('tool_call', { toolName })).toBeUndefined()
+    h.registered.find((tool) => tool.name === 'pion_ask_user')!.sourceInfo.source = 'extension'
+    expect(await h.event('tool_call', { toolName: 'pion_ask_user' })).toMatchObject({ block: true })
+    expect(h.tools()).toEqual(['read', 'grep', 'find', 'ls'])
+    await h.command('exit')
+    expect(h.tools()).toEqual(['read'])
   })
 
   it.each(['command', 'restored session'] as const)('hides image generation and blocks it at execution time in a %s plan', async (entry) => {
@@ -174,13 +160,6 @@ describe('Pion native plan mode', () => {
     await h.event('session_shutdown')
     expect(h.branch).toEqual([])
     expect(h.appendEntry).toHaveBeenCalledTimes(1)
-  })
-
-  it('does not reactivate the task tool while a plan session is restored', () => {
-    const source = nativeTaskExtensionSource()
-
-    expect(source).toContain('function planModeEnabled(ctx)')
-    expect(source).toContain('if (!planModeEnabled(ctx)) ensureToolActive()')
   })
 
   it('does not create a plan entry when an untouched build session shuts down', async () => {

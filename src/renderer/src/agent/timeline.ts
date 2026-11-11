@@ -315,6 +315,31 @@ export function wireMessageTimestamp(message: WireMessage | undefined | null): n
   return messageTimestamp(message)
 }
 
+/** Read only the existing Main display-loss whitelist, for events and history. */
+export function readSnapshotFields(payload: unknown): Set<string> {
+  const value = payload && typeof payload === 'object'
+    ? (payload as Record<string, unknown>)._pionLiveTruncatedFields : undefined
+  return new Set(Array.isArray(value) ? value.filter((field) =>
+    typeof field === 'string' && ['text', 'thinking', 'error', 'diff', 'outputText', 'subagentBatch'].includes(field)) : [])
+}
+
+type AssistantRow = Extract<TimelineItem, { kind: 'assistant' }>
+
+/** Same-message supplementation only. Streaming caches remain provisional;
+ * length chooses a display fragment, while only complete sources clear loss. */
+export function supplementAssistantFields(next: AssistantRow, previous: AssistantRow): AssistantRow {
+  if (!next.partialFields?.length) return next
+  const result = { ...next }
+  const partialFields = next.partialFields.filter((field) => {
+    const complete = !previous.streaming && !previous.partialFields?.includes(field)
+    if (complete || previous[field].length > next[field].length) result[field] = previous[field]
+    return !complete
+  })
+  if (partialFields.length) result.partialFields = partialFields
+  else delete result.partialFields
+  return result
+}
+
 export function compactionFingerprint(value: unknown): string | undefined {
   if (!value || typeof value !== 'object') return undefined
   const { id, summary, firstKeptEntryId, tokensBefore } = value as Record<string, unknown>
@@ -509,7 +534,9 @@ export function entriesToTimeline(
       const thinking = messageThinking(message)
       const error = assistantErrorText(message)
       const calls = messageToolCalls(message)
-      if (text !== '' || thinking !== '' || error) {
+      const fields = readSnapshotFields(message)
+      const partialFields = (['text', 'thinking'] as const).filter((field) => fields.has(field))
+      if (text !== '' || thinking !== '' || error || partialFields.length) {
         items.push({
           kind: 'assistant',
           id: stableTimelineId(`entry:${entry.id}`),
@@ -517,6 +544,7 @@ export function entriesToTimeline(
           messageTimestamp: wireMessageTimestamp(message),
           text,
           thinking,
+          ...(partialFields.length ? { partialFields } : {}),
           streaming: false,
           ...(error ? { error } : {})
         })
@@ -610,15 +638,20 @@ function reconcileLiveRow(live: TimelineItem, persisted: TimelineItem): Timeline
       historyReconciled }
   }
   if (live.kind === 'assistant' && persisted.kind === 'assistant') {
-    const next = { ...live, entryId: persisted.entryId ?? live.entryId, historyReconciled }
+    let next: AssistantRow = { ...live, entryId: persisted.entryId ?? live.entryId, historyReconciled }
     if (!persisted.streaming) {
-      // Persistence can be observed just before the corresponding message_end
-      // IPC event; the stored assistant is already a complete final snapshot.
+      // A saved final can still carry Main display loss. Preserve that loss
+      // while supplementing its fields from the same mounted message.
       next.text = persisted.text
       next.thinking = persisted.thinking
       next.streaming = false
+      if (persisted.partialFields?.length) next.partialFields = persisted.partialFields
+      else delete next.partialFields
+      next = supplementAssistantFields(next, live)
       if (persisted.error) next.error = persisted.error
       else delete next.error
+    } else if (live.partialFields?.length) {
+      next = supplementAssistantFields(next, persisted)
     }
     return next
   }
@@ -717,11 +750,13 @@ export function preserveTimelineToolState(
     // A same-backend cache may omit an entry ID already learned by the mounted
     // row. Carry that proof/key without treating the cache as a new disk page.
     if (!item.entryId) mountedCacheIds.add(mounted.id)
-    return { ...item, id: mounted.id, entryId: item.entryId ?? mounted.entryId, live: mounted.live,
+    const projected = { ...item, id: mounted.id, entryId: item.entryId ?? mounted.entryId, live: mounted.live,
       ...(item.kind === 'user' && mounted.kind === 'user' ? { turnTiming: mergeTurnTiming(mounted.turnTiming, item.turnTiming) } : {}),
       historical: mounted.historical, noReveal: mounted.noReveal,
       historyReconciled: mounted.historyReconciled,
       ...(mounted.liveMessageId ? { liveMessageId: mounted.liveMessageId } : {}) }
+    return projected.kind === 'assistant' && mounted.kind === 'assistant'
+      ? supplementAssistantFields(projected, mounted) : projected
   })
   if (!preserveLive) return projected
   // A jumped window can already pin a streaming row. Do not append its older
@@ -734,7 +769,11 @@ export function preserveTimelineToolState(
   const liveById = new Map(live.map((item) => [item.id, item]))
   const pinnedIds = new Set(projected.filter((item) => item.kind === 'assistant'
     && item.streaming && item.live && liveById.has(item.id)).map((item) => item.id))
-  const items = projected.map((item) => pinnedIds.has(item.id) ? liveById.get(item.id)! : item)
+  const items = projected.map((item) => {
+    const current = pinnedIds.has(item.id) ? liveById.get(item.id) : undefined
+    return current?.kind === 'assistant' && current.partialFields?.length
+      ? reconcileLiveRow(current, item) : current ?? item
+  })
   const reconciled = reconcileTimelinePage(live.filter((item) => !pinnedIds.has(item.id)), items)
   const byId = new Map(reconciled.items.map((item) => [item.id, item]))
   return orderTimelineAroundAnchors(reconciled.page, existing.flatMap((item) => {
@@ -929,6 +968,11 @@ function reconcileTimelinePage(
         rowUpdates.set(existingTool.id, reconcileLiveRow(existingTool, item))
       }
       const current = knownRows[0]
+      if (current.kind === 'assistant' && item.kind === 'assistant' && current.partialFields?.length
+        && !item.streaming
+        && incoming.filter((row) => timelineItemIdentity(row) === identity).length === 1) {
+        rowUpdates.set(current.id, reconcileLiveRow(current, item))
+      }
       if (current.kind === 'user' && item.kind === 'user'
         && incoming.filter(row => timelineItemIdentity(row) === identity).length === 1) {
         const turnTiming = mergeTurnTiming(current.turnTiming, item.turnTiming)

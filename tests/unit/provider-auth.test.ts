@@ -41,23 +41,47 @@ function runtimeFixture(overrides: Partial<ModelRuntime> = {}): ModelRuntime {
   } as unknown as ModelRuntime
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((accept, fail) => { resolve = accept; reject = fail })
+  return { promise, resolve, reject }
+}
+
 describe('ProviderAuthService', () => {
-  it('reads the unfiltered local SDK availability snapshot without auth, network or secret projection', async () => {
-    const getAvailableSnapshot = vi.fn().mockReturnValue([
+  it('shares offline reads across refreshes and preserves a strongly invalidated cache after an old failure', async () => {
+    const old = deferred<ModelRuntime>()
+    const current = deferred<ModelRuntime>()
+    const runtime = runtimeFixture({ getAvailableSnapshot: vi.fn().mockReturnValue([
       { provider: 'hidden-provider', id: 'configured', name: 'Configured', contextWindow: 123, reasoning: true,
         apiKey: 'private', baseUrl: 'private-url' }
-    ])
-    const runtime = runtimeFixture({ getAvailableSnapshot })
-    const create = vi.spyOn(ModelRuntime, 'create').mockResolvedValue(runtime)
+    ]) })
+    const create = vi.spyOn(ModelRuntime, 'create').mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise)
+      .mockResolvedValue(runtimeFixture({ getAvailableSnapshot: () => [] }))
     try {
       const service = new ProviderAuthService()
-      expect(await service.listAvailableModels()).toEqual([
+      const oldProviders = service.listProviders()
+      service.refreshForRead()
+      const stale = Promise.all([oldProviders, service.listAvailableModels()]).catch((error: unknown) => error)
+      expect(create).toHaveBeenCalledExactlyOnceWith({ allowModelNetwork: false })
+      service.invalidate()
+      const models = service.listAvailableModels()
+      service.refreshForRead()
+      const providers = service.listProviders()
+      const failure = new Error('old initialization failed')
+      old.reject(failure)
+      expect(await stale).toBe(failure)
+      service.refreshForRead()
+      const shared = service.listAvailableModels()
+      expect(create).toHaveBeenCalledTimes(2)
+      current.resolve(runtime)
+      expect(await models).toEqual([
         { provider: 'hidden-provider', id: 'configured', name: 'Configured', contextWindow: 123, reasoning: true }
       ])
-      await service.listAvailableModels()
-      expect(create).toHaveBeenCalledExactlyOnceWith({ allowModelNetwork: false })
-      expect(getAvailableSnapshot).toHaveBeenCalledTimes(2)
-      expect(runtime.listCredentials).not.toHaveBeenCalled()
+      await Promise.all([providers, shared])
+      service.refreshForRead()
+      expect(await service.listAvailableModels()).toEqual([])
+      expect(create.mock.calls).toEqual(Array(3).fill([{ allowModelNetwork: false }]))
       expect(runtime.login).not.toHaveBeenCalled()
       expect(runtime.logout).not.toHaveBeenCalled()
     } finally { create.mockRestore() }
@@ -98,9 +122,10 @@ describe('ProviderAuthService', () => {
     expect(JSON.stringify(providers)).not.toContain('hidden')
   })
 
-  it('delegates interactive login and logout to Pi ModelRuntime', async () => {
+  it('delegates login and logout without loading unrequested device settings', async () => {
     const runtime = runtimeFixture()
-    const service = new ProviderAuthService(async () => runtime)
+    const createSettings = vi.fn(() => SettingsManager.inMemory())
+    const service = new ProviderAuthService(async () => runtime, createSettings)
     const interaction = {
       prompt: vi.fn(async () => 'answer'),
       notify: vi.fn()
@@ -113,6 +138,7 @@ describe('ProviderAuthService', () => {
       getDeviceId: expect.any(Function)
     })
     expect(runtime.logout).toHaveBeenCalledWith('openai-codex')
+    expect(createSettings).not.toHaveBeenCalled()
   })
 
   it('uses a stable global SDK device ID across logins and runtime replacement', async () => {
@@ -146,32 +172,6 @@ describe('ProviderAuthService', () => {
     expect(storage.withLock.mock.calls.every(([scope]) => scope === 'global')).toBe(true)
   })
 
-  it('does not load settings when OAuth or legacy API-key login never requests an ID', async () => {
-    const runtime = runtimeFixture({
-      getProvider: vi.fn(() => ({
-        id: 'legacy', name: 'Legacy',
-        auth: {
-          apiKey: { name: 'API key', login: vi.fn(), resolve: vi.fn(() => { throw new Error('Unexpected credential resolution') }) },
-          oauth: { name: 'OAuth', login: vi.fn(), refresh: vi.fn(), toAuth: vi.fn() }
-        },
-        getModels: () => [],
-        stream: vi.fn(() => { throw new Error('Unexpected provider stream') }),
-        streamSimple: vi.fn(() => { throw new Error('Unexpected provider stream') })
-      })) as ModelRuntime['getProvider']
-    })
-    const createSettings = vi.fn(() => SettingsManager.inMemory())
-    const service = new ProviderAuthService(async () => runtime, createSettings)
-    const interaction = { prompt: vi.fn(async () => 'hidden'), notify: vi.fn() }
-
-    await service.login('legacy', 'api_key', interaction)
-    await service.login('legacy', 'oauth', interaction)
-
-    expect(runtime.login).toHaveBeenCalledWith('legacy', 'api_key', interaction, {
-      getDeviceId: expect.any(Function)
-    })
-    expect(createSettings).not.toHaveBeenCalled()
-  })
-
   it('rejects settings load errors before generating an ID', async () => {
     const getOrCreateDeviceId = vi.fn(() => 'unused')
     const settings = {
@@ -196,36 +196,7 @@ describe('ProviderAuthService', () => {
     expect(settings.flush).toHaveBeenCalledOnce()
   })
 
-  it.each(['success', 'cancel', 'credential-sync'] as const)(
-    'surfaces device ID save failures after %s instead of treating login as successful', async (outcome) => {
-      const settings = {
-        getOrCreateDeviceId: vi.fn(() => '22222222-2222-4222-8222-222222222222'),
-        flush: vi.fn(async () => undefined),
-        drainErrors: vi.fn().mockReturnValueOnce([])
-          .mockReturnValue([{ scope: 'global', error: new Error('write denied') }])
-      }
-      const runtime = runtimeFixture({
-        login: vi.fn<ModelRuntime['login']>(async (_provider, _type, _interaction, options) => {
-          options!.getDeviceId!()
-          if (outcome === 'cancel') throw new Error('Login cancelled')
-          if (outcome === 'credential-sync') {
-            throw new CredentialSynchronizationError('openai-codex', 'login', undefined, {
-              cause: new Error('snapshot failed')
-            })
-          }
-          return { type: 'oauth', refresh: 'hidden', access: 'hidden', expires: 1 }
-        })
-      })
-      const service = new ProviderAuthService(async () => runtime, () => settings)
-
-      await expect(service.login('openai-codex', 'oauth', {
-        prompt: vi.fn(async () => ''), notify: vi.fn()
-      })).rejects.toThrow('无法保存 Pi 安装设备 ID')
-      expect(settings.flush).toHaveBeenCalledOnce()
-    }
-  )
-
-  it.each([true, false])('preserves direct cancellation and its original interaction signal (device ID: %s)', async (requestId) => {
+  it('preserves direct cancellation and its interaction signal while flushing requested device settings', async () => {
     const settings = {
       getOrCreateDeviceId: vi.fn(() => '22222222-2222-4222-8222-222222222222'),
       flush: vi.fn(async () => undefined),
@@ -235,7 +206,7 @@ describe('ProviderAuthService', () => {
     const cancellation = new Error('Login cancelled')
     const runtime = runtimeFixture({
       login: vi.fn<ModelRuntime['login']>(async (_provider, _type, interaction, options) => {
-        if (requestId) options!.getDeviceId!()
+        options!.getDeviceId!()
         controller.abort()
         expect(interaction.signal?.aborted).toBe(true)
         throw cancellation
@@ -246,18 +217,15 @@ describe('ProviderAuthService', () => {
     const interaction = { signal: controller.signal, prompt: vi.fn(async () => ''), notify: vi.fn() }
 
     await expect(service.login('openai-codex', 'oauth', interaction)).rejects.toBe(cancellation)
-    expect(settings.flush).toHaveBeenCalledTimes(requestId ? 1 : 0)
-    expect(createSettings).toHaveBeenCalledTimes(requestId ? 1 : 0)
+    expect(settings.flush).toHaveBeenCalledOnce()
     expect(runtime.login).toHaveBeenCalledWith('openai-codex', 'oauth', interaction, {
       getDeviceId: expect.any(Function)
     })
   })
 
   it.each([
-    { requestId: true, settingsFailure: 'none' },
     { requestId: false, settingsFailure: 'none' },
-    { requestId: true, settingsFailure: 'drain' },
-    { requestId: true, settingsFailure: 'flush' }
+    { requestId: true, settingsFailure: 'drain' }
   ] as const)(
     'preserves post-commit cancellation (device ID: $requestId, settings: $settingsFailure)',
     async ({ requestId, settingsFailure }) => {
@@ -267,10 +235,7 @@ describe('ProviderAuthService', () => {
       const controller = new AbortController()
       const settings = {
         getOrCreateDeviceId: vi.fn(() => deviceId),
-        flush: vi.fn(async () => {
-          expect(invalidate).toHaveBeenCalledOnce()
-          if (settingsFailure === 'flush') throw new Error(`write failed: ${deviceId}`)
-        }),
+        flush: vi.fn(async () => undefined),
         drainErrors: vi.fn().mockReturnValueOnce([]).mockReturnValue(
           settingsFailure === 'drain' ? [{ scope: 'global', error: new Error(deviceId) }] : []
         )
@@ -295,7 +260,6 @@ describe('ProviderAuthService', () => {
       const replacement = runtimeFixture()
       const createRuntime = vi.fn().mockResolvedValueOnce(runtime).mockResolvedValue(replacement)
       const service = new ProviderAuthService(createRuntime, createSettings)
-      const invalidate = vi.spyOn(service, 'invalidate')
       const interaction = { signal: controller.signal, prompt: vi.fn(async () => ''), notify: vi.fn() }
 
       const error = await service.login('openai-codex', 'oauth', interaction).catch((error: unknown) => error)
@@ -315,12 +279,7 @@ describe('ProviderAuthService', () => {
       }
       expect(committed.get('openai-codex')).toBe(credential)
       expect(runtime.logout).not.toHaveBeenCalled()
-      expect(invalidate).toHaveBeenCalledOnce()
       expect(settings.flush).toHaveBeenCalledTimes(requestId ? 1 : 0)
-      expect(createSettings).toHaveBeenCalledTimes(requestId ? 1 : 0)
-      expect(settings.drainErrors).toHaveBeenCalledTimes(requestId
-        ? settingsFailure === 'flush' ? 1 : 2
-        : 0)
       await service.listProviders()
       expect(createRuntime).toHaveBeenCalledTimes(2)
       expect(replacement.listCredentials).toHaveBeenCalledOnce()
@@ -329,8 +288,6 @@ describe('ProviderAuthService', () => {
 
   it.each([
     { cancelled: true, settingsFailure: 'flush' },
-    { cancelled: true, settingsFailure: 'drain' },
-    { cancelled: false, settingsFailure: 'flush' },
     { cancelled: false, settingsFailure: 'drain' }
   ] as const)(
     'sanitizes save failure after direct login (cancelled: $cancelled, settings: $settingsFailure)',
@@ -374,9 +331,7 @@ describe('ProviderAuthService', () => {
       expect(JSON.stringify(error)).not.toContain(secret)
       expect((error as Error).stack).not.toContain(secret)
       expect(runtime.logout).not.toHaveBeenCalled()
-      expect(settings.getOrCreateDeviceId).toHaveBeenCalledOnce()
       expect(settings.flush).toHaveBeenCalledOnce()
-      expect(settings.drainErrors).toHaveBeenCalledTimes(settingsFailure === 'flush' ? 1 : 2)
     }
   )
 

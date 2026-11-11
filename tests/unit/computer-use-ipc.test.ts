@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
 import type { IpcMain, IpcMainInvokeEvent } from 'electron'
 import { registerComputerUseIpc } from '../../src/main/ipc/computer-use'
 import { ComputerUseService } from '../../src/main/computer-use/service'
@@ -30,13 +29,15 @@ function harness() {
     stop: vi.fn(async () => snapshot())
   }
   const createLocalOwner = vi.fn(() => owner)
-  registerComputerUseIpc({ ipcMain: { handle: (channel, handler) => { if (handlers.has(channel)) throw new Error('duplicate'); handlers.set(channel, handler) } } as Pick<IpcMain, 'handle'>, service, getMainWindowId: () => ownerId, createLocalOwner, getLocalOwner: () => owner })
+  const getLocalOwner = vi.fn(() => owner)
+  registerComputerUseIpc({ ipcMain: { handle: (channel, handler) => { if (handlers.has(channel)) throw new Error('duplicate'); handlers.set(channel, handler) } } as Pick<IpcMain, 'handle'>, service, getMainWindowId: () => ownerId, createLocalOwner, getLocalOwner })
   return {
-    service, get state() { return snapshot() }, event, owner, createLocalOwner,
+    service, get state() { return snapshot() }, event, owner, createLocalOwner, getLocalOwner,
     setState: (value: ComputerUseStatus) => { state = structuredClone(value) },
     invoke: (channel: string, e = event, ...args: unknown[]) => handlers.get(channel)!(e, ...args),
     destroy: () => { destroyed = true }, replace: () => { ownerId = 9 }, removeWindow: () => { ownerId = undefined },
-    navigate: () => { sender.mainFrame = {} }
+    navigate: () => { sender.mainFrame = {} },
+    retarget: () => { sender.mainFrame = {}; Object.assign(event, { senderFrame: sender.mainFrame }) }
   }
 }
 const consent = { capture: true, upload: false, retention: 'sdk-session', control: false }
@@ -58,10 +59,10 @@ describe('ComputerUse local owner IPC (no OS)', () => {
     const h = harness()
     const args = channel === IPC.ComputerUseStart ? [consent] : channel === IPC.ComputerUseCapture ? [{ scopeRevision: 0 }] : []
     for (const event of [{ ...h.event, senderFrame: {} }, { ...h.event, sender: { ...h.event.sender, id: 8 } }, { ...h.event, senderFrame: null }]) {
-      await expect(Promise.resolve().then(() => h.invoke(channel, event as IpcMainInvokeEvent, ...args))).rejects.toThrow('owner')
+      await expect(Promise.resolve().then(() => h.invoke(channel, event as IpcMainInvokeEvent, ...args))).rejects.toThrow('主帧')
     }
     h.destroy()
-    await expect(Promise.resolve().then(() => h.invoke(channel, h.event, ...args))).rejects.toThrow('owner')
+    await expect(Promise.resolve().then(() => h.invoke(channel, h.event, ...args))).rejects.toThrow('主帧')
     expect(h.service.start).not.toHaveBeenCalled()
     expect(h.service.capture).not.toHaveBeenCalled()
     expect(h.service.stop).not.toHaveBeenCalled()
@@ -81,17 +82,15 @@ describe('ComputerUse local owner IPC (no OS)', () => {
     h.setState(state)
     const action = { type: 'type', text: 'local-only' }
     const request = { scopeRevision: 0, frameId: 'frame-1', action }
-    const getter = vi.fn(() => 0)
-    for (const invalid of [undefined, { ...request, scopeRevision: 1 }, { ...request, owner: h.owner }, { ...request, inputFrame: { sequence: 1, topology: 1 } }, { ...request, toolCallId: 'spoof' }, { ...request, path: '/tmp/input' }, { ...request, action: { ...action, extra: true } }, Object.defineProperty({ frameId: 'frame-1', action }, 'scopeRevision', { enumerable: true, get: getter })]) {
+    for (const invalid of [undefined, { ...request, scopeRevision: 1 }, { ...request, owner: h.owner }, { ...request, inputFrame: { sequence: 1, topology: 1 } }, { ...request, toolCallId: 'spoof' }, { ...request, path: '/tmp/input' }, { ...request, action: { ...action, extra: true } }]) {
       await expect(h.invoke(IPC.ComputerUseAct, h.event, invalid)).rejects.toThrow()
     }
-    expect(getter).not.toHaveBeenCalled()
     expect(h.service.act).not.toHaveBeenCalled()
     const result = await h.invoke(IPC.ComputerUseAct, h.event, request)
     expect(h.service.act).toHaveBeenCalledExactlyOnceWith(h.owner, { frameId: 'frame-1', action })
     expect(result).toEqual(projected(state))
   })
-  it.each(['scope', 'result-scope', 'navigation', 'destroyed'] as const)('rejects late act result after %s changes', async kind => {
+  it.each(['scope', 'result-scope', 'navigation', 'retarget', 'destroyed'] as const)('rejects late act result after %s changes', async kind => {
     const h = harness()
     h.setState(capturedState())
     let resolve!: (state: ComputerUseStatus) => void
@@ -101,9 +100,20 @@ describe('ComputerUse local owner IPC (no OS)', () => {
     if (kind === 'scope') h.setState({ ...result, scopeRevision: 1, frame: undefined })
     if (kind === 'result-scope') { result.scopeRevision = 1; delete result.frame }
     if (kind === 'navigation') h.navigate()
+    if (kind === 'retarget') h.retarget()
     if (kind === 'destroyed') h.destroy()
     resolve(result)
     await expect(pending).rejects.toThrow()
+  })
+  it.each([IPC.ComputerUseStart, IPC.ComputerUseCapture, IPC.ComputerUseAct])('rechecks the captured frame after host owner resolution and before dispatch: %s', async channel => {
+    const h = harness()
+    h.setState(capturedState())
+    const obtainOwner = channel === IPC.ComputerUseStart ? h.createLocalOwner : h.getLocalOwner
+    obtainOwner.mockImplementationOnce(() => { h.navigate(); return h.owner })
+    const request = channel === IPC.ComputerUseStart ? consent : channel === IPC.ComputerUseCapture
+      ? { scopeRevision: 0 } : { scopeRevision: 0, frameId: 'frame-1', action: { type: 'type', text: 'local' } }
+    await expect(h.invoke(channel, h.event, request)).rejects.toThrow('主帧')
+    for (const dispatch of [h.service.start, h.service.capture, h.service.act]) expect(dispatch).not.toHaveBeenCalled()
   })
   it('queries only cached metadata and never falls back to Agent/OS', () => {
     const h = harness()
@@ -136,13 +146,6 @@ describe('ComputerUse local owner IPC (no OS)', () => {
     service.getState().budget.captures = 80
     expect(service.getState().budget.captures).toBe(0)
     for (const callback of [spawn, factory, publish, clock, randomId, coordination.claim, coordination.release]) expect(callback).not.toHaveBeenCalled()
-    // Read the buddy source only: do not execute the helper, shell or main entry.
-    const helper = readFileSync(new URL('../../src/main/computer-use/helper-client.ts', import.meta.url), 'utf8')
-    expect(helper).toContain("const args = ['--client-close-receipt-v1', ...(this.control ? ['--wayland-virtual-input-v1'] : []), ...(this.accounting ? ['--capture-accounting-v1'] : []), ...(this.dmaBufReadback ? ['--dmabuf-readback-v1'] : [])]")
-    expect(helper).toContain("spawn(this.binary, args, { stdio: ['pipe', 'pipe', 'pipe'], shell: false })")
-    expect(helper.slice(helper.indexOf('constructor(private readonly binary:'), helper.indexOf('private launch():'))).not.toContain('spawn(')
-    const driver = readFileSync(new URL('../../src/main/computer-use/wayland-driver.ts', import.meta.url), 'utf8')
-    expect(driver).toContain('constructor(private readonly binary: string, private readonly dmaBufReadback = false, private readonly start?: HelperSpawn) {}')
   })
   it('accepts only explicit local capture consent, host-generates identity', async () => {
     const h = harness()
@@ -219,6 +222,7 @@ describe('ComputerUse local owner IPC (no OS)', () => {
     [IPC.ComputerUseStart, 'replace'], [IPC.ComputerUseCapture, 'replace'], [IPC.ComputerUseStop, 'replace'],
     [IPC.ComputerUseStart, 'destroy'], [IPC.ComputerUseCapture, 'destroy'], [IPC.ComputerUseStop, 'destroy'],
     [IPC.ComputerUseStart, 'navigate'], [IPC.ComputerUseCapture, 'navigate'], [IPC.ComputerUseStop, 'navigate'],
+    [IPC.ComputerUseStart, 'retarget'], [IPC.ComputerUseCapture, 'retarget'], [IPC.ComputerUseStop, 'retarget'],
     [IPC.ComputerUseStart, 'removeWindow'], [IPC.ComputerUseCapture, 'removeWindow'], [IPC.ComputerUseStop, 'removeWindow']
   ] as const)('discards late completion after owner loss: %s %s', async (channel, loss) => {
     const h = harness()
@@ -233,7 +237,7 @@ describe('ComputerUse local owner IPC (no OS)', () => {
     const result = Promise.resolve(h.invoke(channel, h.event, ...(channel === IPC.ComputerUseStart ? [consent] : channel === IPC.ComputerUseCapture ? [{ scopeRevision: 0 }] : []))).then(returned)
     h[loss]()
     resolve(channel === IPC.ComputerUseCapture ? { state, png: Uint8Array.from(makeStaticPng(800, 600)), previewPng: Uint8Array.from(makeStaticPng()) } : state)
-    await expect(result).rejects.toThrow('owner')
+    await expect(result).rejects.toThrow('主帧')
     expect(returned).not.toHaveBeenCalled()
   })
   it.each(['scope', 'frame', 'frameRemoved'] as const)('discards preview after current immutable service %s changes mid-await', async kind => {

@@ -140,7 +140,7 @@ it('serializes revision checks, rejects stale concurrent presets, and captures a
   expect(listener).toHaveBeenCalledTimes(2)
 })
 
-it('strictly validates fields, IDs, revisions, booleans, prototypes and both size budgets', async () => {
+it('validates JSON fields, IDs, revisions, booleans and both size budgets', async () => {
   const base = DEFAULT_CAPABILITY_PREFERENCES
   for (const value of [
     null, [], { ...base, version: 2 }, { ...base, revision: -1 }, { ...base, revision: 0.5 },
@@ -149,14 +149,20 @@ it('strictly validates fields, IDs, revisions, booleans, prototypes and both siz
     { ...base, defaults: { ...base.defaults, subagent: true } },
     { ...base, overrides: { 'tool:read': 'false' } },
     { ...base, overrides: { 'tool:read\n': true } },
-    { ...base, overrides: { 'tool:constructor': true } },
     { ...base, overrides: { 'mcp:non-opaque': true } },
     { ...base, overrides: JSON.parse('{"__proto__":true}') },
     Object.create(base)
   ]) expect(() => validateCapabilityPreferences(value)).toThrow()
-  const getter = vi.fn(() => 1)
-  expect(() => validateCapabilityPreferences({ ...base, get revision() { return getter() } })).toThrow()
-  expect(getter).not.toHaveBeenCalled()
+  const withPrototype = Object.assign(Object.create({ ignored: true }), base)
+  expect(validateCapabilityPreferences(withPrototype)).toEqual(base)
+  expect(validateCapabilityPreferences({ ...base, [Symbol('ignored')]: true })).toEqual(base)
+  expect(validateCapabilityPreferences({ ...base, get revision() { return 1 } }).revision).toBe(1)
+  for (const id of ['tool:constructor', 'tool:prototype', 'tool:__proto__']) {
+    const parsed = validateCapabilityPreferences({ ...base, overrides: { [id]: false } })
+    expect(parsed.overrides[id]).toBe(false)
+    expect(Object.getPrototypeOf(parsed.overrides)).toBeNull()
+    expect(() => validateCapabilityPreferences({ ...base, overrides: { [id]: 'false' } })).toThrow()
+  }
   expect(() => validateCapabilityPreferences({
     ...base, overrides: Object.fromEntries(Array.from({ length: 4097 }, (_, i) => [`tool:t${i}`, true]))
   })).toThrow()
@@ -184,6 +190,8 @@ it('never defaults over a corrupt, oversized, non-file or unreadable configurati
     expect(await readFile(path, 'utf8')).toBe(content)
     await rm(path)
     await expect(store.update(0, { type: 'preset', preset: 'minimal' }, ITEMS)).rejects.toThrow()
+    expect(await store.get()).toEqual(DEFAULT_CAPABILITY_PREFERENCES)
+    expect((await store.update(0, { type: 'preset', preset: 'minimal' }, ITEMS)).revision).toBe(1)
   }
   const { root, path, store } = await fixture()
   await mkdir(path)
@@ -248,6 +256,19 @@ it('keeps the committed revision on write failure, cleans its private temp and a
   await rename(backup, path)
   expect((await store.update(1, { type: 'preset', preset: 'minimal' }, ITEMS)).revision).toBe(2)
   expect(listener).toHaveBeenCalledTimes(1)
+})
+
+it('drains admitted reads and writes on shutdown and rejects new work', async () => {
+  const { path, store } = await fixture()
+  const reading = store.get()
+  const updating = store.update(0, { type: 'preset', preset: 'minimal' }, ITEMS)
+  const shutdown = store.shutdown()
+  await expect(store.get()).rejects.toThrow('closed')
+  await expect(store.update(0, { type: 'preset', preset: 'standard' }, ITEMS)).rejects.toThrow('closed')
+  expect(await reading).toEqual(DEFAULT_CAPABILITY_PREFERENCES)
+  expect((await updating).revision).toBe(1)
+  await shutdown
+  expect((await readCapabilityPreferences(path)).revision).toBe(1)
 })
 
 it('rechecks owners before IO and after actual rename without publishing a retired result', async () => {

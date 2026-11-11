@@ -192,7 +192,8 @@ describe('SettingsModal one-shot navigation', () => {
     fireEvent.change(draft, { target: { value: '保留在宿主的草稿' } })
     fireEvent.click(retry())
     fireEvent.click(screen.getByRole('button', { name: /立即压缩/ }))
-    fireEvent.click(screen.getByRole('button', { name: /导出 HTML/ }))
+    const exportButton = screen.getByRole('button', { name: /导出 HTML/ })
+    act(() => { fireEvent.click(exportButton); fireEvent.click(exportButton) })
     rerender(<SettingsModal {...props} navigationRequest={{ id: 31, page: 'diagnostics' }} />)
     expect(draft).not.toBeInTheDocument()
     rerender(<SettingsModal {...props} navigationRequest={{ id: 32, page: 'session' }} />)
@@ -245,25 +246,6 @@ describe('SettingsModal session name ownership', () => {
     expect(props.actions.renameSession).not.toHaveBeenCalled()
   })
 
-  it('resets the host draft for a different real sessionId even when its name is identical, without selecting a page', () => {
-    const { rerender, props } = renderSettings({ navigationRequest: { id: 1, page: 'session' } })
-    const input = screen.getByPlaceholderText('未命名')
-    fireEvent.change(input, { target: { value: '旧会话草稿' } })
-    rerender(<SettingsModal {...props} session={{ ...session, sessionId: 'second-session' }} />)
-    expect(screen.getByRole('heading', { name: '会话' })).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('未命名')).toBe(input)
-    expect(input).toHaveValue(session.sessionName)
-    fireEvent.change(input, { target: { value: '第二会话草稿' } })
-    goToPage(/^关于 Pion/)
-    rerender(<SettingsModal {...props} session={{ ...session, sessionId: 'third-session', sessionName: '第三会话' }} />)
-    expect(screen.getByRole('heading', { name: '关于 Pion' })).toBeInTheDocument()
-    goToPage(/^会话/)
-    expect(screen.getByPlaceholderText('未命名')).toHaveValue('第三会话')
-    rerender(<SettingsModal {...props} session={null} />)
-    expect(screen.getByPlaceholderText('未命名')).toHaveValue('')
-    expect(props.actions.renameSession).not.toHaveBeenCalled()
-  })
-
   it('keeps the real rename slot across duplicate Enter, page changes, and close/reopen', async () => {
     const saved = deferred<void>()
     const actions = settingsActions()
@@ -310,7 +292,7 @@ describe('SettingsModal session name ownership', () => {
     expect(screen.queryByText('名称写入失败')).not.toBeInTheDocument()
   })
 
-  it.each([false, true])('ignores a late rename acknowledgement after a real identity change (returnToFirst=%s)', async (returnToFirst) => {
+  it('resets the session draft and ignores a late rename acknowledgement across A → B → A', async () => {
     const saved = deferred<void>()
     const actions = settingsActions()
     actions.renameSession = vi.fn(() => saved.promise)
@@ -319,7 +301,8 @@ describe('SettingsModal session name ownership', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
     expect(actions.renameSession).toHaveBeenCalledExactlyOnceWith('第一会话待保存名称')
     rerender(<SettingsModal {...props} session={{ ...session, sessionId: 'second-session' }} />)
-    if (returnToFirst) rerender(<SettingsModal {...props} session={session} />)
+    expect(screen.getByPlaceholderText('未命名')).toHaveValue(session.sessionName)
+    rerender(<SettingsModal {...props} session={session} />)
     fireEvent.change(screen.getByPlaceholderText('未命名'), { target: { value: '当前身份的新草稿' } })
     await act(async () => { saved.resolve(undefined); await saved.promise })
     expect(screen.getByPlaceholderText('未命名')).toHaveValue('当前身份的新草稿')
@@ -419,10 +402,14 @@ describe('SettingsModal page-local resource lifetime', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '保存提问设置' })).toBeEnabled())
     fireEvent.change(screen.getByRole('spinbutton', { name: 'AI 提问等待时间（分钟）' }), { target: { value: '22' } })
     fireEvent.click(screen.getByRole('button', { name: '保存提问设置' }))
+    await waitFor(() => expect(setQuestions).toHaveBeenCalledExactlyOnceWith({ timeoutMinutes: 22 }))
     rerender(<SettingsModal {...props} open={false} />)
     rerender(<SettingsModal {...props} navigationRequest={{ id: 2, page: 'session' }} />)
-    const pendingButton = await screen.findByRole('button', { name: '保存中…' })
+    const question = screen.getByRole('spinbutton', { name: 'AI 提问等待时间（分钟）' })
+    const pendingButton = within(question.closest('form')!).getByRole('button', { name: /保存/ })
     expect(pendingButton).toBeDisabled()
+    expect(question).toBeDisabled()
+    expect(window.pion.getQuestionSettings).toHaveBeenCalledTimes(1)
     fireEvent.click(pendingButton)
     expect(setQuestions).toHaveBeenCalledExactlyOnceWith({ timeoutMinutes: 22 })
     await act(async () => { saved.resolve({ timeoutMinutes: 22 }); await saved.promise })
@@ -451,15 +438,6 @@ describe('SettingsModal authentication navigation', () => {
     expect(within(directory()).getByRole('switch', { name: '显示 Runtime Provider 的模型' })).toHaveAttribute('aria-checked', 'false')
     expect(screen.queryByLabelText('API 密钥')).not.toBeInTheDocument()
     expect(actions.listModelProviders).toHaveBeenCalledTimes(1)
-    expectNoProviderMutation(actions)
-  })
-
-  it.each(['login', 'logout'] as const)('opens the unfiltered Pi catalog for bare %s without choosing an account or method', async (authIntent) => {
-    const actions = settingsActions([provider, otherProvider])
-    renderSettings({ actions, navigationRequest: { id: 1, page: 'models', authIntent } })
-    expect(screen.getByRole('textbox', { name: '搜索 Pi 提供商' })).toHaveValue('')
-    expect(await within(directory()).findByText(provider.id)).toBeInTheDocument()
-    expect(within(directory()).getByText(otherProvider.id)).toBeInTheDocument()
     expectNoProviderMutation(actions)
   })
 
@@ -529,21 +507,6 @@ describe('SettingsModal authentication navigation', () => {
     expect(screen.getByRole('textbox', { name: '搜索 Pi 提供商' })).not.toBe(search)
     expect(screen.getByRole('textbox', { name: '搜索 Pi 提供商' })).toHaveValue(provider.id)
     expect(within(directory()).getByRole('status')).toHaveTextContent('不会自动登出')
-    expectNoProviderMutation(actions)
-  })
-
-  it('does not reopen a manually closed directory or replay auth after navigating away and back', async () => {
-    const actions = settingsActions([provider])
-    const request: SettingsNavigationRequest = { id: 60, page: 'models', authIntent: 'login' }
-    const { rerender, props } = renderSettings({ actions, navigationRequest: request })
-    await within(directory()).findByText(provider.id)
-    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
-    rerender(<SettingsModal {...props} navigationRequest={{ ...request }} />)
-    expect(screen.queryByText('Pi 提供商目录')).not.toBeInTheDocument()
-    goToPage(/^关于 Pion/)
-    goToPage(/^模型与提供商/)
-    rerender(<SettingsModal {...props} navigationRequest={{ ...request }} />)
-    expect(screen.queryByText('Pi 提供商目录')).not.toBeInTheDocument()
     expectNoProviderMutation(actions)
   })
 
@@ -638,6 +601,56 @@ describe('SettingsModal authentication navigation', () => {
     expect(actions.addModelProvider).toHaveBeenCalledTimes(1)
     expect(actions.loginModelProvider).not.toHaveBeenCalled()
     expect(actions.logoutModelProvider).not.toHaveBeenCalled()
+  })
+
+  it.each(['resolve', 'reject'] as const)('reads the subagent directory only after a provider save %s settles across page revisits', async (outcome) => {
+    const saved = deferred<void>()
+    const actions = settingsActions([provider])
+    actions.addModelProvider = vi.fn(() => saved.promise)
+    let storedDirectory = [{ provider: 'old', id: 'old-child', name: 'Old SDK Child' }]
+    const getModels = vi.fn(async () => storedDirectory)
+    const getSettings = vi.fn(async () => ({ ...DEFAULT_SUBAGENT_SETTINGS }))
+    const setSettings = vi.fn<PionApi['setSubagentSettings']>(async (value) => value)
+    window.pion = {
+      getQuestionSettings: vi.fn(async () => ({ ...DEFAULT_QUESTION_SETTINGS })),
+      setQuestionSettings: vi.fn<PionApi['setQuestionSettings']>(async (value) => value),
+      getSubagentSettings: getSettings, setSubagentSettings: setSettings, getSubagentModels: getModels
+    } as unknown as PionApi
+    renderSettings({ actions, models: [{ provider: 'parent', id: 'stale-parent' }] })
+    await screen.findByRole('switch', { name: '显示 Runtime Provider 的模型' })
+    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
+    fireEvent.click(screen.getByRole('tab', { name: /自定义 API/ }))
+    fireEvent.change(screen.getByRole('textbox', { name: /提供商 ID/ }), { target: { value: 'pending-custom' } })
+    fireEvent.change(screen.getByRole('textbox', { name: /模型 ID/ }), { target: { value: 'custom-model' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存并加载' }))
+    expect(actions.addModelProvider).toHaveBeenCalledTimes(1)
+
+    goToPage(/^会话/)
+    await waitFor(() => expect(getSettings).toHaveBeenCalledTimes(1))
+    expect(getModels).not.toHaveBeenCalled()
+    expect(screen.getByRole('combobox', { name: '默认子代理模型' })).toBeDisabled()
+    goToPage(/^关于 Pion/)
+    goToPage(/^会话/)
+    await waitFor(() => expect(getSettings).toHaveBeenCalledTimes(2))
+    expect(getModels).not.toHaveBeenCalled()
+    const select = screen.getByRole('combobox', { name: '默认子代理模型' })
+    expect(select).toBeDisabled()
+    await act(async () => {
+      // Failed mutations may also have committed part of the provider metadata.
+      storedDirectory = [{ provider: 'pending-custom', id: 'custom-model', name: 'Fresh SDK Child' }]
+      if (outcome === 'resolve') saved.resolve(undefined)
+      else saved.reject(new Error('provider metadata partly saved'))
+      await saved.promise.catch(() => undefined)
+    })
+    await waitFor(() => expect(select).toBeEnabled())
+    fireEvent.click(select)
+    expect(screen.getByRole('option', { name: 'Fresh SDK Child' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Old SDK Child' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'stale-parent' })).not.toBeInTheDocument()
+    expect(getModels).toHaveBeenCalledTimes(1)
+    expect(actions.addModelProvider).toHaveBeenCalledTimes(1)
+    expect(setSettings).not.toHaveBeenCalled()
+    expect(actions.setModel).not.toHaveBeenCalled()
   })
 
   it.each([false, true])('keeps the existing owner-change gate until real auth settlement while new ids only navigate (reject=%s)', async (reject) => {

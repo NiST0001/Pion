@@ -34,7 +34,9 @@ Git workflow, run recovery, observability, and multi-agent features.
 - `RunStore` / `RunTracker`: atomic durable run snapshots, usage totals, tool timing,
   compactions, queued prompts, checkpoint metadata, and recovery candidates.
 - `CommandRunner`: cancellable argv execution, bounded logs, timeout and process-tree
-  cleanup. Shared by verification and workflow testing.
+  cleanup. Completion joins the original child and termination helper close receipts;
+  an error event or kill request alone does not release the command. Shared by
+  verification and workflow testing.
 - `VerificationService`: deterministic command discovery and sequential verification
   plans (`typecheck`, `lint`, `test`, `build`). Produces repair context on failure.
 - `GitService`: porcelain-v2 status, unified diffs, optimistic snapshot IDs, stage,
@@ -61,11 +63,13 @@ concise interruption prompt.
 
 Enter is the immediate steering path. Tab-owned follow-ups are kept in Pion's local
 queue so each item can be promoted to a prompt or steer without duplicating Pi's
-raw queue; local follow-ups dispatch only after Pi emits `agent_settled` for a
-successful run. That event is the true idle boundary, including automatic
-compaction/retry, so a failed compaction retry is neither replayed nor projected
-as a successful run. After a failed or aborted turn, the local queue stays blocked
-until the user explicitly promotes an item, preventing accidental replay.
+raw queue. Local follow-ups dispatch one at a time after the input's own
+`agent_settled` receipt and all prompt/steer/abort RPCs, checkpoints and completion
+listeners actually settle. Tool errors, permission/question timeouts, model failures
+and aborted turns may then continue FIFO; legacy persisted `queuePauses` are ignored.
+Unknown pending work retains the slot. Already-invoked prompts are never replayed;
+only pre-invocation preparation failures retain an unsent item with a visible error.
+SDK settlement does not establish provider-request or billing termination.
 
 The renderer loads only a viewport-sized newest history page first. Older/newer
 JSONL windows are fetched at scroll edges, prepending preserves the scroll anchor,
@@ -130,7 +134,18 @@ Paused/terminal states are `waiting_permission`, `blocked`, `failed`, `cancellin
 `cancelled`, `interrupted`, and `stale`. Plans, reviewer findings, test results, base
 and candidate OIDs, permission envelopes, logs, and worktree paths are persisted under
 Electron `userData`. Restart reconciliation marks formerly running workers interrupted
-and never resumes model execution invisibly.
+and never resumes model execution invisibly. Persisted `exitConfirmed` separately
+tracks resource closure: an interrupted/cancelled task can have a confirmed exit,
+while loaded unknown workers retain isolation. Only the original runtime's runner
+can confirm a late close. Admission/deletion guards check related cwd ownership;
+registered role worktrees remain managed by their workflow.
+
+UI stop waits are bounded separately from the shared, deadline-free SDK
+stop/exit/stdio barrier and original preparation/RPC promises. A UI deadline keeps
+that barrier alive; late verified closure releases only its captured worker/cwd.
+An already-started writer with a missing handle and no captured-child barrier stays
+unconfirmed. Shutdown joins all admitted work and persistence before releasing
+resources; settled storage errors and unknown physical closure are distinct.
 
 The tester runs only commands discovered by `VerificationService`. Missing commands
 block the workflow until the user explicitly records a test waiver; review or test

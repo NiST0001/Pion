@@ -3,19 +3,22 @@ import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { addUsage, directoryChain, UsageLedgerStore, usageHash, zeroUsage } from '../../src/main/usage-ledger-store'
+import { UsageLedger } from '../../src/main/usage-ledger'
+import { addUsage, UsageLedgerStore, usageHash, zeroUsage } from '../../src/main/usage-ledger-store'
 import type { LedgerDocument, LedgerSession } from '../../src/main/usage-ledger-store'
 import { createUsageLedgerDirectoryIo } from '../fixtures/usage-ledger-directory-io'
 
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof import('node:fs/promises')>()
-  return { ...actual, open: vi.fn(actual.open) }
+  return { ...actual, open: vi.fn(actual.open), lstat: vi.fn(actual.lstat), unlink: vi.fn(actual.unlink) }
 })
 const dirs: string[] = []
 const directoryIo = createUsageLedgerDirectoryIo()
 beforeEach(async () => {
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
   vi.mocked(fs.open).mockReset().mockImplementation(directoryIo.open(actual))
+  vi.mocked(fs.lstat).mockReset().mockImplementation(actual.lstat)
+  vi.mocked(fs.unlink).mockReset().mockImplementation(actual.unlink)
 })
 afterEach(async () => {
   vi.restoreAllMocks()
@@ -61,30 +64,36 @@ describe('usage ledger without artificial capacity limits', () => {
     })).rejects.toMatchObject({ code: 'collection-failed' })
   }, 30_000)
 
-  it('loads a valid v1 envelope larger than 64 MiB using chunked reads', async () => {
+  it('streams legacy envelopes over 64 MiB, ignores old checksums, and preserves extension fields', async () => {
     const { path, store } = await fixture()
-    const data: LedgerDocument = { version: 1, revision: 7, collectedAt: 0, sessions: [session(0)] }
+    const data: LedgerDocument = Object.assign({ version: 1 as const, revision: 7, collectedAt: 0, sessions: [session(0)] }, { futureDocument: true })
+    Object.assign(data.sessions[0], { futureSession: true })
+    Object.assign(data.sessions[0].aliases[0], { futureAlias: true })
+    data.sessions[0].receipts.push({ entry: hash('entry'), digest: hash('usage'), source: 'tool-summary', cwd: '/fixture', at: 0,
+      usage: Object.assign(zeroUsage(), { futureUsage: 42 }), ...{ futureReceipt: true } })
+    const envelope = { checksum: 'obsolete', futureEnvelope: { value: true }, data }
     const handle = await fs.open(path, 'w')
     try {
       const padding = Buffer.alloc(1024 * 1024, 32)
       for (let index = 0; index < 64; index++) await handle.writeFile(padding)
-      await handle.writeFile(JSON.stringify({ checksum: usageHash(data), data }) + '\n')
+      await handle.writeFile(JSON.stringify(envelope) + '\n')
     } finally { await handle.close() }
     const loaded = await store.transaction(async value => ({ value: value.revision, dirty: false }))
     expect(loaded.value).toBe(7)
     expect(loaded.data).toEqual(data)
+    await store.transaction(async () => ({ value: undefined, dirty: true }))
+    expect(JSON.parse(await fs.readFile(path, 'utf8'))).toEqual({ ...envelope,
+      data: { ...data, revision: 8, collectedAt: expect.any(Number) } })
   }, 30_000)
 
-  it('walks and creates directory chains deeper than 64 to the actual root', async () => {
-    const { dir } = await fixture()
-    const parent = join(dir, ...Array.from({ length: 70 }, () => 'd'))
-    directoryIo.register(parent)
-    const store = new UsageLedgerStore(join(parent, 'ledger.json'))
-    await store.transaction(async () => ({ value: undefined, dirty: true }))
-    const chain = await directoryChain(parent)
-    expect(chain.length).toBeGreaterThan(64)
-    expect(chain[0].path).toBe(parent)
-  }, 30_000)
+  it('checks only the direct parent and exact lock identity before releasing a transaction', async () => {
+    const { dir, path, store } = await fixture()
+    vi.mocked(fs.lstat).mockClear()
+    await store.transaction(async () => ({ value: undefined, dirty: false }))
+    const checked = vi.mocked(fs.lstat).mock.calls.map(([file]) => String(file))
+    expect(checked.filter(file => file === dir)).toHaveLength(2)
+    expect(checked.every(file => file === dir || file === `${path}.lock`)).toBe(true)
+  })
 
   it('reports genuine arithmetic overflow as invalid data rather than capacity', async () => {
     const total = zeroUsage()
@@ -100,20 +109,24 @@ describe('usage ledger without artificial capacity limits', () => {
   it('uses the registered directory model only for Windows algorithm fixtures', async () => {
     const { path, store } = await fixture()
     await store.transaction(async () => ({ value: undefined, dirty: true }))
-    expect(JSON.parse(await fs.readFile(path, 'utf8')).data.revision).toBe(1)
+    const saved = JSON.parse(await fs.readFile(path, 'utf8'))
+    expect(saved.data.revision).toBe(1)
+    expect(saved).not.toHaveProperty('checksum')
     await expect(new UsageLedgerStore(path).transaction(async data => ({ value: data.revision, dirty: false })))
       .resolves.toMatchObject({ value: 1 })
     expect(vi.mocked(fs.open).mock.calls.some(([file]) => String(file) === path)).toBe(true)
     if (process.platform === 'win32') {
       expect(directoryIo.handles).toHaveLength(1)
-      expect(directoryIo.handles[0].sync).toHaveBeenCalledTimes(1)
-      expect(directoryIo.handles[0].close).toHaveBeenCalledTimes(1)
+      for (const handle of directoryIo.handles) {
+        expect(handle.sync).toHaveBeenCalledTimes(1)
+        expect(handle.close).toHaveBeenCalledTimes(1)
+      }
     } else {
       expect(directoryIo.handles).toHaveLength(0)
     }
   })
 
-  it('probes actual host directory sync and preserves the store quarantine on unsupported hosts', async () => {
+  it('probes actual host directory sync and reports unsupported durability as a retryable error', async () => {
     const { dir, path, store } = await fixture()
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     // Bypass the fixture model for both the probe and the complete store transaction.
@@ -130,24 +143,22 @@ describe('usage ledger without artificial capacity limits', () => {
     const transaction = () => store.transaction(async () => ({ value: undefined, dirty: true }))
     if (supported) {
       await expect(transaction()).resolves.toMatchObject({ data: { revision: 1 } })
-      expect(() => store.assertSettled()).not.toThrow()
       await expect(actual.stat(`${path}.lock`)).rejects.toMatchObject({ code: 'ENOENT' })
     } else {
-      await expect(transaction()).rejects.toMatchObject({ code: 'collection-failed', closeUnknown: true })
-      expect(() => store.assertSettled()).toThrow(expect.objectContaining({ closeUnknown: true }))
-      expect((await actual.stat(`${path}.lock`)).isFile()).toBe(true)
+      await expect(transaction()).rejects.toMatchObject({ code: 'collection-failed' })
+      await expect(actual.stat(`${path}.lock`)).rejects.toMatchObject({ code: 'ENOENT' })
       expect(JSON.parse(await actual.readFile(path, 'utf8')).data.revision).toBe(1)
-      await expect(transaction()).rejects.toMatchObject({ code: 'collection-failed', closeUnknown: true })
-      await expect(new UsageLedgerStore(path).transaction(async () => ({ value: undefined, dirty: false })))
-        .rejects.toMatchObject({ code: 'collection-failed' })
+      await expect(store.transaction(async data => ({ value: data.revision, dirty: false })))
+        .resolves.toMatchObject({ value: 1 })
     }
     expect(directoryIo.handles).toHaveLength(0)
   })
 
-  it('retains the lock and quarantines the store when directory sync is unsupported', async () => {
-    const { dir, path, store } = await fixture()
+  it('releases its lock and allows flush after directory sync fails with a successful close', async () => {
+    const { dir, path } = await fixture()
+    const ledger = new UsageLedger({ ledgerPath: path, sessionRoot: join(dir, 'sessions') })
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
-    const sync = vi.fn(async () => { throw Object.assign(new Error('directory sync unsupported'), { code: 'ENOTSUP' }) })
+    const sync = vi.fn<() => Promise<void>>(async () => { throw Object.assign(new Error('directory sync unsupported'), { code: 'ENOTSUP' }) })
     const close = vi.fn(async () => {})
     vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
       if (String(file) === dir) {
@@ -156,27 +167,122 @@ describe('usage ledger without artificial capacity limits', () => {
       }
       return actual.open(file, flags, mode)
     })
-    await expect(store.transaction(async () => ({ value: undefined, dirty: true })))
-      .rejects.toMatchObject({ code: 'collection-failed', closeUnknown: true })
+    await expect(ledger.getOverview()).rejects.toMatchObject({ code: 'collection-failed' })
     expect(sync).toHaveBeenCalledTimes(1)
     expect(close).toHaveBeenCalledTimes(1)
-    expect(() => store.assertSettled()).toThrow(expect.objectContaining({ closeUnknown: true }))
-    expect((await fs.stat(`${path}.lock`)).isFile()).toBe(true)
+    await expect(ledger.flush()).resolves.toBeUndefined()
+    await expect(fs.stat(`${path}.lock`)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(JSON.parse(await fs.readFile(path, 'utf8')).data.revision).toBe(1)
+    // Pure overview reads do not repeat sync; explicit archival still requires it.
+    await expect(ledger.getOverview()).resolves.toMatchObject({ revision: 1 })
+    expect(sync).toHaveBeenCalledTimes(1)
+    const store = new UsageLedgerStore(path)
+    const unchanged = async () => ({ value: undefined, dirty: false })
+    await expect(store.transaction(unchanged, undefined, true)).rejects.toMatchObject({ code: 'collection-failed' })
+    expect(sync).toHaveBeenCalledTimes(2)
+    sync.mockResolvedValue(undefined)
+    await expect(store.transaction(unchanged, undefined, true)).resolves.toMatchObject({ data: { revision: 1 } })
+    expect(sync).toHaveBeenCalledTimes(3)
+    expect(close).toHaveBeenCalledTimes(3)
   })
 
-  it('still quarantines an actual close failure and retains its lock', async () => {
-    const { path, store } = await fixture()
+  it.each(['owned', 'foreign', 'replaced', 'missing', 'replaced-foreign'] as const)('retries settled lock cleanup only for its own identity (%s)', async state => {
+    const { dir, path, store } = await fixture()
+    const lockPath = `${path}.lock`
+    vi.mocked(fs.unlink).mockRejectedValueOnce(Object.assign(new Error('unlink denied'), { code: 'EACCES' }))
+    await expect(store.transaction(async () => ({ value: undefined, dirty: true })))
+      .rejects.toMatchObject({ code: 'collection-failed' })
+    expect((await fs.stat(lockPath)).isFile()).toBe(true)
+    const source = await fs.readFile(path, 'utf8')
+    const retired = ['replaced', 'missing', 'replaced-foreign'].includes(state) ? `${dir}.retired` : undefined
+    if (retired) {
+      await fs.rename(dir, retired)
+      dirs.push(retired)
+      if (state !== 'missing') {
+        await fs.mkdir(dir)
+        await fs.writeFile(path, source)
+      }
+    } else if (state === 'foreign') await fs.rename(lockPath, `${lockPath}.retired`)
+    const foreign = state === 'foreign' || state === 'replaced-foreign'
+    if (foreign) await fs.writeFile(lockPath, 'foreign-lock')
+    const change = vi.fn(async () => ({ value: undefined, dirty: false }))
+    if (state === 'owned') {
+      for (const code of ['EACCES', 'EIO']) {
+        vi.mocked(fs.lstat).mockRejectedValueOnce(Object.assign(new Error('directory stat failed'), { code }))
+        await expect(store.transaction(change)).rejects.toMatchObject({ code: 'collection-failed' })
+      }
+      expect(change).not.toHaveBeenCalled()
+      expect(fs.unlink).toHaveBeenCalledTimes(1)
+    }
+    if (foreign) {
+      await expect(store.transaction(change)).rejects.toMatchObject({ code: 'collection-failed' })
+      expect(change).not.toHaveBeenCalled()
+      expect(await fs.readFile(lockPath, 'utf8')).toBe('foreign-lock')
+      expect(fs.unlink).toHaveBeenCalledTimes(1)
+    } else {
+      await expect(store.transaction(change)).resolves.toMatchObject({ data: { revision: state === 'missing' ? 0 : 1 } })
+      expect(change).toHaveBeenCalledTimes(1)
+      await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    const original = retired ? join(retired, 'ledger.json') : path
+    expect(await fs.readFile(original, 'utf8')).toBe(source)
+    if (retired) expect((await fs.stat(`${original}.lock`)).isFile()).toBe(true)
+  })
+
+  it('refuses publication through a ledger parent replaced during temporary close', async () => {
+    const { dir, path, store } = await fixture()
+    await store.transaction(async () => ({ value: undefined, dirty: true }))
+    const before = await fs.readFile(path, 'utf8')
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
-    vi.mocked(fs.open).mockImplementationOnce(async (...args) => {
-      const handle = await directoryIo.open(actual)(...args)
-      const close = handle.close.bind(handle)
-      vi.spyOn(handle, 'close').mockImplementation(async () => { await close(); throw new Error('close unknown') })
+    let replaced = false
+    vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
+      const handle = await directoryIo.open(actual)(file, flags, mode)
+      if (String(file).startsWith(`${path}.tmp-`)) {
+        const close = handle.close.bind(handle)
+        vi.spyOn(handle, 'close').mockImplementation(async () => { await close(); replaced = true })
+      }
       return handle
     })
-    await expect(store.transaction(async () => ({ value: undefined, dirty: false })))
-      .rejects.toMatchObject({ closeUnknown: true })
-    expect(() => store.assertSettled()).toThrow(expect.objectContaining({ closeUnknown: true }))
+    vi.mocked(fs.lstat).mockImplementation(async file => {
+      const stat = await actual.lstat(file, { bigint: true })
+      if (replaced && String(file) === dir) stat.ino += 1n
+      return stat
+    })
+    await expect(store.transaction(async () => ({ value: undefined, dirty: true })))
+      .rejects.toMatchObject({ code: 'collection-failed' })
+    expect(replaced).toBe(true)
+    expect(await fs.readFile(path, 'utf8')).toBe(before)
     expect((await fs.stat(`${path}.lock`)).isFile()).toBe(true)
+    vi.mocked(fs.lstat).mockImplementation(actual.lstat)
+    const opens = vi.mocked(fs.open).mock.calls.length
+    const change = vi.fn(async () => ({ value: undefined, dirty: false }))
+    await expect(store.transaction(change)).rejects.toMatchObject({ code: 'collection-failed' })
+    expect(change).not.toHaveBeenCalled()
+    expect(fs.open).toHaveBeenCalledTimes(opens + 1)
+    expect((await fs.stat(`${path}.lock`)).isFile()).toBe(true)
+  })
+
+  it('retains a failed private temporary, releases its lock, and permits a later save after close rejects', async () => {
+    const { dir, path, store } = await fixture()
+    await store.transaction(async () => ({ value: undefined, dirty: true }))
+    const before = await fs.readFile(path, 'utf8')
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    let failClose = true
+    vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
+      const handle = await directoryIo.open(actual)(file, flags, mode)
+      if (String(file).startsWith(`${path}.tmp-`) && failClose) {
+        failClose = false
+        const close = handle.close.bind(handle)
+        vi.spyOn(handle, 'close').mockImplementation(async () => { await close(); throw new Error('close rejected') })
+      }
+      return handle
+    })
+    await expect(store.transaction(async () => ({ value: undefined, dirty: true })))
+      .rejects.toMatchObject({ code: 'collection-failed' })
+    expect(await fs.readFile(path, 'utf8')).toBe(before)
+    expect((await fs.readdir(dir)).some(name => name.startsWith('ledger.json.tmp-'))).toBe(true)
+    await expect(fs.stat(`${path}.lock`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(store.transaction(async () => ({ value: undefined, dirty: true })))
+      .resolves.toMatchObject({ data: { revision: 2 } })
   })
 })

@@ -1,6 +1,6 @@
 import {
   COMPUTER_USE_LIMITS as L, reserveComputerUseAction, sameComputerUseOwner,
-  validateComputerUseActRequest, validateComputerUseFrame, validateComputerUseOwner,
+  validateComputerUseActRequest, validateComputerUseFrame, validateComputerUseOwner, validateComputerUseRecord as record,
   type ComputerUseAction, type ComputerUseBudget, type ComputerUseConsent,
   type ComputerUseFrame, type ComputerUseOwner
 } from '../../shared/computer-use'
@@ -37,20 +37,6 @@ interface Scope {
   ids: Set<string>
 }
 function invalid(): never { throw new Error('ComputerUse input unavailable') }
-function record(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
-  const proto = Object.getPrototypeOf(value)
-  if (proto !== Object.prototype && proto !== null) return invalid()
-  const keys = Reflect.ownKeys(value)
-  if (keys.length > required.length + optional.length) return invalid()
-  for (const key of keys) {
-    if (typeof key !== 'string' || (!required.includes(key) && !optional.includes(key))) return invalid()
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)
-    if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) return invalid()
-  }
-  if (required.some(key => !Object.hasOwn(value, key))) return invalid()
-  return value as Record<string, unknown>
-}
 function positive(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 ? value : invalid()
 }
@@ -114,8 +100,9 @@ export class ComputerUseInputPolicy {
       // Initial native protocol supports only printable ASCII, never partial
       // text injection, control sequences or silent Unicode truncation.
       if (action.type === 'type' && !/^[\x20-\x7e]+$/.test(action.text)) return invalid()
-      const consent = record(context.consent, ['capture', 'upload', 'control', 'retention'], ['captureScope'])
-      const capability = record(context.capability, ['platform', 'method', 'capture', 'control', 'scope'])
+      // Service-owned context is typed internal state; wire/native descriptors
+      // are validated at installation and request admission above.
+      const { consent, capability } = context
       if (consent.capture !== true || consent.control !== true || typeof consent.upload !== 'boolean' || consent.retention !== 'sdk-session' || consent.captureScope !== 'display' || capability.platform !== 'linux-wayland' || capability.method !== 'portal-screencast+wayland-virtual-input' || capability.capture !== true || capability.control !== true || capability.scope !== 'display') return invalid()
       const now = time(context.now), startedAt = time(context.startedAt)
       if (now < this.lastClock || now < startedAt || now < slot.frame.createdAt) return invalid()

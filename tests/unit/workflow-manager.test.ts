@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   WorkflowManager,
@@ -11,6 +12,11 @@ import {
   type WorkflowWorkerRunner
 } from '../../src/main/workflow-manager'
 import type { WorkflowSnapshot, WorkflowState } from '../../src/shared/workflows'
+
+vi.mock('node:fs/promises', async original => {
+  const actual = await original<typeof import('node:fs/promises')>()
+  return { ...actual, readFile: vi.fn(actual.readFile), rename: vi.fn(actual.rename) }
+})
 
 const roots: string[] = []
 
@@ -86,7 +92,7 @@ async function settle<T>(action: () => Promise<T>): Promise<T> {
   }
 }
 
-async function manager(_root: string, verification: WorkflowVerificationRunner): Promise<WorkflowManager> {
+async function storedManager(verification: WorkflowVerificationRunner = new FakeVerification()) {
   const state = await mkdtemp(join(tmpdir(), 'pion-workflow-state-'))
   roots.push(state)
   const value = new WorkflowManager({
@@ -96,8 +102,13 @@ async function manager(_root: string, verification: WorkflowVerificationRunner):
     verification,
     workerRunner: new FakeWorkers()
   })
-  await value.load()
-  return value
+  return { workflows: value, filePath: join(state, 'workflows.json') }
+}
+
+async function manager(_root: string, verification: WorkflowVerificationRunner): Promise<WorkflowManager> {
+  const { workflows } = await storedManager(verification)
+  await workflows.load()
+  return workflows
 }
 
 afterEach(async () => {
@@ -111,18 +122,21 @@ afterEach(async () => {
 })
 
 describe('WorkflowManager', () => {
-  function isolatedManager() {
+  function isolatedManager(verification: WorkflowVerificationRunner = new FakeVerification()) {
     const workflows = new WorkflowManager({
       filePath: join(tmpdir(), 'unused-workflow.json'),
       worktreeRoot: join(tmpdir(), 'unused-worktrees'),
       permissionExtensionPath: async () => 'unused',
-      verification: new FakeVerification(), workerRunner: new FakeWorkers()
+      verification, workerRunner: new FakeWorkers()
     })
     const internal = workflows as unknown as {
       workflows: Map<string, WorkflowSnapshot>
       changed(workflow: WorkflowSnapshot): Promise<void>
+      git(cwd: string, args: string[]): Promise<string>
       launch(workflow: WorkflowSnapshot, operation: () => Promise<void>): void
       runAgent(workflow: WorkflowSnapshot, role: 'planner', cwd: string, prompt: string): Promise<string>
+      test(workflow: WorkflowSnapshot): Promise<void>
+      recreateDetachedWorktree(workflow: WorkflowSnapshot, role: 'tester', oid: string): Promise<string>
       runner: WorkflowWorkerRunner
     }
     vi.spyOn(internal, 'changed').mockResolvedValue(undefined)
@@ -135,31 +149,155 @@ describe('WorkflowManager', () => {
       repairAttempts: 0, maxRepairAttempts: 2 }
   }
 
-  it('waits for the owned task to settle before accepting its state and still rejects a wrong final state', async () => {
-    const { workflows, internal } = isolatedManager()
-    const value = snapshot('state-waiter', 'preparing')
-    internal.workflows.set(value.id, value)
-    let finish!: () => void
-    const pending = new Promise<void>(resolve => { finish = resolve })
-    internal.launch(value, async () => {
-      value.state = 'awaiting_plan'
-      await pending
-    })
-    const task = (workflows as unknown as { background: Map<string, Promise<void>> }).background.get(value.id)
-    await Promise.resolve()
-    expect(workflows.get(value.id)?.state).toBe('awaiting_plan')
-    let settled = false
-    const waiting = waitForState(workflows, value.id, 'awaiting_plan').then(() => { settled = true })
-    try {
-      await Promise.resolve()
-      expect(settled).toBe(false)
-    } finally {
-      finish()
-      await task
-      await waiting
+  async function phaseManager(state: WorkflowState) {
+    const { workflows, filePath } = await storedManager()
+    await workflows.load()
+    const internal = workflows as unknown as ReturnType<typeof isolatedManager>['internal']
+    const value: WorkflowSnapshot = {
+      ...snapshot('12345678-1234-4234-8234-123456789abc', state),
+      baseOid: 'a'.repeat(40), candidateOid: 'b'.repeat(40), candidateBranch: 'candidate', targetBranch: 'main',
+      review: { verdict: 'pass', summary: 'reviewed', reviewedAt: 1 },
+      verification: { state: 'passed', summary: 'verified' }, error: 'original problem'
     }
-    expect(settled).toBe(true)
-    await expect(waitForState(workflows, value.id, 'awaiting_merge')).rejects.toThrow('current=awaiting_plan')
+    internal.workflows.set(value.id, value)
+    let merged = false
+    const commands = vi.spyOn(internal, 'git').mockImplementation(async (_cwd, args) => {
+      if (args[0] === 'symbolic-ref') return 'main'
+      if (args[0] === 'status') return ''
+      if (args[0] === 'merge') { merged = true; return '' }
+      if (args[0] === 'rev-parse') {
+        return args[1] === 'HEAD' && !merged ? value.baseOid! : value.candidateOid!
+      }
+      throw new Error(`unexpected Git command: ${args.join(' ')}`)
+    })
+    const launch = vi.spyOn(internal, 'launch').mockImplementation(() => undefined)
+    await workflows.flush()
+    vi.mocked(fs.rename).mockClear()
+    return { workflows, filePath, value, commands, launch }
+  }
+
+  it.each([
+    ['start', 'awaiting_start'], ['merge', 'awaiting_merge']
+  ] as const)('retries %s after a pre-dispatch save failure without issuing work', async (action, state) => {
+    const { workflows, filePath, value, commands, launch } = await phaseManager(state)
+    const before = structuredClone(value)
+    const source = await readFile(filePath, 'utf8')
+    const failure = Object.assign(new Error('disk full before dispatch'), { code: 'ENOSPC' })
+    vi.mocked(fs.rename).mockRejectedValueOnce(failure)
+    await expect(workflows[action](value.id)).rejects.toMatchObject({ cause: failure })
+    expect(value).toEqual({ ...before, revision: before.revision + 1, updatedAt: value.updatedAt })
+    expect(await readFile(filePath, 'utf8')).toBe(source)
+    expect(launch).not.toHaveBeenCalled()
+    expect(commands).not.toHaveBeenCalled()
+    const retried = await workflows[action](value.id)
+    const expected = action === 'merge' ? 'completed' : 'preparing'
+    expect(retried).toMatchObject({ state: expected, error: undefined })
+    expect(launch).toHaveBeenCalledTimes(expected === 'completed' ? 0 : 1)
+    expect(commands.mock.calls.filter(([, args]) => args[0] === 'merge')).toHaveLength(action === 'merge' ? 1 : 0)
+  })
+
+  it('preserves cancellation when an older pre-dispatch save fails', async () => {
+    const { workflows, value, commands, launch } = await phaseManager('awaiting_start')
+    let fail!: (error: Error) => void
+    vi.mocked(fs.rename).mockImplementationOnce(() => new Promise<void>((_done, reject) => { fail = reject }))
+    const failure = Object.assign(new Error('old save failed'), { code: 'ENOSPC' })
+    const rejected = expect(workflows.start(value.id)).rejects.toMatchObject({ cause: failure })
+    await vi.waitFor(() => expect(fs.rename).toHaveBeenCalledOnce())
+    const stopping = workflows.cancel(value.id)
+    expect(() => workflows.assertWorktreeDeletionIdle('/project')).toThrow(/工作流/)
+    fail(failure)
+    await rejected
+    await stopping
+    expect(value).toMatchObject({ state: 'cancelled', error: undefined })
+    expect(commands).not.toHaveBeenCalled()
+    expect(launch).not.toHaveBeenCalled()
+  })
+
+  it('retains an issued merge and its completed state when the later save fails', async () => {
+    const { workflows, value, commands } = await phaseManager('awaiting_merge')
+    const command = commands.getMockImplementation()!
+    const failure = Object.assign(new Error('disk full after merge'), { code: 'ENOSPC' })
+    commands.mockImplementation(async (cwd, args) => {
+      const result = await command(cwd, args)
+      if (args[0] === 'merge') vi.mocked(fs.rename).mockRejectedValueOnce(failure)
+      return result
+    })
+    await expect(workflows.merge(value.id)).rejects.toMatchObject({ cause: failure })
+    expect(value).toMatchObject({ state: 'completed', mergeOid: value.candidateOid })
+    await expect(workflows.merge(value.id)).rejects.toThrow(/尚未到达/)
+    await workflows.flush()
+    expect(commands.mock.calls.filter(([, args]) => args[0] === 'merge')).toHaveLength(1)
+  })
+
+  it.each(['invalid', 'unreadable'])('keeps %s storage read failures isolated from later saves', async (failure) => {
+    const { workflows, filePath } = await storedManager()
+    const source = failure === 'invalid' ? '{broken' : JSON.stringify({ version: 1, workflows: [] })
+    await writeFile(filePath, source)
+    if (failure === 'unreadable') vi.mocked(fs.readFile).mockRejectedValueOnce(Object.assign(new Error('read denied'), { code: 'EACCES' }))
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    await workflows.load()
+    const rename = vi.mocked(fs.rename)
+    await expect(workflows.create({ cwd: '/project', goal: 'preserve source' })).rejects.toThrow(/存储读取失败/)
+    await expect(workflows.flush()).rejects.toThrow(/存储读取失败/)
+    expect(workflows.list()).toEqual([])
+    expect(rename).not.toHaveBeenCalled()
+    expect(await readFile(filePath, 'utf8')).toBe(source)
+  })
+
+  it('retains recovered workflows and their source after EACCES, then allows an explicit flush retry', async () => {
+    const { workflows, filePath } = await storedManager()
+    const source = JSON.stringify({ version: 1, workflows: [snapshot('recovered', 'planning')] })
+    await writeFile(filePath, source)
+    const failure = Object.assign(new Error('recovery save denied'), { code: 'EACCES' })
+    vi.mocked(fs.rename).mockRejectedValueOnce(failure)
+    await expect(workflows.load()).rejects.toMatchObject({ cause: failure })
+    expect(workflows.get('recovered')).toMatchObject({ state: 'interrupted', interruptedFrom: 'planning', revision: 1 })
+    expect(await readFile(filePath, 'utf8')).toBe(source)
+    await workflows.load()
+    expect(fs.rename).toHaveBeenCalledOnce()
+    await workflows.flush()
+    const saved = JSON.parse(await readFile(filePath, 'utf8')) as { workflows: WorkflowSnapshot[] }
+    expect(saved.workflows[0]).toMatchObject({ id: 'recovered', state: 'interrupted', interruptedFrom: 'planning', revision: 1 })
+    expect(fs.rename).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps pending filesystem saves serial and reserved, then reports failure before a newer save succeeds', async () => {
+    const { workflows, filePath } = await storedManager()
+    await workflows.load()
+    vi.spyOn(workflows as unknown as { git(cwd: string, args: string[]): Promise<string> }, 'git').mockImplementation(async cwd => resolve(cwd))
+    let fail!: (error: Error) => void
+    vi.mocked(fs.rename).mockImplementationOnce(() => new Promise<void>((_done, reject) => { fail = reject }))
+    const first = workflows.create({ cwd: '/project', goal: 'first intended state' })
+    const rejected = expect(first).rejects.toThrow(/存储保存失败/)
+    await vi.waitFor(() => expect(fs.rename).toHaveBeenCalledOnce())
+    let finished = false
+    const second = workflows.create({ cwd: '/project', goal: 'latest intended state' }).then(value => {
+      finished = true
+      return value
+    })
+    await vi.waitFor(() => expect(workflows.list()).toHaveLength(2))
+    expect(finished).toBe(false)
+    expect(fs.rename).toHaveBeenCalledOnce()
+    expect(() => workflows.assertWorktreeDeletionIdle('/project')).toThrow(/工作流/)
+    expect(() => workflows.assertWorktreeDeletionIdle('/unrelated')).not.toThrow()
+    fail(Object.assign(new Error('save denied'), { code: 'EACCES' }))
+    await rejected
+    await second
+    expect(() => workflows.assertWorktreeDeletionIdle('/project')).not.toThrow()
+    const saved = JSON.parse(await readFile(filePath, 'utf8')) as { workflows: WorkflowSnapshot[] }
+    expect(saved.workflows.map(value => value.goal)).toEqual(['first intended state', 'latest intended state'])
+  })
+
+  it('retains storage isolation when its owner reports an unknown close', async () => {
+    const { workflows } = await storedManager()
+    await workflows.load()
+    const failure = Object.assign(new Error('filesystem close unknown'), { closeUnknown: true })
+    vi.mocked(fs.rename).mockRejectedValueOnce(failure)
+    await expect(workflows.flush()).rejects.toMatchObject({ closeUnknown: true, cause: failure })
+    await expect(workflows.flush()).rejects.toMatchObject({ closeUnknown: true, cause: failure })
+    await expect(workflows.create({ cwd: '/project', goal: 'retain unknown source' })).rejects.toMatchObject({ closeUnknown: true })
+    await expect(workflows.shutdown()).rejects.toMatchObject({ closeUnknown: true })
+    expect(fs.rename).toHaveBeenCalledOnce()
   })
 
   it.each(['completed', 'failed', 'cancelled'] as const)('does not release a %s workflow worktree without real exit evidence', (state) => {
@@ -193,47 +331,54 @@ describe('WorkflowManager', () => {
     expect(() => workflows.assertWorktreeDeletionIdle('/project')).not.toThrow()
   })
 
-  it('checks all private snapshots rather than the bounded display list', () => {
-    const { workflows, internal } = isolatedManager()
-    internal.workflows.set('old', snapshot('old', 'planning'))
-    for (let index = 0; index < 35; index += 1) {
-      internal.workflows.set(`new-${index}`, { ...snapshot(`new-${index}`), updatedAt: index + 2 })
-    }
-    expect(workflows.list().some((value) => value.id === 'old')).toBe(false)
-    expect(() => workflows.assertWorktreeDeletionIdle('/unrelated')).toThrow(/工作流/)
-  })
-
-  it('keeps cancelled background operations reserved until their real promises settle', async () => {
-    const { workflows, internal } = isolatedManager()
-    const value = snapshot('pending-worker', 'planning')
-    internal.workflows.set(value.id, value)
+  it('preserves cancellation after a pending verification rejects', async () => {
+    const verification = Object.assign(new FakeVerification(), { assertWorktreeDeletionIdle: vi.fn() })
     let finish!: () => void
-    internal.launch(value, () => new Promise<void>((done) => { finish = done }))
-    await Promise.resolve()
+    const pending = new Promise<void>((done) => { finish = done })
+    let start!: () => void
+    const started = new Promise<void>((done) => { start = done })
+    vi.spyOn(verification, 'run').mockImplementationOnce(async () => {
+      start()
+      await pending
+      throw new Error('verification stopped')
+    })
+    const { workflows, internal } = isolatedManager(verification)
+    vi.spyOn(workflows, 'flush').mockResolvedValue(undefined)
+    vi.spyOn(internal, 'recreateDetachedWorktree').mockResolvedValue('/project/tester')
+    const value = snapshot('pending-verification', 'reviewing')
+    value.candidateOid = 'a'.repeat(40)
+    internal.workflows.set(value.id, value)
+    internal.launch(value, () => internal.test(value))
+    await started
     await workflows.cancel(value.id)
-    expect(workflows.get(value.id)?.state).toBe('cancelled')
-    expect(() => workflows.assertWorktreeDeletionIdle('/project')).toThrow(/工作流/)
+    expect(value.state).toBe('cancelled')
+    expect(value.workers[0].exitConfirmed).toBe(false)
     finish()
-    await vi.waitFor(() => expect(() => workflows.assertWorktreeDeletionIdle('/project')).not.toThrow())
+    await waitForState(workflows, value.id, 'cancelled')
+    expect(value.workers[0]).toMatchObject({ status: 'cancelled', exitConfirmed: true })
+    expect(value.verification).toBeUndefined()
   })
 
-  it('keeps shutdown pending until cancelled background preparation actually settles', async () => {
+  it('joins an admitted start save and closes mutation admission during shutdown', async () => {
     const { workflows, internal } = isolatedManager()
     vi.spyOn(workflows, 'flush').mockResolvedValue(undefined)
-    const value = snapshot('pending-preparation', 'preparing')
+    const value = snapshot('pending-start')
+    const execute = vi.spyOn(internal.runner, 'run')
     internal.workflows.set(value.id, value)
-    let finish!: () => void
-    internal.launch(value, () => new Promise<void>((done) => { finish = done }))
+    let release!: () => void
+    vi.mocked(internal.changed).mockImplementationOnce(() => new Promise<void>((done) => { release = done }))
+    const starting = workflows.start(value.id)
+    let settled = false
+    const shutdown = workflows.shutdown().then(() => { settled = true })
+    expect(workflows.shutdown()).toBe(workflows.shutdown())
+    await expect(workflows.start(value.id)).rejects.toThrow(/已关闭/)
     await Promise.resolve()
-    let closed = false
-    const shutdown = workflows.shutdown().then(() => { closed = true })
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(closed).toBe(false)
+    expect(settled).toBe(false)
+    release()
+    await Promise.all([starting, shutdown])
     expect(value.state).toBe('interrupted')
-    finish()
-    await shutdown
-    expect(closed).toBe(true)
+    expect(execute).not.toHaveBeenCalled()
+    expect(value.workers).toEqual([])
   })
 
   it('does not invoke a worker cancelled while its running snapshot is still being saved', async () => {
@@ -267,6 +412,7 @@ describe('WorkflowManager', () => {
     // Test the reservation independently of the snapshot's running-state gate.
     value.state = 'cancelled'
     expect(() => workflows.assertWorktreeDeletionIdle('/project')).toThrow(/工作流/)
+    expect(() => workflows.assertWorktreeDeletionIdle('/unrelated')).not.toThrow()
     blocked = true
     finish()
     await starting
@@ -293,10 +439,6 @@ describe('WorkflowManager', () => {
     for (const role of ['planner', 'implementer', 'reviewer', 'tester'] as const) {
       expect(candidate?.worktrees[role]).toBe(join(root, '.pion-workflow-worktrees', created.id, role))
     }
-    const metadataRoot = (workflows as unknown as { worktreeRoot: string }).worktreeRoot
-    const permissions = JSON.parse(await readFile(join(metadataRoot, created.id, 'permissions.json'), 'utf8'))
-    expect(permissions.projects[candidate!.worktrees.implementer!].write).toBe('allow')
-    expect(permissions.projects[candidate!.worktrees.reviewer!].write).toBe('deny')
     expect(git(root, 'status', '--porcelain')).toBe('')
     expect(git(root, 'check-ignore', '--', '.pion-workflow-worktrees/')).toBe('.pion-workflow-worktrees/')
     expect(git(root, 'show', `${candidate?.candidateOid}:feature.txt`)).toBe('implemented')
@@ -329,46 +471,24 @@ describe('WorkflowManager', () => {
   })
 
   it('reconciles running workers as interrupted without invisible restart', async () => {
-    const root = await repository()
-    const state = await mkdtemp(join(tmpdir(), 'pion-workflow-recovery-'))
-    roots.push(state)
-    const filePath = join(state, 'workflows.json')
-    await mkdir(state, { recursive: true })
-    await writeFile(filePath, JSON.stringify({
-      version: 1,
-      workflows: [{
-        version: 1,
-        id: 'interrupted-1',
-        cwd: root,
-        goal: 'unfinished work',
-        state: 'implementing',
-        createdAt: 1,
-        updatedAt: 1,
-        revision: 1,
-        workers: [{
-          id: 'worker-1', role: 'implementer', kind: 'agent', status: 'running',
-          outputTail: '', outputTruncated: false,
-          permission: { read: true, write: true, shell: false, network: false, external: false, note: 'bounded' }
-        }],
-        worktrees: {},
-        repairAttempts: 0,
-        maxRepairAttempts: 2
-      }]
-    }))
-    const recovered = new WorkflowManager({
-      filePath,
-      worktreeRoot: join(state, 'worktrees'),
-      permissionExtensionPath: async () => join(state, 'permission.ts'),
-      verification: new FakeVerification(),
-      workerRunner: new FakeWorkers()
+    const { workflows, filePath } = await storedManager()
+    const value = snapshot('interrupted-1', 'implementing')
+    value.workers = [{
+      id: 'worker-1', role: 'implementer', kind: 'agent', status: 'running',
+      outputTail: '', outputTruncated: false,
+      permission: { read: true, write: true, shell: false, network: false, external: false, note: 'bounded' }
+    }]
+    await writeFile(filePath, JSON.stringify({ version: 1, workflows: [value] }))
+    await workflows.load()
+    expect(workflows.get(value.id)).toMatchObject({
+      state: 'interrupted', interruptedFrom: 'implementing',
+      workers: [{ status: 'interrupted', exitConfirmed: false }]
     })
-
-    await recovered.load()
-    expect(recovered.get('interrupted-1')).toMatchObject({
-      state: 'interrupted',
-      interruptedFrom: 'implementing',
-      workers: [{ status: 'interrupted' }]
-    })
+    await expect(workflows.resume(value.id)).rejects.toThrow(/退出尚未确认/)
+    await expect(workflows.cleanup(value.id)).rejects.toThrow(/退出尚未确认/)
+    await expect(workflows.shutdown()).rejects.toMatchObject({ closeUnknown: true })
+    expect(() => workflows.assertWorktreeDeletionIdle(value.cwd)).toThrow(/工作流/)
+    expect(() => workflows.assertWorktreeDeletionIdle('/unrelated')).not.toThrow()
   })
 
   it('requires an explicit test waiver when no verification command exists', async () => {

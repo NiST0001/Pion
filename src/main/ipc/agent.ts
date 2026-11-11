@@ -38,7 +38,7 @@ const SESSION_OPERATIONS = new Set<string>([
   IPC.AgentCopySession, IPC.AgentForkSession, IPC.AgentSetMode, IPC.AgentSetYolo,
   IPC.AgentSetSubagents, IPC.AgentLoginModelProvider, IPC.AgentLogoutModelProvider,
   IPC.AgentAddModelProvider, IPC.AgentSetModel, IPC.AgentSetThinking, IPC.AgentSetAutoCompaction,
-  IPC.AgentSetAutoRetry, IPC.AgentCompact, IPC.AgentExportHtml, IPC.AgentExportForCommand, IPC.AgentRenameSession,
+  IPC.AgentSetAutoRetry, IPC.AgentCompact, IPC.AgentExportForCommand, IPC.AgentRenameSession,
   IPC.AgentSetSteeringMode, IPC.AgentSetFollowUpMode, IPC.ProjectTrustSet,
   IPC.ToolPermissionResolve, IPC.ExtensionUiResolve, IPC.BranchCreate, IPC.BranchRename
 ])
@@ -252,7 +252,6 @@ export function registerAgentIpc({ ipcMain: host, bridge, projects, pushProjects
   ipcMain.handle(IPC.AgentCompact, (_event, customInstructions?: string) =>
     bridge.compactNow(customInstructions)
   )
-  ipcMain.handle(IPC.AgentExportHtml, () => bridge.exportSessionHtml())
   ipcMain.handle(IPC.AgentRenameSession, (_event, name: string, sessionPath?: string) =>
     bridge.renameSession(name, sessionPath)
   )

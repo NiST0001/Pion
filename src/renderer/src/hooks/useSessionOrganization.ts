@@ -1,11 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PionApi } from '../../../shared/pion-api'
-import { validateSessionOrganization, type SessionOrganization, type SessionOrganizationChange } from '../../../shared/session-organization'
+import type { SessionOrganization, SessionOrganizationChange } from '../../../shared/session-organization'
 
 export const EMPTY_SESSION_ORGANIZATION: SessionOrganization = { version: 1, revision: 0, folders: [], sessions: [] }
 type OrganizationApi = Pick<PionApi, 'getSessionOrganization' | 'updateSessionOrganization'>
 type Owner = { api: OrganizationApi | undefined }
 type View = { owner: Owner; snapshot: SessionOrganization | null; loading: boolean; error: string }
+
+function equivalent(a: SessionOrganization, b: SessionOrganization): boolean {
+  return a.version === b.version && a.revision === b.revision
+    && a.folders.length === b.folders.length && a.sessions.length === b.sessions.length
+    && a.folders.every((entry, index) => {
+      const other = b.folders[index]
+      return entry.id === other.id && entry.cwd === other.cwd && entry.name === other.name
+        && entry.parentId === other.parentId && entry.collapsed === other.collapsed && entry.order === other.order
+    })
+    && a.sessions.every((entry, index) => {
+      const other = b.sessions[index]
+      return entry.cwd === other.cwd && entry.path === other.path && entry.folderId === other.folderId
+        && entry.archived === other.archived && entry.title === other.title && entry.order === other.order
+    })
+}
 
 export function useSessionOrganization(api: OrganizationApi | undefined) {
   const ownerRef = useRef<Owner>({ api })
@@ -24,7 +39,8 @@ export function useSessionOrganization(api: OrganizationApi | undefined) {
   const publish = useCallback((patch: Partial<Omit<View, 'owner'>>): void => {
     if (!mounted.current || ownerRef.current !== owner) return
     const before = latest.current
-    const snapshot = patch.snapshot && before.snapshot && patch.snapshot.revision < before.snapshot.revision
+    const snapshot = patch.snapshot && before.snapshot
+      && (patch.snapshot.revision < before.snapshot.revision || equivalent(patch.snapshot, before.snapshot))
       ? before.snapshot : patch.snapshot
     const next = { ...before, ...patch, owner, ...('snapshot' in patch ? { snapshot: snapshot ?? null } : {}) }
     latest.current = next
@@ -42,7 +58,7 @@ export function useSessionOrganization(api: OrganizationApi | undefined) {
       try {
         const result = await api.getSessionOrganization()
         if (mounted.current && ownerRef.current === owner) {
-          publish({ snapshot: validateSessionOrganization(result), loading: false, error: '' })
+          publish({ snapshot: result, loading: false, error: '' })
         }
       } catch (error) {
         publish({ loading: false, error: error instanceof Error ? error.message : String(error) })
@@ -70,7 +86,7 @@ export function useSessionOrganization(api: OrganizationApi | undefined) {
     try {
       const result = await api.updateSessionOrganization(change)
       if (!mounted.current || ownerRef.current !== owner) throw new Error('会话整理所属页面已变化。')
-      publish({ snapshot: validateSessionOrganization(result), error: '' })
+      publish({ snapshot: result, error: '' })
     } catch (error) {
       publish({ error: error instanceof Error ? error.message : String(error) })
       throw error

@@ -25,6 +25,7 @@ type SettingsFactory = () => LoginSettings
  */
 export class ProviderAuthService {
   private runtimePromise: Promise<ModelRuntime> | null = null
+  private runtimeReady = false
 
   constructor(
     private readonly createRuntime: RuntimeFactory = () => ModelRuntime.create({
@@ -37,11 +38,20 @@ export class ProviderAuthService {
 
   invalidate(): void {
     this.runtimePromise = null
+    this.runtimeReady = false
+  }
+
+  /** Refresh settled local metadata while sharing actual initialization across read entry points. */
+  refreshForRead(): void {
+    if (this.runtimeReady) this.invalidate()
   }
 
   private runtime(): Promise<ModelRuntime> {
     if (this.runtimePromise) return this.runtimePromise
-    const pending = this.createRuntime().catch((error) => {
+    const pending = this.createRuntime().then((runtime) => {
+      if (this.runtimePromise === pending) this.runtimeReady = true
+      return runtime
+    }).catch((error) => {
       if (this.runtimePromise === pending) this.runtimePromise = null
       throw error
     })

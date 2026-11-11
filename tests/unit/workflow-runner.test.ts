@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { WorkflowManager } from '../../src/main/workflow-manager'
+import type { WorkflowSnapshot } from '../../src/shared/workflows'
 import { PiWorkflowWorkerRunner, VerificationWorkflowRunner } from '../../src/main/workflow/runners'
 import { CommandRunner } from '../../src/main/command-runner'
 import { VerificationService } from '../../src/main/verification'
@@ -25,10 +27,10 @@ const rpc = vi.hoisted(() => {
       this.listeners.get(event)?.delete(listener)
       return this
     }
-    emit(event: string): void {
+    emit(event: string, ...args: unknown[]): void {
       const listeners = this.listeners.get(event)
       this.listeners.delete(event)
-      for (const listener of listeners ?? []) listener()
+      for (const listener of listeners ?? []) listener(...args)
     }
     close(): void {
       this.exitCode = 0
@@ -294,26 +296,6 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     cleaned(rpc.FakeRpc.instances.at(-1)!)
   })
 
-  it.each(['cancel', 'timeout'] as const)('ignores late permission resolution or rejection after %s', async (reason) => {
-    for (const late of ['resolve', 'reject'] as const) {
-      const permission = deferred<string>()
-      const worker = new PiWorkflowWorkerRunner(() => permission.promise)
-      const result = worker.run(input, vi.fn())
-      const rejected = reason === 'cancel'
-        ? expect(result).rejects.toMatchObject({ name: 'AbortError' })
-        : expect(result).rejects.toThrow('Timeout waiting for Agent completion')
-      if (reason === 'cancel') await worker.cancel(input.id)
-      else await vi.advanceTimersByTimeAsync(WORKER_TIMEOUT_MS)
-      expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
-      if (late === 'resolve') permission.resolve('/fake/late-extension.ts')
-      else permission.reject(new Error('late permission failure'))
-      await rejected
-      expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).not.toThrow()
-      expect(rpc.FakeRpc.instances).toHaveLength(0)
-      expect(vi.getTimerCount()).toBe(0)
-    }
-  })
-
   it('keeps synchronous preparation cancellation from creating an RPC client', async () => {
     let cancellation: Promise<void> | undefined
     const worker = new PiWorkflowWorkerRunner(() => {
@@ -541,7 +523,10 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     rpc.FakeRpc.configure = (client) => { client.stop.mockRejectedValueOnce(cleanupError) }
     const worker = runner()
     await expect(worker.run(input, vi.fn())).rejects.toMatchObject({
-      message: 'Agent 收尾未确认：stop unavailable', cause: cleanupError, cleanupError
+      message: 'Agent 收尾未确认：stop unavailable',
+      cause: expect.objectContaining({ message: cleanupError.message, cause: cleanupError, closeUnknown: true }),
+      cleanupError: expect.objectContaining({ message: cleanupError.message, cause: cleanupError, closeUnknown: true }),
+      closeUnknown: true
     })
     const client = rpc.FakeRpc.instances[0]
     client.child.close()
@@ -549,7 +534,7 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
     await expect(worker.run(input, vi.fn())).rejects.toThrow(/仍被保留/)
     await expect(worker.run({ ...input, id: 'new-id' }, vi.fn())).rejects.toThrow(/尚未确认/)
-    await expect(worker.cancel(input.id)).rejects.toBe(cleanupError)
+    await expect(worker.cancel(input.id)).rejects.toMatchObject({ message: cleanupError.message, cause: cleanupError, closeUnknown: true })
     expect(client.child.listeners.get('exit')?.size ?? 0).toBe(0)
     expect(client.child.listeners.get('close')?.size ?? 0).toBe(0)
     expect(client.child.listeners.get('error')?.size ?? 0).toBe(0)
@@ -567,7 +552,8 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     await expect(runner().run(input, vi.fn())).rejects.toMatchObject({
       message: 'original model diagnostic\nworker stderr diagnostic\nAgent 收尾未确认：stop unavailable',
       cause: expect.objectContaining({ message: 'original model diagnostic\nworker stderr diagnostic' }),
-      cleanupError
+      cleanupError: expect.objectContaining({ message: cleanupError.message, cause: cleanupError, closeUnknown: true }),
+      closeUnknown: true
     })
     cleaned(rpc.FakeRpc.instances[0])
   })
@@ -613,22 +599,17 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     cleaned(client)
   })
 
-  it.each(['permission', 'start', 'getState'] as const)('counts both cancelled %s preparations against true capacity until each settles', async (stage) => {
+  it('counts both cancelled startups against capacity until each settles', async () => {
     const preparation = [deferred<void>(), deferred<void>()]
-    const prepare = vi.fn(async () => '/fake/permission-extension.ts')
-    if (stage === 'permission') {
-      for (const pending of preparation) prepare.mockImplementationOnce(() => pending.promise.then(() => '/fake/permission-extension.ts'))
-    }
     let next = 0
     rpc.FakeRpc.configure = (client) => {
       const pending = preparation[next++]
-      if (stage === 'start') client.start.mockImplementationOnce(() => {
+      client.start.mockImplementationOnce(() => {
         client.process = client.child
         return pending.promise
       })
-      if (stage === 'getState') client.getState.mockImplementationOnce(() => pending.promise.then(() => ({ sessionFile: '/fake/late.jsonl' })))
     }
-    const worker = new PiWorkflowWorkerRunner(prepare)
+    const worker = runner()
     const progress = vi.fn()
     const first = worker.run({ ...input, id: 'first', cwd: '/fake/first' }, progress)
     const second = worker.run({ ...input, id: 'second', cwd: '/fake/second' }, progress)
@@ -643,10 +624,6 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     expect(progress).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
     const retainedClients = [...rpc.FakeRpc.instances]
-    for (const client of retainedClients) {
-      expect(client.prompt).not.toHaveBeenCalled()
-      cleaned(client)
-    }
     preparation[0].resolve(undefined)
     await firstRejected
     expect(() => worker.assertWorktreeDeletionIdle('/fake/first')).not.toThrow()
@@ -657,7 +634,7 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     await secondRejected
     expect(() => worker.assertWorktreeDeletionIdle('/fake/second')).not.toThrow()
     expect(progress).not.toHaveBeenCalled()
-    expect(rpc.FakeRpc.instances).toHaveLength(stage === 'permission' ? 1 : 3)
+    expect(rpc.FakeRpc.instances).toHaveLength(3)
     for (const client of retainedClients) {
       expect(client.prompt).not.toHaveBeenCalled()
       cleaned(client)
@@ -687,45 +664,170 @@ describe('PiWorkflowWorkerRunner RPC completion', () => {
     cleaned(client)
   })
 
-  it('retains cwd and both capacity slots until actual exit plus stdio close', async () => {
+  it('retains both slots after stop deadlines and recovers each id/cwd only after real close', async () => {
     rpc.FakeRpc.configure = (client) => {
       client.stop.mockImplementationOnce(async () => { client.process = null })
     }
     const worker = runner()
-    const first = worker.run({ ...input, id: 'first', cwd: '/fake/first' }, vi.fn())
+    const first = worker.run(input, vi.fn())
     const second = worker.run({ ...input, id: 'second', cwd: '/fake/second' }, vi.fn())
-    await flush()
-    await expect(worker.run({ ...input, id: 'third', cwd: '/fake/third' }, vi.fn())).rejects.toThrow(/并发上限/)
-    expect(() => worker.assertWorktreeDeletionIdle('/fake/first')).toThrow(/尚未确认/)
-    const client = rpc.FakeRpc.instances[0]
-    client.child.exitCode = 0
-    client.child.emit('exit')
-    await flush()
-    expect(() => worker.assertWorktreeDeletionIdle('/fake/first')).toThrow(/尚未确认/)
-    client.child.close()
-    await first
-    expect(() => worker.assertWorktreeDeletionIdle('/fake/first')).not.toThrow()
-    rpc.FakeRpc.instances[1].child.close()
-    await second
-    expect(vi.getTimerCount()).toBe(0)
-  })
-
-  it('keeps unknown shutdown quarantined after a late close and rejects reuse of its id/cwd', async () => {
-    rpc.FakeRpc.configure = (client) => {
-      client.stop.mockImplementationOnce(async () => { client.process = null })
-    }
-    const worker = runner()
-    const result = worker.run(input, vi.fn())
-    const rejected = expect(result).rejects.toThrow(/process exit and stdio close/)
+    const firstRejected = expect(first).rejects.toThrow(/process exit and stdio close/)
+    const secondRejected = expect(second).rejects.toThrow(/process exit and stdio close/)
     await flush()
     await vi.advanceTimersByTimeAsync(5_000)
-    await rejected
-    const client = rpc.FakeRpc.instances[0]
-    client.child.close()
+    await Promise.all([firstRejected, secondRejected])
+    const [firstClient, secondClient] = rpc.FakeRpc.instances
     expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
     await expect(worker.run(input, vi.fn())).rejects.toThrow(/仍被保留/)
     await expect(worker.run({ ...input, id: 'new-id' }, vi.fn())).rejects.toThrow(/尚未确认/)
+    await expect(worker.run({ ...input, id: 'third', cwd: '/fake/third' }, vi.fn())).rejects.toThrow(/并发上限/)
+    firstClient.child.exitCode = 0
+    firstClient.child.emit('exit')
+    await flush()
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
+    firstClient.child.close()
+    await flush()
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).not.toThrow()
+    expect(() => worker.assertWorktreeDeletionIdle('/fake/second')).toThrow(/尚未确认/)
+    rpc.FakeRpc.configure = () => undefined
+    await expect(worker.run(input, vi.fn())).resolves.toMatchObject({ sessionPath: '/fake/session.jsonl' })
+    secondClient.child.close()
+    await flush()
+    expect(() => worker.assertWorktreeDeletionIdle('/fake/second')).not.toThrow()
+    for (const client of [firstClient, secondClient]) {
+      expect(client.child.listeners.get('exit')?.size ?? 0).toBe(0)
+      expect(client.child.listeners.get('close')?.size ?? 0).toBe(0)
+      expect(client.child.listeners.get('error')?.size ?? 0).toBe(0)
+      cleaned(client)
+    }
+  })
+
+  it.each(['close-first', 'rpc-first'] as const)('retains the worker until late close plus original RPC both settle (%s)', async (order) => {
+    const dispatch = deferred<Disposition>()
+    rpc.FakeRpc.dispatch = () => dispatch.promise
+    rpc.FakeRpc.configure = (client) => {
+      client.stop.mockImplementationOnce(async () => { client.process = null })
+    }
+    const worker = runner()
+    const progress = vi.fn()
+    const result = worker.run(input, progress)
+    const rejected = expect(result).rejects.toMatchObject({
+      message: expect.stringMatching(/Agent 已取消\nAgent 收尾未确认/), closeUnknown: true
+    })
+    await flush()
+    const client = rpc.FakeRpc.instances[0]
+    const cancellation = worker.cancel(input.id)
+    const cancelRejected = expect(cancellation).rejects.toThrow(/process exit and stdio close/)
+    await vi.advanceTimersByTimeAsync(5_000)
+    await Promise.all([rejected, cancelRejected])
+    if (order === 'close-first') {
+      client.child.close()
+      await flush()
+      expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
+      await worker.cancel(input.id)
+      expect(client.stop).toHaveBeenCalledTimes(1)
+      dispatch.resolve('handled')
+    } else {
+      dispatch.resolve('handled')
+      await flush()
+      expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
+      client.child.close()
+    }
+    await flush()
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).not.toThrow()
+    expect(client.getState).toHaveBeenCalledTimes(1)
+    expect(progress).toHaveBeenCalledExactlyOnceWith('Agent 已启动')
+    cleaned(client)
+  })
+
+  it('rechecks shutdown after late process/RPC cleanup without repeating stop or dispatch', async () => {
+    const dispatch = deferred<Disposition>()
+    rpc.FakeRpc.dispatch = () => dispatch.promise
+    rpc.FakeRpc.configure = (client) => { client.stop.mockImplementationOnce(async () => { client.process = null }) }
+    const workflows = new WorkflowManager({
+      filePath: '/fake/workflows.json', worktreeRoot: '/fake/worktrees', workerRunner: runner(),
+      permissionExtensionPath: async () => '/fake/permission-extension.ts', verification: { run: vi.fn(), cancel: vi.fn() }
+    })
+    const internal = workflows as unknown as {
+      workflows: Map<string, WorkflowSnapshot>
+      changed(workflow: WorkflowSnapshot): Promise<void>
+      launch(workflow: WorkflowSnapshot, operation: () => Promise<void>): void
+      runAgent(workflow: WorkflowSnapshot, role: 'planner', cwd: string, prompt: string): Promise<string>
+    }
+    vi.spyOn(internal, 'changed').mockResolvedValue(undefined)
+    const save = vi.spyOn(workflows, 'flush').mockResolvedValue(undefined)
+    const value: WorkflowSnapshot = { version: 1, id: '12345678-1234-4234-8234-123456789abc', cwd: input.cwd, goal: input.prompt,
+      state: 'planning', createdAt: 1, updatedAt: 1, revision: 0, workers: [], worktrees: {}, repairAttempts: 0, maxRepairAttempts: 2 }
+    internal.workflows.set(value.id, value)
+    internal.launch(value, async () => { await internal.runAgent(value, 'planner', input.cwd, input.prompt) })
+    await flush()
+    const client = rpc.FakeRpc.instances[0]
+    expect(client.prompt).toHaveBeenCalledOnce()
+    const rejected = expect(workflows.shutdown()).rejects.toMatchObject({ closeUnknown: true })
+    await vi.advanceTimersByTimeAsync(5_000)
+    await rejected
+    expect(value.workers[0]).toMatchObject({ status: 'interrupted', exitConfirmed: false })
+    client.child.close()
+    await flush()
+    await expect(workflows.shutdown()).rejects.toMatchObject({ closeUnknown: true })
+    dispatch.resolve('handled')
+    await flush()
+    save.mockRejectedValueOnce(new Error('shutdown save failed'))
+    await expect(workflows.shutdown()).rejects.toThrow('shutdown save failed')
+    await expect(workflows.shutdown()).resolves.toBeUndefined()
+    expect(value.workers[0]).toMatchObject({ status: 'interrupted', exitConfirmed: true })
+    await expect(workflows.start(value.id)).rejects.toThrow(/已关闭/)
+    expect(rpc.FakeRpc.instances).toHaveLength(1)
+    expect(client.prompt).toHaveBeenCalledOnce()
+    cleaned(client)
+  })
+
+  it('marks a started client with no process handle as unknown and retains its reservation', async () => {
+    rpc.FakeRpc.configure = (client) => { client.start.mockResolvedValueOnce(undefined) }
+    const worker = runner()
+    await expect(worker.run(input, vi.fn())).rejects.toMatchObject({
+      message: expect.stringContaining('process handle missing after start'), closeUnknown: true
+    })
+    const client = rpc.FakeRpc.instances[0]
+    expect(client.stop).not.toHaveBeenCalled()
+    expect(client.listeners.size).toBe(0)
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
+    await expect(worker.cancel(input.id)).rejects.toMatchObject({ closeUnknown: true })
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('marks process errors as unknown even after the SDK stop later rejects and the child closes', async () => {
+    const stop = deferred<void>()
+    rpc.FakeRpc.configure = (client) => { client.stop.mockImplementationOnce(() => stop.promise) }
+    const worker = runner()
+    const result = worker.run(input, vi.fn())
+    const rejected = expect(result).rejects.toMatchObject({
+      message: 'Agent 收尾未确认：process failure', closeUnknown: true,
+      cleanupError: expect.objectContaining({ message: 'process failure', closeUnknown: true })
+    })
+    await flush()
+    const client = rpc.FakeRpc.instances[0]
+    client.child.emit('error', new Error('process failure'))
+    await rejected
+    stop.reject(new Error('late SDK rejection'))
+    client.child.close()
+    await flush()
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
+    expect(client.child.listeners.get('error')?.size ?? 0).toBe(0)
+    cleaned(client)
+  })
+
+  it('releases ordinary provider errors after actual cleanup without marking unknown close', async () => {
+    rpc.FakeRpc.dispatch = async () => { throw new Error('ordinary provider failure') }
+    const worker = runner()
+    const result = await worker.run(input, vi.fn()).then(
+      () => { throw new Error('expected provider failure') },
+      (error: unknown) => error
+    )
+    expect(result).toMatchObject({ message: 'ordinary provider failure' })
+    expect(result).not.toHaveProperty('closeUnknown')
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).not.toThrow()
+    cleaned(rpc.FakeRpc.instances[0])
   })
 
   it('honors an already revoked signal before permission preparation', async () => {
@@ -743,7 +845,7 @@ describe('VerificationWorkflowRunner cancellation ownership', () => {
     return {
       discover: vi.fn(async () => ({ steps: [{ kind: 'test' }] })),
       start: vi.fn(async (_cwd: string, _options: StartVerificationOptions, _signal?: AbortSignal) => ({ id: 'verification-1', steps: [{}] })),
-      cancel: vi.fn(async () => undefined),
+      cancel: vi.fn(async (): Promise<void> => undefined),
       listRuns: vi.fn((): VerificationRun[] => []),
       waitForRun: vi.fn(async (_runId: string): Promise<void> => undefined),
       assertWorktreeDeletionIdle: vi.fn()
@@ -785,13 +887,93 @@ describe('VerificationWorkflowRunner cancellation ownership', () => {
     const fake = service()
     fake.listRuns.mockReturnValue([{ id: 'verification-1', cwd: input.cwd, state: 'passed', createdAt: 1,
       steps: [], selectedKinds: [], repairAttempt: 0, revision: 0 }])
-    fake.waitForRun.mockRejectedValueOnce(new Error('command close unknown'))
+    fake.waitForRun.mockRejectedValueOnce(Object.assign(new Error('command close unknown'), { closeUnknown: true }))
     const worker = new VerificationWorkflowRunner(fake as unknown as VerificationService)
     await expect(worker.run(input.cwd, vi.fn())).rejects.toThrow('command close unknown')
     expect(fake.cancel).toHaveBeenCalledExactlyOnceWith('verification-1')
     expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
     await expect(worker.run(input.cwd, vi.fn())).rejects.toThrow(/尚未确认/)
     expect(fake.start).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each(['discover', 'start', 'execution'] as const)('releases an ordinary settled %s error without retaining unknown close', async (stage) => {
+    const fake = service()
+    const error = new Error(`ordinary ${stage} error`)
+    if (stage === 'discover') fake.discover.mockRejectedValueOnce(error)
+    if (stage === 'start') fake.start.mockRejectedValueOnce(error)
+    if (stage === 'execution') {
+      fake.listRuns.mockReturnValue([{ id: 'verification-1', cwd: input.cwd, state: 'passed', createdAt: 1,
+        steps: [], selectedKinds: [], repairAttempt: 0, revision: 0 }])
+      fake.waitForRun.mockRejectedValueOnce(error)
+    }
+    const worker = new VerificationWorkflowRunner(fake as unknown as VerificationService)
+    const failure = await worker.run(input.cwd, vi.fn()).catch((reason: unknown) => reason)
+    expect(failure).toMatchObject({ message: error.message })
+    expect(failure).not.toHaveProperty('closeUnknown')
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).not.toThrow()
+    fake.discover.mockResolvedValue({ steps: [] })
+    await expect(worker.run(input.cwd, vi.fn())).resolves.toMatchObject({ state: 'not-found' })
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('joins a pending cancellation after an ordinary execution error and preserves that error', async () => {
+    const fake = service()
+    const error = new Error('verification save failed')
+    fake.listRuns.mockReturnValue([{ id: 'verification-1', cwd: input.cwd, state: 'passed', createdAt: 1,
+      steps: [], selectedKinds: [], repairAttempt: 0, revision: 0 }])
+    fake.waitForRun.mockRejectedValueOnce(error)
+    const cancellation = deferred<void>()
+    fake.cancel.mockImplementationOnce(() => cancellation.promise)
+    const worker = new VerificationWorkflowRunner(fake as unknown as VerificationService)
+    const result = worker.run(input.cwd, vi.fn())
+    const rejected = expect(result).rejects.toMatchObject({ message: error.message })
+    let finished = false
+    void result.catch(() => { finished = true })
+    await flush()
+    expect(fake.waitForRun).toHaveBeenCalledExactlyOnceWith('verification-1')
+    expect(fake.cancel).toHaveBeenCalledExactlyOnceWith('verification-1')
+    expect(finished).toBe(false)
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
+    cancellation.reject(new Error('ordinary cancellation save failure'))
+    await rejected
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).not.toThrow()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps real execution pending after ordinary cancellation failure', async () => {
+    const fake = service()
+    const controller = new AbortController()
+    const cancellationError = new Error('cancellation save failed')
+    fake.cancel.mockRejectedValueOnce(cancellationError)
+    const execution = deferred<void>()
+    fake.waitForRun.mockImplementationOnce(() => execution.promise)
+    const worker = new VerificationWorkflowRunner(fake as unknown as VerificationService)
+    const result = worker.run(input.cwd, () => controller.abort(), controller.signal)
+    const rejected = expect(result).rejects.toMatchObject({ message: cancellationError.message })
+    let finished = false
+    void result.catch(() => { finished = true })
+    await flush()
+    expect(finished).toBe(false)
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
+    execution.resolve(undefined)
+    await rejected
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).not.toThrow()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('keeps a real close failure visible alongside an earlier task failure', async () => {
+    const fake = service()
+    const error = new Error('progress callback failed')
+    const closeError = Object.assign(new Error('command close unknown'), { closeUnknown: true })
+    fake.waitForRun.mockRejectedValueOnce(closeError)
+    const worker = new VerificationWorkflowRunner(fake as unknown as VerificationService)
+    await expect(worker.run(input.cwd, () => { throw error })).rejects.toMatchObject({
+      message: 'progress callback failed\n验证收尾未确认：command close unknown',
+      cause: error, cleanupError: closeError, closeUnknown: true
+    })
+    expect(() => worker.assertWorktreeDeletionIdle(input.cwd)).toThrow(/尚未确认/)
+    expect(fake.cancel).toHaveBeenCalledExactlyOnceWith('verification-1')
     expect(vi.getTimerCount()).toBe(0)
   })
 

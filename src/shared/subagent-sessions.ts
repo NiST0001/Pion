@@ -1,14 +1,5 @@
 /** Display-only, memory-only child sessions. These IDs are not SDK history IDs. */
 export const SUBAGENT_SESSION_WIDGET_KEY = 'pion-private-subagent-session-v1'
-/** Private RPC request/ACK for display capacity, never user authorization. */
-export const SUBAGENT_SESSION_ADMISSION_TITLE = 'pion-private-subagent-admission-v1'
-export interface SubagentSessionAdmission {
-  version: 1
-  nonce: string
-  runtimeId: string
-  parentToolCallId: string
-  count: number
-}
 export const SUBAGENT_SESSION_RETENTION_MS = 30 * 60_000
 export const SUBAGENT_SESSION_MAX_ROWS = 200
 export const SUBAGENT_SESSION_MAX_CHARS = 64 * 1024

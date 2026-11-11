@@ -16,12 +16,11 @@ async function fixture(): Promise<{ root: string; path: string; store: ProviderV
   return { root, path, store: new ProviderVisibilityStore(path) }
 }
 
-it('shares the actual load promise and defaults to visible without saving a missing file', async () => {
+it('serializes loads and defaults to visible without saving a missing file', async () => {
   const { root, store } = await fixture()
-  const loading = store.load()
-  expect(store.load()).toBe(loading)
-  await loading
-  expect(store.load()).toBe(loading)
+  await Promise.all([store.load(), store.load()])
+  await store.load()
+  expect(store.getRevision()).toBe(1)
   expect(store.disabledProviderIds).toEqual([])
   const model = Object.freeze({ provider: 'openai', id: 'test-model' })
   const models = [model]
@@ -91,7 +90,7 @@ it.each([
   await writeFile(path, content)
   const loading = store.load()
   await expect(loading).rejects.toThrow()
-  expect(store.load()).toBe(loading)
+  await expect(store.load()).rejects.toThrow()
   await expect(store.setEnabled('openai', false)).rejects.toThrow()
   await expect(store.filterModels([{ provider: 'openai' }])).rejects.toThrow()
   await expect(store.projectProviders([{ id: 'openai' }])).rejects.toThrow()
@@ -108,9 +107,23 @@ it('rejects files over 64 KiB before parsing, accepts the exact bound, and block
   expect(await readFile(path, 'utf8')).toBe(content)
   await writeFile(path, content.slice(0, -1))
   await expect(store.setEnabled('openai', false)).rejects.toThrow('64 KiB')
+  await store.load()
+  expect(store.disabledProviderIds).toEqual([])
+  await store.setEnabled('openai', false)
   const fresh = new ProviderVisibilityStore(path)
   await fresh.load()
-  expect(fresh.disabledProviderIds).toEqual([])
+  expect(fresh.disabledProviderIds).toEqual(['openai'])
+})
+
+it('drains admitted operations during shutdown and rejects later work', async () => {
+  const { path, store } = await fixture()
+  const loading = store.load()
+  const changing = store.setEnabled('openai-codex', false)
+  const shutdown = store.shutdown()
+  await expect(store.load()).rejects.toThrow('closed')
+  await expect(store.setEnabled('openai', false)).rejects.toThrow('closed')
+  await Promise.all([loading, changing, shutdown])
+  expect(JSON.parse(await readFile(path, 'utf8')).disabledProviderIds).toEqual(['openai-codex'])
 })
 
 it('rejects invalid setter arguments before creating any files or normalizing IDs', async () => {
@@ -157,6 +170,23 @@ it('retains committed state/revision on write failure, cleans only its temp, and
   await store.setEnabled('anthropic', false)
   expect(store.disabledProviderIds).toEqual(['anthropic', 'openai'])
   expect(store.getRevision()).toBe(revision + 1)
+})
+
+it('checks the publication owner without changing the cached revision on a retired save', async () => {
+  const { root, path, store } = await fixture()
+  await store.setEnabled('openai', false)
+  const source = await readFile(path, 'utf8')
+  const revision = store.getRevision()
+  let checks = 0
+  await expect(store.setEnabled('anthropic', false, () => {
+    if (++checks === 3) throw new Error('retired owner')
+  })).rejects.toThrow('retired owner')
+  expect(store.getRevision()).toBe(revision)
+  expect(store.disabledProviderIds).toEqual(['openai'])
+  expect(await readFile(path, 'utf8')).toBe(source)
+  expect(await readdir(root)).toEqual(['pion-provider-visibility.json'])
+  await store.setEnabled('anthropic', false)
+  expect(store.disabledProviderIds).toEqual(['anthropic', 'openai'])
 })
 
 it('rejects non-file settings and changes only the explicitly supplied Pion file, not neighboring SDK fixtures', async () => {

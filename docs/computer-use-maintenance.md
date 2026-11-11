@@ -1,13 +1,19 @@
 # ComputerUse：开发期受控维护
 
 > **工具源码、定向模拟与类型检查通过；真实 prepare、用户整机重启后的 verify 与另行获准 finish 已成功。首轮旧 marker 已归档退役；后续隔离观察复验失败的新租约也已分别完成本轮真实 prepare、用户完整重启后的只读 verify 与单独批准的 finish，维护归档分别保留、不复用。未因此截图或判定旧观察/新输入验收通过。**
-> 本工具不是正常 Stop、Portal Session.Close 的替代品，不把旧失败追溯改记为 `stopped/released`。
+> 本工具仅用于显式维护退役；正常 Stop、Portal Session.Close 保留独立流程，旧失败保原结果，维护成功仅记为 `maintenance-retired`。
+
+## 当前协调范围与历史记录
+
+只读观察（`control:false`）仅持本进程租约，跨实例各自获得许可并选择 Portal 来源；Start/capture/Stop 全程跳过账户 marker 的 claim/release 与维护 FS 查询。`control:true` 的获准 Start 继续使用真实同账户持久 coordination、既有 marker 排他及 prepared/consumed 维护 guard，停止仍须所属真实收口和协调 release。
+
+此策略保留旧未知 marker、归档及维护完成记录原样，旧租约的停止/维护结论保持原结果。下方真实 prepare/verify/finish 与旧观察记录均归属当时版本；新只读跨实例并发策略尚无新实机验收。控制输入继续保现有排他准入。
 
 ## 一般运行不应进入整机重启维护
 
-新版每轮保留独占 Unix D-Bus socket 的双向关闭权：取消/失败后真实断开该客户端，等待原请求、watcher/PipeWire、连接引用、正常零码 helper/stdio 和解码全部结束，宿主可凭本次关联凭证正常 release。启动失败仍显示失败，正常收尾显示 stopping，不等于资源状态永久未知。此新路径已有源码和模拟/匿名 socket 回归，未真实桌面复验。
+每轮保留独占 Unix D-Bus socket 的双向关闭权：取消/失败后真实断开该客户端，等待原请求、watcher/PipeWire、连接引用、正常零码 helper/stdio 和解码全部结束，宿主可凭本次关联凭证结束本实例 scope；control 租约还须完成真实协调 release。启动失败仍显示失败，正常收尾显示 stopping，真实未知另行隔离。既有收尾证据见[实施说明](computer-use-implementation.md)，验收范围与上述新只读跨实例策略分别记录。
 
-下面的重启维护仅用于没有足够所属收尾凭证的遗留/异常租约，不是正常 Stop 或每次错误的默认步骤。它不为旧运行时补造新 receipt，也不是完整的跨进程崩溃恢复。本轮旧租约后来已通过另行获准的重启、只读 verify 与单独批准的 finish 独立退役；不是新源码追溯解锁，亦不是正常 release。后续观察/输入/模型仍需新许可。
+下面的重启维护仅用于缺少所属收尾凭证的遗留/异常账户 marker，包括旧版本观察留下的 marker 及 control marker。正常 Stop、普通错误沿所属本地收尾；维护另行授权，保留旧运行时原 receipt 与结果，完整跨进程崩溃恢复仍待验收。本轮旧租约后来已通过另行获准的重启、只读 verify 与单独批准的 finish 独立退役；不是新源码追溯解锁，亦不是正常 release。后续观察/输入/模型仍需新许可。
 
 ## 为什么已有一次重启仍不能自动恢复
 
@@ -22,7 +28,7 @@
 - 不适用于容器、网络 home、跨机器共享块设备、虚拟机共享目录、克隆/回滚或无法确认存储独占性的部署。文件系统类型/ID **不能证明**没有共享；`--local-only-storage` 是操作者对部署前提的明确确认，不是认证、旧关闭凭证或单独清锁授权。
 - 不用环境 HOME/XDG/userData/profile 分锁；不读取 SDK 配置、凭据或会话。不连接 Portal/PipeWire、截图、输入、模型、自动 Start 或重启系统服务。
 - **实现及模拟测试授权不等于执行真实 prepare/finish 或重启授权。** 实际操作前分别确认范围；完整重启由用户保存工作后手动执行，不能用重启 Pion、注销、容器重建或挂起/恢复替代。
-- 维护窗口内不要从其他实例启动观察，也不要运行/自动启动不认识维护门的旧观察版本。此机制仍是同账户合作协议，不是防恶意同 UID/管理员修改、坏 FS 或 OS 沙箱。
+- 维护窗口内暂停其他实例的 control Start，并停用仍以观察模式 claim 账户 marker、或未接入维护门的旧版本。新版只读观察跳过账户协调与维护 guard，继续独立许可、Portal 选源和本进程收尾。此机制仅覆盖同账户合作协议，恶意同 UID/管理员修改、坏 FS 及 OS 沙箱保护均超出其边界。
 
 ## 显式命令与顺序
 
@@ -54,17 +60,17 @@ node scripts/computer-use-maintenance.mjs finish --local-only-storage
 1. 再次核验环境及 prepared，一次性 exclusive 创建并持久收口 `maintenance.consumed.json`。跨进程并发只允许一个 finish 进入；consume 后失败不自动重试。
 2. 以不覆盖的 hardlink 将原 marker 保留为 `capture.retired.<id>.marker`，检查同 inode、内容和 link count；sync/全部 FD close 后，重新核对再 unlink 原 `capture.marker`。
 3. 持久写入独立 `maintenance.completed.<id>.json`，保存原维护记录与本次核验的 boot 代际，之后依序清理 prepared/consumed、sync 并实际关闭全部 FD。归档及完成记录不覆盖。
-4. 只有全部操作真实成功才返回 `maintenance-retired`。它表示受控维护退役，不表示旧 Portal Close 成功、旧实机测试通过、独立后台内部资源销毁或全桌面停止。之后的观察仍需重新授权并手动选择测试窗口。
+4. 只有全部操作真实成功才返回 `maintenance-retired`。它表示受控维护退役，不表示旧 Portal Close 成功、旧实机测试通过、独立后台内部资源销毁或全桌面停止。之后的新观察/控制仍须独立授权和 Portal 选源，控制另守账户排他。
 
 ## 错误、持槽与并发
 
-- 普通获准 Start 的 claim 在创建 capture marker 前检查两个固定维护 guard；任何内容、目录或 symlink 都阻止 Start，不读其内容。构造、getState 和无本实例租约 Stop 不因此探测 FS。
+- 仅 `control:true` 的获准 Start 在创建 capture marker 前检查两个固定维护 guard；任何内容、目录或 symlink 都阻止该控制 Start，不读其内容。只读观察全程跳过这些协调/维护 FS 查询；构造、getState 和无本实例租约 Stop 继续保纯缓存/本地状态。
 - 持续 pending 保持 pending；取消等待、超时和进程 exit 不代替 FD/stdio/请求实际 close。不自动重试、换路径、清文件或补建 marker。
 - prepare/finish 错误保留已出现的痕迹，并只给有界固定错误，不输出系统原文或私有元数据。
-- **不能承诺每种失败都保留 guard。** 与普通协调 release 相同，最后 unlink 成功后 sync/close 失败，路径可能已消失，另一个实例可能 claim。失败调用者仍必须报告未确认，不能冒称恢复成功、guard 必在或全局仍被隔离；也不能覆盖后继实例补锁。归档及已持久记录用于后续检查，不自动恢复副作用。
+- **最后 unlink 后失败可能已无 guard。** 与 control 的普通协调 release 相同，最后 unlink 成功后 sync/close 失败，路径可能已消失，另一个控制实例可能 claim。失败调用者仍须报告未确认，恢复结果、guard 是否仍在及全局隔离状态均保留为未知，并保后继实例真实所有权。归档及已持久记录用于后续检查，不自动恢复副作用。
 - inode/birthtime/文件系统 ID 不是防伪认证；克隆、回滚、共享存储和恶意同 UID/管理员更改不属于此受控本机维护边界。
 
-## 当前证据
+## 历史执行证据（当时版本，保原结果）
 
 - 纯协议、合成账户/内存 FS、模拟 stat child、CLI 路由及正常协调 guard 回归；不写真实 home 或临时截图。
 - Node 原生 TypeScript 模块导入、help、无存储确认时拒绝检查的 smoke 已验证；这些无副作用 smoke 本身不执行真实 inspect/prepare/verify/finish。实际 prepare 的单独授权及执行见下一条。

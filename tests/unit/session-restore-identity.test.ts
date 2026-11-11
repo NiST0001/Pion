@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { LiveSessionProjection } from '../../src/main/agent/live-session-state'
+import { LIVE_MAX_BYTES, LiveSessionProjection } from '../../src/main/agent/live-session-state'
 import { reducer } from '../../src/renderer/src/agent/reducer'
 import { entriesToTimeline } from '../../src/renderer/src/agent/timeline'
 import { initialState } from '../../src/renderer/src/agent/types'
 import type { AgentState, TimelineItem, ToolStateScope } from '../../src/renderer/src/agent/types'
+import { messageText } from '../../src/shared/types'
 import type { SessionInfo, WireEntry, WireEvent, WireEventInput, WireMessage } from '../../src/shared/types'
 
 const T = 1_780_000_000_000
@@ -416,6 +417,111 @@ describe('session restore identity across real RPC-shaped messages', () => {
     expect(JSON.stringify(fixture.manager.entries)).toBe(diskBefore)
   })
 
+  it.each(['partial', 'same-text prefix cache', 'longer prefix cache'] as const)('retains assistant field loss through live deltas (%s)', (source) => {
+    const fixture = new RpcFixture()
+    const filled = source !== 'partial'
+    const prefix = 'partial prefix'
+    const recovered = source === 'same-text prefix cache' ? prefix : `${prefix} recovered from a provisional cache`
+    const huge = 'x'.repeat(LIVE_MAX_BYTES)
+    fixture.emit({ type: 'agent_start' })
+    fixture.emit({ type: 'message_start', message: { role: 'assistant', timestamp: T, content: [] } })
+    fixture.emit({ type: 'message_update', usage: null, assistantMessageEvent: { type: 'text_delta', delta: prefix } })
+    fixture.emit({ type: 'message_update', usage: null, assistantMessageEvent: { type: 'thinking_delta', delta: 'complete reasoning' } })
+    fixture.emit({ type: 'message_update', usage: null, assistantMessageEvent: { type: 'text_delta', delta: huge } })
+    let state = acceptState(selectedState(), fixture)
+    const draft = assistants(state)[0]
+    expect(draft).toMatchObject({ text: prefix, thinking: 'complete reasoning', partialFields: ['text'], streaming: true })
+    expect(messageOf(state.session!.liveState!.events[0])._pionLiveTruncatedFields).toEqual(['text'])
+    if (filled) {
+      const { partialFields: _loss, ...prefixCache } = draft
+      state = restoreCache(state, [{ ...prefixCache, text: recovered }], fixture.projection.backendId)
+    }
+    expect(assistants(state)[0].text).toBe(filled ? recovered : prefix)
+    expect(assistants(state)[0].partialFields).toEqual(['text'])
+    const tail = ' live tail'
+    state = reducer(state, { type: 'event', event: fixture.emit({ type: 'message_update', usage: null,
+      assistantMessageEvent: { type: 'text_delta', delta: tail } }) })
+    state = acceptState(state, fixture)
+    expect(assistants(state)[0].text).toBe(`${filled ? recovered : prefix}${tail}`)
+    expect(assistants(state)[0].partialFields).toEqual(['text'])
+
+    const end = fixture.emit({ type: 'message_end', message: { role: 'assistant', timestamp: T,
+      content: [{ type: 'text', text: `${prefix} final ${huge}` }, { type: 'thinking', thinking: huge }], stopReason: 'stop' } })
+    const projected = fixture.session().liveState!.events.find((event) => event.type === 'message_end')!
+    const final = messageOf(projected)
+    expect(final._pionLiveTruncatedFields).toEqual(['text', 'thinking'])
+    expect(end._pionLive!.revision).toBeGreaterThan(state.liveSessionRevision!)
+    state = reducer(state, { type: 'event', event: { ...end, message: final } })
+    expect(assistants(state)).toEqual([expect.objectContaining({ id: draft.id, liveMessageId: draft.liveMessageId,
+      text: messageText(final), thinking: 'complete reasoning', streaming: false })])
+    expect(assistants(state)[0].partialFields).toEqual(['text'])
+    state = reducer(state, { type: 'event', event: { type: 'message_end', message: {
+      role: 'assistant', _pionLiveMessageId: draft.liveMessageId, timestamp: T, content: 'authoritative short final' } } })
+    expect(assistants(state)[0]).toMatchObject({ id: draft.id, text: 'authoritative short final', thinking: '', streaming: false })
+    expect(assistants(state)[0].partialFields).toBeUndefined()
+    state = reducer(state, { type: 'event', event: { type: 'message_end', message: {
+      role: 'assistant', _pionLiveMessageId: draft.liveMessageId, timestamp: T, content: [] } } })
+    expect(assistants(state)).toEqual([])
+  })
+
+  it('maps Main historical field loss before merging and clears it only from the full same-entry history', () => {
+    const fixture = new RpcFixture()
+    const turn = beginTurn(fixture)
+    turn.assistant.content = [{ type: 'text', text: 'complete answer' }, { type: 'thinking', thinking: 'complete reasoning' }]
+    const completed = finishTurn(fixture, turn)
+    const snapshot = fixture.session()
+    const end = snapshot.liveState!.events.find((event) => event.type === 'message_end' && messageOf(event).role === 'assistant')!
+    Object.assign(messageOf(end), { content: [{ type: 'text', text: 'complete' }, { type: 'thinking', thinking: 'complete' }],
+      _pionLiveEntryId: completed.assistantEntry.id, _pionLiveTruncatedFields: ['text', 'thinking'] })
+    let state = reducer(selectedState(), { type: 'session', session: snapshot })
+    const key = assistants(state)[0].id
+    for (const text of ['short', '']) {
+      const page = fixture.page([{ ...completed.assistantEntry, message: { ...turn.assistant,
+        content: text, _pionLiveTruncatedFields: ['text', 'thinking', 'outputText'] } }])
+      expect(page).toEqual([expect.objectContaining({ partialFields: ['text', 'thinking'] })])
+      state = reducer(state, { type: 'loadEntries', items: page, preserveToolState: scopeOf(state) })
+      state = reducer(state, { type: 'appendEntries', items: page })
+      expect(assistants(state)).toEqual([expect.objectContaining({ id: key, entryId: completed.assistantEntry.id,
+        text: 'complete', thinking: 'complete', partialFields: ['text', 'thinking'] })])
+    }
+    state = appendDisk(state, fixture)
+    expect(assistants(state)[0]).toMatchObject({ id: key, text: 'complete answer', thinking: 'complete reasoning' })
+    expect(assistants(state)[0].partialFields).toBeUndefined()
+    const placeholder = fixture.page([{ ...completed.assistantEntry, message: { ...turn.assistant,
+      content: `[输出过长，显示已省略]${'.'.repeat(100)}`, _pionLiveTruncatedFields: ['text', 'thinking'] } }])
+    state = reducer(state, { type: 'loadEntries', items: placeholder, preserveToolState: scopeOf(state) })
+    expect(assistants(state)[0]).toMatchObject({ id: key, text: 'complete answer', thinking: 'complete reasoning' })
+    expect(assistants(state)[0].partialFields).toBeUndefined()
+  })
+
+  it.each(['STATE first', 'cache first'] as const)('keeps a newer clipped background prefix on repeated visits (%s)', (order) => {
+    const fixture = new RpcFixture()
+    const turn = beginTurn(fixture)
+    const oldCache = jsonClone(fixture.liveState().timeline)
+    const suffix = ' continued in the background'
+    fixture.emit({ type: 'message_update', usage: null, assistantMessageEvent: { type: 'text_delta', delta: suffix } })
+    fixture.emit({ type: 'message_update', usage: null,
+      assistantMessageEvent: { type: 'text_delta', delta: 'x'.repeat(LIVE_MAX_BYTES) } })
+    let state = selectedState()
+    state = order === 'STATE first' ? acceptState(state, fixture)
+      : restoreCache(state, oldCache, fixture.projection.backendId)
+    const key = assistants(state)[0].id
+    for (let visit = 0; visit < 2; visit++) {
+      state = acceptState(restoreCache(state, oldCache, fixture.projection.backendId), fixture)
+      expect(assistants(state)).toEqual([expect.objectContaining({ id: key, text: `${turn.draft}${suffix}`,
+        streaming: true, partialFields: ['text'] })])
+    }
+    const tail = ' visible live tail'
+    state = reducer(state, { type: 'event', event: fixture.emit({ type: 'message_update', usage: null,
+      assistantMessageEvent: { type: 'text_delta', delta: tail } }) })
+    state = restoreCache(acceptState(state, fixture), oldCache, fixture.projection.backendId)
+    expect(assistants(state)[0]).toMatchObject({ id: key, text: `${turn.draft}${suffix}${tail}`, partialFields: ['text'] })
+    finishTurn(fixture, turn)
+    state = restoreCache(state, fixture.liveState().timeline, fixture.projection.backendId)
+    expect(assistants(state)[0]).toMatchObject({ id: key, text: messageText(turn.assistant), streaming: false })
+    expect(assistants(state)[0].partialFields).toBeUndefined()
+  })
+
   it.each([true, false])('fills only explicitly clipped snapshot fields from the full cache (marked: %s)', (marked) => {
     const { fixture, turn } = completedFixture()
     const cache = appendDisk(fixture.liveState(), fixture).timeline
@@ -430,9 +536,20 @@ describe('session restore identity across real RPC-shaped messages', () => {
     }
     let state = reducer(selectedState(), { type: 'session', session: snapshot })
     expect(assistants(state)[0].text).toBe('已经')
+    expect(assistants(state)[0].partialFields).toEqual(marked ? ['text'] : undefined)
+    if (marked) {
+      const identified = restoreCache(state, state.timeline.map((row) => row.kind === 'assistant'
+        ? { ...row, entryId: turn.assistantEntry.id } : row), fixture.projection.backendId)
+      expect(assistants(identified)[0].partialFields).toEqual(['text'])
+      const completed = appendDisk(identified, fixture)
+      expect(assistants(completed)[0]).toMatchObject({ id: assistants(state)[0].id,
+        entryId: turn.assistantEntry.id, text: '已经处理好了。' })
+      expect(assistants(completed)[0].partialFields).toBeUndefined()
+    }
     state = restoreCache(state, cache, fixture.projection.backendId)
     expect(assistants(state)).toEqual([expect.objectContaining({ entryId: turn.assistantEntry.id,
       text: marked ? '已经处理好了。' : '已经', streaming: false })])
+    expect(assistants(state)[0].partialFields).toBeUndefined()
     state = appendDisk(state, fixture)
     expect(assistants(state)).toHaveLength(1)
     expect(assistants(state)[0].text).toBe(marked ? '已经处理好了。' : '已经')

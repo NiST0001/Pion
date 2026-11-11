@@ -78,7 +78,6 @@ function mockApi() {
     copySession: vi.fn<PionApi['copySession']>(),
     switchSession: vi.fn<PionApi['switchSession']>(),
     compactNow: vi.fn<PionApi['compactNow']>().mockResolvedValue(undefined),
-    exportSessionHtml: vi.fn<PionApi['exportSessionHtml']>().mockResolvedValue('/wrong-legacy-export.html'),
     stopAgent: vi.fn<PionApi['stopAgent']>().mockResolvedValue(undefined),
     openTerminal: vi.fn<PionApi['openTerminal']>(),
     writeTerminal: vi.fn<PionApi['writeTerminal']>().mockResolvedValue(undefined)
@@ -524,7 +523,6 @@ describe('authoritative copy, statistics, export and bundled Pi metadata', () =>
     const h = harness()
     await execute(h, text)
     expect(h.api.exportSessionForCommand).toHaveBeenCalledExactlyOnceWith(target, path)
-    expect(h.api.exportSessionHtml).not.toHaveBeenCalled()
     expect(h.result.current.dialog?.text).toContain('已导出：/project/A/session.html')
     expect(h.result.current.dialog?.text).toContain('HTML 包含整棵会话树；JSONL 仅导出当前分支')
     expect(h.result.current.dialog?.text).toContain('敏感内容')

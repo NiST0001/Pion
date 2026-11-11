@@ -220,7 +220,7 @@ describe('AgentBridge branch deletion lifecycle', () => {
     }
   )
 
-  it('quarantines missing stdio close at the deadline and rejects a late close retry', async () => {
+  it('retains missing stdio close past the UI deadline and reclaims late real closure without replaying deletion', async () => {
     vi.useFakeTimers()
     const h = fixture()
     const started = deferred()
@@ -231,22 +231,28 @@ describe('AgentBridge branch deletion lifecycle', () => {
       h.child.closePipe(1)
       started.resolve()
     })
-    const deletion = expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow('Timed out waiting for Agent process exit and stdio close')
+    const deletion = h.bridge.deleteBranch(request, 7, h.idle)
+    // Observe immediately while advancing the UI deadline; assert the original rejection below.
+    void deletion.catch(() => undefined)
     try {
       await started.promise
       await vi.advanceTimersByTimeAsync(5_000)
-      await deletion
+      await expect(deletion).rejects.toThrow(/timed out|timeout/i)
       expect(h.backend.historyStopFailed).toBe(true)
       expect(h.fields.backendPool.get(h.backend.key)).toBe(h.backend)
       expect(h.fields.backendKeysBySessionPath.get(h.backend.sessionPath!)).toBe(h.backend.key)
       expect(h.fields.quarantinedSessionPaths.has(h.backend.sessionPath!)).toBe(true)
       expect(h.fields.unconfirmedStoppedWorktreeCwds.has(request.cwd)).toBe(true)
       expect(h.fields.branchDeletionInFlight).toBe(false)
-      h.child.closePipe(2)
       await expect(h.bridge.deleteBranch(request, 7, h.idle)).rejects.toThrow('旧Agent退出未确认')
+      h.child.closePipe(2)
+      await h.backend.historyStop!.promise
       expect(h.client.stop).toHaveBeenCalledTimes(1)
       expect(h.git).not.toHaveBeenCalled()
-      expect(h.backend.historyStopFailed).toBe(true)
+      expect(h.backend.historyStopFailed).toBe(false)
+      expect(h.fields.backendPool.get(h.backend.key)).toBeUndefined()
+      expect(h.fields.quarantinedSessionPaths.has(h.backend.sessionPath!)).toBe(false)
+      expect(h.fields.unconfirmedStoppedWorktreeCwds.has(request.cwd)).toBe(false)
       expect(h.child.listenerCount('exit')).toBe(0)
       expect(h.child.listenerCount('close')).toBe(0)
       expect(h.child.listenerCount('error')).toBe(0)

@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 import type { RpcClient } from '@earendil-works/pi-coding-agent'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { stopForHistory } from '../../src/main/agent/stop-for-history'
-import { stopWithProcessExit } from '../../src/main/process-exit'
+import { prepareProcessStart, stopWithProcessExit, stopWithProcessExitBarrier } from '../../src/main/process-exit'
 
 class MockChild extends EventEmitter {
   exitCode: number | null = null
@@ -146,20 +146,149 @@ describe.each([
     expectClean(child)
   })
 
-  it('times out on missing stdio close and never authorizes a late close', async () => {
+  it('keeps the real barrier after a stdio deadline and lets a retry observe late close', async () => {
     const child = new MockChild()
-    const { client, stop } = setup(child)
-    stop.mockImplementation(async () => { child.exit() })
+    const { client, stop, adapter } = setup(child)
+    stop.mockImplementation(async () => { child.exit(); adapter.process = null })
     const result = observe(stopForHistory(client))
+    const barrier = stopWithProcessExitBarrier(client, true)
+    const actual = observe(barrier)
     await vi.advanceTimersByTimeAsync(5000)
     await result.settled
-    expect(result.rejected).toHaveBeenCalledOnce()
-    expect(result.fulfilled).not.toHaveBeenCalled()
-    expectClean(child)
-    child.close()
+    expect(result.rejected).toHaveBeenCalledWith(expect.objectContaining({ closeUnknown: true }))
+    expectPending(actual)
+    expect(child.listenerCount('close')).toBe(1)
+    expect(child.listenerCount('error')).toBe(1)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(stopWithProcessExitBarrier(client, true)).toBe(barrier)
+    const retry = observe(stopForHistory(client))
     await vi.advanceTimersByTimeAsync(0)
+    expectPending(retry)
+    child.close()
+    await Promise.all([actual.settled, retry.settled])
+    expect(actual.fulfilled).toHaveBeenCalledOnce()
+    expect(retry.fulfilled).toHaveBeenCalledOnce()
     expect(result.fulfilled).not.toHaveBeenCalled()
     expect(stop).toHaveBeenCalledOnce()
+    expectClean(child)
+  })
+
+  it('creates a fresh barrier when the same client later owns a different child', async () => {
+    const child = new MockChild()
+    const { client, stop, adapter } = setup(child)
+    const first = stopWithProcessExitBarrier(client, true)
+    child.exit()
+    child.close()
+    await first
+    const nextChild = new MockChild()
+    adapter.process = nextChild
+    const next = stopWithProcessExitBarrier(client, true)
+    expect(next).not.toBe(first)
+    const actual = observe(next)
+    await vi.advanceTimersByTimeAsync(0)
+    expectPending(actual)
+    expect(stop).toHaveBeenCalledTimes(2)
+    nextChild.exit()
+    nextChild.close()
+    await actual.settled
+    expect(actual.fulfilled).toHaveBeenCalledOnce()
+    expectClean(child)
+    expectClean(nextChild)
+  })
+
+  it('retires an old null-handle receipt before reusing the client for another start', async () => {
+    const child = new MockChild()
+    const { client, stop, adapter } = setup(child)
+    stop.mockImplementation(async () => { child.exit(); child.close(); adapter.process = null })
+    await stopWithProcessExitBarrier(client, true)
+    prepareProcessStart(client)
+    await expect(stopForHistory(client)).rejects.toMatchObject({
+      message: 'Agent process handle missing after start; shutdown is unknown', closeUnknown: true
+    })
+    expect(stop).toHaveBeenCalledOnce()
+    expectClean(child)
+  })
+
+  it('retains a failed capture across later handles and never-started claims', async () => {
+    const { client, stop, adapter } = setup(null)
+    const failed = stopWithProcessExitBarrier(client, true)
+    await expect(failed).rejects.toMatchObject({
+      message: 'Agent process handle missing after start; shutdown is unknown', closeUnknown: true,
+      cause: expect.objectContaining({ message: 'Agent process handle missing after start; shutdown is unknown' })
+    })
+    expect(() => prepareProcessStart(client)).toThrow(/unconfirmed before start/)
+    adapter.process = new MockChild()
+    expect(stopWithProcessExitBarrier(client, true)).toBe(failed)
+    expect(stopWithProcessExitBarrier(client, false)).toBe(failed)
+    await expect(stopForHistory(client)).rejects.toMatchObject({ closeUnknown: true })
+    expect(() => prepareProcessStart(client)).toThrow(/unconfirmed before start/)
+    expect(stop).not.toHaveBeenCalled()
+    expectClean(adapter.process)
+  })
+
+  it.each(['pending', 'rejected'] as const)('preserves the old child identity when shutdown is %s', async (state) => {
+    const child = new MockChild()
+    const { client, stop, adapter } = setup(child)
+    const stopping = deferred()
+    stop.mockReturnValue(stopping.promise)
+    const original = observe(stopWithProcessExitBarrier(client, true))
+    await vi.advanceTimersByTimeAsync(0)
+    if (state === 'rejected') {
+      stopping.reject(new Error('SDK stop failed'))
+      await original.settled
+    }
+    expect(() => prepareProcessStart(client)).toThrow(/unconfirmed before start/)
+    const nextChild = new MockChild()
+    adapter.process = nextChild
+    await expect(stopWithProcessExitBarrier(client, true)).rejects.toMatchObject({
+      message: 'Agent process changed while shutdown is unconfirmed', closeUnknown: true
+    })
+    expect(stop).toHaveBeenCalledOnce()
+    if (state === 'pending') {
+      child.exit()
+      child.close()
+      stopping.resolve()
+      await original.settled
+      expect(original.rejected).toHaveBeenCalledWith(expect.objectContaining({
+        message: 'Agent process changed during SDK stop', closeUnknown: true
+      }))
+    }
+    expectClean(child)
+    expectClean(nextChild)
+  })
+
+  it('rejects a changed SDK handle before invoking stop on another child', async () => {
+    const child = new MockChild()
+    const { client, stop, adapter } = setup(child)
+    const barrier = stopWithProcessExitBarrier(client, true)
+    const nextChild = new MockChild()
+    adapter.process = nextChild
+    await expect(barrier).rejects.toMatchObject({ message: 'Agent process changed before SDK stop', closeUnknown: true })
+    expect(stop).not.toHaveBeenCalled()
+    expectClean(child)
+    expectClean(nextChild)
+  })
+
+  it('keeps repeated bounded waits independent while sharing one listener set and SDK stop', async () => {
+    const child = new MockChild()
+    const { client, stop } = setup(child)
+    const barrier = stopWithProcessExitBarrier(client, true)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = observe(stopForHistory(client))
+      await vi.advanceTimersByTimeAsync(5000)
+      await result.settled
+      expect(result.rejected).toHaveBeenCalledWith(expect.objectContaining({ closeUnknown: true }))
+      expect(child.listenerCount('exit')).toBe(1)
+      expect(child.listenerCount('close')).toBe(1)
+      expect(child.listenerCount('error')).toBe(1)
+      expect(vi.getTimerCount()).toBe(0)
+    }
+    child.exit()
+    child.close()
+    await barrier
+    expect(stop).toHaveBeenCalledOnce()
+    await expect(stopForHistory(client)).resolves.toBeUndefined()
+    expectClean(child)
   })
 
   it('rejects a null handle for an already-started writer without calling stop', async () => {
@@ -222,16 +351,24 @@ describe.each([
     await result.settled
     expect(result.fulfilled).not.toHaveBeenCalled()
     expect(result.rejected).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringMatching(/Timed out/) }))
-    expectClean(child)
+    const actual = observe(stopWithProcessExitBarrier(client, true))
+    expect(child.listenerCount('exit')).toBe(1)
     child.exit()
     await vi.advanceTimersByTimeAsync(0)
+    expectPending(actual)
+    child.close()
+    await actual.settled
+    expect(actual.fulfilled).toHaveBeenCalledOnce()
     expect(result.fulfilled).not.toHaveBeenCalled()
+    expect(stop).toHaveBeenCalledOnce()
+    expectClean(child)
   })
 
-  it.each([false, true])('bounds a hanging SDK stop even when actual exit=%s', async (exited) => {
+  it.each([false, true])('bounds a hanging SDK stop while preserving its real barrier even when actual exit=%s', async (exited) => {
     const child = new MockChild()
     const { client, stop } = setup(child)
-    stop.mockReturnValue(new Promise<void>(() => {}))
+    const stopping = deferred()
+    stop.mockReturnValue(stopping.promise)
     const result = observe(stopForHistory(client))
     await vi.advanceTimersByTimeAsync(0)
     if (exited) { child.exit(); child.close() }
@@ -239,16 +376,26 @@ describe.each([
     await result.settled
     expect(result.fulfilled).not.toHaveBeenCalled()
     expect(result.rejected).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringMatching(/Timed out/) }))
+    const actual = observe(stopWithProcessExitBarrier(client, true))
+    await vi.advanceTimersByTimeAsync(0)
+    expectPending(actual)
+    expect(child.listenerCount('error')).toBe(1)
+    if (!exited) { child.exit(); child.close() }
+    stopping.resolve()
+    await actual.settled
+    expect(actual.fulfilled).toHaveBeenCalledOnce()
+    expect(result.fulfilled).not.toHaveBeenCalled()
+    expect(stop).toHaveBeenCalledOnce()
     expectClean(child)
   })
 
   it.each(['throw', 'reject'] as const)('fails closed on SDK stop %s and cleans up without an exit', async (kind) => {
     const child = new MockChild()
     const { client, stop } = setup(child)
-    const error = new Error('SDK stop failed')
+    const error = Object.freeze(new Error('SDK stop failed'))
     if (kind === 'throw') stop.mockImplementation(() => { throw error })
     else stop.mockRejectedValue(error)
-    await expect(stopForHistory(client)).rejects.toBe(error)
+    await expect(stopForHistory(client)).rejects.toMatchObject({ message: error.message, cause: error, closeUnknown: true })
     expectClean(child)
   })
 
@@ -257,7 +404,7 @@ describe.each([
     const { client, stop } = setup(child)
     const error = new Error('SDK stop failed after exit')
     stop.mockImplementation(async () => { child.exit(); throw error })
-    await expect(stopForHistory(client)).rejects.toBe(error)
+    await expect(stopForHistory(client)).rejects.toMatchObject({ message: error.message, cause: error, closeUnknown: true })
     expectClean(child)
   })
 
@@ -276,9 +423,16 @@ describe.each([
       else await vi.advanceTimersByTimeAsync(5000)
       await result.settled
       expect(result.fulfilled).not.toHaveBeenCalled()
-      if (failure === 'error') expect(result.rejected).toHaveBeenCalledWith(error)
+      if (failure === 'error') expect(result.rejected).toHaveBeenCalledWith(expect.objectContaining({
+        message: error.message, cause: error, closeUnknown: true
+      }))
       else expect(result.rejected).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringMatching(/Timed out/) }))
-      expectClean(child)
+      if (failure === 'error') expectClean(child)
+      else {
+        expect(child.listenerCount('close')).toBe(1)
+        expect(child.listenerCount('error')).toBe(1)
+        expect(vi.getTimerCount()).toBe(0)
+      }
 
       stopping.reject(new Error('late SDK failure'))
       await vi.advanceTimersByTimeAsync(0)
@@ -303,7 +457,7 @@ describe.each([
       child.emit('error', error)
       return new Promise<void>(() => {})
     })
-    await expect(stopForHistory(client)).rejects.toBe(error)
+    await expect(stopForHistory(client)).rejects.toMatchObject({ message: error.message, cause: error, closeUnknown: true })
     expectClean(child)
   })
 
@@ -336,7 +490,7 @@ describe.each([
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it.each(['exit', 'timeout'] as const)('removes only its own child listeners after %s', async (outcome) => {
+  it.each(['exit', 'timeout'] as const)('removes only its own child listeners after real cleanup following %s', async (outcome) => {
     const child = new MockChild()
     const existingExit = vi.fn()
     const existingClose = vi.fn()
@@ -355,6 +509,14 @@ describe.each([
     await result.settled
     expect(result.fulfilled).toHaveBeenCalledTimes(outcome === 'exit' ? 1 : 0)
     expect(result.rejected).toHaveBeenCalledTimes(outcome === 'timeout' ? 1 : 0)
+    if (outcome === 'timeout') {
+      expect(child.listenerCount('exit')).toBe(2)
+      expect(child.listenerCount('close')).toBe(2)
+      expect(child.listenerCount('error')).toBe(2)
+      child.exit()
+      child.close()
+      await stopWithProcessExitBarrier(client, true)
+    }
     expect(child.listeners('exit')).toEqual([existingExit])
     expect(child.listeners('close')).toEqual([existingClose])
     expect(child.listeners('error')).toEqual([existingError])
@@ -411,16 +573,21 @@ describe('shared exit barrier with independently proven never-started client', (
     await vi.advanceTimersByTimeAsync(5000)
     await result.settled
     expect(result.rejected).toHaveBeenCalledOnce()
-    stopping.resolve()
+    const actual = observe(stopWithProcessExitBarrier(client, false))
     await vi.advanceTimersByTimeAsync(0)
+    expectPending(actual)
+    stopping.resolve()
+    await actual.settled
+    expect(actual.fulfilled).toHaveBeenCalledOnce()
     expect(result.fulfilled).not.toHaveBeenCalled()
     expect(stop).toHaveBeenCalledOnce()
+    await expect(stopWithProcessExit(client, true)).rejects.toThrow('shutdown is unknown')
   })
 
   it('propagates rejected SDK stop even without a child', async () => {
     const { client, stop } = setup(null)
     const error = new Error('never-started stop failed')
     stop.mockRejectedValue(error)
-    await expect(stopWithProcessExit(client, false)).rejects.toBe(error)
+    await expect(stopWithProcessExit(client, false)).rejects.toMatchObject({ message: error.message, cause: error, closeUnknown: true })
   })
 })

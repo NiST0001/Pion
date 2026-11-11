@@ -2,7 +2,6 @@ import {
   MCP_STATUS_STALE_MS,
   MCP_STATUS_WIDGET_KEY,
   mcpScopeString,
-  projectMcpStatusSnapshot,
   readMcpStatusNotice,
   unavailableMcpStatus
 } from '../../shared/mcp'
@@ -72,9 +71,11 @@ export function cacheMcpStatusWidget(backend: BackendRecord, event: McpStatusWid
     retiredRuntimeIds.push(previous.runtimeId)
   }
   const scope = mcpBackendScope(backend)
-  const snapshot = notice
-    ? projectMcpStatusSnapshot({ ...notice, ...scope, revision, receivedAt: now })!
-    : unknownMcpStatus('invalid-notice', scope, revision, now)
+  let snapshot = unknownMcpStatus('invalid-notice', scope, revision, now)
+  if (notice) {
+    const { version: _version, ...status } = notice
+    snapshot = { ...status, ...scope, revision, receivedAt: now }
+  }
   backend.mcpStatus = {
     client: backend.client,
     runtimeId: notice?.runtimeId ?? previous?.runtimeId,
@@ -100,7 +101,6 @@ export function readCachedMcpStatus(backend: BackendRecord, elapsedNow = perform
     cache.expired = true
     return unknownMcpStatus('stale-status', scope, cache.snapshot.revision, cache.snapshot.receivedAt)
   }
-  // The shared projection allocates server rows and strips any unknown fields.
-  return projectMcpStatusSnapshot(cache.snapshot)
-    ?? unknownMcpStatus('invalid-notice', scope, cache.snapshot.revision, cache.snapshot.receivedAt)
+  // The private notice was normalized on receipt; readers need only a copy.
+  return { ...cache.snapshot, servers: cache.snapshot.servers.map((server) => ({ ...server })) }
 }

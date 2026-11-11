@@ -394,7 +394,7 @@ export function PluginStoreModal({
             )}
             {catalogError && displayPackages.length > 0 && (
               <div className="plugin-store-notice plugin-store-warning">
-                官方目录暂时无法加载；仍可管理本机已安装插件。
+                {catalogError}；{packages.length > 0 ? '保留上次加载的目录。' : '仍可管理本机已安装插件。'}
               </div>
             )}
             {!catalogLoading && filteredPackages.length === 0 && (

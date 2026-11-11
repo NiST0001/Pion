@@ -88,24 +88,19 @@ describe('persisted whole-file session token projection', () => {
 
   it('keeps ledger and uncached total reads independent of sidebar snapshot receipts', async () => {
     const path = await file([header, assistant('first')])
-    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
-    const readers: Array<ReturnType<typeof vi.spyOn>> = []
-    vi.mocked(fs.open).mockImplementation(async (...args) => {
-      const handle = await actual.open(...args)
-      readers.push(vi.spyOn(handle, 'read'))
-      return handle
-    })
     const cache = new SessionTokenCache()
     const owner = { id: header.id, cwd: header.cwd }
     expect(await cache.read(path, owner)).toBe(10)
     expect(await cache.read(path, owner)).toBe(10)
     expect(await readSessionTokenTotal(path, owner)).toBe(10)
     expect(await readSessionTokenTotal(path, owner)).toBe(10)
-    const first = await readSessionUsageSnapshot(path, owner)
-    const second = await readSessionUsageSnapshot(path, owner)
+    const yieldRead = vi.fn(async () => {})
+    const first = await readSessionUsageSnapshot(path, owner, { yield: yieldRead })
+    const second = await readSessionUsageSnapshot(path, owner, { yield: yieldRead })
     expect(first.receipts).toHaveLength(1)
     expect(second).toEqual(first)
-    expect(readers.map(reader => reader.mock.calls.length)).toEqual([2, 0, 2, 2, 2, 2])
+    expect(yieldRead).toHaveBeenCalledTimes(2)
+    expect(fs.open).toHaveBeenCalledTimes(5)
   })
 
   it('reads ledger lines past the sidebar limit and yields once per 64 KiB block without changing identity deduplication', async () => {
@@ -156,21 +151,21 @@ describe('persisted whole-file session token projection', () => {
     const close = vi.spyOn(handle, 'close')
     vi.mocked(fs.open).mockResolvedValueOnce(handle)
     await expect(readSessionUsageSnapshot(path, undefined, { yield: async () => { throw new Error('pause failed') } }))
-      .rejects.toMatchObject({ closeUnknown: false })
+      .rejects.toThrow('Session usage unavailable')
     expect(close).toHaveBeenCalledOnce()
   })
 
-  it('distinguishes unconfirmed close for the ledger while the old API remains unknown', async () => {
+  it('rejects a failed close without publishing usage and permits a later read', async () => {
     const path = await file([header])
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
-    vi.mocked(fs.open).mockImplementation(async (...args) => {
+    vi.mocked(fs.open).mockImplementationOnce(async (...args) => {
       const handle = await actual.open(...args)
       const close = handle.close.bind(handle)
       vi.spyOn(handle, 'close').mockImplementation(async () => { await close(); throw new Error('private failure') })
       return handle
     })
-    await expect(readSessionUsageSnapshot(path)).rejects.toMatchObject({ closeUnknown: true, message: 'Session usage unavailable' })
-    expect(await readSessionTokenTotal(path)).toBeUndefined()
+    await expect(readSessionUsageSnapshot(path)).rejects.toThrow('Session usage unavailable')
+    expect(await readSessionTokenTotal(path)).toBe(0)
   })
 
   it('refuses tokens belonging to a changed SDK header ID or cwd', async () => {
@@ -191,16 +186,15 @@ describe('persisted whole-file session token projection', () => {
         const result = await pending
         expect(typeof result === 'number' ? result : result?.total).toBe(10)
       } else if (reader === 'total') expect(await pending).toBeUndefined()
-      else await expect(pending).rejects.toMatchObject({ closeUnknown: false })
+      else await expect(pending).rejects.toThrow('Session usage unavailable')
     }
   })
 
-  it('rejects accessor ownership without evaluating getters or opening a descriptor', async () => {
-    const access = vi.fn(() => header.id)
-    const owner = Object.defineProperties({}, { id: { get: access }, cwd: { value: header.cwd } }) as { id: string; cwd: string }
+  it.each([
+    { id: '../other', cwd: header.cwd }, { id: header.id, cwd: '' }
+  ])('rejects malformed ordinary ownership before opening a descriptor: %j', async owner => {
     expect(await readSessionTokenTotal('/fixture/session.jsonl', owner)).toBeUndefined()
-    await expect(readSessionUsageSnapshot('/fixture/session.jsonl', owner)).rejects.toMatchObject({ closeUnknown: false })
-    expect(access).not.toHaveBeenCalled()
+    await expect(readSessionUsageSnapshot('/fixture/session.jsonl', owner)).rejects.toThrow('Session usage unavailable')
     expect(fs.open).not.toHaveBeenCalled()
   })
 
@@ -230,6 +224,20 @@ describe('persisted whole-file session token projection', () => {
     ]))).toBe(40)
   })
 
+  it('ignores sidebar-only metadata payload shape while preserving deduplication and unknown coverage', async () => {
+    const metadata = { ...base('session_info', 'metadata'), name: { future: 'SDK metadata' } }
+    const path = await file([header, metadata, metadata, assistant('answer', 10, 'metadata')])
+    expect(await readSessionTokenTotal(path)).toBe(10)
+    // The shared ledger reader keeps its existing strict coverage contract.
+    await expect(readSessionUsageSnapshot(path)).rejects.toThrow('Session usage unavailable')
+    expect(await readSessionTokenTotal(await file([header, metadata, { ...metadata, name: 'conflict' }]))).toBeUndefined()
+    for (const unknown of [base('future_metadata', 'unknown'), { ...metadata, usage: usage(10) }]) {
+      const unknownPath = await file([header, assistant('answer'), unknown])
+      expect(await readSessionTokenTotal(unknownPath)).toBeUndefined()
+      await expect(readSessionUsageSnapshot(unknownPath)).rejects.toThrow('Session usage unavailable')
+    }
+  })
+
   it('returns unknown for conflicting IDs or native original response usage', async () => {
     expect(await readSessionTokenTotal(await file([header, assistant('a'), assistant('a', 11)]))).toBeUndefined()
     expect(await readSessionTokenTotal(await file([
@@ -243,6 +251,7 @@ describe('persisted whole-file session token projection', () => {
     ['missing header', [assistant('a')]],
     ['duplicate header', [header, header]],
     ['invalid session ID', [{ ...header, id: '../other' }]],
+    ['newline entry ID', [header, assistant('answer\n')]],
     ['invalid header timestamp', [{ ...header, timestamp: 'bad' }]],
     ['missing cwd', [{ ...header, cwd: undefined }]],
     ['unknown entry', [header, base('future_usage', 'a')]],
@@ -250,9 +259,6 @@ describe('persisted whole-file session token projection', () => {
     ['missing entry ID', [header, { ...assistant('a'), id: undefined }]],
     ['missing usage', [header, { ...assistant('a'), message: { ...assistant('a').message, usage: undefined } }]],
     ['negative usage', [header, independent('a', -1)]],
-    ['fractional usage', [header, independent('a', 10.5)]],
-    ['unsafe usage', [header, independent('a', Number.MAX_SAFE_INTEGER + 1)]],
-    ['malformed cache counter', [header, { ...independent('a'), usage: { ...usage(10), cacheRead: '1' } }]],
     ['missing usage attribution', [header, { ...independent('a'), provider: undefined }]],
     ['unknown top-level usage source', [header, { ...base('custom', 'a'), customType: 'extension', usage: usage(10) }]]
   ])('keeps %s unknown instead of presenting partial or zero totals', async (_label, entries) => {

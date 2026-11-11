@@ -15,6 +15,7 @@ import { useAgentRunActions } from './agent/useAgentRunActions'
 import { useAgentSessionActions } from './agent/useAgentSessionActions'
 import { useAgentSettingsActions } from './agent/useAgentSettingsActions'
 import { initialState } from '../agent/types'
+import type { SessionCommandTarget } from '../../../shared/slash-command-protocol'
 
 export function useAgent() {
   const [state, dispatch] = useReducer(reducer, initialState)
@@ -68,6 +69,26 @@ export function useAgent() {
         && (current.state.liveSessionBackendId ?? current.state.session?.liveState?.backendId) === backendId
     }
   }, [api, selectionRef])
+  const captureSessionCommand = useCallback(() => {
+    const { api: currentApi, state: current } = modelScope.current
+    const selected = selectionRef.current
+    const isCurrentIntent = captureSelectionIntent()
+    const isCurrentSelection = captureModelSelection()
+    const isSelected = () => isCurrentIntent() && isCurrentSelection()
+    const { cwd, phase } = current.status
+    const session = current.session
+    if (!api || currentApi !== api || !isSelected() || phase !== 'running' || !cwd || !session?.sessionId
+      || selected.cwd !== cwd || selected.sessionId !== session.sessionId
+      || selected.ownerPath !== session.sessionFile || selected.sessionPath !== session.sessionFile
+      || timelineOwnerPath.current !== session.sessionFile) {
+      throw new Error('请等待所选会话后端就绪')
+    }
+    const backendId = current.liveSessionBackendId ?? session.liveState?.backendId
+    const target: SessionCommandTarget = { cwd, sessionId: session.sessionId,
+      ...(session.sessionFile ? { sessionPath: session.sessionFile } : {}),
+      ...(backendId ? { backendId } : {}) }
+    return { target, isSelected }
+  }, [api, captureModelSelection, captureSelectionIntent, selectionRef, timelineOwnerPath])
   const reloadTimelineAfterDelete = useCallback(() => reloadTimeline(undefined, false, true), [reloadTimeline])
   const captureDeletionSelection = useCallback(() => {
     const selected = { ...selectionRef.current }
@@ -278,6 +299,7 @@ export function useAgent() {
     setFollowUpMode
   } = useAgentSettingsActions({
     api,
+    captureSessionCommand,
     timelineOwnerPath,
     reloadTimeline,
     refreshHistoryIndex

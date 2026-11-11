@@ -179,29 +179,21 @@ export async function readCapabilityResources(options: ReadCapabilityResourcesOp
     } catch { notices.add(READ_NOTICE) }
   } else notices.add('当前 SDK 版本尚未核对只读资源解析；包和扩展目录保持未知。')
 
-  // SDK 1.4.0's object-form package filters fall back to convention directories
-  // for an omitted/empty manifest field. A preference must NEVER widen a package
-  // manifest. The SDK already applies nonempty manifest patterns/exclusions.
-  const manifests = new Map<string, unknown>()
-  for (const type of RESOURCE_TYPES) resources[type] = resources[type].filter((resource) => {
-    const root = resource.metadata.packageRoot
-    if (resource.metadata.origin !== 'package' || !root) return true
-    try {
-      if (!manifests.has(root)) manifests.set(root, readJson(join(root, 'package.json')))
-      const pkg = manifests.get(root)
-      if (!record(pkg) || !record(pkg.pi)) return true
-      const entries = pkg.pi[type]
-      return Array.isArray(entries) && entries.length > 0 && entries.every((entry) => typeof entry === 'string')
-    } catch { notices.add(READ_NOTICE); return false }
-  })
-
+  // The audited SDK resolver owns manifest patterns, object-form package
+  // filters and project deltas, including its convention-directory fallback.
+  // Capability preferences only select among those resolved resources.
   const raw = new Map<string, CapabilityItem>()
   const projected = new Map<string, CapabilityItem>()
-  const add = (item: CapabilityItem): CapabilityItem | undefined => {
-    if (raw.has(item.id)) return projected.get(item.id)
-    if (raw.size >= MAX_ITEMS) { notices.add('能力目录已达到显示上限，后续项未枚举。'); return undefined }
-    raw.set(item.id, item)
+  const add = (item: CapabilityItem): CapabilityItem => {
+    const existing = projected.get(item.id)
+    if (existing) return existing
     const desired = { ...item, enabled: capabilityEnabled(preferences, item.id, item.kind, item.enabled) }
+    // Display capacity never truncates the private loader selection.
+    if (raw.size >= MAX_ITEMS) {
+      notices.add('能力目录已达到显示上限，后续条目已省略；资源加载仍按完整集合筛选。')
+      return desired
+    }
+    raw.set(item.id, item)
     projected.set(item.id, desired)
     return desired
   }
@@ -209,7 +201,7 @@ export async function readCapabilityResources(options: ReadCapabilityResourcesOp
   const extensionPaths: string[] = []
   for (const resource of resources.extensions) {
     const item = add(extensionItem(resource))
-    if (item?.enabled && item.available) extensionPaths.push(resource.path)
+    if (item.enabled && item.available) extensionPaths.push(resource.path)
   }
   for (const [name, path] of [['codemode', 'builtin:codemode'], ['tool_search', 'builtin:tool-search']]) {
     if (extensionPaths.includes(path)) continue
@@ -229,7 +221,7 @@ export async function readCapabilityResources(options: ReadCapabilityResourcesOp
           description: skill.description.slice(0, 1024), origin: resource.metadata.scope === 'project' ? 'project' : 'user',
           enabled: resource.enabled, available: true
         })
-        if (!item?.enabled) continue
+        if (!item.enabled) continue
         if (skillNames.has(skill.name)) {
           item.available = false
           item.unavailableReason = '同名 Skill 已由更高优先级的选中资源提供。'

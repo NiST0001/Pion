@@ -157,13 +157,13 @@ async function excludeWorktreeDirectory(root: string, directoryName: ProjectWork
   const maxBytes = 1024n * 1024n
   const invalidFile = () => new Error('Git 本地排除文件不是稳定的普通文件')
   const sameSnapshot = (actual: BigIntStats, expected: BigIntStats): boolean =>
-    actual.isFile() && !actual.isSymbolicLink() && actual.nlink === 1n
+    actual.isFile() && actual.nlink === expected.nlink
     && actual.dev === expected.dev && actual.ino === expected.ino && actual.size === expected.size
     && actual.mtimeNs === expected.mtimeNs && actual.ctimeNs === expected.ctimeNs
   let existing: BigIntStats | undefined
   try {
     existing = await lstat(excludePath, { bigint: true })
-    if (!sameSnapshot(existing, existing)) throw invalidFile()
+    if (!existing.isFile()) throw invalidFile()
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
@@ -180,7 +180,7 @@ async function excludeWorktreeDirectory(root: string, directoryName: ProjectWork
       if (!sameSnapshot(await file.stat({ bigint: true }), snapshot)
         || !sameSnapshot(await lstat(excludePath, { bigint: true }), snapshot)) throw invalidFile()
     }
-    await checkSnapshot()
+    if (!sameSnapshot(await lstat(excludePath, { bigint: true }), snapshot)) throw invalidFile()
     if (snapshot.size < 0n || snapshot.size > maxBytes) throw new Error('Git 本地排除文件过大')
     const buffer = Buffer.alloc(Number(snapshot.size) + 1)
     let length = 0
@@ -194,13 +194,14 @@ async function excludeWorktreeDirectory(root: string, directoryName: ProjectWork
     const content = buffer.subarray(0, length).toString('utf8')
     const rule = `/${directoryName}/`
     if (content.split(/\r?\n/).includes(rule)) return
+    if (snapshot.nlink !== 1n) throw invalidFile()
     const eol = content.includes('\r\n') ? '\r\n' : '\n'
     const addition = Buffer.from(`${content && !content.endsWith('\n') ? eol : ''}${rule}${eol}`, 'utf8')
     if (snapshot.size + BigInt(addition.length) > maxBytes) throw new Error('Git 本地排除文件过大')
     const { bytesWritten } = await file.write(addition, 0, addition.length, null)
     if (bytesWritten !== addition.length) throw invalidFile()
     const updated = await file.stat({ bigint: true })
-    if (updated.dev !== snapshot.dev || updated.ino !== snapshot.ino
+    if (updated.nlink !== 1n || updated.dev !== snapshot.dev || updated.ino !== snapshot.ino
       || updated.size !== snapshot.size + BigInt(addition.length)
       || !sameSnapshot(await lstat(excludePath, { bigint: true }), updated)) throw invalidFile()
   } finally {

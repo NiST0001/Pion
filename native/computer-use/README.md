@@ -1,7 +1,12 @@
-# Linux Wayland ScreenCast helper — core local observation acceptance verified
+# Linux Wayland ScreenCast helper — implementation and historical acceptance
 
 Self-written code is SPDX MIT. This is **not a release or proof of desktop
-compatibility**. Both historical unknown leases were independently retired by
+compatibility**. The scope5→10 evidence below belongs to the former account-wide
+observation exclusion and GPU behavior. Read-only cross-instance concurrency,
+required accounting, accounting/closure separation and the revised GPU initialization
+failure branches have no new live acceptance. This sync only reads source and edits
+documentation; it runs no tests, types, build, GUI, auth or model requests.
+Both historical unknown leases were independently retired by
 separately authorized boot-bound prepare/verify/finish, with distinct archives;
 neither remains held/prepared and neither gained a retrospective ordinary close receipt.
 Later new leases have actually reached stopped/released, actualPending=false after
@@ -50,6 +55,10 @@ feature, whole-desktop stop or independent driver/compositor hardware destructio
 
 ## Implementation
 
+- One host service retains one local lease. Read-only observation skips account-wide
+  marker claim/release and maintenance IO; separate instances keep independent
+  source selection, consent and helpers. Control retains the existing exclusive
+  account marker and maintenance guards. Input queueing/handoff remains future work.
 - Passive host constructor, explicit absolute executable, private inherited stdio
   (`PCU1`: magic + big-endian JSON length + binary length). No PATH search, shell,
   default PipeWire server or Screenshot/X11/display fallback. Input is a separately
@@ -127,13 +136,15 @@ feature, whole-desktop stop or independent driver/compositor hardware destructio
   pointer/size; partial, duplicate or malformed crops and VideoDamage are rejected,
   never silently cropped or treated as a complete fresh frame.
 - Each capture supplies smaller remaining limits, checked against open limits.
-  Pixel and conservative uncompressed PNG-size admission precede RGB allocation;
-  filter-byte admission uses transformed output height, including odd rotations;
-  the bounded writer additionally enforces remaining PNG bytes. This conservative
-  MVP can reject highly compressible images that would fit the encoded budget.
+  Layout, pixel and raw-memory admission precede RGB allocation; transformed
+  raster/filter-byte bounds remain independent. `BoundedOutput` enforces the actual
+  encoded PNG byte limit, without the former uncompressed PNG-size estimate.
   Actual generated frames are returned despite later cancellation/revocation for
-  host accounting before delivery denial. Error/unaccountable frames quarantine
-  the driver, even if resource close later succeeds; no automatic recapture.
+  host accounting before delivery denial. Byte/pixel counters include only
+  actually confirmed frames. Unknown image statistics retain the consumed attempt,
+  prohibit more capture/act in that scope, and initiate cleanup. Actual resource closure is
+  checked independently: confirmed cleanup may end the scope while missing byte/
+  pixel statistics remain unknown. No invented no-frame receipt or automatic recapture.
 - Stop drains admitted capture (ordinary frame wait is bounded; unknown GPU
   completion deliberately remains held), closes GPU before PipeWire teardown,
   disconnects and actually joins its worker even when sending Stop fails (drops its sole command sender, keeps
@@ -147,8 +158,10 @@ feature, whole-desktop stop or independent driver/compositor hardware destructio
   to closing sessions made by that client, not destruction of independent server
   internals. Only the parent's correlated close may then get
   closeReceipt:{version:1,boundary:'client-disconnected'} on closed. Host still
-  needs normal zero process/stdio close, all actual replies and decodes, no poison
-  or unaccountable frames, then verified coordination release. An earlier open
+  needs normal zero process/stdio close, all actual replies and decodes, no poison,
+  then verified coordination release for control. Missing image statistics remain
+  an operation/accounting failure, separate from a successful resource-close receipt.
+  An earlier open
   failure stays an operation failure, not permanent resource quarantine when
   cleanup is positively confirmed. Old unknown markers gain no retrospective receipt.
   A separate Node 24 development maintenance CLI now has source/mock coverage for
@@ -165,7 +178,8 @@ feature, whole-desktop stop or independent driver/compositor hardware destructio
   Their confirmed cleanup is ordinary stopped/released, not another maintenance
   operation; the historical failures are not rewritten.
   The CLI does not run on startup or connect Portal. See [controlled maintenance](../../docs/computer-use-maintenance.md).
-- The host explicitly launches with --client-close-receipt-v1. Missing, duplicate
+- The host explicitly launches with --client-close-receipt-v1 and mandatory
+  --capture-accounting-v1. Missing, duplicate
   or unknown flags refuse hello with a legacy bare error, prohibit Portal/client
   creation and permit zero-resource bare close; old hosts never receive unknown
   new fields after a successful capture. This is capability negotiation, not
@@ -176,21 +190,22 @@ feature, whole-desktop stop or independent driver/compositor hardware destructio
   the owning service retains full bounded PNG validation before external use.
 - Development-only `PION_COMPUTER_USE_DEVELOPMENT_STAGE_TRACE=1` enables fixed
   `PCU_STAGE` enums; it is off by default and does not change PCU1 or the normal
-  UI's four diagnostic slots. Limited PipeWire stage/error classification helps
-  investigation, never forwards raw stderr/errors, titles, URIs, node identifiers
-  or pixels, and is not a stop receipt. No niri configuration changes or source
+  UI's four diagnostic slots. Limited PipeWire stage/error classification remains;
+  the producer-format probe and its dedicated diagnostics have been removed.
+  Traces never forward raw stderr/errors, titles, URIs, node identifiers
+  or pixels; they provide no stop receipt. No niri configuration changes or source
   auto-selection are used; one-off focus-window help only made the chooser visible
   to the human, not a product dependency.
 
-## Explicit EGL/DMA-BUF route (separately approved, one live local observation cycle)
+## Explicit EGL/DMA-BUF route (separately approved, historical live cycle)
 
 - Default remains CPU. The host requires non-packaged execution and exact
   `PION_COMPUTER_USE_DMABUF_DEVELOPMENT=1`; optional status
   `dmaBufDevelopmentEnabled` is pure configuration, absent means false, not GPU
   capability or capture/control/upload consent. Ordered argv is close, optional
-  input, optional accounting, optional DMA: eight combinations, each flag once,
+  input, required accounting, optional DMA: four combinations, each flag once,
   `--dmabuf-readback-v1` strictly last. Only DMA requesters get hello
-  `dmaBufReadbackVersion:1`; old combinations gain no DMA field. Missing feature
+  `dmaBufReadbackVersion:1`; non-DMA combinations gain no DMA field. Missing feature
   fails before open/Portal/GPU resources, with actual owned cleanup still required;
   no protocol/mode fallback, automatic restart or retry. JSON cannot enable DMA.
 - `src/gpu_readback.rs` lazy-dlopens only fixed `libEGL.so.1` / `libGLESv2.so.2` on
@@ -219,8 +234,12 @@ feature, whole-desktop stop or independent driver/compositor hardware destructio
   length. The matching fixture preserves bounded raster/EGL validation and normal
   span checks for other layouts. Actual producer n_datas==num_planes; four unused
   slots have not been established, so every supplied plane is checked, none guessed away.
-- The independent P1 review fix makes GL/EGL context loss and unknown synchronization
-  sticky: later NO_ERROR or successful destroy/terminate cannot clear them.
+- GL/EGL context loss or failed synchronization latches unknown completion only
+  while a borrowed buffer is pending. Later NO_ERROR or successful destroy/terminate
+  preserves that uncertainty. Initialization/pre-borrow failures and context loss
+  after confirmed synchronization still perform actual handle teardown; no extra
+  unconditional Finish is needed without borrowed work. Failed teardown still
+  forbids a clean ACK.
   Completion proof is separate from handle cleanup. Only actual synchronization
   permits PW buffer return; GPU close precedes PW teardown. Unknown completion
   **parks the actual worker**, retaining buffer, Stream/Core/FD, GPU objects/libraries
@@ -268,8 +287,8 @@ feature, whole-desktop stop or independent driver/compositor hardware destructio
   or events injected during discovery. The abandoned VM was never booted.
 - Input requires the ordered additional --wayland-virtual-input-v1 flag, hello
   inputProtocolVersion:1, and explicit open control:true/captureScope:display.
-  Flags are negotiation, not authentication/consent. Single-flag window mode stays
-  unchanged; old peers fail closed without automatic fallback.
+  Flags are negotiation, not authentication/consent. Window mode still uses types=2
+  and now requires close/accounting flags; old peers fail closed without automatic fallback.
 - Explicit monitor selection requires source_type=1 plus exact signed (ii)
   position/size, a unique complete xdg_output geometry, normal transform, and a
   unique keyboard+pointer seat. Missing/ambiguous mappings fail before input;
@@ -302,7 +321,11 @@ and actual factory/client/backend/root/run/session/document provenance. Its obse
 currently selects only a window; act cannot silently upgrade it to display/control
 and fails closed without trusted focus/protected-target/physical-takeover guards.
 Deny, plan, YOLO, explicit tool subsets and nested/subagent isolation remain real
-execution gates. Input has its own `PION_COMPUTER_USE_INPUT_DEVELOPMENT=1` gate and
+execution gates. For a verified SDK model-only root with its exact `<sdk:tool-name>`
+source, the generic gate performs deny/checkpoint checks only; Main verifies actual
+factory/root provenance and provides the sole capture/upload/retention confirmation.
+Unknown or extension-owned same-name tools retain ordinary confirmation.
+Input has its own `PION_COMPUTER_USE_INPUT_DEVELOPMENT=1` gate and
 independent display/control consent, not implied by either Portal capture or Agent enablement.
 
 Only the actual physical openai-codex/openai-codex-responses model with image input
@@ -347,29 +370,36 @@ SDK-image/model/input result.
 
 ## Confirmed negative capture accounting
 
-The host driver additionally requests --capture-accounting-v1 (ordered after the
+The host driver requires --capture-accounting-v1 (ordered after the
 optional input flag) and requires hello captureAccountingVersion:1 before open.
-Peers not requesting accounting never receive accounting fields; peers not
-requesting DMA never receive its hello field. Accounting precedes the optional
-final DMA flag; absent negotiation is never silently retried. Only an actual worker oneshot negative result can produce a
+Valid hello always includes accounting version 1; peers not requesting DMA never
+receive its hello field. Accounting follows optional input and precedes optional
+final DMA, making four legal combinations. Missing accounting arguments receive only
+the bare rejected hello/zero-resource close path; absent negotiation is never retried. Only an actual worker oneshot negative result can produce a
 capture error with noFrameReceipt:{version:1,outcome:'no-complete-png'}. Lost channel,
 worker panic, failed command send, malformed/missing response remain unknown.
 
 The evidence is no complete original PNG, not zero raw/PipeWire/preview activity.
 Fallible preview encoding runs before original encoding; there is no later
 fallible auxiliary step that can discard a complete original under this receipt.
-All successful/revoked original bytes still reach host accounting. Attempt counts
-remain consumed. The operation still fails and must complete normal resource
-cleanup/closed/zero process+stdio, requests/decodes and coordination release. No
-existing poison or old unknown marker is cleared.
+All successful/revoked original bytes still reach host accounting. Byte/pixel
+counters include only actually confirmed frames; the current attempt remains
+consumed when statistics are unknown. Unknown statistics prohibit further
+capture/act in that scope and initiate cleanup; they do not supply a no-frame receipt. The operation still fails and must complete
+normal resource cleanup/closed/zero process+stdio, requests/decodes and control
+coordination release. Confirmed closure can end the scope without filling missing
+statistics; real pending/transport poison still retains its resource barrier. No
+old unknown marker is cleared.
 
 Only a bound trusted Node ENOENT/EACCES pre-exec error plus exact error/argument
 identity, no execution/output, negative-errno actual close and all stdio/request
 settlement provides a no-helper zero-resource exception. This is not an arbitrary
 nonzero exit or PID-absence inference; it invents no native ACK and never retries.
 
-## Validation actually executed
+## Historical validation actually executed
 
+The following commands and results predate the revised concurrency, handshake,
+accounting and GPU-failure branches; they are not fresh validation of those changes.
 Authorized development-only commands:
 
 ```

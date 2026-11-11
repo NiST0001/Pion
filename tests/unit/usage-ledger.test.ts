@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as sessionUsage from '../../src/main/agent/session-token-total'
 import { UsageLedger } from '../../src/main/usage-ledger'
+import * as ledgerStore from '../../src/main/usage-ledger-store'
 import { createUsageLedgerDirectoryIo } from '../fixtures/usage-ledger-directory-io'
 
 vi.mock('node:fs/promises', async original => {
@@ -77,7 +78,8 @@ afterEach(async () => {
 describe('durable local usage ledger', () => {
   it('is lazy, deduplicates rescans/restarts, and persists only bounded metadata and hashes', async () => {
     const f = await fixture()
-    await f.file('root', [header('root'), assistant('1234abcd'), independent('warm')])
+    const path = await f.file('root', [header('root'), assistant('1234abcd'), independent('warm')])
+    const snapshots = vi.spyOn(sessionUsage, 'readSessionUsageSnapshot')
     const opens = vi.mocked(fs.open).mock.calls.length
     const ledger = new UsageLedger(f)
     expect(vi.mocked(fs.open).mock.calls).toHaveLength(opens)
@@ -87,6 +89,8 @@ describe('durable local usage ledger', () => {
     const restarted = await new UsageLedger(f).getOverview()
     expect(rescanned).toEqual(first)
     expect(restarted).toEqual(first)
+    await ledger.captureSession(path)
+    expect(snapshots).toHaveBeenCalledTimes(1)
     const saved = await fs.readFile(f.ledgerPath, 'utf8')
     expect(saved).not.toContain('PRIVATE-PROMPT')
     expect(saved).not.toContain('1234abcd')
@@ -141,7 +145,11 @@ describe('durable local usage ledger', () => {
     const moved = await f.file('c-moved', [header('same-session', undefined, '/fixture/moved'), first, second])
     await f.file('d-moved-again', [header('same-session', undefined, '/fixture/moved-again'), first, second, assistant('third', 30, 'second')])
     await f.file('e-child', [header('child', moved, '/fixture/child'), first, second, assistant('child-new', 40, 'second')])
+    vi.mocked(fs.lstat).mockClear()
     const value = await f.ledger.getOverview()
+    // Root/bucket verification is per discovery/publication phase, independent of file count.
+    expect(vi.mocked(fs.lstat).mock.calls.filter(([path]) => String(path) === f.root).length).toBeLessThanOrEqual(5)
+    expect(vi.mocked(fs.lstat).mock.calls.filter(([path]) => String(path) === join(f.root, 'bucket')).length).toBeLessThanOrEqual(3)
     expect(value).toMatchObject({ sessions: 3, records: 5, totals: { total: 110 }, coverage: { collectedSessions: 5 }, warnings: [] })
     expect(value.byProject.find(project => project.cwd === cwd)?.usage.total).toBe(20)
     expect(value.byProject.find(project => project.cwd === '/fixture/moved')?.usage.total).toBe(20)
@@ -154,7 +162,7 @@ describe('durable local usage ledger', () => {
     expect(await new UsageLedger(f).getOverview()).toEqual(value)
   })
 
-  it('preserves conflicting alias evidence while capturing a clean same-ID migration alias', async () => {
+  it('preserves alias conflicts and old receipts until the original session validates again', async () => {
     const f = await fixture()
     const path = await f.file('source', [header('root'), assistant('first')])
     await f.ledger.captureSession(path)
@@ -177,6 +185,15 @@ describe('durable local usage ledger', () => {
     expect(saved.data.sessions[0].aliases[0]).toEqual(conflicted.data.sessions[0].aliases[0])
     expect(saved.data.sessions[0].receipts).toHaveLength(2)
     expect((await f.ledger.getOverview()).totals.total).toBe(30)
+    await fs.writeFile(path, jsonl([header('root'), assistant('first', 30)]))
+    await expect(f.ledger.captureSession(path)).rejects.toThrow('Usage ledger unavailable')
+    expect(JSON.parse(await fs.readFile(f.ledgerPath, 'utf8')).data.sessions[0].aliases[0].conflict).toBeDefined()
+    await fs.writeFile(path, jsonl([header('root'), assistant('first')]))
+    await f.ledger.captureSession(path)
+    const recovered = JSON.parse(await fs.readFile(f.ledgerPath, 'utf8')).data.sessions[0]
+    expect(recovered.aliases[0]).not.toHaveProperty('conflict')
+    expect(recovered.receipts).toEqual(saved.data.sessions[0].receipts)
+    expect(await f.ledger.getOverview()).toMatchObject({ records: 2, totals: { total: 30 }, warnings: [] })
   })
 
   it('keeps equal numbers/short entry IDs in unrelated sessions distinct and honors native event IDs within lineage', async () => {
@@ -264,7 +281,7 @@ describe('durable local usage ledger', () => {
     expect(await new UsageLedger(f).getOverview()).toEqual(value)
   })
 
-  it('rechecks parent proofs after the actual temporary close, before publishing a new lineage edge', async () => {
+  it.each(['file', 'directory'] as const)('rechecks parent %s identity after the actual temporary close, before publishing a new lineage edge', async changed => {
     const f = await fixture()
     const path = await f.file('parent', [header('parent-a'), assistant('original')])
     await f.ledger.captureSession(path)
@@ -273,13 +290,18 @@ describe('durable local usage ledger', () => {
     const child = await f.file('child', [header('child', path), assistant('original'), assistant('child-new', 20, 'original')])
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
     let reused = false
+    vi.mocked(fs.lstat).mockImplementation(async file => {
+      const value = await actual.lstat(file, { bigint: true })
+      if (changed === 'directory' && reused && String(file) === join(f.root, 'bucket')) value.ino += 1n
+      return value
+    })
     vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
       const handle = await directoryIo.open(actual)(file, flags, mode)
       if (String(file).startsWith(`${f.ledgerPath}.tmp-`)) {
         const close = handle.close.bind(handle)
         vi.spyOn(handle, 'close').mockImplementation(async () => {
           await close()
-          await fs.writeFile(path, jsonl([header('parent-b'), assistant('different', 30)]))
+          if (changed === 'file') await fs.writeFile(path, jsonl([header('parent-b'), assistant('different', 30)]))
           reused = true
         })
       }
@@ -287,6 +309,31 @@ describe('durable local usage ledger', () => {
     })
     await expect(f.ledger.captureSession(child)).rejects.toThrow('Usage ledger unavailable')
     expect(reused).toBe(true)
+    expect(fs.rename).toHaveBeenCalledTimes(publications)
+    expect(await fs.readFile(f.ledgerPath, 'utf8')).toBe(before)
+  })
+
+  it.each(['new', 'cached'] as const)('rechecks every %s source after temporary close, including sources without lineage edges', async mode => {
+    const f = await fixture()
+    const source = await f.file('a-source', [header('source'), assistant('first')])
+    await f.ledger.captureSession(source)
+    const before = await fs.readFile(f.ledgerPath, 'utf8')
+    const publications = vi.mocked(fs.rename).mock.calls.length
+    if (mode === 'new') await fs.appendFile(source, jsonl([assistant('second', 20, 'first')]))
+    await f.file('z-trigger', [header('trigger'), assistant('trigger')])
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    vi.mocked(fs.open).mockImplementation(async (file, flags, permissions) => {
+      const handle = await directoryIo.open(actual)(file, flags, permissions)
+      if (String(file).startsWith(`${f.ledgerPath}.tmp-`)) {
+        const close = handle.close.bind(handle)
+        vi.spyOn(handle, 'close').mockImplementation(async () => {
+          await close()
+          await actual.appendFile(source, jsonl([assistant('late', 30, 'first')]))
+        })
+      }
+      return handle
+    })
+    await expect(f.ledger.getOverview()).rejects.toThrow('Usage ledger unavailable')
     expect(fs.rename).toHaveBeenCalledTimes(publications)
     expect(await fs.readFile(f.ledgerPath, 'utf8')).toBe(before)
   })
@@ -695,28 +742,44 @@ describe('durable local usage ledger', () => {
     expect(read.mock.calls[2][0]).toBe(first)
   })
 
-  it('keeps an unknown-close lock quarantined and does not retry or declare flush complete', async () => {
+  it('projects unchanged overview reads once and skips aggregation in unchanged notification passes', async () => {
+    const f = await fixture()
+    const path = await f.file('root', [header('root'), assistant('first')])
+    const add = vi.spyOn(ledgerStore, 'addUsage')
+    const first = await f.ledger.getOverview()
+    // One receipt contributes to totals, project, model, and any visible daily row.
+    const projectionAdds = 3 + first.daily.length
+    expect(add).toHaveBeenCalledTimes(2 * projectionAdds)
+    add.mockClear()
+    expect(await f.ledger.getOverview()).toEqual(first)
+    expect(add).toHaveBeenCalledTimes(projectionAdds)
+    add.mockClear()
+    f.ledger.setBackgroundCollectionEnabled(true)
+    f.ledger.scheduleSession(path)
+    await f.ledger.flush()
+    expect(add).not.toHaveBeenCalled()
+  })
+
+  it('reports a settled source close failure and permits a later collection to recover', async () => {
     const f = await fixture()
     const path = await f.file('root', [header('root'), assistant('first')])
     const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
-    let closes = 0
+    let failClose = true
     vi.mocked(fs.open).mockImplementation(async (file, flags, mode) => {
       const handle = await directoryIo.open(actual)(file, flags, mode)
-      if (String(file) === path) {
+      if (String(file) === path && failClose) {
+        failClose = false
         const close = handle.close.bind(handle)
-        vi.spyOn(handle, 'close').mockImplementation(async () => { closes++; await close(); throw new Error('private close status') })
+        vi.spyOn(handle, 'close').mockImplementation(async () => { await close(); throw new Error('private close failure') })
       }
       return handle
     })
     await expect(f.ledger.captureSession(path)).rejects.toThrow('Usage ledger unavailable')
-    expect(closes).toBe(1)
-    expect(await fs.readFile(`${f.ledgerPath}.lock`, 'utf8')).not.toBe('')
+    await expect(fs.stat(`${f.ledgerPath}.lock`)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(f.ledger.flush()).rejects.toThrow('Usage ledger unavailable')
     const first = f.ledger.getOverview()
     expect(f.ledger.getOverview()).toBe(first)
-    await expect(first).rejects.toThrow('Usage ledger unavailable')
-    await expect(f.ledger.getOverview()).rejects.toThrow('Usage ledger unavailable')
-    await expect(new UsageLedger(f).getOverview()).rejects.toThrow('Usage ledger unavailable')
-    expect(closes).toBe(1)
+    await expect(first).resolves.toMatchObject({ records: 1, totals: { total: 10 }, warnings: [] })
+    await expect(f.ledger.flush()).resolves.toBeUndefined()
   })
 })

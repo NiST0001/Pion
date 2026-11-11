@@ -1,17 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Agent } from '@earendil-works/pi-agent-core'
-import { AgentSession, ModelRuntime, type SessionEntry, type SessionManager, type SettingsManager } from '@earendil-works/pi-coding-agent'
+import { ModelRuntime, SessionManager, type SessionEntry, type SettingsManager } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
 import { createAssistantMessageEventStream, normalizeContext, type Api, type AssistantMessage, type Model, type ToolResultMessage } from '@earendil-works/pi-ai'
-import { computerUseHistoryState, createComputerUseModelGate, COMPUTER_USE_TAINT_ENTRY, COMPUTER_USE_UNWATCH_TIMEOUT_MS } from '../../src/main/agent/computer-use-model-gate'
+import { computerUseHistoryState, createComputerUseModelGate, COMPUTER_USE_TAINT_ENTRY } from '../../src/main/agent/computer-use-model-gate'
 import type { ComputerUseAgentResponse } from '../../src/shared/computer-use-agent'
+import { makeStaticPng } from '../fixtures/static-png'
 
 const io = vi.hoisted(() => ({ open: vi.fn(() => 7), sync: vi.fn(), close: vi.fn() }))
 vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>(), openSync: io.open, fsyncSync: io.sync, closeSync: io.close }))
 const model = { provider: 'openai-codex', id: 'test-vision', api: 'openai-codex-responses', input: ['text', 'image'] } as Model<Api>
 const assistant = (): AssistantMessage => ({ role: 'assistant', content: [{ type: 'text', text: 'ok' }], provider: model.provider, model: model.id, api: model.api, timestamp: 1, stopReason: 'stop', usage: { input: 9, output: 3, cacheRead: 2, cacheWrite: 1, totalTokens: 15, cost: { input: 0.1, output: 0.2, cacheRead: 0.01, cacheWrite: 0.02, total: 0.33 } } })
 const message = { type: 'message', id: 'u', parentId: null, timestamp: '', message: { role: 'user', content: 'hi', timestamp: 1 } } as SessionEntry
-function fixture() {
+function fixture(runtimeId = 'runtime') {
   const entries: SessionEntry[] = [message]
   const append = vi.fn((customType: string, data: unknown) => {
     entries.push({ type: 'custom', customType, data, id: 'marker', parentId: 'u', timestamp: '' })
@@ -65,7 +66,7 @@ function fixture() {
     getProvider: vi.fn(() => ({ streamSimple: vi.fn() })), getProviders: vi.fn(() => [{ streamSimple: vi.fn() }])
   }
   const current = { value: true }
-  const gate = createComputerUseModelGate(runtime as unknown as ModelRuntime, { runtimeId: 'runtime', sessionManager: manager, settingsManager: settings, authorize, watch, unwatch, assertObservation, isCurrent: () => current.value })
+  const gate = createComputerUseModelGate(runtime as unknown as ModelRuntime, { runtimeId, sessionManager: manager, settingsManager: settings, authorize, watch, unwatch, assertObservation, isCurrent: () => current.value })
   let observationSerial = 0
   const retain = (scopeRevision = 4, actual = model) => {
     const response = { version: 1, ok: true, operation: 'observe', requestId: `observe-${++observationSerial}`, scopeRevision, frameId: 'frame', width: 1, height: 1, image: { mimeType: 'image/png', data: 'synthetic-only' } } as ComputerUseAgentResponse
@@ -184,27 +185,7 @@ describe('ComputerUse request exit gate (mock only)', () => {
     expect(f.runtime.getAuth).not.toHaveBeenCalled()
     expect(f.watch).not.toHaveBeenCalled()
   })
-  it('authorizes auth-only first, preserves auth overrides and requires a separate approval/watch for the subsequent compaction stream', async () => {
-    const f = fixture(); f.retain(4)
-    const overrides = { signal: new AbortController().signal, minOAuthValidityMs: 789, env: { MOCK: '1' } }
-    expect(await f.gate.models.getAuth(model, overrides)).toBe(f.auth)
-    expect(f.authorize).toHaveBeenCalledOnce()
-    expect(f.authorize.mock.invocationCallOrder[0]).toBeLessThan(f.runtime.getAuth.mock.invocationCallOrder[0])
-    expect(f.runtime.getAuth).toHaveBeenCalledWith(model, { ...overrides, signal: expect.any(AbortSignal) })
-    expect((f.runtime.getAuth.mock.calls[0][1] as typeof overrides).signal).not.toBe(overrides.signal)
-    expect(f.calls).toHaveLength(0)
-    expect(f.watch).toHaveBeenCalledOnce()
-    expect(f.unwatch).toHaveBeenCalledOnce() // ends only auth; no provider stream has started
-    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('stop')
-    expect(f.authorize).toHaveBeenCalledTimes(4) // fresh stream pre-auth, transformed payload and fetch
-    expect(f.watch).toHaveBeenCalledTimes(2)
-    expect(f.unwatch).toHaveBeenCalledTimes(2)
-    f.authorize.mockRejectedValue(new Error('later summary not approved'))
-    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('error')
-    expect(f.calls).toHaveLength(1)
-    expect(f.runtime.getAuth).toHaveBeenCalledOnce()
-  })
-  it('keeps pinned SDK toolResult → next prompt → default compaction independently approvable after taint (mock boundaries only)', async () => {
+  it('keeps the pinned SDK toolResult and next prompt behind independent approval after taint (mock boundaries only)', async () => {
     const f = fixture()
     const sdk = usePinnedSdkRequests(f)
     f.assistantResponses.push({ ...assistant(), stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'observe-call', name: 'pion_computer_observe', arguments: {} }] })
@@ -241,34 +222,6 @@ describe('ComputerUse request exit gate (mock only)', () => {
     approvePrompt(); await prompt
     expect(agent.state.messages.at(-1)).toMatchObject({ role: 'assistant', stopReason: 'stop' })
     expect(f.runtime.getAuth).toHaveBeenCalledTimes(3)
-
-    // No AgentSession constructor/factory: invoke its actual pinned default
-    // compaction and auth helpers on an existing in-memory Agent + fake services.
-    const session = Object.assign(Object.create(AgentSession.prototype), { agent, _modelRuntime: f.gate.models,
-      settingsManager: { getRetrySettings: () => ({ enabled: false, maxRetries: 0, baseDelayMs: 0 }) }, _emit: vi.fn() })
-    const preparation = { firstKeptEntryId: 'keep', messagesToSummarize: agent.state.messages, turnPrefixMessages: [], isSplitTurn: false,
-      tokensBefore: 100, fileOps: { read: new Set(), written: new Set(), edited: new Set() } }
-    const compact = () => Reflect.apply(Reflect.get(AgentSession.prototype, '_runDefaultCompaction'), session,
-      [preparation, model, undefined, new AbortController().signal, 'manual'])
-    f.authorize.mockRejectedValue(new Error('Main compaction egress denied'))
-    await expect(compact()).rejects.toThrow(/denied/)
-    expect(f.runtime.getAuth).toHaveBeenCalledTimes(3)
-    expect(sdk.streamSimple).toHaveBeenCalledTimes(3)
-
-    let approveCompaction!: () => void
-    const compactionApproval = new Promise<void>(resolve => { approveCompaction = resolve })
-    f.authorize.mockImplementation(async () => { await compactionApproval; return { scopeRevision: 4 } })
-    const compaction = compact()
-    await Promise.resolve()
-    expect(f.runtime.getAuth).toHaveBeenCalledTimes(3)
-    approveCompaction()
-    await expect(compaction).resolves.toMatchObject({ summary: 'ok', usage: assistant().usage })
-    expect(f.runtime.getAuth).toHaveBeenCalledTimes(5) // summary pre-auth + actual ModelRuntime.prepareRequest
-    expect(f.runtime.getAuth.mock.calls.every(([actual]) => actual === model)).toBe(true)
-    expect(sdk.getAuth.mock.calls.every(([actual]) => actual === model)).toBe(true)
-    expect(f.append).toHaveBeenCalledOnce() // no recapture or restored permission
-    expect(f.watch).toHaveBeenCalledTimes(4) // continuation, prompt, summary auth, summary stream
-    expect(f.unwatch).toHaveBeenCalledTimes(4)
   })
   it.each(['caller-abort', 'retire', 'new-source', 'watch-withdrawal'] as const)('owns dispatched auth through actual SDK settlement, not cancellation: %s', async change => {
     const f = fixture(); f.retain(4)
@@ -289,12 +242,19 @@ describe('ComputerUse request exit gate (mock only)', () => {
     else if (change === 'new-source') { f.retain(9); f.retain(4) }
     else withdraw({ scopeRevision: 99 })
     await Promise.resolve(); await Promise.resolve()
+    if (change === 'watch-withdrawal') {
+      // This delivered poll needs its exact cleanup ACK even while auth is pending.
+      await vi.waitFor(() => expect(f.unwatch).toHaveBeenCalledWith(model, 'auth-withdrawal'))
+      expect(f.unwatch).toHaveBeenCalledOnce()
+      await expect(f.unwatch.mock.results[0].value).resolves.toBeUndefined()
+    } else expect(f.unwatch).not.toHaveBeenCalled()
     expect(originalSignal.aborted).toBe(false) // SDK auth cancellation would only stop waiting, not refresh/persistence
     expect(completed).not.toHaveBeenCalled()
-    expect(f.unwatch).not.toHaveBeenCalled()
     settle(f.auth)
     await expect(result).rejects.toThrow(/denied/)
     expect(completed).toHaveBeenCalledOnce()
+    expect(f.unwatch).toHaveBeenCalledOnce()
+    expect(f.unwatch).toHaveBeenCalledWith(model, change === 'watch-withdrawal' ? 'auth-withdrawal' : 'watch-1')
     expect(f.calls).toHaveLength(0)
     expect(f.network).not.toHaveBeenCalled()
   })
@@ -314,20 +274,6 @@ describe('ComputerUse request exit gate (mock only)', () => {
     await expect(failedWatch.gate.models.getAuth(model)).rejects.toThrow(/denied/)
     expect(failedWatch.runtime.getAuth).not.toHaveBeenCalled()
   })
-  it('poisons later auth on an unknown unwatch outcome rather than refreshing again after local cleanup timeout', async () => {
-    vi.useFakeTimers()
-    const f = fixture(); f.retain(4)
-    f.unwatch.mockImplementationOnce(() => new Promise<void>(() => {}))
-    const result = f.gate.models.getAuth(model)
-    await vi.advanceTimersByTimeAsync(0)
-    expect(f.unwatch).toHaveBeenCalledOnce()
-    await vi.advanceTimersByTimeAsync(COMPUTER_USE_UNWATCH_TIMEOUT_MS)
-    expect(await result).toBe(f.auth)
-    await expect(f.gate.models.getAuth(model)).rejects.toThrow(/denied/)
-    expect(f.runtime.getAuth).toHaveBeenCalledOnce()
-    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('error')
-    expect(f.calls).toHaveLength(0)
-  })
   it('writes and syncs the SDK taint marker before allowing image retention; write failure poisons delivery', () => {
     const f = fixture()
     f.gate.assertImageDelivery(model)
@@ -343,47 +289,6 @@ describe('ComputerUse request exit gate (mock only)', () => {
     broken.append.mockImplementation(() => { throw new Error('disk full') })
     expect(() => broken.retain(4)).toThrow(/denied/)
     expect(() => broken.gate.assertImageDelivery(model)).toThrow(/denied/)
-  })
-  it('retains only an actual observed response, appends every scope/model generation and never reuses old approval', async () => {
-    const f = fixture()
-    expect(() => f.gate.retain(model, { version: 1, ok: true, operation: 'observe', requestId: 'forged', scopeRevision: 4 } as never)).toThrow(/source-unverified/)
-    const first = f.retain(4)
-    expect(() => f.gate.retain(model, first)).toThrow(/denied/)
-    f.retain(9)
-    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('error') // Main still returned the old scope.
-    expect(f.calls).toHaveLength(0)
-    f.authorize.mockResolvedValue({ scopeRevision: 9 })
-    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('stop')
-    const alternate = { ...model, id: 'other-vision' }
-    f.retain(4, alternate)
-    expect(f.append.mock.calls.map(call => call[1])).toEqual([
-      expect.objectContaining({ scopeRevision: 4, modelId: model.id, observationRequestId: 'observe-1' }),
-      expect.objectContaining({ scopeRevision: 9, modelId: model.id, observationRequestId: 'observe-2' }),
-      expect.objectContaining({ scopeRevision: 4, modelId: alternate.id, observationRequestId: 'observe-3' })
-    ])
-    expect(io.sync).toHaveBeenCalledTimes(3)
-    expect(computerUseHistoryState(f.manager, 'runtime')).toBe('current')
-    f.authorize.mockResolvedValue({ scopeRevision: 4 })
-    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('stop')
-  })
-  it('permits a later root run only after an independent Main egress approval for the retained history, without a new observe', async () => {
-    const f = fixture(); f.retain(4)
-    await f.gate.models.streamSimple(model, { messages: [] }).result()
-    let approve!: () => void
-    const approval = new Promise<void>(resolve => { approve = resolve })
-    let permitted = false
-    const requestApproval = vi.fn(() => approval)
-    f.authorize.mockImplementation(async () => {
-      if (!permitted) { await requestApproval(); permitted = true }
-      return { scopeRevision: 4 }
-    })
-    const later = f.gate.models.streamSimple(model, { messages: [] }).result()
-    await vi.waitFor(() => expect(requestApproval).toHaveBeenCalledOnce())
-    expect(f.network).toHaveBeenCalledOnce()
-    approve()
-    expect((await later).stopReason).toBe('stop')
-    expect(f.append).toHaveBeenCalledOnce() // no new capture or restored grant
-    expect(f.network).toHaveBeenCalledTimes(2)
   })
   it('preserves real stream usage, method receivers and request callbacks', async () => {
     const f = fixture(); f.retain(4)
@@ -434,35 +339,56 @@ describe('ComputerUse request exit gate (mock only)', () => {
     f.gate.retire()
     expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('error')
   })
-  it('awaits the real correlated Main unwatch ACK after provider settlement, not just local input abort', async () => {
+  it.each(['auth', 'stream'] as const)('keeps %s cleanup owned when the exact ACK precedes its late watch result', async operation => {
+    vi.useFakeTimers()
     const f = fixture(); f.retain(4)
+    let respond!: (value: { scopeRevision: number }) => void
+    f.watch.mockImplementationOnce(() => ({ watchRequestId: 'late-watch', result: new Promise(resolve => { respond = resolve }) }))
     let acknowledge!: () => void
-    f.unwatch.mockImplementation(() => new Promise<void>(resolve => { acknowledge = resolve }))
+    f.unwatch.mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve }))
     const completed = vi.fn()
-    const result = f.gate.models.streamSimple(model, { messages: [] }).result().then(value => { completed(); return value })
-    await vi.waitFor(() => expect(f.unwatch).toHaveBeenCalledWith(model, 'watch-1'))
-    expect(f.watch.mock.calls[0][1].aborted).toBe(true)
-    expect(f.unwatch.mock.calls[0]).toHaveLength(2) // no already-aborted cleanup signal
-    expect(completed).not.toHaveBeenCalled()
+    const result = (operation === 'auth' ? f.gate.models.getAuth(model) : f.gate.models.streamSimple(model, { messages: [] }).result()).then(value => { completed(); return value })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(f.unwatch).toHaveBeenCalledWith(model, 'late-watch')
     acknowledge()
-    expect((await result).usage).toEqual(assistant().usage)
+    await vi.advanceTimersByTimeAsync(5_001)
+    expect(completed).not.toHaveBeenCalled()
+    await expect(f.gate.models.getAuth(model)).rejects.toThrow(/denied/)
+    expect(f.runtime.getAuth).toHaveBeenCalledTimes(operation === 'auth' ? 1 : 0)
+    respond({ scopeRevision: 4 })
+    expect(await result).toEqual(operation === 'auth' ? f.auth : assistant())
+    expect(f.unwatch).toHaveBeenCalledOnce() // The late response reuses its acknowledged cleanup.
+    expect(await f.gate.models.getAuth(model)).toBe(f.auth)
+    expect(f.unwatch.mock.calls.map(([, id]) => id)).toEqual(['late-watch', 'watch-1'])
   })
-  it('does not fill Main\'s four watcher slots across short sequential provider requests', async () => {
+  it.each(['auth', 'stream'] as const)('continues admitted %s during its heartbeat ACK window while blocking new requests', async operation => {
+    vi.useFakeTimers()
     const f = fixture(); f.retain(4)
-    const active = new Set<string>()
-    let serial = 0
-    f.watch.mockImplementation((_actual, signal) => {
-      if (active.size >= 4) throw new Error('busy')
-      const watchRequestId = `actual-${++serial}`
-      active.add(watchRequestId)
-      return { watchRequestId, result: new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('LOCAL cancellation only')), { once: true })) }
-    })
-    f.unwatch.mockImplementation(async (_actual, id) => { expect(active.delete(id)).toBe(true) })
-    for (let index = 0; index < 7; index++) {
-      expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('stop')
-      expect(active.size).toBe(0)
-    }
-    expect(f.unwatch).toHaveBeenCalledTimes(7)
+    let release!: () => void
+    if (operation === 'auth') f.runtime.getAuth.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve(f.auth) }))
+    const onPayload = () => new Promise<void>(resolve => { release = resolve })
+    f.watch.mockImplementationOnce(() => ({ watchRequestId: 'heartbeat',
+      result: new Promise(resolve => { setTimeout(() => resolve({ scopeRevision: 4 }), 20_000) }) }))
+    let acknowledge!: () => void
+    f.unwatch.mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve }))
+    f.revokeBetweenAttempts(() => {}) // Both actual fetch attempts cross the pending heartbeat ACK.
+    const completed = vi.fn()
+    const result = (operation === 'auth' ? f.gate.models.getAuth(model) : f.gate.models.streamSimple(model, { messages: [] }, { onPayload }).result())
+      .then(value => { completed(); return value })
+    await vi.advanceTimersByTimeAsync(25_000)
+    expect(f.unwatch).toHaveBeenCalledWith(model, 'heartbeat')
+    await expect(f.gate.models.getAuth(model)).rejects.toThrow()
+    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('error')
+    release()
+    await vi.advanceTimersByTimeAsync(6_000)
+    expect(completed).not.toHaveBeenCalled()
+    expect(f.network).toHaveBeenCalledTimes(operation === 'stream' ? 2 : 0)
+    acknowledge()
+    expect(await result).toEqual(operation === 'auth' ? f.auth : assistant())
+    // The settled provider result retains its original usage; no second request is dispatched for cleanup.
+    expect(f.network).toHaveBeenCalledTimes(operation === 'stream' ? 2 : 0)
+    expect(await f.gate.models.getAuth(model)).toBe(f.auth)
+    expect(f.unwatch.mock.calls.map(([, id]) => id)).toEqual(['heartbeat', 'watch-1'])
   })
   it('retirement abort is not provider settlement and cannot close watches until the original request really ends', async () => {
     const f = fixture(); f.retain(4)
@@ -500,19 +426,37 @@ describe('ComputerUse request exit gate (mock only)', () => {
     expect(await result).toBe(final)
     expect(f.unwatch).toHaveBeenCalledOnce()
   })
-  it('bounds waiting for cleanup but keeps transport/owner unknown poisoned even after a late ACK', async () => {
+  it('accepts a cleanup ACK later than five seconds and releases the original controller before a new request', async () => {
     vi.useFakeTimers()
     const f = fixture(); f.retain(4)
     let acknowledge!: () => void
-    f.unwatch.mockImplementation(() => new Promise<void>(resolve => { acknowledge = resolve }))
-    const result = f.gate.models.streamSimple(model, { messages: [] }).result()
-    await vi.advanceTimersByTimeAsync(0)
-    expect(f.unwatch).toHaveBeenCalledOnce()
-    await vi.advanceTimersByTimeAsync(COMPUTER_USE_UNWATCH_TIMEOUT_MS)
-    expect((await result).usage).toEqual(assistant().usage) // real result, not fabricated failure/zero usage
-    acknowledge()
+    f.unwatch.mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve }))
+    const completed = vi.fn()
+    const result = f.gate.models.streamSimple(model, { messages: [] }).result().then(value => { completed(); return value })
+    await vi.advanceTimersByTimeAsync(6_000)
+    expect(f.unwatch).toHaveBeenCalledWith(model, 'watch-1')
+    expect(completed).not.toHaveBeenCalled()
     expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('error')
     expect(f.network).toHaveBeenCalledOnce()
+    acknowledge()
+    expect((await result).usage).toEqual(assistant().usage)
+    f.retain(4)
+    expect((f.calls[0].signal as AbortSignal).aborted).toBe(false) // successfully cleaned controllers are retired
+    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('stop')
+    expect(f.network).toHaveBeenCalledTimes(2)
+    expect(f.unwatch.mock.calls.map(([, id]) => id)).toEqual(['watch-1', 'watch-2'])
+  })
+  it('keeps later egress denied after a real cleanup rejection while preserving settled provider usage', async () => {
+    const f = fixture(); f.retain(4)
+    f.unwatch.mockRejectedValueOnce(new Error('actual cleanup transport rejected'))
+    const result = await f.gate.models.streamSimple(model, { messages: [] }).result()
+    expect(result.usage).toEqual(assistant().usage)
+    expect((f.calls[0].signal as AbortSignal).aborted).toBe(true)
+    await expect(f.gate.models.getAuth(model)).rejects.toThrow(/denied/)
+    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('error')
+    expect(f.runtime.getAuth).not.toHaveBeenCalled()
+    expect(f.network).toHaveBeenCalledOnce()
+    expect(f.unwatch).toHaveBeenCalledOnce()
   })
   it('does not confuse an actual negative Main watch ACK with an unknown transport or permanently poison a normal later prompt', async () => {
     const f = fixture(); f.retain(4)
@@ -522,13 +466,6 @@ describe('ComputerUse request exit gate (mock only)', () => {
     expect(f.unwatch).not.toHaveBeenCalled() // Main proved this actual poll ended.
     expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('stop')
     expect(f.unwatch).toHaveBeenCalledOnce()
-  })
-  it('a rejected unwatch ACK cannot retire the watcher just because its local input was aborted', async () => {
-    const f = fixture(); f.retain(4)
-    f.unwatch.mockRejectedValue(new Error('owner retired / transport unknown'))
-    await f.gate.models.streamSimple(model, { messages: [] }).result()
-    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('error')
-    expect(f.calls).toHaveLength(1)
   })
   it('rejects un-audited transport/API, blockImages and provider overrides before any request', async () => {
     for (const mutate of [
@@ -562,23 +499,42 @@ describe('ComputerUse request exit gate (mock only)', () => {
     expect(f.runtime.fetchDeferred).not.toHaveBeenCalled()
     expect(f.runtime.generateImages).not.toHaveBeenCalled()
   })
-  it('fails closed on restore, branch/clone/import provenance, unknown taint and image-without-marker', async () => {
-    const f = fixture(); f.retain(4)
-    expect(computerUseHistoryState(f.manager, 'new-runtime')).toBe('unknown')
-    f.manager.getHeader = () => ({ parentSession: '/not-followed/original.jsonl' }) as never
-    f.entries.splice(1)
-    expect(computerUseHistoryState(f.manager, 'runtime')).toBe('clean') // untainted normal clone
-    f.entries.push({ type: 'branch_summary', id: 'summary', summary: 'derived text', fromId: 'old' } as SessionEntry)
-    expect(computerUseHistoryState(f.manager, 'runtime')).toBe('unknown')
-    expect(() => f.gate.assertImageDelivery(model)).toThrow(/Restore\/fork\/import/)
-    expect(() => f.retain(9)).toThrow(/live runtime/)
-    const restored = await f.gate.models.streamSimple(model, { messages: [] }).result()
-    expect(restored.stopReason).toBe('error')
-    expect(restored.errorMessage).toMatch(/no approval was restored/)
+  it('keeps recognized text-only fork summaries usable without screenshot approval', async () => {
+    const plain = fixture()
+    plain.manager.getHeader = () => ({ parentSession: '/not-opened/original.jsonl' }) as never
+    plain.entries.push({ type: 'branch_summary', id: 'text-summary', summary: 'ordinary text', fromId: 'old' } as SessionEntry)
+    expect(computerUseHistoryState(plain.manager, 'fresh-runtime')).toBe('clean')
+    expect((await plain.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('stop')
+    expect(plain.authorize).not.toHaveBeenCalled()
+  })
+  it.each(['null', 'text', 'image', 'unknown'] as const)('scans actual SDK context-edit replacement: %s', async kind => {
+    const image = { type: 'image' as const, mimeType: 'image/png', data: makeStaticPng(1, 1).toString('base64') }
+    const replacement = kind === 'null' ? null : { content: kind === 'text' ? 'plain replacement' : [kind === 'image' ? image : { type: 'future-input', data: 'unknown' }] }
+    const manager = SessionManager.inMemory('/test')
+    const target = manager.appendMessage({ role: 'user', content: 'original text', timestamp: 1 })
+    manager.appendContextEdit(target, replacement as Parameters<SessionManager['appendContextEdit']>[1])
+    const f = fixture()
+    f.manager.getEntries = () => manager.getEntries()
+    f.manager.getHeader = () => ({ ...manager.getHeader()!, parentSession: '/not-opened/original.jsonl' })
+    const unknown = kind === 'image' || kind === 'unknown'
+    expect(computerUseHistoryState(f.manager, 'runtime')).toBe(unknown ? 'unknown' : 'clean')
+    expect((await f.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe(unknown ? 'error' : 'stop')
+    if (unknown) {
+      await expect(f.gate.models.getAuth(model)).rejects.toThrow()
+      expect(f.runtime.getAuth).not.toHaveBeenCalled()
+      expect(f.network).not.toHaveBeenCalled()
+    }
     expect(f.authorize).not.toHaveBeenCalled()
-    const unmarked = fixture()
-    unmarked.entries.push({ type: 'message', message: { role: 'toolResult', toolName: 'pion_computer_observe', content: [{ type: 'image', data: 'not decoded', mimeType: 'image/png' }] } } as SessionEntry)
-    expect(computerUseHistoryState(unmarked.manager, 'runtime')).toBe('unknown')
-    expect((await unmarked.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('error')
+  })
+  it('keeps copied screenshot taint gated after restore even when only its text summary remains', async () => {
+    const original = fixture(); original.retain(4)
+    const restored = fixture('restored-runtime')
+    restored.entries.push(...original.entries.slice(1), { type: 'branch_summary', id: 'summary', summary: 'derived text', fromId: 'old' } as SessionEntry)
+    expect(computerUseHistoryState(restored.manager, 'restored-runtime')).toBe('unknown')
+    expect(() => restored.gate.assertImageDelivery(model)).toThrow()
+    expect((await restored.gate.models.streamSimple(model, { messages: [] }).result()).stopReason).toBe('error')
+    await expect(restored.gate.models.getAuth(model)).rejects.toThrow()
+    expect(restored.authorize).not.toHaveBeenCalled()
+    expect(restored.network).not.toHaveBeenCalled()
   })
 })

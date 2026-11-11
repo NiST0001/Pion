@@ -206,7 +206,7 @@ it('only polls pending/applying while visible, stops at settlement and never dis
   let visibility: DocumentVisibilityState = 'visible'
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility })
   const state = (value: 'pending' | 'applying' | 'applied') => snapshot('/a', {
-    notices: ['private catalogue diagnostic'],
+    notices: ['能力已应用；会话模型偏好保存失败，可重新选择当前模型重试。'],
     application: { state: value, requestedRevision: 4, pendingBackends: value === 'applied' ? 0 : 1, message: 'private application diagnostic' }
   })
   const get = vi.fn().mockResolvedValueOnce(state('pending')).mockResolvedValueOnce(state('applying'))
@@ -219,6 +219,7 @@ it('only polls pending/applying while visible, stops at settlement and never dis
   expect(get).toHaveBeenCalledTimes(1)
   expect(screen.getByText('已保存，等待应用')).toBeInTheDocument()
   expect(screen.getByText(/待本轮真实结束后应用/)).toBeInTheDocument()
+  expect(screen.getByText('能力已应用；会话模型偏好保存失败，可重新选择当前模型重试。')).toBeVisible()
   expect(document.body).not.toHaveTextContent('private')
   await act(async () => { visibility = 'hidden'; document.dispatchEvent(new Event('visibilitychange')); vi.advanceTimersByTime(5000) })
   expect(get).toHaveBeenCalledTimes(1)

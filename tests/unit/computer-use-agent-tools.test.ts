@@ -1,10 +1,12 @@
 import { deflateSync } from 'node:zlib'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AgentSession, ExtensionCommandContext, ExtensionToolContext, ModelRuntime, SessionManager } from '@earendil-works/pi-coding-agent'
 import type { ComputerUseModelGate } from '../../src/main/agent/computer-use-model-gate'
 import { createComputerUseAgentChannel, createComputerUseTools } from '../../src/main/agent/computer-use'
 import { COMPUTER_USE_AGENT_TITLE_PREFIX, COMPUTER_USE_AGENT_SOURCE_FIELD, COMPUTER_USE_OBSERVE_TOOL, COMPUTER_USE_ACT_TOOL } from '../../src/shared/computer-use-agent'
-import { COMPUTER_USE_MODEL_MAX_EDGE, COMPUTER_USE_UNWATCH_TIMEOUT_MS } from '../../src/main/agent/computer-use-model-gate'
+import { COMPUTER_USE_MODEL_MAX_EDGE } from '../../src/main/agent/computer-use-model-gate'
+
+afterEach(() => vi.useRealTimers())
 
 function png() {
   const chunk = (kind: string, bytes: Buffer) => {
@@ -18,7 +20,7 @@ function png() {
   const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(1, 0); ihdr.writeUInt32BE(1, 4); ihdr[8] = 8; ihdr[9] = 2
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(Buffer.from([0, 200, 100, 50]))), chunk('IEND', Buffer.alloc(0))]).toString('base64')
 }
-function fixture(enabled = true) {
+function fixture(enabled = true, actEnabled = false) {
   const listeners = new Set<(event: any) => void>()
   const metadata = { provider: 'openai-codex', id: 'test-vision', api: 'openai-codex-responses', input: ['text', 'image'] }
   const modelRegistry = {}
@@ -37,7 +39,7 @@ function fixture(enabled = true) {
   } as unknown as AgentSession
   let current = true
   const channel = Object.assign(vi.fn(async (operation: string) => ({ version: 1, ok: true, operation, requestId: 'r', scopeRevision: 4, ...(operation === 'observe' ? { frameId: 'frame', width: 1, height: 1, image: { data: png(), mimeType: 'image/png' } } : {}) })), { assertObservation: vi.fn() })
-  const factory = createComputerUseTools({ runtimeId: 'runtime', nonce: 'nonce', enabled, sessionManager: manager, getSession: () => session, getModels: () => models, channel: channel as never, gate, isCurrent: () => current })
+  const factory = createComputerUseTools({ runtimeId: 'runtime', nonce: 'nonce', enabled, actEnabled, sessionManager: manager, getSession: () => session, getModels: () => models, channel: channel as never, gate, isCurrent: () => current })
   factory.attach(session)
   const observed: any[] = []
   session.subscribe(event => observed.push(event))
@@ -60,8 +62,15 @@ describe('root ComputerUse tools (synthetic SDK/Main only)', () => {
     expect(f.channel).not.toHaveBeenCalled()
     expect(f.models.getPhysicalModel).not.toHaveBeenCalled()
   })
-  it('keeps exact model-only tools, minimal schemas and no self-reported owner/run/model fields', () => {
+  it('exposes only observe while trusted input guards are unavailable', () => {
     const f = fixture()
+    expect(f.factory.tools.map(tool => tool.name)).toEqual([COMPUTER_USE_OBSERVE_TOOL])
+    f.start(COMPUTER_USE_ACT_TOOL, 'unavailable-act')
+    expect(f.observed.at(-1)[COMPUTER_USE_AGENT_SOURCE_FIELD]).toBeUndefined()
+    expect(f.channel).not.toHaveBeenCalled()
+  })
+  it('keeps exact model-only tools, minimal schemas and no self-reported owner/run/model fields', () => {
+    const f = fixture(true, true)
     expect(f.factory.tools.map(tool => tool.name)).toEqual([COMPUTER_USE_OBSERVE_TOOL, COMPUTER_USE_ACT_TOOL])
     for (const tool of f.factory.tools) expect(tool).toMatchObject({ exposure: 'model-only', executionMode: 'sequential' })
     expect(f.factory.tools[0].parameters).toMatchObject({ additionalProperties: false, properties: {} })
@@ -85,6 +94,16 @@ describe('root ComputerUse tools (synthetic SDK/Main only)', () => {
     f.session.getAllTools = () => [{ name: COMPUTER_USE_OBSERVE_TOOL, sourceInfo: { source: 'extension', path: 'spoof' } }] as never
     f.start(COMPUTER_USE_OBSERVE_TOOL, 'not-sdk')
     expect(f.observed[1][COMPUTER_USE_AGENT_SOURCE_FIELD]).toBeUndefined()
+  })
+  it('stamps only the current explicit tool subset even when hidden tool events arrive', async () => {
+    const f = fixture(true, true)
+    f.session.getActiveToolNames = () => [COMPUTER_USE_OBSERVE_TOOL]
+    f.start(COMPUTER_USE_ACT_TOOL, 'hidden-act')
+    expect(f.observed.at(-1)[COMPUTER_USE_AGENT_SOURCE_FIELD]).toBeUndefined()
+    await expect(f.execute(COMPUTER_USE_ACT_TOOL, { frameId: 'frame', action: { type: 'key', keys: 'Enter' } }, 'hidden-act')).rejects.toThrow(/source-unverified/)
+    f.start()
+    expect(f.observed.at(-1)[COMPUTER_USE_AGENT_SOURCE_FIELD]).toMatchObject({ toolCallId: 'root-call' })
+    expect(f.channel).not.toHaveBeenCalled()
   })
   it('returns exactly one model image only after the durable taint gate; details are metadata-only', async () => {
     const f = fixture(); f.start()
@@ -124,7 +143,7 @@ describe('root ComputerUse tools (synthetic SDK/Main only)', () => {
     expect(f.channel).toHaveBeenCalledOnce()
   })
   it('consumes frame once even on Main protected-target rejection; never retries, types Unicode, or grants focus safety', async () => {
-    const f = fixture(); f.start(); await f.execute()
+    const f = fixture(true, true); f.start(); await f.execute()
     f.start(COMPUTER_USE_ACT_TOOL, 'act')
     const params = { frameId: 'frame', action: { type: 'click', x: 0, y: 0, button: 'left' } }
     await expect(f.execute(COMPUTER_USE_ACT_TOOL, { frameId: 'frame', action: { type: 'type', text: '中文' } }, 'act')).rejects.toThrow(/invalid-request/)
@@ -209,18 +228,28 @@ describe('private SDK command-context channel', () => {
     await channel('egress', { provider: 'openai-codex', id: 'vision' } as never, {}, signal)
     expect(input).toHaveBeenCalledWith(expect.stringContaining(COMPUTER_USE_AGENT_TITLE_PREFIX), undefined, { signal, timeout: 120_000 })
   })
-  it('exports the actual outgoing watch requestId and explicitly unwatches after SDK input abort without reusing its signal', async () => {
+  it('keeps the actual unwatch receiver past five seconds with a signal independent of the cancelled SDK watch', async () => {
+    vi.useFakeTimers()
     const active = new Set<string>()
-    const input = vi.fn((title: string, _placeholder: unknown, options: { signal?: AbortSignal; timeout: number }) => {
+    let acknowledge!: () => void
+    const input = vi.fn((title: string, _placeholder: unknown, options: { signal?: AbortSignal; timeout?: number }) => {
       const request = JSON.parse(title.slice(COMPUTER_USE_AGENT_TITLE_PREFIX.length))
       if (request.operation === 'watch') {
         active.add(request.requestId)
         return new Promise<undefined>(resolve => options.signal!.addEventListener('abort', () => resolve(undefined), { once: true }))
       }
       expect(request.operation).toBe('unwatch')
-      expect(options).toEqual({ signal: undefined, timeout: COMPUTER_USE_UNWATCH_TIMEOUT_MS })
-      expect(active.delete(request.watchRequestId)).toBe(true)
-      return Promise.resolve(JSON.stringify({ version: 1, operation: 'unwatch', requestId: request.requestId, ok: true }))
+      expect(options).toEqual({ signal: expect.any(AbortSignal), timeout: undefined })
+      expect(options.signal?.aborted).toBe(false)
+      return new Promise<string | undefined>(resolve => {
+        // Pinned SDK input timeout/abort resolves locally and loses its receiver.
+        options.signal?.addEventListener('abort', () => resolve(undefined), { once: true })
+        if (options.timeout) setTimeout(() => resolve(undefined), options.timeout)
+        acknowledge = () => {
+          expect(active.delete(request.watchRequestId)).toBe(true)
+          resolve(JSON.stringify({ version: 1, operation: 'unwatch', requestId: request.requestId, ok: true }))
+        }
+      })
     })
     const channel = createComputerUseAgentChannel({ runtimeId: 'runtime', nonce: 'nonce', isCurrent: () => true, createContext: () => ({ mode: 'rpc', hasUI: true, ui: { input } }) as never })
     const controller = new AbortController()
@@ -230,9 +259,14 @@ describe('private SDK command-context channel', () => {
     controller.abort()
     await expect(request.result).rejects.toThrow(/scope-revoked/)
     expect(request.isAcknowledged()).toBe(false)
-    expect(active.size).toBe(1) // the real SDK emits no cancellation RPC
-    const ack = await channel('unwatch', model, { watchRequestId: request.watchRequestId })
-    expect(ack.operation).toBe('unwatch')
+    const result = channel('unwatch', model, { watchRequestId: request.watchRequestId }, controller.signal)
+    const completed = vi.fn()
+    void result.then(completed, completed)
+    await vi.advanceTimersByTimeAsync(6_000)
+    expect(completed).not.toHaveBeenCalled()
+    expect(active.size).toBe(1) // local cancellation never closes the Main watch
+    acknowledge()
+    expect((await result).operation).toBe('unwatch')
     expect(active.size).toBe(0)
   })
   it('marks a watch ended only for a validated matching Main ACK, including an explicit negative response', async () => {
@@ -264,7 +298,7 @@ describe('private SDK command-context channel', () => {
     current = false
     expect(() => channel.assertObservation(model, response)).toThrow(/source-unverified/)
   })
-  it('a cleanup timeout, wrong ACK or retired runtime is not a successful unwatch', async () => {
+  it('a missing response, wrong ACK or retired runtime is not a successful unwatch', async () => {
     const input = vi.fn().mockResolvedValueOnce(undefined).mockResolvedValueOnce(JSON.stringify({ version: 1, operation: 'unwatch', requestId: 'wrong', ok: true }))
     let current = true
     const channel = createComputerUseAgentChannel({ runtimeId: 'runtime', nonce: 'nonce', isCurrent: () => current, createContext: () => ({ mode: 'rpc', hasUI: true, ui: { input } }) as never })

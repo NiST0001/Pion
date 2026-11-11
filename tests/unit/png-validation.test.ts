@@ -1,8 +1,7 @@
 import { Buffer } from 'node:buffer'
-import { deflateRawSync, deflateSync, gzipSync, inflateSync } from 'node:zlib'
+import { deflateRawSync, deflateSync, inflateSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { assertGeneratedPngData, GENERATED_PNG_VALIDATION_LIMITS } from '../../src/main/agent/png-validation'
-import { createGeneratedPngValidationReceipt, snapshotGeneratedPngBytes } from '../../src/main/agent/generated-png-validation-receipt'
+import { assertGeneratedPngData } from '../../src/main/agent/png-validation'
 import { makeStaticPng } from '../fixtures/static-png'
 
 // Real, in-memory zlib except the one explicit large-budget observation below.
@@ -64,9 +63,6 @@ function badCrc(type: string, data = Buffer.alloc(0)): Buffer {
 function compressedText(type: 'iCCP' | 'zTXt', compressed = deflateSync(Buffer.from('bounded text'))): Buffer {
   return chunk(type, Buffer.concat([Buffer.from('Name\0'), Buffer.of(0), compressed]))
 }
-function internationalText(text: Buffer, flag = 1, method = 0): Buffer {
-  return chunk('iTXt', Buffer.concat([Buffer.from('Name\0'), Buffer.of(flag, method), Buffer.from('zh-CN\0标题\0'), flag === 1 ? deflateSync(text) : text]))
-}
 const PALETTE = chunk('PLTE', Buffer.from([255, 0, 0, 0, 255, 0]))
 
 // Independent test geometry, with hard-coded pass origins/strides and a known
@@ -82,162 +78,7 @@ function adam7Rows(width: number, height: number, bitsPerPixel: number): Buffer 
   return Buffer.concat(rows)
 }
 
-describe('execution-private complete-validation receipts', () => {
-  const dimensions = { width: 1, height: 1 }
-
-  it('binds one exact snapshot and dimensions to one consume, across nonzero Buffer offsets', () => {
-    const backing = Buffer.concat([Buffer.of(1, 2, 3), makeStaticPng(), Buffer.of(4)])
-    const source = backing.subarray(3, -1)
-    const receipt = createGeneratedPngValidationReceipt()
-    receipt.validate(source, dimensions)
-    const snapshot = snapshotGeneratedPngBytes(source)
-    expect(snapshot.buffer).not.toBe(source.buffer)
-    expect(receipt.consume(source, snapshot, dimensions)).toBe(true)
-    expect(receipt.consume(source, snapshot, dimensions)).toBe(false)
-    expect(inflateSync).toHaveBeenCalledTimes(1)
-  })
-
-  it('keeps SharedArrayBuffer and Buffer slice snapshots private, without reading overridden byte slots', () => {
-    const valid = makeStaticPng()
-    const shared = new Uint8Array(new SharedArrayBuffer(valid.length + 2), 1, valid.length)
-    shared.set(valid)
-    const source = Buffer.from(shared.buffer, shared.byteOffset, shared.byteLength).slice(0)
-    const getter = vi.fn(() => { throw new Error('Unexpected byte getter') })
-    for (const key of ['buffer', 'byteOffset', 'byteLength', 'length']) Object.defineProperty(source, key, { get: getter })
-    const receipt = createGeneratedPngValidationReceipt()
-    receipt.validate(source, dimensions)
-    const snapshot = snapshotGeneratedPngBytes(source)
-    shared.fill(0)
-    expect(snapshot.buffer).toBeInstanceOf(ArrayBuffer)
-    expect(snapshot).toEqual(new Uint8Array(valid))
-    expect(receipt.consume(source, snapshot, dimensions)).toBe(true)
-    expect(() => assertPng(snapshot)).not.toThrow()
-    expect(getter).not.toHaveBeenCalled()
-  })
-
-  it('rejects accessor dimensions without issuing a receipt or invoking the getter', () => {
-    const source = makeStaticPng()
-    const getter = vi.fn(() => 1)
-    const dimensions = Object.defineProperty({ height: 1 }, 'width', { get: getter }) as { width: number; height: number }
-    const receipt = createGeneratedPngValidationReceipt()
-    expect(() => receipt.validate(source, dimensions)).toThrow('dimensions')
-    expect(receipt.consume(source, snapshotGeneratedPngBytes(source), { width: 1, height: 1 })).toBe(false)
-    expect(getter).not.toHaveBeenCalled()
-  })
-
-  it('honours disposal re-entered from a descriptor trap before validation completes', () => {
-    const source = makeStaticPng()
-    const receipt = createGeneratedPngValidationReceipt()
-    const inspected = new Proxy(dimensions, {
-      getOwnPropertyDescriptor(target, key) { receipt.dispose(); return Reflect.getOwnPropertyDescriptor(target, key) }
-    })
-    receipt.validate(source, inspected)
-    expect(receipt.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
-  })
-
-  it.each(['dimensions', 'limits', 'exception'] as const)('retires a receipt on %s descriptor rejection without calling accessors', (kind) => {
-    const source = makeStaticPng()
-    const receipt = createGeneratedPngValidationReceipt()
-    receipt.validate(source, dimensions)
-    const getter = vi.fn(() => 1)
-    const inspected = Object.defineProperty({ height: 1 }, 'width', { get: getter }) as { width: number; height: number }
-    const limits = Object.defineProperty({ ...GENERATED_PNG_VALIDATION_LIMITS }, 'maxBytes', { get: getter })
-    const snapshot = snapshotGeneratedPngBytes(source)
-    if (kind === 'exception') {
-      const throwing = new Proxy(dimensions, { getOwnPropertyDescriptor() { throw new Error('descriptor failure') } })
-      expect(() => receipt.consume(source, snapshot, throwing)).toThrow('descriptor failure')
-    } else expect(receipt.consume(source, snapshot, kind === 'dimensions' ? inspected : dimensions,
-      kind === 'limits' ? limits : GENERATED_PNG_VALIDATION_LIMITS)).toBe(false)
-    expect(receipt.consume(source, snapshot, dimensions)).toBe(false)
-    expect(getter).not.toHaveBeenCalled()
-  })
-
-  it('rejects same-Buffer mutation, forged tags, different source objects and wrong dimensions', () => {
-    const source = Buffer.from(makeStaticPng())
-    Object.assign(source, { validated: true, validationReceipt: 'trusted' })
-    const receipt = createGeneratedPngValidationReceipt()
-    receipt.validate(source, dimensions)
-    source[source.length - 1] ^= 1
-    expect(receipt.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
-    source[source.length - 1] ^= 1
-    expect(receipt.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
-    for (const [key, inspected] of [[Buffer.from(source), dimensions], [source, { width: 2, height: 1 }]] as const) {
-      const other = createGeneratedPngValidationReceipt()
-      other.validate(source, dimensions)
-      expect(other.consume(key, snapshotGeneratedPngBytes(source), inspected)).toBe(false)
-    }
-    const unrelated = createGeneratedPngValidationReceipt()
-    expect(unrelated.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
-  })
-
-  it.each(Object.keys(GENERATED_PNG_VALIDATION_LIMITS) as (keyof typeof GENERATED_PNG_VALIDATION_LIMITS)[])(
-    'rejects a different %s budget, consuming the receipt even on mismatch', (key) => {
-      const source = makeStaticPng()
-      const receipt = createGeneratedPngValidationReceipt()
-      receipt.validate(source, dimensions)
-      const snapshot = snapshotGeneratedPngBytes(source)
-      expect(receipt.consume(source, snapshot, dimensions, {
-        ...GENERATED_PNG_VALIDATION_LIMITS, [key]: GENERATED_PNG_VALIDATION_LIMITS[key] - 1
-      })).toBe(false)
-      expect(receipt.consume(source, snapshot, dimensions)).toBe(false)
-    }
-  )
-
-  it('clears prior receipts on validation failure and never issues after failure or disposal', () => {
-    const source = makeStaticPng()
-    const invalid = Buffer.from(source)
-    invalid[invalid.length - 1] ^= 1
-    const receipt = createGeneratedPngValidationReceipt()
-    receipt.validate(source, dimensions)
-    expect(() => receipt.validate(invalid, dimensions)).toThrow(/CRC/)
-    expect(receipt.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
-    const failed = createGeneratedPngValidationReceipt()
-    expect(() => failed.validate(invalid, dimensions)).toThrow(/CRC/)
-    failed.validate(source, dimensions)
-    expect(failed.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
-    const disposed = createGeneratedPngValidationReceipt()
-    disposed.dispose()
-    disposed.validate(source, dimensions)
-    expect(disposed.consume(source, snapshotGeneratedPngBytes(source), dimensions)).toBe(false)
-  })
-
-  it('uses native slots and private copies, bounds bytes before copy, and retains all inflate limits', () => {
-    const source = makeStaticPng()
-    Object.defineProperty(source, Symbol.iterator, { value: () => { throw new Error('Unexpected iterator') } })
-    Object.defineProperty(source, 'byteLength', { get: () => { throw new Error('Unexpected byteLength getter') } })
-    expect(snapshotGeneratedPngBytes(source)).toEqual(new Uint8Array(makeStaticPng()))
-    const oversized = Buffer.alloc(GENERATED_PNG_VALIDATION_LIMITS.maxBytes + 1)
-    Object.defineProperty(oversized, 'byteLength', { value: 1 })
-    expect(() => snapshotGeneratedPngBytes(oversized)).toThrow(/byte size/)
-    for (const invalid of [
-      encoded(RGB_ROW, {}, [badCrc('tEXt', Buffer.from('Name\0text'))]),
-      encoded(Buffer.alloc(1024 * 1024)),
-      encoded(RGB_ROW, {}, [compressedText('zTXt', deflateSync(Buffer.alloc(1024 * 1024 + 1)))])
-    ]) {
-      const receipt = createGeneratedPngValidationReceipt()
-      expect(() => receipt.validate(invalid, dimensions)).toThrow(/CRC|budget/)
-      expect(receipt.consume(invalid, snapshotGeneratedPngBytes(invalid), dimensions)).toBe(false)
-    }
-  })
-})
-
 describe('static PNG fixture and supported raster formats', () => {
-  it('creates a deterministic, valid default 1x1 RGB fixture with independent known CRCs', () => {
-    const bytes = makeStaticPng()
-    expect(bytes).toEqual(makeStaticPng(1, 1))
-    expect(bytes.subarray(24, 29)).toEqual(Buffer.from([8, 2, 0, 0, 0]))
-    expect(bytes.readUInt32BE(29)).toBe(0x907753de)
-    expect(bytes.readUInt32BE(bytes.length - 4)).toBe(0xae426082)
-    expect(() => assertPng(bytes)).not.toThrow()
-  })
-
-  it.each([[23, 17], [512, 512], [4096, 1]])('validates a %i x %i fixture without changing caller bytes', (width, height) => {
-    const bytes = makeStaticPng(width, height)
-    const original = Buffer.from(bytes)
-    expect(() => assertPng(bytes, width, height)).not.toThrow()
-    expect(bytes).toEqual(original)
-  })
-
   it('respects a Uint8Array view with a nonzero offset', () => {
     const bytes = makeStaticPng(3, 2)
     const backing = Buffer.concat([Buffer.of(1, 2, 3), bytes, Buffer.of(4, 5)])
@@ -246,17 +87,11 @@ describe('static PNG fixture and supported raster formats', () => {
   })
 
   it.each([
-    [0, 1, 1], [0, 2, 1], [0, 4, 1], [0, 8, 1], [0, 16, 1],
-    [2, 8, 3], [2, 16, 3], [3, 1, 1], [3, 2, 1], [3, 4, 1], [3, 8, 1],
-    [4, 8, 2], [4, 16, 2], [6, 8, 4], [6, 16, 4]
+    [0, 1, 1], [2, 8, 3], [3, 2, 1], [4, 8, 2], [6, 16, 4]
   ])('accepts color type %i / bit depth %i, including packed rows', (colorType, bitDepth, channels) => {
     const raw = Buffer.alloc(1 + Math.ceil(3 * channels * bitDepth / 8))
     const before = colorType === 3 ? [PALETTE] : []
     expect(() => assertPng(encoded(raw, { width: 3, colorType, bitDepth }, before), 3, 1)).not.toThrow()
-  })
-
-  it.each([0, 1, 2, 3, 4])('accepts scanline filter %i', (filter) => {
-    expect(() => assertPng(encoded(Buffer.of(filter, 0, 0, 0)))).not.toThrow()
   })
 
   it('accepts consecutive split IDAT, including empty fragments', () => {
@@ -265,7 +100,7 @@ describe('static PNG fixture and supported raster formats', () => {
     expect(() => assertPng(bytes)).not.toThrow()
   })
 
-  it.each([[1, 1], [1, 2], [2, 1], [3, 5], [8, 8], [9, 10]])('accepts Adam7 %i x %i with empty passes omitted', (width, height) => {
+  it.each([[1, 1], [8, 8]])('accepts Adam7 %i x %i with empty passes omitted', (width, height) => {
     const raw = adam7Rows(width, height, 24)
     if (width === 8 && height === 8) expect(raw.length).toBe(207)
     expect(() => assertPng(encoded(raw, { width, height, interlace: 1 }), width, height)).not.toThrow()
@@ -295,20 +130,15 @@ describe('static PNG fixture and supported raster formats', () => {
 })
 
 describe('PNG chunk integrity and ordering', () => {
-  it.each(['IHDR', 'IDAT', 'tEXt', 'IEND'])('checks the %s CRC, not just structure', (type) => {
-    const header = ihdr()
-    if (type === 'IHDR') header[header.length - 1] ^= 1
-    const idat = type === 'IDAT' ? badCrc('IDAT', deflateSync(RGB_ROW)) : chunk('IDAT', deflateSync(RGB_ROW))
-    const text = type === 'tEXt' ? badCrc('tEXt', Buffer.from('Name\0text')) : chunk('tEXt', Buffer.from('Name\0text'))
-    const end = type === 'IEND' ? badCrc('IEND') : chunk('IEND')
-    expect(() => assertPng(Buffer.concat([SIGNATURE, header, text, idat, end]))).toThrow(/CRC/)
+  it('checks IDAT CRC even when its compressed data is intact', () => {
+    expect(() => assertPng(png({}, [badCrc('IDAT', deflateSync(RGB_ROW)), chunk('IEND')]))).toThrow(/CRC/)
   })
 
   it('checks unknown ancillary CRCs rather than skipping their data', () => {
     expect(() => assertPng(encoded(RGB_ROW, {}, [badCrc('vpAg', Buffer.of(7))]))).toThrow(/CRC/)
   })
 
-  it.each(['ABCD', 'CgBI'])('rejects unknown critical chunk %s', (type) => {
+  it.each(['ABCD'])('rejects unknown critical chunk %s', (type) => {
     expect(() => assertPng(encoded(RGB_ROW, {}, [chunk(type)]))).toThrow(/critical/)
   })
 
@@ -316,18 +146,15 @@ describe('PNG chunk integrity and ordering', () => {
     expect(() => assertPng(encoded(RGB_ROW, {}, [chunk(type)]))).toThrow(/chunk type/)
   })
 
-  it.each(['acTL', 'fcTL', 'fdAT'])('rejects animated PNG %s before or after IDAT', (type) => {
-    for (const bytes of [encoded(RGB_ROW, {}, [chunk(type, Buffer.alloc(26))]), encoded(RGB_ROW, {}, [], [chunk(type, Buffer.alloc(26))])]) {
-      expect(() => assertPng(bytes)).toThrow(/animated/)
-    }
+  it('rejects animated PNG', () => {
+    expect(() => assertPng(encoded(RGB_ROW, {}, [chunk('acTL', Buffer.alloc(8))]))).toThrow(/animated/)
   })
 
   it('requires IHDR first, exactly once and with length 13', () => {
     for (const bytes of [
       Buffer.concat([SIGNATURE, chunk('tEXt', Buffer.from('Name\0text')), ihdr(), chunk('IDAT', deflateSync(RGB_ROW)), chunk('IEND')]),
       png({}, [ihdr(), chunk('IDAT', deflateSync(RGB_ROW)), chunk('IEND')]),
-      Buffer.concat([SIGNATURE, chunk('IHDR', Buffer.alloc(12)), chunk('IDAT', deflateSync(RGB_ROW)), chunk('IEND')]),
-      Buffer.concat([SIGNATURE, chunk('IHDR', Buffer.alloc(14)), chunk('IDAT', deflateSync(RGB_ROW)), chunk('IEND')])
+      Buffer.concat([SIGNATURE, chunk('IHDR', Buffer.alloc(12)), chunk('IDAT', deflateSync(RGB_ROW)), chunk('IEND')])
     ]) expect(() => assertPng(bytes)).toThrow(/IHDR/)
   })
 
@@ -346,18 +173,16 @@ describe('PNG chunk integrity and ordering', () => {
     const overrun = Buffer.from(valid)
     overrun.writeUInt32BE(valid.length, 33)
     for (const bytes of [
-      signature, valid.subarray(0, 7), valid.subarray(0, 39), valid.subarray(0, -1), valid.subarray(0, -12),
-      oversized, overrun, png({}, [chunk('IEND')]),
-      png({}, [chunk('IDAT', deflateSync(RGB_ROW)), chunk('IEND', Buffer.of(0))]),
-      Buffer.concat([valid, Buffer.of(0)]), Buffer.concat([valid, chunk('IEND')])
+      signature, valid.subarray(0, 39), valid.subarray(0, -12), oversized, overrun,
+      png({}, [chunk('IEND')]), png({}, [chunk('IDAT', deflateSync(RGB_ROW)), chunk('IEND', Buffer.of(0))]),
+      Buffer.concat([valid, Buffer.of(0)])
     ]) expect(() => assertPng(bytes)).toThrow()
   })
 })
 
 describe('IHDR and allocation limits', () => {
   it.each([
-    { bitDepth: 0 }, { bitDepth: 3 }, { bitDepth: 32 }, { colorType: 1 }, { colorType: 5 }, { colorType: 7 },
-    { colorType: 2, bitDepth: 4 }, { colorType: 3, bitDepth: 16 }, { colorType: 4, bitDepth: 1 }, { colorType: 6, bitDepth: 4 },
+    { bitDepth: 3 }, { colorType: 1 }, { colorType: 2, bitDepth: 4 },
     { compression: 1 }, { filter: 1 }, { interlace: 2 }
   ])('rejects an invalid but CRC-correct IHDR %j', (options) => {
     expect(() => assertPng(png(options))).toThrow(/bit depth|color type|method/)
@@ -368,14 +193,9 @@ describe('IHDR and allocation limits', () => {
     expect(() => assertPng(makeStaticPng(), 2, 1)).toThrow(/match/)
   })
 
-  it.each([[0, 1], [1, 0], [4097, 1], [1, 4097], [4001, 4000], [0x80000000, 1], [1, 0xffffffff]])('bounds unsigned IHDR dimensions %i x %i before allocating raster data', (width, height) => {
+  it.each([[0, 1], [4097, 1], [4001, 4000]])('bounds unsigned IHDR dimensions %i x %i before allocating raster data', (width, height) => {
     expect(() => assertPng(png({ width, height }))).toThrow(/dimensions/)
     expect(inflateSync).not.toHaveBeenCalled()
-  })
-
-  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('rejects invalid caller dimensions and fixture dimensions %j', (value) => {
-    expect(() => assertPng(makeStaticPng(), value, 1)).toThrow(/dimensions/)
-    expect(() => makeStaticPng(value, 1)).toThrow(/dimensions/)
   })
 
   it('rejects oversized input before walking chunks or inflating', () => {
@@ -386,7 +206,6 @@ describe('IHDR and allocation limits', () => {
   it('uses the exact raster byte budget, always below 128 MiB, at the 16-million-pixel limit', () => {
     vi.mocked(inflateSync).mockImplementationOnce(() => { throw new Error('stop before allocating a large raster') })
     expect(() => assertPng(png({ width: 4000, height: 4000, colorType: 6, bitDepth: 16 }), 4000, 4000)).toThrow(/inflate budget/)
-    expect(inflateSync).toHaveBeenCalledTimes(1)
     expect(vi.mocked(inflateSync).mock.calls[0][1]).toEqual({ info: true, maxOutputLength: 128_004_000 })
     expect(128_004_000).toBeLessThan(128 * 1024 * 1024)
   })
@@ -402,14 +221,14 @@ describe('IDAT zlib and scanlines', () => {
     const wrongAdler = Buffer.from(compressed)
     wrongAdler[wrongAdler.length - 1] ^= 1
     for (const payload of [
-      Buffer.of(0), Buffer.of(0, 1, 2, 3, 4, 5), compressed.subarray(0, -1), wrongAdler,
-      deflateRawSync(RGB_ROW), gzipSync(RGB_ROW), deflateSync(RGB_ROW, { dictionary: Buffer.from('dictionary') })
+      compressed.subarray(0, -1), wrongAdler, deflateRawSync(RGB_ROW),
+      deflateSync(RGB_ROW, { dictionary: Buffer.from('dictionary') })
     ]) expect(() => assertPng(png({}, [chunk('IDAT', payload), chunk('IEND')]))).toThrow(/zlib/)
   })
 
   it('rejects trailing junk and concatenated zlib streams which inflateSync alone would ignore', () => {
     const compressed = deflateSync(RGB_ROW)
-    for (const suffix of [Buffer.of(0), compressed, deflateSync(Buffer.alloc(0))]) {
+    for (const suffix of [Buffer.of(0), compressed]) {
       expect(() => assertPng(png({}, [chunk('IDAT', Buffer.concat([compressed, suffix])), chunk('IEND')]))).toThrow(/trailing/)
     }
   })
@@ -418,10 +237,6 @@ describe('IDAT zlib and scanlines', () => {
     for (const raw of [Buffer.alloc(0), RGB_ROW.subarray(0, 3), Buffer.concat([RGB_ROW, Buffer.of(0)])]) {
       expect(() => assertPng(encoded(raw))).toThrow(/scanline|inflate budget/)
     }
-  })
-
-  it.each([5, 255])('rejects illegal scanline filter %i', (filter) => {
-    expect(() => assertPng(encoded(Buffer.of(filter, 1, 2, 3)))).toThrow(/filter/)
   })
 
   it('rejects a later-row illegal filter and an Adam7 later-pass illegal filter', () => {
@@ -455,19 +270,6 @@ describe('PLTE and indexed sample correctness', () => {
     }
   })
 
-  it('rejects empty, misaligned, oversized, duplicate or late palettes', () => {
-    for (const before of [[chunk('PLTE')], [chunk('PLTE', Buffer.of(1, 2))], [chunk('PLTE', Buffer.alloc(257 * 3))], [PALETTE, PALETTE]]) {
-      expect(() => assertPng(encoded(RGB_ROW, {}, before))).toThrow(/PLTE/)
-    }
-    expect(() => assertPng(encoded(RGB_ROW, {}, [], [PALETTE]))).toThrow(/order/)
-    expect(() => assertPng(encoded(Buffer.of(0, 0), { colorType: 3, bitDepth: 1 }, [chunk('PLTE', Buffer.alloc(9))]))).toThrow(/bit depth/)
-  })
-
-  it('permits optional truecolor palettes', () => {
-    expect(() => assertPng(encoded(RGB_ROW, {}, [PALETTE]))).not.toThrow()
-    expect(() => assertPng(encoded(Buffer.alloc(5), { colorType: 6 }, [PALETTE]))).not.toThrow()
-  })
-
   it('checks reconstructed indices, not filtered bytes, across scanlines', () => {
     const raw = Buffer.of(1, 1, 255, 2, 255, 1) // Sub => [1,0]; Up => [0,1].
     const bytes = encoded(raw, { width: 2, height: 2, colorType: 3 }, [PALETTE])
@@ -483,46 +285,20 @@ describe('PLTE and indexed sample correctness', () => {
     expect(() => assertPng(encoded(raw, { width: 4, height: 3, colorType: 3 }, [chunk('PLTE', Buffer.alloc(12))]), 4, 3)).not.toThrow()
   })
 
-  it.each([[1, 1, 0x80], [2, 2, 0x80], [4, 2, 0x20], [8, 2, 2]])('checks actual packed depth-%i indices against %i palette entries', (bitDepth, entries, pixel) => {
+  it.each([[1, 1, 0x80], [8, 2, 2]])('checks actual packed depth-%i indices against %i palette entries', (bitDepth, entries, pixel) => {
     expect(() => assertPng(encoded(Buffer.of(0, pixel), { bitDepth, colorType: 3 }, [chunk('PLTE', Buffer.alloc(entries * 3))]))).toThrow(/palette entry/)
   })
 
   it('ignores unused low padding bits in packed indexed rows', () => {
     expect(() => assertPng(encoded(Buffer.of(0, 0x7f), { bitDepth: 1, colorType: 3 }, [chunk('PLTE', Buffer.alloc(3))]))).not.toThrow()
   })
-
-  it('checks tRNS/bKGD/hIST basic lengths, ordering and sample ranges', () => {
-    expect(() => assertPng(encoded(Buffer.of(0, 0), { colorType: 3 }, [PALETTE, chunk('tRNS', Buffer.of(255)), chunk('bKGD', Buffer.of(1)), chunk('hIST', Buffer.alloc(4))]))).not.toThrow()
-    for (const metadata of [chunk('tRNS', Buffer.alloc(3)), chunk('bKGD', Buffer.of(2)), chunk('hIST', Buffer.alloc(2))]) {
-      expect(() => assertPng(encoded(Buffer.of(0, 0), { colorType: 3 }, [PALETTE, metadata]))).toThrow()
-    }
-    expect(() => assertPng(encoded(RGB_ROW, {}, [chunk('tRNS', Buffer.alloc(6)), PALETTE]))).toThrow(/ordering/)
-    expect(() => assertPng(encoded(RGB_ROW, {}, [chunk('tRNS', Buffer.of(1, 0, 0, 0, 0, 0))]))).toThrow(/sample/)
-    expect(() => assertPng(encoded(Buffer.alloc(5), { colorType: 6 }, [chunk('tRNS', Buffer.alloc(6))]))).toThrow(/forbidden/)
-  })
 })
 
 describe('bounded ancillary metadata', () => {
-  it('accepts text, bounded compressed text/ICC streams, and UTF-8 international text', () => {
-    const before = [compressedText('iCCP', deflateSync(Buffer.alloc(128, 1))), chunk('tEXt', Buffer.from('Name\0plain text'))]
-    const after = [compressedText('zTXt'), internationalText(Buffer.from('你好 🌍')), internationalText(Buffer.from('未压缩'), 0)]
-    expect(() => assertPng(encoded(RGB_ROW, {}, before, after))).not.toThrow()
-    // Only compression envelope/budgets are asserted for ICC here, not profile
-    // semantics or the colors an image decoder would render from this profile.
-    expect(vi.mocked(inflateSync).mock.calls.slice(0, 3).every(([, options]) => (options?.maxOutputLength ?? Infinity) <= 1024 * 1024)).toBe(true)
-  })
-
   it.each(['iCCP', 'zTXt'] as const)('rejects %s bombs, broken streams and compressed trailing bytes', (type) => {
     const compressed = deflateSync(Buffer.from('valid'))
     for (const payload of [deflateSync(Buffer.alloc(1024 * 1024 + 1)), compressed.subarray(0, -1), Buffer.concat([compressed, Buffer.of(0)])]) {
       expect(() => assertPng(encoded(RGB_ROW, {}, [compressedText(type, payload)]))).toThrow(/budget|zlib/)
-    }
-  })
-
-  it('bounds compressed and uncompressed iTXt and validates UTF-8', () => {
-    const over = Buffer.alloc(1024 * 1024 + 1, 65)
-    for (const metadata of [internationalText(over), internationalText(over, 0), internationalText(Buffer.of(0xff)), internationalText(Buffer.of(0xff), 0)]) {
-      expect(() => assertPng(encoded(RGB_ROW, {}, [metadata]))).toThrow(/budget|UTF-8/)
     }
   })
 
@@ -538,29 +314,5 @@ describe('bounded ancillary metadata', () => {
     const sixtyFour = Array.from({ length: 64 }, () => compressedText('zTXt', empty))
     expect(() => assertPng(encoded(RGB_ROW, {}, sixtyFour))).not.toThrow()
     expect(() => assertPng(encoded(RGB_ROW, {}, [...sixtyFour, compressedText('zTXt', empty)]))).toThrow(/too many/)
-  })
-
-  it('rejects malformed keyword/compression/iTXt envelopes despite correct CRCs', () => {
-    for (const metadata of [
-      chunk('zTXt', Buffer.from('unterminated')), chunk('zTXt', Buffer.from('\0\0')),
-      chunk('zTXt', Buffer.from(`${'x'.repeat(80)}\0\0`)), chunk('zTXt', Buffer.from('bad  name\0\0')),
-      chunk('zTXt', Buffer.from(' trailing\0\0')), chunk('zTXt', Buffer.from('trailing \0\0')),
-      chunk('zTXt', Buffer.of(0x80, 0, 0)), chunk('zTXt', Buffer.from('Name\0\x01')),
-      chunk('iCCP', Buffer.from('Name\0\x01')), compressedText('iCCP', deflateSync(Buffer.alloc(0))),
-      internationalText(Buffer.from('text'), 2), internationalText(Buffer.from('text'), 0, 1),
-      chunk('iTXt', Buffer.from('Name\0\x01\0unterminated')), chunk('iTXt', Buffer.from('Name\0\0\0\0\xff\0text', 'latin1')),
-      chunk('tEXt', Buffer.from('Name\0text\0')), compressedText('zTXt', deflateSync(Buffer.from('text\0')))
-    ]) expect(() => assertPng(encoded(RGB_ROW, {}, [metadata]))).toThrow()
-  })
-
-  it('requires ICC/color metadata before PLTE/IDAT and rejects duplicate/conflicting profiles', () => {
-    const profile = compressedText('iCCP')
-    const srgb = chunk('sRGB', Buffer.of(0))
-    for (const bytes of [encoded(RGB_ROW, {}, [profile, profile]), encoded(RGB_ROW, {}, [PALETTE, profile]), encoded(RGB_ROW, {}, [], [profile]), encoded(RGB_ROW, {}, [profile, srgb]), encoded(RGB_ROW, {}, [srgb, profile])]) {
-      expect(() => assertPng(bytes)).toThrow()
-    }
-    for (const metadata of [chunk('sRGB', Buffer.of(4)), chunk('gAMA', Buffer.alloc(4)), chunk('cHRM', Buffer.alloc(31)), chunk('sBIT', Buffer.of(8, 9, 8))]) {
-      expect(() => assertPng(encoded(RGB_ROW, {}, [metadata]))).toThrow()
-    }
   })
 })

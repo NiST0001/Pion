@@ -10,8 +10,8 @@ export interface SessionModelPreference {
 
 export interface SessionModelPreferenceStore {
   getSessionModel(sessionPath: string): SessionModelPreference | undefined
-  setSessionModel(sessionPath: string, preference: SessionModelPreference): Promise<void>
-  deleteSessionModel(sessionPath: string): Promise<void>
+  setSessionModel(sessionPath: string, preference: SessionModelPreference, assertCurrent?: () => void): Promise<void>
+  deleteSessionModel(sessionPath: string, assertCurrent?: () => void): Promise<void>
 }
 
 interface PionSettingsFile {
@@ -29,20 +29,21 @@ function parseSettings(value: unknown): PionSettingsFile {
   }
   const record = value as Record<string, unknown>
   for (const key of ['windowEffectsEnabled', 'completionNotificationsEnabled', 'usageBackgroundCollectionEnabled']) {
-    if (key in record && typeof record[key] !== 'boolean') throw new Error(`Invalid Pion setting: ${key}`)
+    if (Object.hasOwn(record, key) && typeof record[key] !== 'boolean') throw new Error(`Invalid Pion setting: ${key}`)
   }
-  const settings = { ...record } as PionSettingsFile
-  if ('sessionModels' in record) {
+  const settings = Object.assign(Object.create(null), record) as PionSettingsFile
+  if (Object.hasOwn(record, 'sessionModels')) {
     if (typeof record.sessionModels !== 'object' || record.sessionModels === null || Array.isArray(record.sessionModels)) {
       throw new Error('Invalid Pion session model preferences')
     }
-    const sessionModels: Record<string, SessionModelPreference> = {}
+    const sessionModels: Record<string, SessionModelPreference> = Object.create(null)
     for (const [path, candidate] of Object.entries(record.sessionModels)) {
       if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
         throw new Error('Invalid Pion session model preference')
       }
       const preference = candidate as Record<string, unknown>
-      if (typeof preference.provider !== 'string' || preference.provider.length === 0
+      if (!Object.hasOwn(preference, 'provider') || !Object.hasOwn(preference, 'modelId')
+        || typeof preference.provider !== 'string' || preference.provider.length === 0
         || typeof preference.modelId !== 'string' || preference.modelId.length === 0) {
         throw new Error('Invalid Pion session model preference')
       }
@@ -55,7 +56,7 @@ function parseSettings(value: unknown): PionSettingsFile {
 
 /** Persistent settings owned by the Pion shell rather than by a pi session. */
 export class AppSettings implements SessionModelPreferenceStore {
-  private settings: PionSettingsFile = {}
+  private settings: PionSettingsFile = Object.create(null)
   private loaded = false
   private closed = false
   private writeQueue: Promise<void> = Promise.resolve()
@@ -81,16 +82,16 @@ export class AppSettings implements SessionModelPreferenceStore {
 
   get windowEffectsEnabled(): boolean { return this.settings.windowEffectsEnabled ?? false }
 
-  setWindowEffectsEnabled(enabled: boolean): Promise<void> {
-    return this.update((settings) => ({ ...settings, windowEffectsEnabled: enabled }))
+  setWindowEffectsEnabled(enabled: boolean, assertCurrent?: () => void): Promise<void> {
+    return this.update((settings) => ({ ...settings, windowEffectsEnabled: enabled }), assertCurrent)
   }
 
   get usageBackgroundCollectionEnabled(): boolean {
     return this.settings.usageBackgroundCollectionEnabled ?? true
   }
 
-  setUsageBackgroundCollectionEnabled(enabled: boolean): Promise<void> {
-    return this.update((settings) => ({ ...settings, usageBackgroundCollectionEnabled: enabled }))
+  setUsageBackgroundCollectionEnabled(enabled: boolean, assertCurrent?: () => void): Promise<void> {
+    return this.update((settings) => ({ ...settings, usageBackgroundCollectionEnabled: enabled }), assertCurrent)
   }
 
   get completionNotificationsEnabled(): boolean {
@@ -98,42 +99,47 @@ export class AppSettings implements SessionModelPreferenceStore {
       ?? DEFAULT_COMPLETION_NOTIFICATIONS_ENABLED
   }
 
-  setCompletionNotificationsEnabled(enabled: boolean): Promise<void> {
-    return this.update((settings) => ({ ...settings, completionNotificationsEnabled: enabled }))
+  setCompletionNotificationsEnabled(enabled: boolean, assertCurrent?: () => void): Promise<void> {
+    return this.update((settings) => ({ ...settings, completionNotificationsEnabled: enabled }), assertCurrent)
   }
 
   getSessionModel(sessionPath: string): SessionModelPreference | undefined {
-    const preference = this.settings.sessionModels?.[resolve(sessionPath)]
+    const models = this.settings.sessionModels
+    const path = resolve(sessionPath)
+    const preference = models && Object.hasOwn(models, path) ? models[path] : undefined
     return preference ? { ...preference } : undefined
   }
 
-  async setSessionModel(sessionPath: string, preference: SessionModelPreference): Promise<void> {
+  async setSessionModel(sessionPath: string, preference: SessionModelPreference, assertCurrent?: () => void): Promise<void> {
     const path = resolve(sessionPath)
     const next = { ...preference }
     return this.update((settings) => {
-      const current = settings.sessionModels?.[path]
+      const current = settings.sessionModels && Object.hasOwn(settings.sessionModels, path) ? settings.sessionModels[path] : undefined
       if (current?.provider === next.provider && current.modelId === next.modelId) return settings
-      return { ...settings, sessionModels: { ...settings.sessionModels, [path]: next } }
-    })
+      return { ...settings, sessionModels: Object.assign(Object.create(null), settings.sessionModels, { [path]: next }) }
+    }, assertCurrent)
   }
 
-  async deleteSessionModel(sessionPath: string): Promise<void> {
+  async deleteSessionModel(sessionPath: string, assertCurrent?: () => void): Promise<void> {
     const path = resolve(sessionPath)
     return this.update((settings) => {
-      if (!settings.sessionModels?.[path]) return settings
-      const sessionModels = { ...settings.sessionModels }
+      if (!settings.sessionModels || !Object.hasOwn(settings.sessionModels, path)) return settings
+      const sessionModels = Object.assign(Object.create(null), settings.sessionModels) as Record<string, SessionModelPreference>
       delete sessionModels[path]
       return { ...settings, sessionModels }
-    })
+    }, assertCurrent)
   }
 
-  private update(patch: (settings: PionSettingsFile) => PionSettingsFile): Promise<void> {
+  private update(patch: (settings: PionSettingsFile) => PionSettingsFile, assertCurrent: () => void = () => undefined): Promise<void> {
     return this.enqueue(async () => {
+      assertCurrent()
       await this.ensureLoaded()
+      assertCurrent()
       const next = patch(this.settings)
       if (next === this.settings) return
-      await writeAtomicJson(this.filePath, next)
+      await writeAtomicJson(this.filePath, next, assertCurrent)
       this.settings = next
+      assertCurrent()
     })
   }
 

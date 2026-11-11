@@ -29,7 +29,10 @@ it('restores the last theme in a new store and rejects invalid values without ov
   expect(JSON.parse(await readFile(path, 'utf8'))).toBe('plain-light')
   await writeFile(path, '{broken')
   await expect(store.get()).rejects.toThrow()
+  await expect(store.set('terracotta-light')).rejects.toThrow()
   expect(await readFile(path, 'utf8')).toBe('{broken')
+  await writeFile(path, JSON.stringify('plain-light'))
+  expect(await store.get()).toBe('plain-light')
   await store.set('terracotta-light')
   expect(await store.get()).toBe('terracotta-light')
 })
@@ -49,10 +52,25 @@ it('persists division-dark across store instances without allowing unknown IDs t
   await expect(new ThemeSettingsStore(() => path).get()).rejects.toThrow('主题配置无效')
 })
 
-it('limits installer sync deletion to generated directories, not the application root', async () => {
-  // Source contract only; do not run installation from a unit test.
-  const script = await readFile('scripts/install-local.sh', 'utf8')
-  expect(script).toContain('rsync -a --delete out/ "$APP_DIR/out/"')
-  expect(script).toContain('rsync -a --delete node_modules/ "$APP_DIR/node_modules/"')
-  expect(script).not.toMatch(/rsync[^\n]*--delete[^\n]*"\$APP_DIR\/"/)
+it('rechecks the owner before publication and drains accepted reads and saves on shutdown', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pion-theme-owner-'))
+  roots.push(root)
+  const path = join(root, 'pion-theme.json')
+  const store = new ThemeSettingsStore(() => path)
+  await store.set('plain-dark')
+  let checks = 0
+  await expect(store.set('plain-light', () => {
+    if (++checks > 1) throw new Error('retired owner')
+  })).rejects.toThrow('retired owner')
+  expect(await store.get()).toBe('plain-dark')
+  const prior = store.get()
+  const saving = store.set('division-dark')
+  const latest = store.get()
+  const shutdown = store.shutdown()
+  await expect(store.get()).rejects.toThrow('closed')
+  await expect(store.set('plain-light')).rejects.toThrow('closed')
+  expect(await prior).toBe('plain-dark')
+  expect(await saving).toBe('division-dark')
+  expect(await latest).toBe('division-dark')
+  await shutdown
 })

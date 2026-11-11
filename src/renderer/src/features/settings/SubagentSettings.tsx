@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type MutableRefObject } from 'react'
 import type { ModelOption } from '../../../../shared/types'
 import type { PionApi } from '../../../../shared/pion-api'
 import { PionSelect, type PionSelectOption } from '../common/PionSelect'
@@ -24,7 +24,10 @@ const withSelections = (draft: Settings, saved: Settings): Settings => ({
 // drafts retain the API slot. Reopened pages still read the persisted baseline.
 const saveSlots = new WeakMap<PionApi, SaveSlot>()
 
-export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
+export function SubagentSettings({ models = [], providerActionSlot }: {
+  models?: ModelOption[]
+  providerActionSlot?: MutableRefObject<Promise<void> | null>
+}) {
   const api = typeof window === 'undefined' ? undefined : window.pion
   const available = typeof api?.getSubagentSettings === 'function' && typeof api?.setSubagentSettings === 'function'
   const [settings, setSettings] = useState<Settings>({ ...DEFAULT_SUBAGENT_SETTINGS })
@@ -105,27 +108,38 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
     setModelsError('')
     setModelsLoading(independentDirectory)
     if (independentDirectory) {
-      timer = setTimeout(() => {
-        if (!current()) return
-        active = false
-        setModelsLoading(false)
-        setModelsError('读取模型目录超时，请重新打开设置重试；已选默认模型保持不变。')
-      }, 10_000)
-      void capturedApi!.getSubagentModels().then((value) => {
-        if (!current()) return
-        if (!Array.isArray(value) || value.length > 4096 || value.some((model) =>
-          !model || typeof model.provider !== 'string' || !model.provider || typeof model.id !== 'string' || !model.id)) {
-          throw new Error('模型目录无效')
+      const load = async () => {
+        try {
+          // Provider saves invalidate the runtime directory at actual settlement,
+          // including failure. A retired page observes the slot without reading.
+          while (providerActionSlot?.current) {
+            await providerActionSlot.current.catch(() => undefined)
+            if (!current()) return
+          }
+          if (!current()) return
+          timer = setTimeout(() => {
+            if (!current()) return
+            active = false
+            setModelsLoading(false)
+            setModelsError('读取模型目录超时，请重新打开设置重试；已选默认模型保持不变。')
+          }, 10_000)
+          const value = await capturedApi!.getSubagentModels()
+          if (!current()) return
+          if (!Array.isArray(value) || value.length > 4096 || value.some((model) =>
+            !model || typeof model.provider !== 'string' || !model.provider || typeof model.id !== 'string' || !model.id)) {
+            throw new Error('模型目录无效')
+          }
+          setDirectory(value)
+        } catch {
+          if (current()) setModelsError('读取模型目录失败，请重新打开设置重试；已选默认模型保持不变。')
+        } finally {
+          if (current()) { setModelsLoading(false); if (timer) clearTimeout(timer) }
         }
-        setDirectory(value)
-      }).catch(() => {
-        if (current()) setModelsError('读取模型目录失败，请重新打开设置重试；已选默认模型保持不变。')
-      }).finally(() => {
-        if (current()) { setModelsLoading(false); if (timer) clearTimeout(timer) }
-      })
+      }
+      void load()
     }
     return () => { active = false; if (timer) clearTimeout(timer) }
-  }, [api, independentDirectory, available, readAttempt])
+  }, [api, independentDirectory, available, readAttempt, providerActionSlot])
 
   const save = async (kind: SaveSlot['kind'] = 'manual', selection?: Partial<Settings>) => {
     if (!available || loading || !readReady || !baseline.current || !api || window.pion !== api || saveSlots.get(api)?.pending) return
@@ -138,20 +152,13 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
     const current = () => mounted.current && owner.current === capturedApi && window.pion === capturedApi && generation.current === revision
     const slot: SaveSlot = { draft: nextDraft, kind, error: '' }
     // Register the pending promise before invoking even a synchronous/reentrant API.
-    let begin!: () => void
-    slot.pending = new Promise<Settings>((resolve, reject) => {
-      begin = () => {
-        try {
-          Promise.resolve(capturedApi.setSubagentSettings(next)).then(validateSubagentSettings).then((saved) => {
-            if (FIELDS.some(({ key }) => saved[key] !== next[key])
-              || JSON.stringify(saved.defaultModel) !== JSON.stringify(next.defaultModel)
-              || saved.defaultThinkingLevel !== next.defaultThinkingLevel) {
-              throw new Error('保存回执与提交配置不一致，请重试。')
-            }
-            return saved
-          }).then(resolve, reject)
-        } catch (reason) { reject(reason) }
+    slot.pending = Promise.resolve().then(() => capturedApi.setSubagentSettings(next)).then(validateSubagentSettings).then((saved) => {
+      if (FIELDS.some(({ key }) => saved[key] !== next[key])
+        || JSON.stringify(saved.defaultModel) !== JSON.stringify(next.defaultModel)
+        || saved.defaultThinkingLevel !== next.defaultThinkingLevel) {
+        throw new Error('保存回执与提交配置不一致，请重试。')
       }
+      return saved
     })
     saveSlots.set(capturedApi, slot)
     draft.current = nextDraft
@@ -160,7 +167,6 @@ export function SubagentSettings({ models = [] }: { models?: ModelOption[] }) {
     setFailedKind(null)
     setError('')
     setMessage('')
-    begin()
     try {
       const saved = await slot.pending
       slot.draft = kind === 'auto' ? withSelections(slot.draft, saved) : saved

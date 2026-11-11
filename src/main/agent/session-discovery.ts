@@ -10,6 +10,7 @@ const text = (value: unknown): value is string => typeof value === 'string' && v
 const validTime = (value: number): boolean => Number.isFinite(value) && Number.isFinite(new Date(value).getTime())
 const missing = (error: unknown): boolean => record(error) && error.code === 'ENOENT'
 const stamp = (stat: BigIntStats): string => [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
+const identity = (stat: BigIntStats): string => [stat.dev, stat.ino].join(':')
 
 /** SDK 1.4.0 bucket encoding, without getDefaultSessionDir's mkdir side effect. */
 export function sessionDiscoveryDirectory(cwd: string, agentDir: string): string {
@@ -18,18 +19,18 @@ export function sessionDiscoveryDirectory(cwd: string, agentDir: string): string
 }
 
 export class SessionDiscoveryError extends Error {
-  constructor(readonly closeUnknown = false) { super('Session discovery unavailable') }
+  constructor(readonly sourceChanged = false) { super('Session discovery unavailable') }
 }
 
 interface CachedFile {
+  identity: string
   stamp: string
   meta: SessionMeta
 }
 interface Bucket {
+  identity?: string
   files: Map<string, CachedFile>
   pending?: Promise<SessionMeta[]>
-  // Retain the actual descriptor and isolate this bucket after an unknown close.
-  closeUnknown?: FileHandle
 }
 
 /**
@@ -38,9 +39,10 @@ interface Bucket {
  *
  * Preserve the SDK's physical message count (all roles, across branches), first
  * nonempty user text, latest trimmed name/clear, activity clock and stable sort.
- * Reject malformed JSON/metadata and unreadable/unstable files as a whole scan;
- * the prior verified file cache survives failures. Stamps are cache hints, not
- * authentication or a filesystem snapshot/OS sandbox. Each admitted scan owns
+ * File failures retain that file's verified metadata while healthy files advance.
+ * Directory failures retain the whole prior bucket. Unchanged metadata needs one
+ * path stamp, not another open/read. Stamps are cache hints, not authentication
+ * or a filesystem snapshot/OS sandbox. Each admitted scan owns
  * its actual reads/closes through settlement; signal only fences its result.
  */
 export class SessionDiscovery {
@@ -61,18 +63,16 @@ export class SessionDiscovery {
     const directory = sessionDiscoveryDirectory(owner, root)
     let bucket = this.buckets.get(directory)
     if (!bucket) {
-      // Sidebar metadata only: evict settled LRU buckets, never an actual scan
-      // or an unknown descriptor close. Full isolated capacity rejects intake.
+      // Sidebar metadata only: evict settled LRU buckets, never an actual scan.
       for (const [oldDirectory, oldBucket] of this.buckets) {
         if (this.buckets.size < this.maxBuckets) break
-        if (!oldBucket.pending && !oldBucket.closeUnknown) this.buckets.delete(oldDirectory)
+        if (!oldBucket.pending) this.buckets.delete(oldDirectory)
       }
       if (this.buckets.size >= this.maxBuckets) throw new SessionDiscoveryError()
       bucket = { files: new Map() }
     }
     this.buckets.delete(directory)
     this.buckets.set(directory, bucket)
-    if (bucket.closeUnknown) throw new SessionDiscoveryError(true)
     if (!bucket.pending) {
       const captured = bucket
       captured.pending = this.scan(directory, captured).catch((error: unknown) => {
@@ -95,56 +95,73 @@ export class SessionDiscovery {
       await this.yieldRead()
       try { await lstat(directory, { bigint: true }) } catch (confirmed) {
         if (!missing(confirmed)) throw confirmed
+        bucket.identity = undefined
         bucket.files = new Map()
         return []
       }
       throw new SessionDiscoveryError()
     }
     if (!before.isDirectory()) throw new SessionDiscoveryError()
+    // A replacement directory starts a new source even when filenames match.
+    const previousFiles = bucket.identity === identity(before) ? bucket.files : new Map<string, CachedFile>()
     const names = (await readdir(directory)).filter((name) => name.endsWith('.jsonl')).sort((a, b) => b.localeCompare(a))
     const discovered = new Map<string, CachedFile>()
+    let failed = false
     for (const name of names) {
       const path = join(directory, name)
-      discovered.set(path, await this.readFile(path, bucket))
+      try {
+        discovered.set(path, await this.readFile(path, previousFiles.get(path)))
+      } catch (error) {
+        let previous = previousFiles.get(path)
+        if (previous && !(error instanceof SessionDiscoveryError && error.sourceChanged)) {
+          try {
+            const current = await lstat(path, { bigint: true })
+            if (!current.isFile() || identity(current) !== previous.identity) previous = undefined
+          } catch { previous = undefined }
+        } else previous = undefined
+        if (previous) discovered.set(path, previous)
+        failed = true
+      }
       await this.yieldRead()
-    }
-    // Earlier files can change while a later one is read, without changing the
-    // directory's mtime. Recheck every source before publishing the whole scan.
-    for (const [path, file] of discovered) {
-      const current = await lstat(path, { bigint: true })
-      if (!current.isFile() || stamp(current) !== file.stamp) throw new SessionDiscoveryError()
     }
     const afterNames = (await readdir(directory)).filter((name) => name.endsWith('.jsonl')).sort((a, b) => b.localeCompare(a))
     const after = await lstat(directory, { bigint: true })
     if (!after.isDirectory() || stamp(before) !== stamp(after)
       || names.length !== afterNames.length || names.some((name, index) => name !== afterNames[index])) throw new SessionDiscoveryError()
-    const result = [...discovered.values()].map((file) => file.meta).sort((a, b) => b.mtime - a.mtime)
+    bucket.identity = identity(before)
     bucket.files = discovered
+    // An unreadable bucket stays unknown; healthy files can still advance.
+    if (!discovered.size && failed) throw new SessionDiscoveryError()
+    const result = [...discovered.values()].map((file) => file.meta).sort((a, b) => b.mtime - a.mtime)
     return result
   }
 
-  private async readFile(path: string, bucket: Bucket): Promise<CachedFile> {
+  private async readFile(path: string, cached?: CachedFile): Promise<CachedFile> {
     const named = await lstat(path, { bigint: true })
     if (!named.isFile() || named.size === 0n) throw new SessionDiscoveryError()
     const expected = stamp(named)
+    if (cached?.stamp === expected) return cached
     let handle: FileHandle | undefined
+    let sourceChanged = false
     try {
       handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
       const before = await handle.stat({ bigint: true })
       if (!before.isFile() || stamp(before) !== expected) throw new SessionDiscoveryError()
-      const cached = bucket.files.get(path)
-      // Still open/stat/close unchanged files so unreadable paths cannot pass as
-      // fresh discovery merely because metadata happens to match an old stamp.
-      const meta = cached?.stamp === expected ? cached.meta : await readMetadata(handle, path, before.size, this.yieldRead)
+      const meta = await readMetadata(handle, path, before.size, this.yieldRead, header => {
+        sourceChanged = !header || !!cached && (header.id !== cached.meta.id
+          || header.projectCwd !== cached.meta.projectCwd || header.timestamp !== cached.meta.timestamp)
+      })
       const after = await handle.stat({ bigint: true })
       const current = await lstat(path, { bigint: true })
       if (!after.isFile() || !current.isFile() || stamp(after) !== expected || stamp(current) !== expected) throw new SessionDiscoveryError()
-      return { stamp: expected, meta }
+      return { identity: identity(before), stamp: expected, meta }
+    } catch (error) {
+      if (sourceChanged) throw new SessionDiscoveryError(true)
+      throw error
     } finally {
       if (handle) {
         try { await handle.close() } catch {
-          bucket.closeUnknown = handle
-          throw new SessionDiscoveryError(true)
+          throw new SessionDiscoveryError(sourceChanged)
         }
       }
     }
@@ -153,7 +170,7 @@ export class SessionDiscovery {
 
 /** Only the currently decoded JSONL line is retained, plus the 120-char preview. */
 async function readMetadata(
-  handle: FileHandle, path: string, size: bigint, yieldRead: () => Promise<void>
+  handle: FileHandle, path: string, size: bigint, yieldRead: () => Promise<void>, onHeader: (header?: SessionMeta) => void
 ): Promise<SessionMeta> {
   let meta: SessionMeta | undefined
   let headerTime = 0
@@ -161,6 +178,7 @@ async function readMetadata(
   let preview: string | undefined
   const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
   const consume = (line: Buffer): void => {
+    if (!meta) onHeader()
     const raw = decoder.decode(line)
     if (!raw.trim()) return
     const entry: unknown = JSON.parse(raw)
@@ -175,6 +193,7 @@ async function readMetadata(
       // symlink aliases; a realpath lookup would merge distinct worktree owners.
       meta = { projectCwd: resolve(entry.cwd), path, id: entry.id, timestamp: new Date(headerTime).toISOString(),
         mtime: headerTime, preview: '(no messages)', messageCount: 0 }
+      onHeader(meta)
       return
     }
     if (entry.type === 'session') throw new SessionDiscoveryError()

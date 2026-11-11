@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! PipeWire objects and all callbacks live on one dedicated thread. No default
 //! server connection: only the fd supplied by this ScreenCast session is used.
-use crate::{development_stage_trace, development_stage_trace_is_enabled, trace_result, DevelopmentStage};
+use crate::{development_stage_trace, trace_result, DevelopmentStage};
 use crate::gpu_readback::{retain_unverified_worker, DmaPlane, GpuCleanup, GpuFormat, GpuReadback};
 use crate::pixels::{self, Limits, PackedFormat};
 use pipewire as pw;
@@ -175,205 +175,14 @@ fn stream_state_stage(state: &pw::stream::StreamState) -> DevelopmentStage {
         pw::stream::StreamState::Error(_) => DevelopmentStage::PipewireStateError,
     }
 }
-const PROBE_FORMAT_LIMIT: u32 = 8;
-const PROBE_PARAM_SEQ: i32 = 73;
+// Bounded wire readers are shared by production GPU format negotiation.
 const PROBE_POD_LIMIT: usize = 16 * 1024;
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct ProducerFormatFacts {
-    packed: bool,
-    size_mandatory: bool,
-    framerate_mandatory: bool,
-    modifier: bool,
-    modifier_mandatory: bool,
-}
-impl ProducerFormatFacts {
-    // Every complete sample is exactly five fixed boolean categories, in this
-    // order. No value, index, count, property name or identifier is rendered.
-    fn stages(self) -> [DevelopmentStage; 5] {
-        use DevelopmentStage::*;
-        [if self.packed { PipewireProbePackedSupported } else { PipewireProbePackedUnsupported },
-            if self.size_mandatory { PipewireProbeSizeMandatory } else { PipewireProbeSizeNotMandatory },
-            if self.framerate_mandatory { PipewireProbeFramerateMandatory } else { PipewireProbeFramerateNotMandatory },
-            if self.modifier { PipewireProbeModifierPresent } else { PipewireProbeModifierAbsent },
-            if self.modifier_mandatory { PipewireProbeModifierMandatory } else { PipewireProbeModifierNotMandatory }]
-    }
-}
 fn probe_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_ne_bytes(bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?))
 }
 fn probe_pod(bytes: &[u8]) -> Option<(u32, &[u8])> {
     let size = probe_u32(bytes, 0)? as usize;
     Some((probe_u32(bytes, 4)?, bytes.get(8..8usize.checked_add(size)?)?))
-}
-fn probe_ids(bytes: &[u8]) -> Option<&[u8]> {
-    let (type_, body) = probe_pod(bytes)?;
-    if type_ == spa::sys::SPA_TYPE_Id && body.len() == 4 { return Some(body); }
-    if type_ != spa::sys::SPA_TYPE_Choice || body.len() < 20
-        || probe_u32(body, 4)? != 0 || probe_u32(body, 8)? != 4
-        || probe_u32(body, 12)? != spa::sys::SPA_TYPE_Id { return None; }
-    let choice = probe_u32(body, 0)?;
-    let values = body.get(16..)?;
-    if values.len() % 4 != 0 || values.len() > 64 * 4
-        || (choice != spa::sys::SPA_CHOICE_Enum && choice != spa::sys::SPA_CHOICE_None)
-        || (choice == spa::sys::SPA_CHOICE_None && values.len() != 4) { return None; }
-    Some(values)
-}
-fn producer_format_facts(bytes: &[u8]) -> Option<ProducerFormatFacts> {
-    // A non-recursive, allocation-free projection. Skip unknown property bodies
-    // without decoding strings, nested objects, geometry or modifier values.
-    if bytes.len() > PROBE_POD_LIMIT { return None; }
-    let (type_, body) = probe_pod(bytes)?;
-    if type_ != spa::sys::SPA_TYPE_Object || probe_u32(body, 0)? != spa::sys::SPA_TYPE_OBJECT_Format
-        || probe_u32(body, 4)? != spa::sys::SPA_PARAM_EnumFormat { return None; }
-    let keys = [spa::sys::SPA_FORMAT_mediaType, spa::sys::SPA_FORMAT_mediaSubtype,
-        spa::sys::SPA_FORMAT_VIDEO_format, spa::sys::SPA_FORMAT_VIDEO_size,
-        spa::sys::SPA_FORMAT_VIDEO_framerate, spa::sys::SPA_FORMAT_VIDEO_modifier];
-    let mut seen = [false; 6];
-    let mut raw_video = [false; 2];
-    let mut facts = ProducerFormatFacts::default();
-    let mut offset = 8usize;
-    let mut properties = 0;
-    while offset < body.len() {
-        properties += 1;
-        if properties > 64 { return None; }
-        let key = probe_u32(body, offset)?;
-        let flags = probe_u32(body, offset + 4)?;
-        let value = body.get(offset + 8..)?;
-        let size = (probe_u32(value, 0)? as usize).checked_add(8)?;
-        let value = value.get(..size)?;
-        if let Some(index) = keys.iter().position(|k| *k == key) {
-            if seen[index] { return None; }
-            seen[index] = true;
-            let mandatory = flags & spa::sys::SPA_POD_PROP_FLAG_MANDATORY != 0;
-            match index {
-                0 | 1 => {
-                    let ids = probe_ids(value)?;
-                    if ids.len() != 4 { return None; }
-                    raw_video[index] = probe_u32(ids, 0)? == if index == 0 {
-                        spa::sys::SPA_MEDIA_TYPE_video
-                    } else { spa::sys::SPA_MEDIA_SUBTYPE_raw };
-                }
-                2 => facts.packed = probe_ids(value)?.chunks_exact(4).any(|id| matches!(
-                    u32::from_ne_bytes(id.try_into().unwrap()),
-                    spa::sys::SPA_VIDEO_FORMAT_RGB | spa::sys::SPA_VIDEO_FORMAT_RGBA
-                    | spa::sys::SPA_VIDEO_FORMAT_RGBx | spa::sys::SPA_VIDEO_FORMAT_BGRx
-                    | spa::sys::SPA_VIDEO_FORMAT_BGRA)),
-                3 => facts.size_mandatory = mandatory,
-                4 => facts.framerate_mandatory = mandatory,
-                5 => { facts.modifier = true; facts.modifier_mandatory = mandatory; }
-                _ => unreachable!(),
-            }
-        }
-        offset = offset.checked_add(8)?.checked_add(size.checked_add(7)? & !7)?;
-        if offset > body.len() { return None; }
-    }
-    if !seen[..3].iter().all(|v| *v) { return None; }
-    facts.packed &= raw_video.into_iter().all(|v| v);
-    Some(facts)
-}
-#[derive(Default)]
-struct ProbeSamples { count: u32, invalid: bool }
-impl ProbeSamples {
-    fn accept(&mut self, seq: i32, id: spa::param::ParamType, pod: Option<&spa::pod::Pod>) -> Option<ProducerFormatFacts> {
-        if self.invalid || self.count >= PROBE_FORMAT_LIMIT || seq != PROBE_PARAM_SEQ
-            || id != spa::param::ParamType::EnumFormat { return None; }
-        self.count += 1;
-        let facts = pod.filter(|p| p.size() as usize <= PROBE_POD_LIMIT - 8)
-            .and_then(|p| producer_format_facts(p.as_bytes()));
-        if facts.is_none() { self.invalid = true; }
-        facts
-    }
-}
-fn probe_target_global(target: u32) -> Option<pw::registry::GlobalObject<&'static spa::utils::dict::DictRef>> {
-    if target == pw::constants::ID_ANY { return None; }
-    Some(pw::registry::GlobalObject {
-        id: target, type_: pw::types::ObjectType::Node, version: pw::sys::PW_VERSION_NODE,
-        // Registry::bind sends only id/type/version. This local field requests
-        // no rights; the already-authorized Portal remote enforces its rights.
-        permissions: pw::permissions::PermissionFlags::empty(), props: None,
-    })
-}
-fn probe_roundtrip(loop_: &pw::main_loop::MainLoopRc, core: &pw::core::CoreRc,
-    deadline: std::time::Instant, done: &std::cell::Cell<Option<spa::utils::result::AsyncSeq>>,
-    failed: &std::cell::Cell<bool>) -> Option<()> {
-    if failed.get() || std::time::Instant::now() >= deadline { return None; }
-    done.set(None);
-    let pending = core.sync(0).ok()?;
-    loop {
-        if failed.get() { return None; }
-        let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
-        if done.get() == Some(pending) { return Some(()); }
-        loop_.loop_().iterate(remaining.min(Duration::from_millis(5)));
-    }
-}
-fn probe_selected_producer(loop_: &pw::main_loop::MainLoopRc, core: &pw::core::CoreRc,
-    target: u32, opening_deadline: std::time::Instant) {
-    // Called only after a startup failure is latched, never from construction,
-    // state reads or a successful/normal open. No second PipeWire connection.
-    if !development_stage_trace_is_enabled() { return; }
-    let deadline = opening_deadline.min(std::time::Instant::now() + Duration::from_millis(400));
-    let available = (|| -> Option<()> {
-        use std::{cell::Cell, rc::Rc};
-        use pw::proxy::ProxyT;
-        let global = probe_target_global(target)?;
-        if std::time::Instant::now() >= deadline { return None; }
-        let done = Rc::new(Cell::new(None));
-        let failed = Rc::new(Cell::new(false));
-        let core_done = done.clone();
-        let core_failed = failed.clone();
-        let node_id = Rc::new(Cell::new(None));
-        let error_node_id = node_id.clone();
-        let _probe_core_listener = core.add_listener_local()
-            .done(move |id, seq| { if id == pw::core::PW_ID_CORE { core_done.set(Some(seq)); } })
-            // A delayed error for the already-failed consumer must not abort
-            // this read-only node probe. Match only this probe's local proxy
-            // ID or the Core; the Node also has its own error listener.
-            .error(move |id, _, _, _| {
-                if id == pw::core::PW_ID_CORE || Some(id) == error_node_id.get() { core_failed.set(true); }
-            }).register();
-        let registry = core.get_registry().ok()?;
-        // No Registry.global listener or discovery: bind only the exact Portal
-        // ID supplied to this worker. No other global's contents are inspected.
-        // No closure captures a Node, Registry, Core or MainLoop (strongly or
-        // indirectly); no self-Rc/listener ownership ring.
-        let selected: pw::node::Node = registry.bind(&global).ok()?;
-        node_id.set(Some(selected.upcast_ref().id()));
-        let removed = failed.clone();
-        let proxy_failed = failed.clone();
-        let _node_proxy_listener = selected.upcast_ref().add_listener_local()
-            .removed(move || removed.set(true))
-            .error(move |_, _, _| proxy_failed.set(true)).register();
-        let readable = Rc::new(Cell::new(false));
-        let seen = Rc::new(Cell::new(false));
-        let info_readable = readable.clone();
-        let info_failed = failed.clone();
-        let samples = Rc::new(std::cell::RefCell::new(ProbeSamples::default()));
-        let param_samples = samples.clone();
-        let _node_listener = selected.add_listener_local().info(move |info| {
-            if info.id() != target { info_failed.set(true); return; }
-            if !seen.replace(true) { development_stage_trace(DevelopmentStage::PipewireProbeTargetSeen); }
-            // Only this selected node's parameter descriptors; never props or
-            // its arbitrary state-error text. Oversized metadata is unavailable.
-            info_readable.set(info.as_raw().n_params <= 64 && info.params().iter().any(|p|
-                p.id() == spa::param::ParamType::EnumFormat && p.flags().contains(spa::param::ParamInfoFlags::READ)));
-        }).param(move |seq, id, _, _, pod| {
-            if let Some(facts) = param_samples.borrow_mut().accept(seq, id, pod) {
-                for stage in facts.stages() { development_stage_trace(stage); }
-            }
-        }).register();
-        probe_roundtrip(loop_, core, deadline, &done, &failed)?;
-        if !readable.get() { return None; }
-        selected.enum_params(PROBE_PARAM_SEQ, Some(spa::param::ParamType::EnumFormat), 0, PROBE_FORMAT_LIMIT);
-        probe_roundtrip(loop_, core, deadline, &done, &failed)?;
-        let samples = samples.borrow();
-        if samples.invalid || samples.count == 0 { return None; }
-        // Reverse lexical drop: NodeListener -> ProxyListener -> Node ->
-        // RegistryBox -> CoreListener. Only pure Cells/RefCells are cloned.
-        Some(())
-    })().is_some();
-    if !available { development_stage_trace(DevelopmentStage::PipewireProbeTargetUnavailable); }
-    // This result never participates in readiness or a closedReceipt. Actual
-    // worker/thread join still follows complete Core/Context/loop/FD teardown.
 }
 /// Exactly-once buffer return for settled reads, including ordinary metadata,
 /// conversion and encoding failures. Unknown GPU access must not requeue pixels.
@@ -748,9 +557,6 @@ fn worker_pipewire(
         } else { pw::stream::StreamFlags::MAP_BUFFERS },
         &mut params,
     ), DevelopmentStage::PipewireStreamConnectFailed);
-    if connected.is_err() {
-        probe_selected_producer(&loop_, &core, node, opening_deadline);
-    }
     connected?;
     development_stage_trace(DevelopmentStage::PipewireStreamConnected);
     loop {
@@ -763,9 +569,7 @@ fn worker_pipewire(
             }
             // Error is never ready. GPU closes before disconnect and all PW
             // drops; Capture::start still awaits this actual worker's join.
-            let disconnected = disconnect_stream(&stream, &gpu, cleanup_ok);
-            probe_selected_producer(&loop_, &core, node, opening_deadline);
-            disconnected?;
+            disconnect_stream(&stream, &gpu, cleanup_ok)?;
             return Err(invalid().into());
         }
     }
@@ -986,17 +790,15 @@ fn validate_gpu_format(pod: &spa::pod::Pod, format: &spa::param::video::VideoInf
     }
     Ok(modifier)
 }
-/// Admission before EGL imports/copies. Matches pixels.rs' conservative original
-/// PNG upper bound; a highly compressible but oversized source is still rejected.
+/// Raw admission before EGL imports/copies. PNG bytes are limited by the
+/// encoder's BoundedOutput after readback, independently of compressibility.
 fn admit_gpu_frame(width: u32, height: u32, transform: u32, limits: &Limits) -> io::Result<()> {
     let (width, height) = (width as usize, height as usize);
-    if !limits.valid() || width == 0 || height == 0 || transform > 7
+    if !limits.valid() || limits.max_frame_bytes < 69 || width == 0 || height == 0 || transform > 7
         || width > limits.max_frame_edge || height > limits.max_frame_edge { return Err(invalid()); }
     let pixels = width.checked_mul(height).ok_or_else(invalid)?;
     let raw = pixels.checked_mul(3).ok_or_else(invalid)?;
     if pixels > limits.max_frame_pixels || raw > 24_000_000 { return Err(invalid()); }
-    let rows = if transform % 2 == 1 { width } else { height };
-    if pixels::rgb_png_upper_bound(raw, rows)? > limits.max_frame_bytes { return Err(invalid()); }
     Ok(())
 }
 fn dma_planes(data: &[spa::sys::spa_data], width: u32, height: u32, spa_format: u32, modifier: u64) -> io::Result<Vec<DmaPlane>> {
@@ -1641,146 +1443,27 @@ mod tests {
         assert!(dma_planes(&[bad_plane], 2, 2, spa::sys::SPA_VIDEO_FORMAT_BGRx, 0).is_err());
     }
     #[test]
-    fn gpu_preimport_admission_keeps_existing_conservative_png_and_transform_budget() {
+    fn gpu_preimport_admission_keeps_raw_bounds_without_predicting_png_size() {
         for (width, height) in [(1, 1), (10, 1), (1, 10), (9, 7)] {
-            let rgb = vec![0; width * height * 3];
             for transform in 0..9 {
-                for bytes in [1, 1030, 1031, 1054, 1055, 1059, 1063, 1064, 4096] {
+                for bytes in [1, 68, 69, 100, 4096] {
                     let limits = Limits { max_frame_bytes: bytes, max_frame_pixels: 100, max_frame_edge: 10 };
-                    assert_eq!(admit_gpu_frame(width as u32, height as u32, transform, &limits).is_ok(),
-                        pixels::encode_transformed(&rgb, 0, width * 3, width, height, PackedFormat::Rgb, transform, &limits).is_ok());
+                    assert_eq!(admit_gpu_frame(width, height, transform, &limits).is_ok(),
+                        transform <= 7 && bytes >= 69);
                 }
             }
         }
-        assert!(admit_gpu_frame(4096, 4096, 0, &video_limits()).is_err());
-        assert!(admit_gpu_frame(4096, 1900, 0, &video_limits()).is_err());
+        for (width, height) in [(0, 1), (1, 0), (4097, 1), (4096, 4096), (u32::MAX, u32::MAX)] {
+            assert!(admit_gpu_frame(width, height, 0, &video_limits()).is_err());
+        }
+        for (width, height) in [(2560, 1440), (4096, 1900)] {
+            assert!(admit_gpu_frame(width, height, 0, &video_limits()).is_ok());
+        }
+        assert!(admit_gpu_frame(2, 1, 0, &Limits { max_frame_pixels: 1, ..video_limits() }).is_err());
         let production = include_str!("capture.rs").split("#[cfg(test)]\nmod tests").next().unwrap();
         assert_eq!(production.matches("GpuReadback::open()").count(), 1);
         assert!(production.contains("let readback = if dmabuf {"));
         assert!(production.contains("} else { None };"));
-    }
-    #[test]
-    fn producer_probe_projects_only_boolean_flags_without_changing_consumer_pod() {
-        use spa::pod::{ChoiceValue, Object, Property, PropertyFlags, Value};
-        use spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Id};
-        let consumer = format_parameters().unwrap();
-        let (_, Value::Object(object)) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(&consumer).unwrap()
-            else { panic!("object required") };
-        assert_eq!(producer_format_facts(&consumer), Some(ProducerFormatFacts { packed: true, ..Default::default() }));
-        let serialize = |object: Object| spa::pod::serialize::PodSerializer::serialize(
-            std::io::Cursor::new(Vec::new()), &Value::Object(object)).unwrap().0.into_inner();
-        for format in [spa::sys::SPA_VIDEO_FORMAT_RGB, spa::sys::SPA_VIDEO_FORMAT_RGBA,
-            spa::sys::SPA_VIDEO_FORMAT_RGBx, spa::sys::SPA_VIDEO_FORMAT_BGRx,
-            spa::sys::SPA_VIDEO_FORMAT_BGRA, spa::sys::SPA_VIDEO_FORMAT_YUY2] {
-            for size_mandatory in [false, true] {
-                for framerate_mandatory in [false, true] {
-                    // Absent, present optional, present mandatory. Values are
-                    // deliberately irrelevant to the privacy-safe projection.
-                    for modifier in 0..3 {
-                        let mut producer = object.clone();
-                        producer.properties.iter_mut().find(|p| p.key == spa::sys::SPA_FORMAT_VIDEO_format).unwrap().value = Value::Id(Id(format));
-                        for (key, required, value) in [
-                            (spa::sys::SPA_FORMAT_VIDEO_size, size_mandatory, Value::Rectangle(spa::utils::Rectangle { width: 777, height: 333 })),
-                            (spa::sys::SPA_FORMAT_VIDEO_framerate, framerate_mandatory, Value::Fraction(spa::utils::Fraction { num: 0, denom: 1 }))] {
-                            let mut property = Property::new(key, value);
-                            if required { property.flags |= PropertyFlags::MANDATORY; }
-                            producer.properties.push(property);
-                        }
-                        if modifier != 0 {
-                            let mut property = Property::new(spa::sys::SPA_FORMAT_VIDEO_modifier, Value::Long(987654321));
-                            if modifier == 2 { property.flags |= PropertyFlags::MANDATORY; }
-                            producer.properties.push(property);
-                        }
-                        // A nested private string is skipped, not decoded or
-                        // retained; no fact or stage can contain this payload.
-                        producer.properties.push(Property::new(u32::MAX,
-                            Value::Struct(vec![Value::String("private-node-title-uri".into())])));
-                        let expected = ProducerFormatFacts { packed: format != spa::sys::SPA_VIDEO_FORMAT_YUY2,
-                            size_mandatory, framerate_mandatory, modifier: modifier != 0, modifier_mandatory: modifier == 2 };
-                        let facts = producer_format_facts(&serialize(producer)).unwrap();
-                        assert_eq!(facts, expected);
-                        let stages = facts.stages().map(|s| format!("{s:?}"));
-                        assert_eq!(stages, [
-                            if expected.packed { "PipewireProbePackedSupported" } else { "PipewireProbePackedUnsupported" },
-                            if size_mandatory { "PipewireProbeSizeMandatory" } else { "PipewireProbeSizeNotMandatory" },
-                            if framerate_mandatory { "PipewireProbeFramerateMandatory" } else { "PipewireProbeFramerateNotMandatory" },
-                            if modifier != 0 { "PipewireProbeModifierPresent" } else { "PipewireProbeModifierAbsent" },
-                            if modifier == 2 { "PipewireProbeModifierMandatory" } else { "PipewireProbeModifierNotMandatory" }]);
-                    }
-                }
-            }
-        }
-        let mut mixed = object.clone();
-        mixed.properties.iter_mut().find(|p| p.key == spa::sys::SPA_FORMAT_VIDEO_format).unwrap().value =
-            Value::Choice(ChoiceValue::Id(Choice(ChoiceFlags::empty(), ChoiceEnum::Enum {
-                default: Id(spa::sys::SPA_VIDEO_FORMAT_YUY2), alternatives: vec![Id(spa::sys::SPA_VIDEO_FORMAT_BGRA)],
-            })));
-        assert!(producer_format_facts(&serialize(mixed.clone())).unwrap().packed);
-        mixed.properties.iter_mut().find(|p| p.key == spa::sys::SPA_FORMAT_mediaSubtype).unwrap().value = Value::Id(Id(u32::MAX));
-        assert!(!producer_format_facts(&serialize(mixed)).unwrap().packed);
-        // Probe never mutates/rebuilds the business negotiation parameters.
-        assert_eq!(format_parameters().unwrap(), consumer);
-    }
-    #[test]
-    fn producer_probe_rejects_malformed_ambiguous_or_unbounded_metadata() {
-        use spa::pod::{ChoiceValue, Object, Property, Value};
-        use spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Id};
-        let bytes = format_parameters().unwrap();
-        let (_, Value::Object(object)) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(&bytes).unwrap()
-            else { panic!("object required") };
-        let serialize = |object: Object| spa::pod::serialize::PodSerializer::serialize(
-            std::io::Cursor::new(Vec::new()), &Value::Object(object)).unwrap().0.into_inner();
-        for end in 0..bytes.len() { assert!(producer_format_facts(&bytes[..end]).is_none()); }
-        let mut duplicate = object.clone();
-        duplicate.properties.push(duplicate.properties[0].clone());
-        assert!(producer_format_facts(&serialize(duplicate)).is_none());
-        for index in 0..3 {
-            let mut missing = object.clone();
-            missing.properties.remove(index);
-            assert!(producer_format_facts(&serialize(missing)).is_none());
-        }
-        let mut large = object.clone();
-        large.properties.push(Property::new(u32::MAX, Value::Bytes(vec![0; PROBE_POD_LIMIT])));
-        assert!(producer_format_facts(&serialize(large)).is_none());
-        let mut too_many = object.clone();
-        too_many.properties.extend((0..65).map(|key| Property::new(u32::MAX - key, Value::Int(0))));
-        assert!(producer_format_facts(&serialize(too_many)).is_none());
-        let mut too_many_ids = object.clone();
-        too_many_ids.properties[2].value = Value::Choice(ChoiceValue::Id(Choice(ChoiceFlags::empty(), ChoiceEnum::Enum {
-            default: Id(spa::sys::SPA_VIDEO_FORMAT_BGRx), alternatives: vec![Id(spa::sys::SPA_VIDEO_FORMAT_BGRx); 64],
-        })));
-        assert!(producer_format_facts(&serialize(too_many_ids)).is_none());
-        let mut malformed = bytes.clone();
-        malformed[24..28].copy_from_slice(&u32::MAX.to_ne_bytes()); // property value's size
-        assert!(producer_format_facts(&malformed).is_none());
-    }
-    #[test]
-    fn producer_probe_binds_only_explicit_target_and_caps_responses_even_if_peer_overproduces() {
-        assert!(probe_target_global(pw::constants::ID_ANY).is_none());
-        for target in [0, 17, u32::MAX - 1] {
-            let global = probe_target_global(target).unwrap();
-            assert_eq!(global.id, target);
-            assert_eq!(global.type_, pw::types::ObjectType::Node);
-            assert_eq!(global.version, pw::sys::PW_VERSION_NODE);
-            assert!(global.permissions.is_empty()); // cannot request/grant more rights
-            assert!(global.props.is_none());
-        }
-        let bytes = format_parameters().unwrap();
-        let pod = spa::pod::Pod::from_bytes(&bytes).unwrap();
-        let mut samples = ProbeSamples::default();
-        assert!(samples.accept(PROBE_PARAM_SEQ + 1, spa::param::ParamType::EnumFormat, Some(pod)).is_none());
-        assert!(samples.accept(PROBE_PARAM_SEQ, spa::param::ParamType::Format, Some(pod)).is_none());
-        assert_eq!(samples.count, 0);
-        for index in 0..12 {
-            assert_eq!(samples.accept(PROBE_PARAM_SEQ, spa::param::ParamType::EnumFormat, Some(pod)).is_some(), index < PROBE_FORMAT_LIMIT);
-        }
-        assert_eq!(samples.count, PROBE_FORMAT_LIMIT);
-        assert!(!samples.invalid);
-        let mut samples = ProbeSamples::default();
-        assert!(samples.accept(PROBE_PARAM_SEQ, spa::param::ParamType::EnumFormat, None).is_none());
-        assert!(samples.invalid);
-        assert!(samples.accept(PROBE_PARAM_SEQ, spa::param::ParamType::EnumFormat, Some(pod)).is_none());
-        assert_eq!(samples.count, 1); // no retry after malformed/absent reply
     }
     #[test]
     fn stream_state_trace_discards_native_error_text() {

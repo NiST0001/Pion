@@ -9,7 +9,6 @@ import {
 } from '../../shared/image-generation'
 import { decodeImageBase64, inspectRasterImage } from '../../shared/tool-images'
 import { assertGeneratedPngData } from './png-validation'
-import { createGeneratedPngValidationReceipt, snapshotGeneratedPngBytes } from './generated-png-validation-receipt'
 
 /** Codex's independent Images API, not Responses tools or API-key Images.
  * Protocol: github.com/openai/codex/blob/31519549/codex-rs/codex-api/src/images.rs
@@ -137,7 +136,7 @@ export function sanitizeImageDiagnostic(value: string, secrets: readonly string[
 async function readBoundedBody(response: Response, signal: AbortSignal, maxBytes: number): Promise<string> {
   const length = response.headers.get('content-length')
   if (length && /^\d+$/.test(length) && Number(length) > maxBytes) {
-    void response.body?.cancel().catch(() => {})
+    await response.body?.cancel().catch(() => {})
     throw new CodexImageError('protocol', '图片服务响应超过安全大小限制。')
   }
   if (!response.body) throw new CodexImageError('protocol', '图片服务返回了空响应。')
@@ -147,13 +146,16 @@ async function readBoundedBody(response: Response, signal: AbortSignal, maxBytes
   let used = 0
   let complete = false
   let reads = 0
-  const cancel = () => { void reader.cancel().catch(() => {}) }
+  let cancellation: Promise<void> | undefined
+  const cancel = () => { cancellation ??= reader.cancel().catch(() => {}) }
   signal.addEventListener('abort', cancel, { once: true })
   try {
     while (true) {
       checkImageAbort(signal)
       if (++reads > 65_536) throw new CodexImageError('protocol', '图片服务响应分片过多，已停止读取。')
-      const chunk = await waitForImageOperation(reader.read(), signal)
+      // The public abort race may settle first; this operation retains its
+      // slot until the actual read and requested cancellation both settle.
+      const chunk = await reader.read()
       if (chunk.done) { complete = true; break }
       if (chunk.value.byteLength > maxBytes - used) throw new CodexImageError('protocol', '图片服务响应超过安全大小限制。')
       bytes.set(chunk.value, used)
@@ -164,7 +166,8 @@ async function readBoundedBody(response: Response, signal: AbortSignal, maxBytes
   } finally {
     signal.removeEventListener('abort', cancel)
     if (!complete) cancel()
-    try { reader.releaseLock() } catch { /* a cancelled read may still be settling */ }
+    await cancellation
+    reader.releaseLock()
   }
 }
 
@@ -211,10 +214,6 @@ function providerFailure(status: number, body: string, secrets: string[], reques
 }
 
 export function inspectGeneratedPng(bytes: Uint8Array): { width: number; height: number } {
-  return checkGeneratedPng(bytes, assertGeneratedPngData)
-}
-
-function checkGeneratedPng(bytes: Uint8Array, validate: typeof assertGeneratedPngData): { width: number; height: number } {
   if (!bytes.byteLength || bytes.byteLength > MAX_GENERATED_IMAGE_BYTES) throw new CodexImageError('protocol', '生成的原图超过 16 MiB 安全限制。')
   // Before any raster decoder (including thumbnail resize) sees the bytes.
   const dimensions = inspectRasterImage(bytes, 'image/png', {
@@ -223,7 +222,7 @@ function checkGeneratedPng(bytes: Uint8Array, validate: typeof assertGeneratedPn
     allowCompressedPngMetadata: true
   })
   if (!dimensions) throw new CodexImageError('protocol', '图片服务未返回有效静态 PNG，或原图尺寸超过 4096 像素/边、1600 万像素限制。')
-  try { validate(bytes, dimensions) }
+  try { assertGeneratedPngData(bytes, dimensions) }
   catch { throw new CodexImageError('protocol', '图片服务返回的 PNG 数据不完整、损坏或超过解码安全限制。') }
   return dimensions
 }
@@ -333,12 +332,14 @@ function boundedReferenceBytes(value: unknown): Uint8Array {
   return bytes
 }
 
-/** Reader/transport admission; metadata is retained and uploaded, not stripped.
+/** Complete transport admission; metadata is retained and uploaded, not stripped.
  * PNG has bounded CRC/zlib/scanline/metadata checks; JPEG has bounded framing
  * and a complete final EOI only. Neither promises full color/ICC semantics or
  * full JPEG decoding. Callers must disclose metadata upload to the user.
  */
-export function inspectReferenceImage(bytes: Uint8Array, mimeType: 'image/png' | 'image/jpeg'): { width: number; height: number } {
+export function inspectReferenceImage(
+  bytes: Uint8Array, mimeType: 'image/png' | 'image/jpeg', remainingPixels = MAX_IMAGE_REFERENCE_TOTAL_PIXELS
+): { width: number; height: number } {
   const view = boundedReferenceBytes(bytes)
   if (mimeType !== 'image/png' && mimeType !== 'image/jpeg') throw new Error('参考图片仅支持 PNG/JPEG。')
   const dimensions = inspectRasterImage(view, mimeType, {
@@ -346,6 +347,9 @@ export function inspectReferenceImage(bytes: Uint8Array, mimeType: 'image/png' |
     allowCompressedPngMetadata: true
   })
   if (!dimensions) throw new Error('参考图片格式无效、MIME 不符或超过 4096 像素/边、1600 万像素限制。')
+  // Use actual header dimensions, preserving framing/per-image errors, before
+  // any PNG metadata or raster inflate can spend the remaining total budget.
+  if (dimensions.width * dimensions.height > remainingPixels) throw new Error('参考图片总像素不能超过 1600 万。')
   if (mimeType === 'image/png') {
     try { assertGeneratedPngData(view, dimensions) }
     catch { throw new Error('参考 PNG 数据不完整、损坏或超过解码安全限制。') }
@@ -355,18 +359,11 @@ export function inspectReferenceImage(bytes: Uint8Array, mimeType: 'image/png' |
   return dimensions
 }
 
-/** Fail closed on unknown fields/accessors instead of guessing request data. */
+/** Validate ordinary DTO fields; upload JSON is built from an explicit whitelist. */
 function imageRequestFields(value: unknown, allowed: readonly string[], message: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) throw new Error(message)
-  const fields = Object.create(null) as Record<string, unknown>
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== 'string' || !allowed.includes(key)) throw new Error(message)
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)
-    if (!descriptor || !('value' in descriptor)) throw new Error(message)
-    fields[key] = descriptor.value
-  }
-  return fields
+    || Object.keys(value).some((key) => !allowed.includes(key))) throw new Error(message)
+  return value as Record<string, unknown>
 }
 
 function prepareImageRequest(request: CodexImageRequest): {
@@ -383,41 +380,19 @@ function prepareImageRequest(request: CodexImageRequest): {
   let totalPixels = 0
   if (fields.images !== undefined) {
     const references = fields.images
-    if (!Array.isArray(references) || Object.getPrototypeOf(references) !== Array.prototype
-      || references.length > MAX_IMAGE_REFERENCES) throw new Error('参考图片快照必须是至多 5 张图片的数组。')
-    for (const key of Reflect.ownKeys(references)) {
-      if (key !== 'length' && (typeof key !== 'string' || !/^(?:0|[1-9]\d*)$/.test(key) || Number(key) >= references.length)) throw new Error('参考图片数组包含不支持的字段。')
-    }
+    if (!Array.isArray(references) || references.length > MAX_IMAGE_REFERENCES) throw new Error('参考图片快照必须是至多 5 张图片的数组。')
     for (let index = 0; index < references.length; index++) {
-      const descriptor = Object.getOwnPropertyDescriptor(references, String(index))
-      if (!descriptor || !('value' in descriptor)) throw new Error('参考图片快照数组不得为空位或访问器。')
-      const reference = imageRequestFields(descriptor.value, ['bytes', 'mimeType', 'width', 'height'], '参考图片快照类型或字段无效。')
+      const reference = imageRequestFields(references[index], ['bytes', 'mimeType', 'width', 'height'], '参考图片快照类型或字段无效。')
       if (reference.mimeType !== 'image/png' && reference.mimeType !== 'image/jpeg') throw new Error('参考图片仅支持 PNG/JPEG。')
-      if (typeof reference.width !== 'number' || typeof reference.height !== 'number'
-        || !Number.isSafeInteger(reference.width) || !Number.isSafeInteger(reference.height)
-        || reference.width < 1 || reference.height < 1 || reference.width > MAX_IMAGE_REQUEST_DIMENSION
-        || reference.height > MAX_IMAGE_REQUEST_DIMENSION || reference.width * reference.height > MAX_IMAGE_REQUEST_PIXELS) throw new Error('参考图片快照尺寸无效或超过安全限制。')
       const source = boundedReferenceBytes(reference.bytes)
       totalBytes += source.byteLength
       if (totalBytes > MAX_IMAGE_REFERENCE_TOTAL_BYTES) throw new Error('参考图片总字节数不能超过 16 MiB。')
       // An actual private copy, not Buffer.from(buffer)/a shared subarray. All
       // inspection and upload encoding use only this copy, even during OAuth.
       const snapshot = new Uint8Array(source)
-      // Framing-only admission uses the original per-image limits, not caller
-      // metadata or the remaining budget. Reject aggregate pixels before any
-      // PNG CRC/metadata/raster validation can inflate another image. Invalid
-      // framing still goes through inspectReferenceImage for its format error.
-      const headerDimensions = inspectRasterImage(snapshot, reference.mimeType, {
-        maxDimension: MAX_IMAGE_REQUEST_DIMENSION, maxPixels: MAX_IMAGE_REQUEST_PIXELS,
-        allowCompressedPngMetadata: true
-      })
-      if (headerDimensions && headerDimensions.width * headerDimensions.height > MAX_IMAGE_REFERENCE_TOTAL_PIXELS - totalPixels) {
-        throw new Error('参考图片总像素不能超过 1600 万。')
-      }
-      const dimensions = inspectReferenceImage(snapshot, reference.mimeType)
+      const dimensions = inspectReferenceImage(snapshot, reference.mimeType, MAX_IMAGE_REFERENCE_TOTAL_PIXELS - totalPixels)
       if (dimensions.width !== reference.width || dimensions.height !== reference.height) throw new Error('参考图片快照尺寸与实际字节不符。')
       totalPixels += dimensions.width * dimensions.height
-      if (totalPixels > MAX_IMAGE_REFERENCE_TOTAL_PIXELS) throw new Error('参考图片总像素不能超过 1600 万。')
       const encoded = Buffer.from(snapshot.buffer, snapshot.byteOffset, snapshot.byteLength).toString('base64')
       images.push({ image_url: `data:${reference.mimeType};base64,${encoded}` })
     }
@@ -428,112 +403,94 @@ function prepareImageRequest(request: CodexImageRequest): {
   return { requestedModel, endpoint: editing ? CODEX_IMAGE_EDITS_ENDPOINT : CODEX_IMAGES_ENDPOINT, body, prompt, editing }
 }
 
-/** Created per backend, but auth is resolved only inside an approved execute. */
+/** Created per backend, but auth is resolved only inside an approved execute.
+ * Output is decoded into fresh private bytes, fully validated, then handed
+ * directly to the caller without exposing it to callbacks or extensions. */
 export function createCodexImageGenerator(options: CodexImageTransportOptions): CodexImageGenerator {
-  return createImageGenerator(options, assertGeneratedPngData)
-}
-
-/** Execution-private channel for the built-in tool only. Injected generators
- * never receive it. Every boundary still inspects framing, limits and exact
- * bytes; an absent/mismatched receipt runs the full validator on a private copy. */
-export function createCodexImageGeneratorWithValidation(options: CodexImageTransportOptions) {
-  const receipt = createGeneratedPngValidationReceipt()
-  const generate = createImageGenerator(options, receipt.validate)
-  return {
-    async generate(request: CodexImageRequest, signal: AbortSignal): Promise<GeneratedCodexImage> {
-      try { return await generate(request, signal) }
-      catch (error) { receipt.dispose(); throw error }
-    },
-    validate(image: GeneratedCodexImage): GeneratedCodexImage {
-      try {
-        const source = image.bytes
-        const bytes = snapshotGeneratedPngBytes(source)
-        const dimensions = checkGeneratedPng(bytes, (snapshot, dimensions) => {
-          if (!receipt.consume(source, snapshot, dimensions)) assertGeneratedPngData(snapshot, dimensions)
-        })
-        return { bytes, ...dimensions }
-      } finally { receipt.dispose() }
-    },
-    dispose: receipt.dispose
-  }
-}
-
-function createImageGenerator(options: CodexImageTransportOptions, validate: typeof assertGeneratedPngData): CodexImageGenerator {
   const fetchImage = options.fetch ?? globalThis.fetch
   const timeoutMs = checkedImageTimeout(options.timeoutMs)
+  let inFlight = false
   return async (request, parentSignal) => {
+    if (inFlight) throw new CodexImageError('protocol', '此后端仍有未结束的图片认证、请求或响应读取，请等待实际收尾。')
     // Validate and serialize a private snapshot before OAuth, timers or network.
     // No caller-held object/bytes is read again after the first await.
     const { requestedModel, endpoint, body: requestBody, prompt, editing } = prepareImageRequest(request)
     const scope = createImageAbortScope(parentSignal, timeoutMs)
     const signal = scope.signal
     let dispatched = false
-    try {
-      checkImageAbort(signal)
-      let resolved: Awaited<ReturnType<ResolveCodexImageAuth>>
+    inFlight = true
+    const operation = (async () => {
       try {
-        resolved = await waitForImageOperation(options.getAuth({ signal, minOAuthValidityMs: CODEX_IMAGE_TIMEOUT_MS }), signal)
-      } catch {
         checkImageAbort(signal)
-        throw new CodexImageError('login', '无法刷新 Codex 登录，请在设置中重新登录 OpenAI Codex。')
-      }
-      checkImageAbort(signal)
-      const token = resolved?.source === 'OAuth' ? resolved.auth.apiKey : undefined
-      const accountId = typeof token === 'string' ? accountIdFromToken(token) : undefined
-      if (!token || !accountId) throw new CodexImageError('login', '请先在设置中登录 OpenAI Codex 订阅账号；此工具不使用 API key 或付费 API 回退。')
-      dispatched = true
-      const pending = fetchImage(endpoint, {
-        method: 'POST', redirect: 'error', signal,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'chatgpt-account-id': accountId,
-          'x-codex-image-turn-id': randomUUID(),
-          originator: 'pion',
-          'Content-Type': 'application/json',
-          Accept: 'application/json'
-        },
-        // Official/experimental request IDs are not actual-version evidence.
-        // Reference data is inline JSON per Codex Images, never a URL download.
-        body: requestBody
-      })
-      // If a mock/adapter resolves after cancellation, discard its body as well.
-      void pending.then((response) => { if (signal.aborted) void response.body?.cancel().catch(() => {}) }, () => {})
-      const response = await waitForImageOperation(pending, signal)
-      checkImageAbort(signal)
-      if (response.redirected || (response.status >= 300 && response.status < 400)
-        || (response.url && response.url !== endpoint)) {
-        void response.body?.cancel().catch(() => {})
-        throw new CodexImageError('protocol', '图片服务返回了重定向，已拒绝跟随其他地址。')
-      }
-      if (!response.ok) {
-        let body = ''
-        try { body = await readBoundedBody(response, signal, MAX_ERROR_BODY_BYTES) }
-        catch { checkImageAbort(signal) }
-        throw providerFailure(response.status, body, [token, accountId, prompt], requestedModel, editing)
-      }
-      if (response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
-        void response.body?.cancel().catch(() => {})
-        throw new CodexImageError('protocol', '图片服务未返回 JSON 图片响应。')
-      }
-      const body = await readBoundedBody(response, signal, MAX_CODEX_IMAGE_JSON_BYTES)
-      let parsed: unknown
-      try { parsed = JSON.parse(body) }
-      catch { throw new CodexImageError('protocol', '图片服务返回了无效 JSON。') }
-      const data = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>).data : undefined
-      if (!Array.isArray(data) || data.length !== 1 || !data[0] || typeof data[0] !== 'object') throw new CodexImageError('protocol', '图片服务没有返回单张 PNG；不会下载外部图片地址。')
-      const encoded: unknown = (data[0] as Record<string, unknown>).b64_json
-      const bytes = decodeImageBase64(encoded, MAX_GENERATED_IMAGE_BYTES)
-      if (!bytes) throw new CodexImageError('protocol', '图片服务返回了无效 base64，或原图超过 16 MiB 安全限制。')
-      const dimensions = checkGeneratedPng(bytes, validate)
-      checkImageAbort(signal)
-      // Undocumented model echoes/headers are not actual-version evidence.
-      // Image usage is not chat-token usage; do not estimate or forward it.
-      return { bytes, ...dimensions }
-    } catch (error) {
-      const safe = signal.aborted ? imageAbortError(signal)
-        : error instanceof CodexImageError ? error
-          : new CodexImageError('network', '无法连接 Codex 图片服务，请检查网络。')
-      throw new CodexImageError(safe.kind, `${safe.message}${dispatched ? ` ${UNCERTAIN_USAGE}` : ''}`)
-    } finally { scope.dispose() }
+        let resolved: Awaited<ReturnType<ResolveCodexImageAuth>>
+        try {
+          // SDK 1.4 races getAuth against its signal while an OAuth refresh and
+          // credential writeback may continue. Keep auth alive so inFlight tracks
+          // its settlement; the outer signal still stops waiting and dispatch.
+          resolved = await options.getAuth({ signal: new AbortController().signal, minOAuthValidityMs: CODEX_IMAGE_TIMEOUT_MS })
+        } catch {
+          checkImageAbort(signal)
+          throw new CodexImageError('login', '无法刷新 Codex 登录，请在设置中重新登录 OpenAI Codex。')
+        }
+        checkImageAbort(signal)
+        const token = resolved?.source === 'OAuth' ? resolved.auth.apiKey : undefined
+        const accountId = typeof token === 'string' ? accountIdFromToken(token) : undefined
+        if (!token || !accountId) throw new CodexImageError('login', '请先在设置中登录 OpenAI Codex 订阅账号；此工具不使用 API key 或付费 API 回退。')
+        dispatched = true
+        const response = await fetchImage(endpoint, {
+          method: 'POST', redirect: 'error', signal,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'chatgpt-account-id': accountId,
+            'x-codex-image-turn-id': randomUUID(),
+            originator: 'pion',
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
+          },
+          // Official/experimental request IDs are not actual-version evidence.
+          // Reference data is inline JSON per Codex Images, never a URL download.
+          body: requestBody
+        })
+        if (signal.aborted) {
+          await response.body?.cancel().catch(() => {})
+          checkImageAbort(signal)
+        }
+        if (response.redirected || (response.status >= 300 && response.status < 400)
+          || (response.url && response.url !== endpoint)) {
+          await response.body?.cancel().catch(() => {})
+          throw new CodexImageError('protocol', '图片服务返回了重定向，已拒绝跟随其他地址。')
+        }
+        if (!response.ok) {
+          let body = ''
+          try { body = await readBoundedBody(response, signal, MAX_ERROR_BODY_BYTES) }
+          catch { checkImageAbort(signal) }
+          throw providerFailure(response.status, body, [token, accountId, prompt], requestedModel, editing)
+        }
+        if (response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
+          await response.body?.cancel().catch(() => {})
+          throw new CodexImageError('protocol', '图片服务未返回 JSON 图片响应。')
+        }
+        const body = await readBoundedBody(response, signal, MAX_CODEX_IMAGE_JSON_BYTES)
+        let parsed: unknown
+        try { parsed = JSON.parse(body) }
+        catch { throw new CodexImageError('protocol', '图片服务返回了无效 JSON。') }
+        const data = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>).data : undefined
+        if (!Array.isArray(data) || data.length !== 1 || !data[0] || typeof data[0] !== 'object') throw new CodexImageError('protocol', '图片服务没有返回单张 PNG；不会下载外部图片地址。')
+        const encoded: unknown = (data[0] as Record<string, unknown>).b64_json
+        const bytes = decodeImageBase64(encoded, MAX_GENERATED_IMAGE_BYTES)
+        if (!bytes) throw new CodexImageError('protocol', '图片服务返回了无效 base64，或原图超过 16 MiB 安全限制。')
+        const dimensions = inspectGeneratedPng(bytes)
+        checkImageAbort(signal)
+        // Undocumented model echoes/headers are not actual-version evidence.
+        // Image usage is not chat-token usage; do not estimate or forward it.
+        return { bytes, ...dimensions }
+      } catch (error) {
+        const safe = signal.aborted ? imageAbortError(signal)
+          : error instanceof CodexImageError ? error
+            : new CodexImageError('network', '无法连接 Codex 图片服务，请检查网络。')
+        throw new CodexImageError(safe.kind, `${safe.message}${dispatched ? ` ${UNCERTAIN_USAGE}` : ''}`)
+      } finally { scope.dispose(); inFlight = false }
+    })()
+    return waitForImageOperation(operation, signal)
   }
 }

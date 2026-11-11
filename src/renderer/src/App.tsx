@@ -1015,9 +1015,9 @@ export function App(): ReactElement {
 
         <div className="main" {...dock.panelProps('chat')}>
           {dockHeader('chat')}
-          {!viewingChild && state.status.phase === 'error' && (
+          {!viewingChild && (state.status.phase === 'error' || state.status.error) && (
             <div className="banner banner-error">
-              <span>agent 启动失败：{state.status.error}</span>
+              <span>{state.status.phase === 'error' && 'agent 启动失败：'}{state.status.error}</span>
             </div>
           )}
           {(viewingChild ? childSessions.error : state.timelineError) && (

@@ -1,8 +1,13 @@
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Api, Model } from '@earendil-works/pi-ai'
-import type { AgentSession, SessionEntry } from '@earendil-works/pi-coding-agent'
+import type { AgentSession, ExtensionAPI, SessionEntry } from '@earendil-works/pi-coding-agent'
 import { createPionRuntime, parseRuntimeArgs } from '../../src/main/agent/runtime-host'
+import * as capabilitySettings from '../../src/main/capability-settings'
+import * as capabilityCatalogue from '../../src/main/capability-catalogue'
+import * as capabilityMcp from '../../src/main/agent/capability-mcp'
+import * as nativeExtensions from '../../src/main/agent/native-extensions'
+import { DEFAULT_CAPABILITY_PREFERENCES } from '../../src/shared/capability-settings'
 import * as modelGate from '../../src/main/agent/computer-use-model-gate'
 import * as computerUse from '../../src/main/agent/computer-use'
 
@@ -43,7 +48,7 @@ beforeEach(() => {
   }))
   // SDK replacements create new service/runtime objects, never another facade
   // around the previous backend's already-retired model runtime.
-  mocks.services.mockImplementation(async () => ({ settingsManager: settings, modelRuntime: { getAuth: mocks.auth }, resourceLoader: { getExtensions: () => ({ extensions: [] }) }, diagnostics: [] }))
+  mocks.services.mockImplementation(async () => ({ settingsManager: settings, modelRuntime: { getAuth: mocks.auth }, resourceLoader: { getExtensions: () => ({ extensions: [] }), getSkills: () => ({ skills: [] }) }, diagnostics: [] }))
   mocks.session.mockImplementation(async ({ sessionManager }) => ({ session: fakeSession(sessionManager), extensionsResult: {} }))
   mocks.runtime.mockImplementation(async (factory, target) => factory(target))
 })
@@ -238,11 +243,13 @@ it('freezes raw explicit loadouts before RPC MCP lifecycle binding', async () =>
   expect(getActiveToolNames).toHaveBeenCalledTimes(1)
   const factories = mocks.services.mock.calls[0][0].resourceLoaderOptions.extensionFactories
   const handlers = new Map<string, (event: any) => unknown>()
-  factories[3]({
+  const pi = {
     getActiveTools: () => ['read', 'codemode', 'tool_search', 'mcp__other__get'],
     setActiveTools: vi.fn(),
     on: (name: string, handler: (event: any) => unknown) => { handlers.set(name, handler); return () => {} }
-  })
+  }
+  factories[3](pi) // execution gate
+  factories[5](pi) // no-policy declaration lifecycle
   // Binding after creation sees an MCP-expanded loadout; it cannot recapture it.
   handlers.get('session_start')!({ reason: 'startup' })
   const call = (toolName: string) => handlers.get('tool_call')!({ toolName, input: {}, parentToolCallId: 'codemode/1' })
@@ -251,6 +258,53 @@ it('freezes raw explicit loadouts before RPC MCP lifecycle binding', async () =>
   expect(call('mcp__docs__delete_all')).toMatchObject({ block: true })
   expect(call('mcp__other__get')).toMatchObject({ block: true })
   expect(call('tool_search')).toMatchObject({ block: true })
+})
+
+it('uses capability lifecycle declarations and the single ceiling gate without duplicate loadout hooks', async () => {
+  vi.stubEnv('PION_CAPABILITY_SETTINGS_FILE', '/fixture/capabilities.json')
+  const settings = mocks.settings()
+  settings.getSettings = () => ({ defaultTools: ['read'] })
+  settings.getDefaultTools = () => ['read']
+  const loadout = nativeExtensions.createPionNativeLoadoutBoundary(['read'])
+  const spies = [
+    vi.spyOn(capabilitySettings, 'readCapabilityPreferences').mockResolvedValue(DEFAULT_CAPABILITY_PREFERENCES),
+    vi.spyOn(capabilityCatalogue, 'readCapabilityResources').mockResolvedValue({ catalogueRevision: 'fixture', items: [], notices: [],
+      extensionPaths: [], skillPaths: [], promptPaths: [], themePaths: [] }),
+    vi.spyOn(capabilityMcp, 'loadCapabilityMcpConfiguration').mockReturnValue({ config: { servers: [], errors: [] }, items: [], notices: [] }),
+    vi.spyOn(nativeExtensions, 'createPionNativeLoadoutBoundary').mockReturnValue(loadout)
+  ]
+  try {
+    await createPionRuntime(['--mode', 'rpc'], cwd)
+    const factories = mocks.services.mock.calls[0][0].resourceLoaderOptions.extensionFactories
+    expect(factories).not.toContain(loadout.capture)
+    expect(factories).not.toContain(loadout.declarations)
+    let active = ['read', 'write']
+    const handlers = new Map<string, (...args: any[]) => unknown>()
+    const policy = factories.find((entry: { name?: string }) => entry.name === 'pion-capability-policy')
+    policy.factory({ registerCommand: vi.fn(), getMcpServers: () => [],
+      getActiveTools: () => [...active], setActiveTools: (names: string[]) => { active = [...names] },
+      getAllTools: () => ['read', 'write'].map(name => ({ name, exposure: 'direct',
+        sourceInfo: { path: `builtin:${name}`, source: 'builtin', scope: 'temporary', origin: 'top-level' } })),
+      on: (name: string, handler: (...args: any[]) => unknown) => { handlers.set(name, handler) }
+    } as unknown as ExtensionAPI)
+    const allowed = vi.spyOn(loadout, 'allowed')
+    expect(handlers.get('tool_call')!({ toolName: 'read' })).toBeUndefined()
+    expect(allowed).toHaveBeenCalledExactlyOnceWith('read')
+    allowed.mockClear()
+    expect(handlers.get('tool_call')!({ toolName: 'write' })).toMatchObject({ block: true })
+    expect(allowed).toHaveBeenCalledExactlyOnceWith('write')
+    for (const type of ['session_start', 'session_tree', 'before_agent_start']) {
+      active = ['read', 'write'] // Simulate an SDK registry/branch loadout refresh.
+      const event = { systemPromptOptions: { selectedTools: [...active] } }
+      const ctx = { sessionManager: { getBranch: () => [] } }
+      handlers.get(type)!(event, ctx)
+      expect(active).toEqual(['read'])
+      if (type === 'before_agent_start') expect(event.systemPromptOptions.selectedTools).toEqual(['read'])
+      active = [] // A user-hidden/empty subset remains empty across every hook.
+      handlers.get(type)!(event, ctx)
+      expect(active).toEqual([])
+    }
+  } finally { spies.forEach(spy => spy.mockRestore()) }
 })
 
 it('rejects a stored session from another project before creating services or tools', async () => {

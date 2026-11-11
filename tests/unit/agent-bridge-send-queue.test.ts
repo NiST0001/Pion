@@ -30,6 +30,7 @@ interface BridgeHarness {
   dispatchNextLocalFollowUp(backend: BackendRecord): void
   projectedQueueSnapshot(backend: BackendRecord): QueuedMessagesSnapshot
   restoreQueuedRuns(backend: BackendRecord): void
+  prepareQueuedRunForDispatch(backend: BackendRecord, runId: string): void
   createRun(backend: BackendRecord, state: null, message: string, images: [], kind: 'follow-up', phase: 'queued'): RunOperation
   activeKey: string
   activeSessionPath?: string
@@ -101,6 +102,16 @@ async function dispatchGap() {
 }
 
 describe('AgentBridge queue draft retrieval', () => {
+  it('prepares an unsent queued run synchronously without inserting a synthetic microtask', async () => {
+    const h = await harness()
+    const run = h.addQueued('queued')
+    expect(h.bridge.prepareQueuedRunForDispatch(h.backend, run.id)).toBeUndefined()
+    expect(h.runStore.get(run.id)).toMatchObject({ state: 'dispatching', usageBackendId: h.backend.usageBackendId })
+    expect(h.prompt).not.toHaveBeenCalled()
+    expect(h.getState).not.toHaveBeenCalled()
+    await h.runStore.flush()
+  })
+
   it('takes root images in order by real id after queue positions drift without dispatching other items', async () => {
     const h = await harness()
     const first = h.addQueued('same')
@@ -264,8 +275,7 @@ describe('AgentBridge bounded queue admission notices', () => {
     const first = h.addQueued('same'), second = h.addQueued('same')
     const secret = 'Bearer private-token; <script>secret()</script>\n' + 'diagnostic'.repeat(30_000)
     if (source === 'state') h.getState.mockRejectedValueOnce(new Error(secret))
-    else vi.spyOn(h.bridge as unknown as { prepareQueuedRunForDispatch(...args: unknown[]): Promise<void> },
-      'prepareQueuedRunForDispatch').mockRejectedValueOnce(new Error(secret))
+    else vi.spyOn(h.bridge, 'prepareQueuedRunForDispatch').mockImplementationOnce(() => { throw new Error(secret) })
     h.bridge.dispatchNextLocalFollowUp(h.backend)
     await h.backend.localQueueDispatchPromise
     const pushed = h.wireSend.mock.calls.map(call => call[1]).filter(event => event?.type === 'queue_update').at(-1)
@@ -1169,8 +1179,7 @@ describe('AgentBridge send and local queue', () => {
     const first = h.addQueued('first')
     h.addQueued('second')
     if (source === 'state') h.getState.mockRejectedValueOnce(new Error('state unavailable'))
-    else vi.spyOn(h.bridge as unknown as { prepareQueuedRunForDispatch(...args: unknown[]): Promise<void> },
-      'prepareQueuedRunForDispatch').mockRejectedValueOnce(new Error('preparation failed'))
+    else vi.spyOn(h.bridge, 'prepareQueuedRunForDispatch').mockImplementationOnce(() => { throw new Error('preparation failed') })
     h.bridge.dispatchNextLocalFollowUp(h.backend)
     await h.backend.localQueueDispatchPromise
     await dispatchGap()
@@ -1790,17 +1799,17 @@ describe('AgentBridge send and local queue', () => {
   )
 
   it.each(['auto', 'promoted'] as const)(
-    'restores only the unsent %s ledger when preparation yields to compaction', async (path) => {
+    'restores only the unsent %s ledger when compaction reenters preparation before dispatch', async (path) => {
       const h = await harness()
       const queued = h.addQueued('prepared but unsent')
-      const gate = deferred<void>()
-      const internals = h.bridge as unknown as {
-        prepareQueuedRunForDispatch(backend: BackendRecord, runId: string): Promise<void>
-      }
-      const original = internals.prepareQueuedRunForDispatch.bind(internals)
-      vi.spyOn(internals, 'prepareQueuedRunForDispatch').mockImplementationOnce(async (backend, runId) => {
-        await original(backend, runId)
-        await gate.promise
+      const remaining = h.addQueued('prepared but unsent')
+      const original = h.bridge.prepareQueuedRunForDispatch.bind(h.bridge)
+      const preparation = vi.spyOn(h.bridge, 'prepareQueuedRunForDispatch').mockImplementationOnce((backend, runId) => {
+        original(backend, runId)
+        expect(h.runStore.get(runId)?.state).toBe('dispatching')
+        expect(h.prompt).not.toHaveBeenCalled()
+        // Preparation is synchronous; reenter before its dispatch lease check.
+        h.emit('compaction_start')
       })
       let sending: Promise<void>
       if (path === 'auto') {
@@ -1808,14 +1817,15 @@ describe('AgentBridge send and local queue', () => {
         sending = h.backend.localQueueDispatchPromise!
       } else sending = h.bridge.sendQueuedMessage({ runId: queued.id, cwd: queued.cwd, sessionFile: queued.sessionPath }, 7)
       const observed = sending.catch((error: unknown) => error)
-      await dispatchGap()
-      expect(h.runStore.get(queued.id)?.state).toBe('dispatching')
-      h.emit('compaction_start')
-      gate.resolve()
       await observed
+      expect(preparation).toHaveBeenCalledExactlyOnceWith(h.backend, queued.id)
       expect(h.prompt).not.toHaveBeenCalled()
+      expect(h.steer).not.toHaveBeenCalled()
       expect(h.runStore.get(queued.id)?.state).toBe('queued')
-      expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual([queued.id])
+      expect(h.runStore.get(queued.id)?.dispatchedAt).toBeUndefined()
+      expect(h.runStore.get(remaining.id)).toEqual(remaining)
+      expect(h.backend.localFollowUps?.map((item) => item.runId)).toEqual([queued.id, remaining.id])
+      expect(h.backend.activeRunId).toBeUndefined()
       expect(h.backend.busy).toBe(true)
       expect(h.backend.compacting).toBe(true)
       expect(h.backend.localQueueDispatching).toBe(false)

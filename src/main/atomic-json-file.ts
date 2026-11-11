@@ -3,7 +3,7 @@ import { mkdir, open, rename, unlink } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 
 /** Publish a complete, closed sibling file; callers commit their cache afterwards. */
-export async function writeAtomicJson(file: string, value: unknown): Promise<void> {
+export async function writeAtomicJson(file: string, value: unknown, beforePublish?: () => void): Promise<void> {
   const json = `${JSON.stringify(value, null, 2)}\n`
   const directory = dirname(file)
   await mkdir(directory, { recursive: true })
@@ -19,6 +19,7 @@ export async function writeAtomicJson(file: string, value: unknown): Promise<voi
       await handle.close()
       closed = true
     }
+    beforePublish?.()
     await rename(temporary, file)
   } catch (error) {
     if (closed) {

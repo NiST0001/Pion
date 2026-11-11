@@ -1,6 +1,5 @@
-import { randomUUID } from 'node:crypto'
-import { open, mkdir, rename, unlink, type FileHandle } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { open, type FileHandle } from 'node:fs/promises'
+import { writeAtomicJson } from './atomic-json-file'
 import {
   DEFAULT_CAPABILITY_PREFERENCES, PI_CORE_TOOL_NAMES,
   type CapabilityChange, type CapabilityItem, type CapabilityPreferences
@@ -9,28 +8,20 @@ import {
 const MAX_FILE_BYTES = 256 * 1024
 const MAX_ENTRIES = 4096
 const GROUPS = ['tool', 'mcp', 'skill', 'extension'] as const
-const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 
 class CapabilitySettingsError extends Error {}
 function invalid(message = '能力开关设置无效'): never { throw new CapabilitySettingsError(message) }
 
 function record(value: unknown, maxKeys: number, fields?: readonly string[]): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) invalid()
-  const keys = Reflect.ownKeys(value)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid()
+  const keys = Object.keys(value)
   if (keys.length > maxKeys || (fields && (keys.length !== fields.length || fields.some((key) => !Object.hasOwn(value, key))))) invalid()
-  for (const key of keys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)!
-    if (typeof key !== 'string' || UNSAFE_KEYS.has(key) || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) invalid()
-  }
   return value as Record<string, unknown>
 }
 
 function validId(value: unknown): value is string {
   if (typeof value !== 'string') return false
-  if (/^tool:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}(?![\s\S])/.test(value)) {
-    return !UNSAFE_KEYS.has(value.slice(5))
-  }
+  if (/^tool:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}(?![\s\S])/.test(value)) return true
   return /^(?:mcp|skill|extension):[a-f0-9]{64}(?![\s\S])/.test(value)
 }
 
@@ -140,25 +131,33 @@ function applyChange(current: CapabilityPreferences, change: CapabilityChange): 
 
 /** Pion's own file only. Presets are single writes, not retained modes. */
 export class CapabilitySettingsStore {
-  private loading: Promise<void> | undefined
   private preferences: CapabilityPreferences | undefined
-  private writes: Promise<unknown> = Promise.resolve()
+  private loadFailure: { error: unknown } | undefined
+  private operations: Promise<void> = Promise.resolve()
+  private closed = false
   private readonly listeners = new Set<(prefs: CapabilityPreferences) => void>()
 
   constructor(readonly filePath: string) {
     if (typeof filePath !== 'string' || !filePath || filePath.includes('\0')) invalid('能力开关设置路径无效')
   }
 
-  private load(): Promise<void> {
-    // Keep a failed load rejected: it must never become a default-overwrite path.
-    this.loading ??= readCapabilityPreferences(this.filePath).then((value) => { this.preferences = value })
-    return this.loading
+  private async load(retry = false): Promise<void> {
+    if (this.preferences) return
+    if (this.loadFailure && !retry) throw this.loadFailure.error
+    try {
+      this.preferences = await readCapabilityPreferences(this.filePath)
+      this.loadFailure = undefined
+    } catch (error) {
+      this.loadFailure = { error }
+      throw error
+    }
   }
 
-  async get(): Promise<CapabilityPreferences> {
-    await this.writes.catch(() => undefined)
-    await this.load()
-    return clone(this.preferences!)
+  get(): Promise<CapabilityPreferences> {
+    return this.enqueue(async () => {
+      await this.load(true)
+      return clone(this.preferences!)
+    })
   }
 
   getSnapshot(): CapabilityPreferences | undefined {
@@ -175,17 +174,19 @@ export class CapabilitySettingsStore {
   ): Promise<CapabilityPreferences> {
     if (!validRevision(expectedRevision)) invalid('能力开关设置修订号无效')
     const captured = captureChange(change, items)
-    const operation = this.writes.catch(() => undefined).then(async () => {
+    return this.enqueue(async () => {
       assertCurrent()
       await this.load()
       assertCurrent()
       if (this.preferences!.revision !== expectedRevision) invalid('能力开关设置已变更，请刷新后重试')
       const next = applyChange(this.preferences!, captured)
-      await this.save(next, assertCurrent)
+      if (Buffer.byteLength(`${JSON.stringify(next, null, 2)}\n`, 'utf8') > MAX_FILE_BYTES) invalid('能力开关设置超过 256 KiB')
+      try { await writeAtomicJson(this.filePath, next, assertCurrent) }
+      catch { invalid('能力开关设置保存失败') }
       try { assertCurrent() }
       catch {
         this.preferences = undefined
-        this.loading = undefined
+        this.loadFailure = undefined
         invalid('能力开关设置已写入，但所属窗口已变更，请重新读取')
       }
       this.preferences = next
@@ -194,52 +195,18 @@ export class CapabilitySettingsStore {
       }
       return clone(next)
     })
-    this.writes = operation
-    return operation
   }
 
-  private async save(next: CapabilityPreferences, assertCurrent: () => void): Promise<void> {
-    const temporary = `${this.filePath}.${randomUUID()}.tmp`
-    let file: FileHandle | undefined
-    let owned = false
-    let committed = false
-    let failed = false
-    let cleanupFailed = false
-    try {
-      assertCurrent()
-      await mkdir(dirname(this.filePath), { recursive: true })
-      assertCurrent()
-      file = await open(temporary, 'wx', 0o600)
-      owned = true
-      assertCurrent()
-      await file.writeFile(`${JSON.stringify(next)}\n`, 'utf8')
-      assertCurrent()
-      await file.sync()
-      assertCurrent()
-      const closing = file
-      file = undefined // Never retry an uncertain close.
-      try { await closing.close() } catch { cleanupFailed = true; throw new Error() }
-      assertCurrent()
-      await rename(temporary, this.filePath)
-      committed = true
-      assertCurrent()
-    } catch { failed = true }
-    finally {
-      if (file) try { await file.close() } catch { cleanupFailed = true }
-      // An exclusive-open failure must not delete another writer's temporary file.
-      if (owned && !committed) {
-        try { await unlink(temporary) }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') cleanupFailed = true }
-      }
-    }
-    if (failed || cleanupFailed) {
-      if (committed) {
-        // Rename is irreversible. Do not publish to a retired owner or retain the
-        // old revision; the next get/update must read the actual committed file.
-        this.preferences = undefined
-        this.loading = undefined
-      }
-      invalid(`${committed ? '能力开关设置已写入，但所属窗口已变更，请重新读取' : '能力开关设置保存失败'}${cleanupFailed ? '（临时文件收尾失败）' : ''}`)
-    }
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.closed) return Promise.reject(new Error('Capability settings are closed'))
+    const result = this.operations.then(operation)
+    this.operations = result.then(() => undefined, () => undefined)
+    return result
+  }
+
+  /** Close admission and wait for actual reads, writes and staging cleanup. */
+  shutdown(): Promise<void> {
+    this.closed = true
+    return this.operations
   }
 }

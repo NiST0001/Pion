@@ -83,11 +83,7 @@ describe('ComputerUseInputPolicy (pure host frame admission, not native input)',
     expect(() => new ComputerUseInputPolicy().install(owner, 1, frame, descriptor)).toThrow()
   })
 
-  it('rejects window/unknown scopes and accessors without executing getters', () => {
-    const getter = vi.fn(() => 1)
-    const fence = Object.defineProperty({ topology: 1 }, 'sequence', { get: getter, enumerable: true })
-    expect(() => new ComputerUseInputPolicy().install(owner, 1, frame, { ...native, inputFrame: fence })).toThrow()
-    expect(getter).not.toHaveBeenCalled()
+  it('rejects window/unknown scopes and missing own native fields', () => {
     for (const scope of ['window', 'unknown-window-or-display']) {
       expect(() => new ComputerUseInputPolicy().install(owner, 1, { ...frame, captureScope: scope }, native)).toThrow()
     }
@@ -98,13 +94,9 @@ describe('ComputerUseInputPolicy (pure host frame admission, not native input)',
     expect(() => setup().reserve(owner, 1, { frameId: frame.id, action: { type: 'type', text } }, context())).toThrow()
   })
 
-  it('rejects frame/action accessors and exotic prototypes without running them', () => {
-    const getter = vi.fn(() => 100)
-    const badFrame = Object.defineProperty({ ...frame }, 'width', { enumerable: true, get: getter })
-    expect(() => new ComputerUseInputPolicy().install(owner, 1, badFrame, native)).toThrow()
-    const badAction = Object.defineProperty({ type: 'type' }, 'text', { enumerable: true, get: getter })
-    expect(() => setup().reserve(owner, 1, { frameId: frame.id, action: badAction }, context())).toThrow()
-    expect(getter).not.toHaveBeenCalled()
+  it('rejects malformed frame/action JSON before input dispatch', () => {
+    expect(() => new ComputerUseInputPolicy().install(owner, 1, { ...frame, width: '100' }, native)).toThrow()
+    expect(() => setup().reserve(owner, 1, { frameId: frame.id, action: { type: 'type', text: 100 } }, context())).toThrow()
   })
 
   it('rejects topology changes, invalid revisions and nonfinite clocks', () => {

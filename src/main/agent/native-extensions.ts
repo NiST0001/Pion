@@ -13,14 +13,19 @@ const MAX_RESULT_TEXT = 64 * 1024
 const MODEL_CALL_METHODS = new Set(['classify', 'generateImages', 'complete', 'stream', 'streamSimple'])
 const MCP_RESOURCE_TOOLS = new Set(['list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'])
 
-/** Projection only: arbitrary base64 embedded in text/store/arguments is not detected. */
-function safeNativeResult(event: Pick<ToolResultEvent, 'content' | 'details'>): ToolResultEventResult {
+/** Bound model/display content, leaving the SDK's programmatic result intact.
+ * Arbitrary base64 embedded in text/store/arguments is not detected. */
+function safeNativeResult(event: Pick<ToolResultEvent, 'content' | 'details' | 'structuredContent'>): ToolResultEventResult {
+  let preview: ToolResultEventResult
   try {
-    return projectNativeResult(event)
+    preview = projectNativeResult(event)
   } catch {
     // An invalid extension payload must not throw from tool_result: the SDK would fail open.
-    return { content: [{ type: 'text', text: '原生工具输出无法安全预览，已省略。' }], details: {} }
+    preview = { content: [{ type: 'text', text: '原生工具输出无法安全预览，已省略。' }], details: {} }
   }
+  // SDK 1.4 drops structuredContent when a hook replaces content alone. MCP
+  // scripts receive the original CallToolResult, independent of preview limits.
+  return { ...preview, ...(event.structuredContent === undefined ? {} : { structuredContent: event.structuredContent }) }
 }
 
 function projectNativeResult(event: Pick<ToolResultEvent, 'content' | 'details'>): ToolResultEventResult {
@@ -59,7 +64,6 @@ function projectNativeResult(event: Pick<ToolResultEvent, 'content' | 'details'>
       return projected
     })
   }
-  // Replacing content publicly drops structuredContent; never forward an unbounded second copy.
   // isError and usage remain authoritative SDK fields, not recomputed or reported a second time.
   return { content, details }
 }
@@ -132,7 +136,7 @@ function boundedCodemode(definition: ToolDefinition): ToolDefinition {
           // Never publish late script output, structured data or partial-call rows.
           ...(result.usage ? { usage: result.usage } : {})
         }
-        return { ...result, ...safeNativeResult(result), structuredContent: undefined }
+        return { ...result, ...safeNativeResult(result) }
       } finally {
         clearTimeout(timer)
         parentSignal?.removeEventListener('abort', abort)
@@ -144,9 +148,10 @@ function boundedCodemode(definition: ToolDefinition): ToolDefinition {
 
 function guardedNativeFactory(factory: ExtensionFactory, toolName: 'codemode' | 'mcp'): ExtensionFactory {
   return (pi) => {
-    pi.on('tool_result', (event) => {
-      if (toolName === 'codemode' ? event.toolName !== 'codemode'
-        : !event.toolName.startsWith('mcp__') && !MCP_RESOURCE_TOOLS.has(event.toolName)) return
+    // Codemode's execute wrapper already projects progress and its final result.
+    // Only MCP needs a result hook for dynamically registered/resource tools.
+    if (toolName === 'mcp') pi.on('tool_result', (event) => {
+      if (!event.toolName.startsWith('mcp__') && !MCP_RESOURCE_TOOLS.has(event.toolName)) return
       return safeNativeResult(event)
     })
     const intercepted = new Proxy(pi, {
@@ -162,11 +167,13 @@ function guardedNativeFactory(factory: ExtensionFactory, toolName: 'codemode' | 
   }
 }
 
-/** Public SDK exports no tool-pattern matcher. Support exact, * and ? only; reject
- * other glob syntax rather than guessing its meaning in an execution boundary. */
-function loadoutPattern(pattern: string): RegExp | undefined {
-  if (!pattern || /[^a-zA-Z0-9_.*?\-]/.test(pattern)) return undefined
-  return new RegExp(`^${pattern.split('').map((char) => char === '*' ? '.*' : char === '?' ? '.' : char === '.' ? '\\.' : char).join('')}$`)
+/** SDK 1.4's internal createToolNameMatcher: only * is special; all other
+ * characters are literal. Shared by selection expansion and execution ceilings. */
+export function createPionToolNameMatcher(entries: readonly string[]): (name: string) => boolean {
+  const names = new Set(entries.filter((entry) => !entry.includes('*')))
+  const patterns = entries.filter((entry) => entry.includes('*')).map((entry) => new RegExp(`^${entry
+    .split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`))
+  return (name) => names.has(name) || patterns.some((pattern) => pattern.test(name))
 }
 
 /** Initialize before MCP's session_start, and filter declarations after it.
@@ -188,19 +195,18 @@ export function createPionNativeLoadoutBoundary(entries: readonly string[] | und
   const expressions = ordered.map((entry) => {
     const remove = entry.startsWith('-')
     const pattern = entry.startsWith('+') || remove ? entry.slice(1) : entry
-    return { remove, pattern, match: loadoutPattern(pattern) }
+    return { remove, pattern, match: createPionToolNameMatcher([pattern]) }
   })
-  const unsupported = expressions.some(({ match }) => !match)
   let initial: Set<string> | undefined
   const allowed = (name: string): boolean => {
     if (!explicit) return true
-    if (!initial || empty || unsupported) return false
+    if (!initial || empty) return false
     // +only is NOT a whitelist: retain the SDK's resolved initial coding/default set.
     // Only explicit mcp__ patterns may grant late MCP tools; SDK's special MCP
     // retention rule must not turn a user's subset into unlimited MCP execution.
     let permit = initial.has(name)
     for (const expression of expressions) {
-      if (!expression.match?.test(name)) continue
+      if (!expression.match(name)) continue
       if (expression.remove) permit = false
       else if (initial.has(name) || (name.startsWith('mcp__') && expression.pattern.startsWith('mcp__'))) permit = true
     }
@@ -222,12 +228,9 @@ export function createPionNativeLoadoutBoundary(entries: readonly string[] | und
     capture: (pi) => {
       // Never capture here: SDK runs builtin MCP handlers before inline ones.
       // An explicit boundary not initialized by the host must remain fail-closed.
-      pi.on('session_start', () => filter(pi))
       pi.on('tool_call', (event) => {
         if (allowed(event.toolName)) return
-        return { block: true, reason: unsupported
-          ? 'Unsupported defaultTools pattern; native loadout fails closed (exact, * and ? only).'
-          : `Tool ${event.toolName} is outside the initial Pion defaultTools loadout.` }
+        return { block: true, reason: `Tool ${event.toolName} is outside the initial Pion defaultTools loadout.` }
       })
     },
     declarations: (pi) => {

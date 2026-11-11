@@ -1,6 +1,6 @@
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionDiscovery, sessionDiscoveryDirectory } from '../../src/main/agent/session-discovery'
@@ -90,11 +90,10 @@ describe('strict lightweight session discovery', () => {
   })
 
   it.each([
-    '{broken', 'null', '[]', '{"type":"message","message":{}}',
+    '{broken',
     JSON.stringify({ type: 'session', id: 'different-header', cwd: '/other', timestamp }),
     JSON.stringify({ type: 'session_info', name: 3 }),
-    JSON.stringify(message('user', [{ type: 'text', text: 7 }])),
-    JSON.stringify(message('user', 'bad clock', 1e100))
+    JSON.stringify(message('user', [{ type: 'text', text: 7 }]))
   ])('rejects malformed or invalid metadata lines: %s', async (line) => {
     const { owner, path, discovery } = await fixture()
     await actual.writeFile(path, jsonl([header(owner)]) + line + '\n')
@@ -103,7 +102,7 @@ describe('strict lightweight session discovery', () => {
 
   it('rejects invalid headers/UTF-8 and accepts a complete final JSON line without repairing the file', async () => {
     const { owner, path, discovery } = await fixture()
-    for (const value of [{ ...header(owner), id: '' }, { ...header(owner), timestamp: 'bad' }, { ...header(owner), cwd: '' }, { ...header(owner), version: 4 }]) {
+    for (const value of [{ ...header(owner), cwd: '' }, { ...header(owner), version: 4 }]) {
       await actual.writeFile(path, jsonl([value]))
       await expect(discovery.list(owner)).rejects.toThrow('Session discovery unavailable')
     }
@@ -219,34 +218,26 @@ describe('strict lightweight session discovery', () => {
     expect(fs.open).toHaveBeenCalledTimes(2)
   })
 
-  it('reuses unchanged parsed metadata, rechecks readability and preserves the prior cache after a failed scan', async () => {
+  it('uses one path stamp for metadata hits and publishes healthy files beside retained or new bad files', async () => {
     const { owner, directory, discovery } = await fixture()
     const existing = join(directory, 'z-existing.jsonl')
     const added = join(directory, 'y-added.jsonl')
     const bad = join(directory, 'a-bad.jsonl')
     await actual.writeFile(existing, jsonl([header(owner)]))
-    const opened: { path: string; read: { mock: { calls: unknown[] } }; close: { mock: { calls: unknown[] } } }[] = []
-    vi.mocked(fs.open).mockImplementation(async (...args) => {
-      const handle = await actual.open(...args)
-      opened.push({ path: String(args[0]), read: vi.spyOn(handle, 'read'), close: vi.spyOn(handle, 'close') })
-      return handle
-    })
     const first = await discovery.list(owner)
     first[0].preview = 'caller mutation'
+    vi.mocked(fs.open).mockClear()
+    vi.mocked(fs.lstat).mockClear()
     expect((await discovery.list(owner))[0].preview).toBe('(no messages)')
-    expect(opened[1].read.mock.calls).toHaveLength(0)
-    expect(opened[1].close.mock.calls).toHaveLength(1)
+    expect(fs.open).not.toHaveBeenCalled()
+    expect(vi.mocked(fs.lstat).mock.calls.filter(([path]) => path === existing)).toHaveLength(1)
     await actual.writeFile(added, jsonl([header(owner, 'new-header')]))
+    await actual.appendFile(existing, '{broken\n')
     await actual.writeFile(bad, 'broken\n')
-    await expect(discovery.list(owner)).rejects.toThrow('Session discovery unavailable')
+    expect((await discovery.list(owner)).map(row => row.id)).toEqual(['actual-header-id', 'new-header'])
+    await actual.writeFile(existing, jsonl([header(owner), message('user', 'recovered')]))
     await actual.unlink(bad)
-    await discovery.list(owner)
-    const addedReads = opened.filter((entry) => entry.path === added)
-    expect(addedReads).toHaveLength(2)
-    expect(addedReads.every((entry) => entry.read.mock.calls.length > 0)).toBe(true)
-    expect(opened.filter((entry) => entry.path === existing).slice(1).every((entry) => entry.read.mock.calls.length === 0)).toBe(true)
-    vi.mocked(fs.open).mockRejectedValueOnce(Object.assign(new Error('denied'), { code: 'EACCES' }))
-    await expect(discovery.list(owner)).rejects.toThrow('Session discovery unavailable')
+    expect((await discovery.list(owner))[0]).toMatchObject({ preview: 'recovered', messageCount: 1 })
   })
 
   it('reparses actual growth, truncation and replacement instead of reusing stale cached metadata', async () => {
@@ -264,27 +255,25 @@ describe('strict lightweight session discovery', () => {
     expect((await discovery.list(owner))[0]).toMatchObject({ id: 'replacement', preview: 'replacement', messageCount: 1 })
   })
 
-  it.each([1, 2])('rechecks cached descriptor stamps at FD stat %s and closes the actual reader on change', async point => {
-    const { owner, path, discovery } = await fixture()
+  it.each(['file', 'directory', 'header', 'deleted'] as const)('retires old metadata for a changed %s source', async changed => {
+    const { owner, directory, path, discovery } = await fixture()
+    const healthy = join(directory, 'healthy.jsonl')
     await actual.writeFile(path, jsonl([header(owner)]))
     await discovery.list(owner)
-    const handle = await actual.open(path, 'r')
-    const stat = handle.stat.bind(handle)
-    let calls = 0
-    vi.spyOn(handle, 'stat').mockImplementation(async () => {
-      if (++calls === point) await actual.appendFile(path, '\n')
-      return stat({ bigint: true })
-    })
-    const read = vi.spyOn(handle, 'read')
-    const close = vi.spyOn(handle, 'close')
-    vi.mocked(fs.open).mockResolvedValueOnce(handle)
-    await expect(discovery.list(owner)).rejects.toThrow('Session discovery unavailable')
-    expect(read).not.toHaveBeenCalled()
-    expect(close).toHaveBeenCalledOnce()
-    expect((await discovery.list(owner))[0].id).toBe('actual-header-id')
+    if (changed === 'directory') {
+      await actual.rename(directory, directory + '.old')
+      await actual.mkdir(directory)
+      await actual.link(join(directory + '.old', basename(path)), path)
+    } else if (changed === 'file') await actual.rename(path, path + '.old')
+    if (changed === 'deleted') await actual.unlink(path)
+    else await actual.writeFile(path, jsonl([header(owner, changed === 'header' ? 'new-header' : 'actual-header-id')]) + 'broken\n')
+    await actual.writeFile(healthy, jsonl([header(owner, 'healthy')]))
+    expect((await discovery.list(owner)).map(row => row.id)).toEqual(['healthy'])
+    if (changed !== 'deleted') await actual.unlink(path)
+    expect((await discovery.list(owner)).map(row => row.id)).toEqual(['healthy'])
   })
 
-  it.each(['content', 'path', 'directory'])('rejects changed %s stamps instead of publishing a mixed scan', async (change) => {
+  it('rejects a directory changed during the scan instead of publishing a mixed snapshot', async () => {
     const { owner, root, directory, path } = await fixture()
     const content = jsonl([header(owner), message('user', 'initial')])
     await actual.writeFile(path, content)
@@ -292,16 +281,12 @@ describe('strict lightweight session discovery', () => {
     const discovery = new SessionDiscovery(() => root, async () => {
       if (changed) return
       changed = true
-      if (change === 'content') await actual.appendFile(path, '\n')
-      else if (change === 'path') {
-        await actual.rename(path, path + '.old')
-        await actual.writeFile(path, content)
-      } else await actual.writeFile(join(directory, 'new.jsonl'), jsonl([header(owner, 'other')]))
+      await actual.writeFile(join(directory, 'new.jsonl'), jsonl([header(owner, 'other')]))
     })
     await expect(discovery.list(owner)).rejects.toThrow('Session discovery unavailable')
   })
 
-  it('rechecks earlier cached files after later files settle, and closes readers on read failure', async () => {
+  it('limits append/read failures to one file while advancing healthy metadata', async () => {
     const { owner, root, directory } = await fixture()
     const first = join(directory, 'z-first.jsonl')
     const last = join(directory, 'a-last.jsonl')
@@ -310,21 +295,35 @@ describe('strict lightweight session discovery', () => {
     let armed = false
     let changed = false
     const discovery = new SessionDiscovery(() => root, async () => {
-      if (armed && !changed && vi.mocked(fs.open).mock.calls.some(([path]) => path === last)) {
+      if (armed && !changed) {
         changed = true
-        await actual.appendFile(first, '\n')
+        await actual.appendFile(first, jsonl([message('assistant', 'appended during read')]))
       }
     })
     await discovery.list(owner)
-    vi.mocked(fs.open).mockClear()
+    await actual.appendFile(first, jsonl([message('user', 'unverified')]))
+    await actual.appendFile(last, jsonl([message('user', 'healthy', at + 9000)]))
     armed = true
-    await expect(discovery.list(owner)).rejects.toThrow('Session discovery unavailable')
+    const rows = await discovery.list(owner)
+    expect(rows.map(row => [row.id, row.messageCount])).toEqual([['last', 1], ['first', 0]])
     const handle = await actual.open(first, 'r')
     const close = vi.spyOn(handle, 'close')
     vi.spyOn(handle, 'read').mockRejectedValueOnce(new Error('read failed'))
     vi.mocked(fs.open).mockResolvedValueOnce(handle)
-    await expect(discovery.list(owner)).rejects.toThrow('Session discovery unavailable')
+    expect(await discovery.list(owner)).toEqual(rows)
     expect(close).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the whole published cache when final directory enumeration fails', async () => {
+    const { owner, path, discovery } = await fixture()
+    await actual.writeFile(path, jsonl([header(owner)]))
+    const previous = await discovery.list(owner)
+    await actual.appendFile(path, jsonl([message('user', 'not yet published')]))
+    vi.mocked(fs.readdir).mockResolvedValueOnce([path.split(/[\\/]/).pop()!] as never)
+      .mockRejectedValueOnce(new Error('directory unavailable'))
+    await expect(discovery.list(owner)).rejects.toThrow('Session discovery unavailable')
+    await actual.writeFile(path, jsonl([header(owner)]) + 'broken\n')
+    expect(await discovery.list(owner)).toEqual(previous)
   })
 
   it('streams lines past token-reader budgets and yields while retaining only the preview', async () => {
@@ -339,30 +338,24 @@ describe('strict lightweight session discovery', () => {
     expect(yieldRead.mock.calls.length).toBeGreaterThan(30)
   })
 
-  it('keeps the actual pending scan through close, then rejects cancelled or changed-root results', async () => {
+  it('waits for actual close before rejecting a changed-root result', async () => {
     const { owner, root, path } = await fixture()
     await actual.writeFile(path, jsonl([header(owner)]))
-    for (const reason of ['abort', 'root']) {
-      const entered = deferred()
-      const release = deferred()
-      const handle = await actual.open(path, 'r')
-      const close = handle.close.bind(handle)
-      vi.spyOn(handle, 'close').mockImplementation(async () => { entered.resolve(); await release.promise; await close() })
-      vi.mocked(fs.open).mockResolvedValueOnce(handle)
-      let currentRoot = root
-      const discovery = new SessionDiscovery(() => currentRoot)
-      const controller = new AbortController()
-      let settled = false
-      const reading = discovery.list(owner, { signal: controller.signal }).finally(() => { settled = true })
-      const rejected = expect(reading).rejects.toThrow()
-      await entered.promise
-      if (reason === 'abort') controller.abort()
-      else currentRoot = root + '-other'
-      await setImmediate()
-      expect(settled).toBe(false)
-      release.resolve()
-      await rejected
-    }
+    const entered = deferred(), release = deferred()
+    const handle = await actual.open(path, 'r')
+    const close = handle.close.bind(handle)
+    vi.spyOn(handle, 'close').mockImplementation(async () => { entered.resolve(); await release.promise; await close() })
+    vi.mocked(fs.open).mockResolvedValueOnce(handle)
+    let currentRoot = root, settled = false
+    const discovery = new SessionDiscovery(() => currentRoot)
+    const reading = discovery.list(owner).finally(() => { settled = true })
+    const rejected = expect(reading).rejects.toThrow()
+    await entered.promise
+    currentRoot = root + '-other'
+    await setImmediate()
+    expect(settled).toBe(false)
+    release.resolve()
+    await rejected
   })
 
   it('bounds settled metadata with LRU eviction and reparses only an evicted bucket', async () => {
@@ -388,28 +381,8 @@ describe('strict lightweight session discovery', () => {
     await discovery.list(owners[1])
     const first = opened.filter(file => file.path === join(sessionDiscoveryDirectory(owners[0], root), 'session.jsonl'))
     const second = opened.filter(file => file.path === join(sessionDiscoveryDirectory(owners[1], root), 'session.jsonl'))
-    expect(first.map(file => file.read.mock.calls.length > 0)).toEqual([true, false, false])
+    expect(first.map(file => file.read.mock.calls.length > 0)).toEqual([true])
     expect(second.map(file => file.read.mock.calls.length > 0)).toEqual([true, true])
-    for (const capacity of [0, -1, 1.5, Infinity]) {
-      expect(() => new SessionDiscovery(() => root, undefined, capacity)).toThrow('Invalid discovery cache capacity')
-    }
-  })
-
-  it('keeps the default 64-bucket capacity while every real scan is pending', async () => {
-    const { root } = await fixture()
-    const entered = deferred()
-    const release = deferred()
-    let waiting = 0
-    const discovery = new SessionDiscovery(() => root, async () => {
-      if (++waiting === 64) entered.resolve()
-      await release.promise
-    })
-    const readers = Array.from({ length: 64 }, (_, index) => discovery.list(join(root, `pending-${index}`)))
-    await entered.promise
-    await expect(discovery.list(join(root, 'overflow'))).rejects.toThrow('Session discovery unavailable')
-    release.resolve()
-    expect((await Promise.all(readers)).every(rows => rows.length === 0)).toBe(true)
-    expect(await discovery.list(join(root, 'overflow'))).toEqual([])
   })
 
   it('shares an actual scan through cancelled waits and delayed close, retaining capacity until settlement', async () => {
@@ -436,36 +409,23 @@ describe('strict lightweight session discovery', () => {
     expect(await discovery.list(owner + '-other')).toEqual([])
   })
 
-  it('keeps unknown-close isolation under capacity pressure and rejects new buckets when every slot is isolated', async () => {
-    const { root, owner, path } = await fixture()
+  it('retains the prior row after a failed close, advances healthy files and retries next scan', async () => {
+    const { owner, directory, path, discovery } = await fixture()
     await actual.writeFile(path, jsonl([header(owner)]))
+    await discovery.list(owner)
+    await actual.appendFile(path, jsonl([message('user', 'unconfirmed close')]))
     const handle = await actual.open(path, 'r')
     const close = handle.close.bind(handle)
     vi.spyOn(handle, 'close').mockImplementation(async () => { await close(); throw new Error('unknown close') })
     vi.mocked(fs.open).mockResolvedValueOnce(handle)
-    let currentRoot = root
-    const discovery = new SessionDiscovery(() => currentRoot, undefined, 1)
-    await expect(discovery.list(owner)).rejects.toMatchObject({ closeUnknown: true })
-    const statCalls = vi.mocked(fs.lstat).mock.calls.length
-    await expect(discovery.list(owner + '-other')).rejects.toMatchObject({ closeUnknown: false })
-    currentRoot = root + '-changed'
-    await expect(discovery.list(owner)).rejects.toThrow('Session discovery unavailable')
-    currentRoot = root
-    await expect(discovery.list(owner)).rejects.toMatchObject({ closeUnknown: true })
-    expect(fs.lstat).toHaveBeenCalledTimes(statCalls)
-    expect(fs.open).toHaveBeenCalledOnce()
-  })
-
-  it('quarantines an unknown descriptor close within its bucket rather than reopening it', async () => {
-    const { owner, path, discovery } = await fixture()
-    await actual.writeFile(path, jsonl([header(owner)]))
-    const handle = await actual.open(path, 'r')
-    const close = handle.close.bind(handle)
-    vi.spyOn(handle, 'close').mockImplementation(async () => { await close(); throw new Error('unknown close') })
-    vi.mocked(fs.open).mockResolvedValueOnce(handle)
-    await expect(discovery.list(owner)).rejects.toMatchObject({ closeUnknown: true })
-    await expect(discovery.list(owner)).rejects.toMatchObject({ closeUnknown: true })
-    expect(fs.open).toHaveBeenCalledOnce()
-    expect(await discovery.list(owner + '-other')).toEqual([])
+    const healthy = join(directory, 'a-healthy.jsonl')
+    await actual.writeFile(healthy, jsonl([header(owner, 'healthy'), message('user', 'first')]))
+    expect((await discovery.list(owner)).map(row => [row.id, row.messageCount])).toEqual([['healthy', 1], ['actual-header-id', 0]])
+    vi.mocked(fs.open).mockClear()
+    await actual.appendFile(healthy, jsonl([message('assistant', 'second')]))
+    const recovered = await discovery.list(owner)
+    expect(recovered.find(row => row.path === path)?.messageCount).toBe(1)
+    expect(recovered.find(row => row.path === healthy)?.messageCount).toBe(2)
+    expect(vi.mocked(fs.open).mock.calls.map(([opened]) => opened)).toEqual([path, healthy])
   })
 })

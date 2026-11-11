@@ -345,6 +345,29 @@ describe('AgentBridge extension UI requests', () => {
     expect(value.bridge.getPendingToolPermissionRequests()).toEqual([])
   })
 
+  it.each([
+    { canRemember: false, risks: [] },
+    { canRemember: true, risks: ['sensitive-path'] }
+  ])('keeps one-shot and risk-bearing approvals single-use: %j', async metadata => {
+    const h = await fixture()
+    const store = (h.bridge as unknown as { toolPermissionStore: ToolPermissionStore }).toolPermissionStore
+    const grant = vi.spyOn(store, 'allowProjectCategories').mockRejectedValue(new Error('unexpected project grant'))
+    h.handle({ type: 'extension_ui_request', id: 'single-use', method: 'select',
+      title: `${TOOL_PERMISSION_MARKER}${JSON.stringify({ cwd: h.backend.cwd, toolName: 'write',
+        category: 'write', policyCategories: ['write'], summary: '写入文件', detail: '', ...metadata })}` })
+    const request = h.bridge.getPendingToolPermissionRequests()[0]
+    expect(request).toMatchObject(metadata)
+    for (const resolution of ['allow-session', 'allow-project'] as const) {
+      await expect(h.bridge.resolveToolPermission(request.id, resolution)).rejects.toThrow('只能单次允许')
+      expect(h.bridge.getPendingToolPermissionRequests()).toEqual([request])
+    }
+    expect(grant).not.toHaveBeenCalled()
+    expect(h.writes).toEqual([])
+    await h.bridge.resolveToolPermission(request.id, 'allow-once')
+    expect(h.bridge.getPendingToolPermissionRequests()).toEqual([])
+    expect(JSON.parse(h.writes[0])).toMatchObject({ id: 'single-use', value: 'allow-once' })
+  })
+
   it('answers a stale image project grant with deny when a requested category is now denied', async () => {
     const value = await fixture()
     const store = (value.bridge as unknown as { toolPermissionStore: ToolPermissionStore }).toolPermissionStore

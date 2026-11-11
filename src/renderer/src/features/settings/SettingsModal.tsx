@@ -33,7 +33,7 @@ import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 import { currentTheme, saveTheme } from '../../utils/theme'
 import type { ThemeId } from '../../utils/theme'
 import type { SettingsNavigationRequest, SettingsPage } from './settingsNavigation'
-import { containModalTab, isTopmostModalDialog, restoreModalFocus } from '../../utils/dialogFocus'
+import { useModalLifecycle } from '../../hooks/useModalLifecycle'
 
 export interface SettingsActions {
   setModel(provider: string, modelId: string): Promise<void>
@@ -126,10 +126,7 @@ export function SettingsModal({
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   const titleId = useId()
-  const composingTarget = useRef<EventTarget | null>(null)
-  const onCloseRef = useRef(onClose)
-
-  useEffect(() => { onCloseRef.current = onClose }, [onClose])
+  const { close, dialogEvents } = useModalLifecycle({ open, dialogRef, initialFocusRef: closeRef, onClose })
 
   // Page views mount on navigation; keep the existing drafts and in-flight state in this host.
   const [selectedPage, setPage] = useState<SettingsPage>('models')
@@ -156,6 +153,10 @@ export function SettingsModal({
   const [compacting, setCompacting] = useState(false)
   const [exportPath, setExportPath] = useState('')
   const [exporting, setExporting] = useState(false)
+  const exportPending = useRef(false)
+  useEffect(() => {
+    setExportPath('')
+  }, [cwd, capabilityScope, session?.sessionId, session?.sessionFile, session?.liveState?.backendId, window.pion])
   const [autoRetry, setAutoRetry] = useState(true)
   const [selectedTheme, setSelectedTheme] = useState<ThemeId>(currentTheme())
   const [themeSaveError, setThemeSaveError] = useState('')
@@ -231,42 +232,6 @@ export function SettingsModal({
     setProviderRequest(undefined)
   }
 
-  useEffect(() => {
-    if (!open) return
-    const dialog = dialogRef.current
-    if (!dialog) return
-    composingTarget.current = null
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const frame = requestAnimationFrame(() => {
-      // A nested modal or focus already inside this dialog owns the first frame.
-      if (!isTopmostModalDialog(dialog) || dialog.contains(document.activeElement)) return
-      closeRef.current?.focus({ preventScroll: true })
-    })
-    const handler = (event: KeyboardEvent): void => {
-      if (event.key !== 'Tab' && event.key !== 'Escape') return
-      if (event.defaultPrevented || !isTopmostModalDialog(dialog)) return
-      if (event.key === 'Tab') {
-        containModalTab(event, dialog)
-        event.stopImmediatePropagation()
-        return
-      }
-      event.stopImmediatePropagation()
-      if (event.isComposing || event.keyCode === 229 || event.repeat
-        || (composingTarget.current !== null
-          && (composingTarget.current === event.target || composingTarget.current === document.activeElement))) return
-      event.preventDefault()
-      onCloseRef.current()
-    }
-    // PionSelect consumes an open portal menu's Escape during capture.
-    window.addEventListener('keydown', handler)
-    return () => {
-      cancelAnimationFrame(frame)
-      window.removeEventListener('keydown', handler)
-      composingTarget.current = null
-      restoreModalFocus(dialog, previousFocus)
-    }
-  }, [open])
-
   if (!open) return null
 
   const handleModelSelect = async (provider: string, modelId: string): Promise<void> => {
@@ -292,13 +257,16 @@ export function SettingsModal({
   }
 
   const handleExport = async (): Promise<void> => {
+    if (exportPending.current) return
+    exportPending.current = true
     setExporting(true)
+    setExportPath('')
     try {
-      const path = await actions.exportSessionHtml()
-      setExportPath(path)
+      setExportPath(await actions.exportSessionHtml())
     } catch (err) {
       setExportPath(`导出失败：${err instanceof Error ? err.message : String(err)}`)
     } finally {
+      exportPending.current = false
       setExporting(false)
     }
   }
@@ -342,9 +310,7 @@ export function SettingsModal({
   }
 
   return (
-    <div className="modal-backdrop" onClick={() => {
-      if (isTopmostModalDialog(dialogRef.current)) onClose()
-    }}>
+    <div className="modal-backdrop" onClick={close}>
       <div
         ref={dialogRef}
         className="modal settings-modal"
@@ -353,8 +319,7 @@ export function SettingsModal({
         aria-labelledby={titleId}
         data-modal-layer="110"
         tabIndex={-1}
-        onCompositionStartCapture={(event) => { composingTarget.current = event.target }}
-        onCompositionEndCapture={() => { composingTarget.current = null }}
+        {...dialogEvents}
         onClick={(event) => event.stopPropagation()}
       >
         <header className="modal-head">
@@ -362,7 +327,7 @@ export function SettingsModal({
             <div className="modal-kicker">PION WORKSPACE</div>
             <h2 id={titleId}>设置</h2>
           </div>
-          <button ref={closeRef} type="button" className="icon-button" onClick={onClose} title="关闭">
+          <button ref={closeRef} type="button" className="icon-button" onClick={close} title="关闭">
             <X size={16} />
           </button>
         </header>
@@ -449,6 +414,7 @@ export function SettingsModal({
             {page === 'session' && (
               <SessionPage
                 models={models}
+                providerActionSlot={providerActionSlot}
                 session={session}
                 name={name}
                 nameSaved={nameSaved}

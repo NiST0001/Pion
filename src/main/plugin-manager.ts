@@ -18,6 +18,8 @@ import { piCliPath } from './pi-runtime'
 const execFileAsync = promisify(execFile)
 const PI_PLUGIN_STORE_URL = 'https://pi.dev/packages'
 const CATALOG_TTL_MS = 5 * 60 * 1000
+const CATALOG_MAX_BYTES = 4 * 1024 * 1024
+const CATALOG_MAX_ITEMS = 2_000
 const CLI_TIMEOUT_MS = 5 * 60 * 1000
 const MAX_BUFFER = 4 * 1024 * 1024
 
@@ -61,6 +63,30 @@ function parseInstallSource(block: string, name: string): string {
   return decodeHtml(command ?? `npm:${name}`)
 }
 
+async function readCatalogHtml(response: Response, signal: AbortSignal): Promise<string> {
+  if (Number(response.headers.get('content-length')) > CATALOG_MAX_BYTES) {
+    throw new Error('插件目录响应超过 4 MiB')
+  }
+  if (!response.body) throw new Error('插件目录返回了空响应')
+  const reader = response.body.getReader()
+  const bytes = Buffer.allocUnsafe(CATALOG_MAX_BYTES)
+  let used = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      signal.throwIfAborted()
+      if (done) return bytes.subarray(0, used).toString('utf8')
+      if (value.byteLength > CATALOG_MAX_BYTES - used) {
+        throw new Error('插件目录响应超过 4 MiB')
+      }
+      bytes.set(value, used)
+      used += value.byteLength
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 function parsePackageCatalog(html: string): PluginCatalogItem[] {
   const items: PluginCatalogItem[] = []
   const cards = html.matchAll(/<article\b[^>]*data-package-card="true"[^>]*>[\s\S]*?<\/article>/gi)
@@ -68,22 +94,32 @@ function parsePackageCatalog(html: string): PluginCatalogItem[] {
     const block = match[0]
     const name = attribute(block, 'data-package-name')
     const path = attribute(block, 'data-package-path')
-    if (!name || !path) continue
+    const description = classText(block, 'packages-desc')
+    const type = attribute(block, 'data-package-types') || 'package'
+    if (!name?.trim() || name.length > 256 || !path || path.length > 2_048
+      || description.length > 8_192 || type.length > 128 || items.length >= CATALOG_MAX_ITEMS) {
+      throw new Error('插件目录包含无效或过大的包信息')
+    }
 
-    const source = parseInstallSource(block, name)
-    const packageUrl = new URL(path, PI_PLUGIN_STORE_URL).toString()
+    const source = normalizePackageSource(parseInstallSource(block, name))
+    const packageUrl = new URL(path, PI_PLUGIN_STORE_URL)
     const npmUrl = block.match(/href="(https:\/\/www\.npmjs\.com\/package\/[^"]+)"/i)?.[1]
+    if (source.length > 2_048 || (npmUrl && npmUrl.length > 2_048)
+      || !['http:', 'https:'].includes(packageUrl.protocol) || packageUrl.username || packageUrl.password) {
+      throw new Error('插件目录包含无效的包链接或安装源')
+    }
     const downloads = Number(attribute(block, 'data-package-downloads'))
     items.push({
       name,
-      description: classText(block, 'packages-desc'),
-      type: attribute(block, 'data-package-types') || 'package',
+      description,
+      type,
       source,
-      packageUrl,
+      packageUrl: packageUrl.toString(),
       npmUrl,
-      downloads: Number.isFinite(downloads) && downloads > 0 ? downloads : undefined
+      downloads: Number.isSafeInteger(downloads) && downloads > 0 ? downloads : undefined
     })
   }
+  if (items.length === 0) throw new Error('插件目录暂时没有可用包')
   return items
 }
 
@@ -135,27 +171,36 @@ function withPackageManagerCommand(settings: SettingsManager, command: string): 
 /** Fetches the official catalog and installs packages through pi's own manager. */
 export class PluginManager {
   private catalogCache: CatalogCache | null = null
+  private catalogPending: Promise<PluginCatalogItem[]> | null = null
 
   constructor(private readonly dependencies: PluginManagerDependencies = {}) {}
 
-  async getCatalog(): Promise<PluginCatalogItem[]> {
-    const now = Date.now()
-    if (this.catalogCache && now - this.catalogCache.loadedAt < CATALOG_TTL_MS) {
-      return this.catalogCache.items
+  getCatalog(): Promise<PluginCatalogItem[]> {
+    if (this.catalogPending) return this.catalogPending
+    if (this.catalogCache && Date.now() - this.catalogCache.loadedAt < CATALOG_TTL_MS) {
+      return Promise.resolve(this.catalogCache.items)
     }
+    this.catalogPending = this.fetchCatalog().finally(() => { this.catalogPending = null })
+    return this.catalogPending
+  }
 
+  private async fetchCatalog(): Promise<PluginCatalogItem[]> {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 20_000)
+    const timeout = setTimeout(() => controller.abort(new Error('插件目录请求超时（20 秒）')), 20_000)
+    let response: Response | undefined
     try {
-      const response = await fetch(PI_PLUGIN_STORE_URL, {
+      response = await fetch(PI_PLUGIN_STORE_URL, {
         headers: { accept: 'text/html', 'user-agent': 'Pion/0.1' },
         signal: controller.signal
       })
       if (!response.ok) throw new Error(`插件目录请求失败（HTTP ${response.status}）`)
-      const items = parsePackageCatalog(await response.text())
-      if (items.length === 0) throw new Error('插件目录暂时没有可用包')
-      this.catalogCache = { loadedAt: now, items }
+      const items = parsePackageCatalog(await readCatalogHtml(response, controller.signal))
+      this.catalogCache = { loadedAt: Date.now(), items }
       return items
+    } catch (error) {
+      controller.abort(error)
+      await response?.body?.cancel().catch(() => {})
+      throw controller.signal.reason
     } finally {
       clearTimeout(timeout)
     }

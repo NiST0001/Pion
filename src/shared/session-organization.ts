@@ -46,15 +46,17 @@ export function sessionPlacementKey(cwd: string, path: string): string {
 
 function invalid(): never { throw new Error('会话分组参数无效') }
 
-/** Copy data descriptors only; unknown keys, accessors and exotic objects are rejected. */
+function record(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
+  return value as Record<string, unknown>
+}
+
+/** JSON and structured-clone boundaries validate ordinary fields and reject unknown keys. */
 function fields(value: unknown, allowed: readonly string[]): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return invalid()
   const result: Record<string, unknown> = Object.create(null)
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== 'string' || !allowed.includes(key)) return invalid()
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)!
-    if (!descriptor.enumerable || !('value' in descriptor)) return invalid()
-    result[key] = descriptor.value
+  for (const [key, entry] of Object.entries(record(value))) {
+    if (!allowed.includes(key)) return invalid()
+    result[key] = entry
   }
   return result
 }
@@ -75,25 +77,22 @@ function nonnegativeInteger(value: unknown): number {
 }
 
 function organizationItem(value: unknown): SessionOrganizationItem {
-  const raw = fields(value, ['kind', 'id', 'path'])
-  if (raw.kind === 'folder') {
-    fields(value, ['kind', 'id'])
-    return { kind: raw.kind, id: text(raw.id) }
+  const input = record(value)
+  const kind = Object.hasOwn(input, 'kind') ? input.kind : undefined
+  if (kind === 'folder') {
+    const raw = fields(value, ['kind', 'id'])
+    return { kind, id: text(raw.id) }
   }
-  if (raw.kind === 'session') {
-    fields(value, ['kind', 'path'])
-    return { kind: raw.kind, path: text(raw.path) }
+  if (kind === 'session') {
+    const raw = fields(value, ['kind', 'path'])
+    return { kind, path: text(raw.path) }
   }
   return invalid()
 }
 
 function items<T>(value: unknown, parse: (item: unknown) => T): T[] {
-  if (!Array.isArray(value) || Reflect.ownKeys(value).length !== value.length + 1) return invalid()
-  return Array.from({ length: value.length }, (_, index) => {
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
-    if (!descriptor?.enumerable || !('value' in descriptor)) return invalid()
-    return parse(descriptor.value)
-  })
+  if (!Array.isArray(value)) return invalid()
+  return Array.from(value, parse)
 }
 
 function folder(value: unknown): SessionFolder {
@@ -120,9 +119,14 @@ function placement(value: unknown): SessionPlacement {
 /** Validates the complete graph and returns an independent canonical snapshot. */
 export function validateSessionOrganization(value: unknown): SessionOrganization {
   const raw = fields(value, ['version', 'revision', 'folders', 'sessions'])
-  if (raw.version !== 1 || typeof raw.revision !== 'number' || !Number.isSafeInteger(raw.revision) || raw.revision < 0) return invalid()
-  const folders = items(raw.folders, folder)
-  const sessions = items(raw.sessions, placement)
+  if (raw.version !== 1) return invalid()
+  const result: SessionOrganization = { version: 1, revision: nonnegativeInteger(raw.revision), folders: items(raw.folders, folder), sessions: items(raw.sessions, placement) }
+  assertOrganizationGraph(result)
+  return result
+}
+
+/** Shared graph invariants for boundary snapshots and the final typed patch result. */
+function assertOrganizationGraph({ folders, sessions }: SessionOrganization): void {
   const byId = new Map<string, SessionFolder>()
   for (const entry of folders) {
     if (byId.has(entry.id)) return invalid()
@@ -152,7 +156,6 @@ export function validateSessionOrganization(value: unknown): SessionOrganization
     keys.add(key)
     if (entry.folderId !== undefined) assertFolder(entry.folderId, entry.cwd)
   }
-  return { version: 1, revision: raw.revision, folders, sessions }
 }
 
 /** Ranked entries precede unranked entries; ties retain their natural input order. */
@@ -178,52 +181,61 @@ export function orderedSessionOrganizationItems(organization: SessionOrganizatio
 }
 
 export function validateSessionOrganizationChange(value: unknown): SessionOrganizationChange {
-  const raw = fields(value, ['type', 'id', 'cwd', 'name', 'parentId', 'collapsed', 'path', 'folderId', 'archived', 'title', 'ids', 'expectedRevision', 'items'])
-  switch (raw.type) {
+  const input = record(value)
+  const type = Object.hasOwn(input, 'type') ? input.type : undefined
+  switch (type) {
     case 'createFolder': {
-      fields(value, ['type', 'id', 'cwd', 'name', 'parentId'])
-      return { type: raw.type, id: text(raw.id), cwd: text(raw.cwd), name: text(raw.name), ...('parentId' in raw ? { parentId: text(raw.parentId) } : {}) }
+      const raw = fields(value, ['type', 'id', 'cwd', 'name', 'parentId'])
+      return { type, id: text(raw.id), cwd: text(raw.cwd), name: text(raw.name), ...('parentId' in raw ? { parentId: text(raw.parentId) } : {}) }
     }
-    case 'renameFolder':
-      fields(value, ['type', 'id', 'name'])
-      return { type: raw.type, id: text(raw.id), name: text(raw.name) }
-    case 'moveFolder':
-      fields(value, ['type', 'id', 'parentId'])
-      return { type: raw.type, id: text(raw.id), ...('parentId' in raw ? { parentId: text(raw.parentId) } : {}) }
+    case 'renameFolder': {
+      const raw = fields(value, ['type', 'id', 'name'])
+      return { type, id: text(raw.id), name: text(raw.name) }
+    }
+    case 'moveFolder': {
+      const raw = fields(value, ['type', 'id', 'parentId'])
+      return { type, id: text(raw.id), ...('parentId' in raw ? { parentId: text(raw.parentId) } : {}) }
+    }
     case 'reorderFolders': {
-      fields(value, ['type', 'cwd', 'parentId', 'ids'])
+      const raw = fields(value, ['type', 'cwd', 'parentId', 'ids'])
       const ids = items(raw.ids, (item) => text(item))
       if (new Set(ids).size !== ids.length) return invalid()
-      return { type: raw.type, cwd: text(raw.cwd), ...('parentId' in raw ? { parentId: text(raw.parentId) } : {}), ids }
+      return { type, cwd: text(raw.cwd), ...('parentId' in raw ? { parentId: text(raw.parentId) } : {}), ids }
     }
     case 'reorderItems': {
-      fields(value, ['type', 'cwd', 'parentId', 'expectedRevision', 'items'])
+      const raw = fields(value, ['type', 'cwd', 'parentId', 'expectedRevision', 'items'])
       const refs = items(raw.items, organizationItem)
       if (new Set(refs.map(sessionOrganizationItemKey)).size !== refs.length) return invalid()
-      return { type: raw.type, cwd: text(raw.cwd), ...('parentId' in raw ? { parentId: text(raw.parentId) } : {}), expectedRevision: nonnegativeInteger(raw.expectedRevision), items: refs }
+      return { type, cwd: text(raw.cwd), ...('parentId' in raw ? { parentId: text(raw.parentId) } : {}), expectedRevision: nonnegativeInteger(raw.expectedRevision), items: refs }
     }
-    case 'deleteFolder':
-      fields(value, ['type', 'id'])
-      return { type: raw.type, id: text(raw.id) }
-    case 'setFolderCollapsed':
-      fields(value, ['type', 'id', 'collapsed'])
-      return { type: raw.type, id: text(raw.id), collapsed: bool(raw.collapsed) }
-    case 'setSession':
-      fields(value, ['type', 'cwd', 'path', 'folderId', 'archived', 'title'])
+    case 'deleteFolder': {
+      const raw = fields(value, ['type', 'id'])
+      return { type, id: text(raw.id) }
+    }
+    case 'setFolderCollapsed': {
+      const raw = fields(value, ['type', 'id', 'collapsed'])
+      return { type, id: text(raw.id), collapsed: bool(raw.collapsed) }
+    }
+    case 'setSession': {
+      const raw = fields(value, ['type', 'cwd', 'path', 'folderId', 'archived', 'title'])
       return {
-        type: raw.type, cwd: text(raw.cwd), path: text(raw.path),
+        type, cwd: text(raw.cwd), path: text(raw.path),
         ...('folderId' in raw ? { folderId: raw.folderId === null ? null : text(raw.folderId) } : {}),
         ...('archived' in raw ? { archived: bool(raw.archived) } : {}),
         ...('title' in raw ? { title: text(raw.title, true) } : {})
       }
+    }
     default: return invalid()
   }
 }
 
-/** Applies a patch without touching the input, then revalidates graph invariants. */
 export function applySessionOrganizationChange(value: SessionOrganization, input: unknown): SessionOrganization {
-  const result = validateSessionOrganization(value)
-  const change = validateSessionOrganizationChange(input)
+  return applyValidatedSessionOrganizationChange(validateSessionOrganization(value), validateSessionOrganizationChange(input))
+}
+
+/** Internal typed patches copy once and check the final graph, without reparsing snapshots. */
+export function applyValidatedSessionOrganizationChange(value: SessionOrganization, change: SessionOrganizationChange): SessionOrganization {
+  const result: SessionOrganization = { ...value, folders: value.folders.map((entry) => ({ ...entry })), sessions: value.sessions.map((entry) => ({ ...entry })) }
   if (result.revision === Number.MAX_SAFE_INTEGER) return invalid()
   if (change.type === 'setSession') {
     const key = sessionPlacementKey(change.cwd, change.path)
@@ -237,7 +249,6 @@ export function applySessionOrganizationChange(value: SessionOrganization, input
     if ('archived' in change) entry.archived = change.archived
     if ('title' in change) entry.title = change.title
   } else if (change.type === 'createFolder') {
-    if (result.folders.some((entry) => entry.id === change.id)) return invalid()
     result.folders.push({ id: change.id, cwd: change.cwd, name: change.name, ...('parentId' in change ? { parentId: change.parentId } : {}) })
   } else if (change.type === 'reorderFolders') {
     if (change.parentId !== undefined && !result.folders.some((entry) => entry.id === change.parentId && entry.cwd === change.cwd)) return invalid()
@@ -260,7 +271,7 @@ export function applySessionOrganizationChange(value: SessionOrganization, input
     const placements = new Map(result.sessions.filter((entry) => entry.cwd === change.cwd).map((entry) => [entry.path, entry]))
     const knownPaths = new Set(result.sessions.map((entry) => entry.path))
     const folderRefs = change.items.filter((item) => item.kind === 'folder')
-    if (folderRefs.length !== siblings.size) return invalid()
+    if (folderRefs.length !== siblings.size || new Set(change.items.map(sessionOrganizationItemKey)).size !== change.items.length) return invalid()
     for (const [order, ref] of change.items.entries()) {
       if (ref.kind === 'folder') {
         const entry = siblings.get(ref.id)
@@ -308,5 +319,6 @@ export function applySessionOrganizationChange(value: SessionOrganization, input
     }
   }
   result.revision += 1
-  return validateSessionOrganization(result)
+  assertOrganizationGraph(result)
+  return result
 }

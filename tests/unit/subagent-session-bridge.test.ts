@@ -5,7 +5,7 @@ import type { AgentBridge as Bridge } from '../../src/main/agent/agent-bridge'
 import { LiveSessionProjection } from '../../src/main/agent/live-session-state'
 import type { BackendRecord } from '../../src/main/agent/types'
 import type { SubagentSessionStore } from '../../src/main/agent/subagent-session-store'
-import { SUBAGENT_SESSION_WIDGET_KEY, SUBAGENT_SESSION_RETENTION_MS, SUBAGENT_SESSION_ADMISSION_TITLE } from '../../src/shared/subagent-sessions'
+import { SUBAGENT_SESSION_WIDGET_KEY, SUBAGENT_SESSION_RETENTION_MS } from '../../src/shared/subagent-sessions'
 import { IPC_EVENTS } from '../../src/shared/ipc'
 let AgentBridge: typeof import('../../src/main/agent/agent-bridge').AgentBridge
 let messageRevert: typeof import('../../src/main/agent/message-revert')
@@ -15,14 +15,11 @@ interface Internals {
   attachBackendEvents(backend: BackendRecord): void
   subagentSessions(): SubagentSessionStore
   observeSubagentProcessExit(backend: BackendRecord): void
+  retireRuntimeSources(backend: BackendRecord, confirmed?: boolean): void
   markSubagentBackendGone(backend: BackendRecord, confirmed: boolean): void
   syncBackendSession(backend: BackendRecord): Promise<void>
   hiddenSubagentBackends?: Set<string>
   deletedSubagentParentPaths?: Set<string>
-}
-function admission(overrides = {}) {
-  return { type: 'extension_ui_request', method: 'input', title: SUBAGENT_SESSION_ADMISSION_TITLE, id: 'admission',
-    placeholder: JSON.stringify({ version: 1, nonce: 'nonce', runtimeId: 'runtime', parentToolCallId: 'call', count: 1, ...overrides }) }
 }
 // Pinned SDK child: close follows exit and all three pipe closes.
 class HistoryProcess extends EventEmitter {
@@ -40,7 +37,7 @@ class HistoryProcess extends EventEmitter {
     this.emit('close', this.exitCode, this.signalCode)
   }
 }
-function fixture(reserve = true, parentPath: string | null = path) {
+function fixture(parentPath: string | null = path) {
   let listener!: (event: unknown) => void
   const child = new HistoryProcess()
   const forbidden = vi.fn(() => { throw new Error('Display read must not call SDK') })
@@ -67,21 +64,18 @@ function fixture(reserve = true, parentPath: string | null = path) {
     widgetKey: SUBAGENT_SESSION_WIDGET_KEY, widgetLines: [JSON.stringify({ version: 1, nonce: 'nonce',
       source: 'sdk:pion_subagents', runtimeId: 'runtime', id: 'child', parentToolCallId: 'call',
       parentSessionId: 'parent-sdk', parentSessionPath: path, cwd, name: 'worker', revision: 1,
-      status: 'running', truncated: false, rows: [{ id: 'row', kind: 'assistant', text: 'answer' }], ...overrides })] })
+      status: 'starting', truncated: false, rows: [{ id: 'row', kind: 'assistant', text: 'answer' }], ...overrides })] })
   const emit = (event: unknown) => listener(event)
   // Exercise the real root start -> trackBackendEvent -> native receipt flow.
   expect(backend.nativeToolReceipts).toBeUndefined()
   emit({ type: 'tool_execution_start', toolName: 'pion_subagents', toolCallId: 'call', args: { tasks: [] } })
   expect(backend.nativeToolReceipts?.get('call')).toMatchObject({ name: 'pion_subagents', state: 'running', runId: 'run' })
-  if (reserve) {
-    emit(admission())
-    expect(respondToExtensionUi).toHaveBeenLastCalledWith(client, 'admission', { value: 'reserved' })
-  }
   trackBackendEvent.mockClear(); send.mockClear(); runStore.update.mockClear(); handleExtensionUiRequest.mockClear(); respondToExtensionUi.mockClear()
   const read = () => bridge.getSubagentSession('child', backend.liveState!.backendId, 7)
-  return { bridge, internals, backend, pool, send, trackBackendEvent, handleExtensionUiRequest, forbidden, child, client, run, runStore, respondToExtensionUi, packet, emit, read }
+  const complete = (publish = emit) => { publish(packet()); publish(packet({ status: 'completed', revision: 2 })) }
+  return { bridge, internals, backend, pool, send, trackBackendEvent, handleExtensionUiRequest, forbidden, child, client, run, runStore, respondToExtensionUi, packet, emit, read, complete }
 }
-function replaceBackendWithoutReservation(h: ReturnType<typeof fixture>) {
+function replaceBackend(h: ReturnType<typeof fixture>) {
   let listener!: (event: unknown) => void
   const child = new HistoryProcess()
   const client = { ...h.client, process: child, onEvent: (callback: typeof listener) => { listener = callback } }
@@ -92,12 +86,6 @@ function replaceBackendWithoutReservation(h: ReturnType<typeof fixture>) {
   const emit = (event: unknown) => listener(event)
   emit({ type: 'tool_execution_start', toolName: 'pion_subagents', toolCallId: 'call', args: { tasks: [] } })
   return { backend, child, client, emit }
-}
-function replaceBackend(h: ReturnType<typeof fixture>) {
-  const replacement = replaceBackendWithoutReservation(h)
-  replacement.emit(admission())
-  expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(replacement.client, 'admission', { value: 'reserved' })
-  return replacement
 }
 function prepareUndo(h: ReturnType<typeof fixture>, backend: BackendRecord) {
   backend.activeRunId = undefined
@@ -130,9 +118,34 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
   afterEach(() => { for (const bridge of bridges.splice(0)) bridge.disposeSubagentSessions(); vi.restoreAllMocks() })
   afterAll(() => { vi.doUnmock('electron'); vi.resetModules() })
 
+  it('retires only the actual old runtime display source and native receipts after a successful replacement', () => {
+    const h = fixture()
+    h.emit(h.packet())
+    const mark = vi.spyOn(h.internals.subagentSessions(), 'markRuntimeGone')
+    h.internals.retireRuntimeSources(h.backend, false)
+    expect(mark).toHaveBeenCalledExactlyOnceWith(h.backend.liveState!.backendId, 'runtime', false)
+    expect(h.read()).toMatchObject({ status: 'cancelling' })
+    expect(h.read()?.retentionRemainingMs).toBeUndefined()
+    expect(h.backend.nativeToolReceipts?.size).toBe(1)
+    h.internals.retireRuntimeSources(h.backend)
+    expect(mark).toHaveBeenLastCalledWith(h.backend.liveState!.backendId, 'runtime', true)
+    expect(h.read()).toMatchObject({ status: 'aborted', retentionRemainingMs: expect.any(Number) })
+    expect(h.backend.nativeToolReceipts?.size).toBe(0)
+    h.emit(h.packet({ id: 'retired-child' }))
+    expect(h.bridge.getSubagentSession('retired-child', h.backend.liveState!.backendId, 7)).toBeNull()
+    expect(h.forbidden).not.toHaveBeenCalled()
+    const failedDisplay = fixture()
+    failedDisplay.emit(failedDisplay.packet())
+    vi.spyOn(failedDisplay.internals.subagentSessions(), 'markRuntimeGone').mockImplementation(() => { throw new Error('renderer gone') })
+    expect(() => failedDisplay.internals.retireRuntimeSources(failedDisplay.backend)).not.toThrow()
+    expect(failedDisplay.backend.nativeToolReceipts?.size).toBe(0)
+  })
+
   it('reads and pushes display-only snapshots before root/live/billing/UI projection', () => {
     const h = fixture(), revision = h.backend.liveState!.revision
-    h.emit(h.packet())
+    h.emit(h.packet({ parentSessionPath: undefined })) // Main already knows the path at the first packet.
+    expect(h.read()).toMatchObject({ parentSessionPath: path, status: 'starting' })
+    h.emit(h.packet({ parentSessionPath: undefined, revision: 2, status: 'running' }))
     expect(h.read()?.rows[0].text).toBe('answer')
     expect(h.bridge.getSubagentSessions(7).sessions).toHaveLength(1)
     expect(h.send).toHaveBeenCalledWith(IPC_EVENTS.SubagentSessions, expect.objectContaining({ sessions: [expect.objectContaining({ id: 'child' })] }))
@@ -142,112 +155,64 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
     expect(h.runStore.update).not.toHaveBeenCalled()
     expect(h.forbidden).not.toHaveBeenCalled()
   })
-  it.each([1, 8, 9, 100])('reserves %i tasks through private input/ACK without generic UI, live or billing projection', (count) => {
-    const h = fixture(false), revision = h.backend.liveState!.revision
-    h.emit(admission({ count }))
-    expect(h.respondToExtensionUi).toHaveBeenCalledExactlyOnceWith(h.client, 'admission', { value: 'reserved' })
-    expect(h.backend.liveState!.revision).toBe(revision)
-    expect(h.trackBackendEvent).not.toHaveBeenCalled()
-    expect(h.runStore.update).not.toHaveBeenCalled()
-    expect(h.handleExtensionUiRequest).not.toHaveBeenCalled()
-    expect(h.send).not.toHaveBeenCalled()
-    h.emit(h.packet())
-    expect(h.read()?.status).toBe('running')
-  })
-  it.each([
-    { method: 'confirm' }, { type: 'message_update', usage: { input: 99 } }, { parentToolCallId: 'iframe' },
-    { placeholder: 'not-json' }, { placeholder: 'x'.repeat(4097) },
-    admission({ nonce: 'other' }), admission({ count: 0 }), admission({ count: 101 }), admission({ count: 1.5 }),
-    admission({ extra: true }), admission({ runtimeId: 'x'.repeat(257) }), admission({ parentToolCallId: 'x\0y' })
-  ])('swallows invalid reserved admission without generic UI or billing: %j', (invalid) => {
-    const h = fixture(false), revision = h.backend.liveState!.revision
-    h.emit({ ...admission(), ...invalid })
-    expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(h.client, 'admission', { value: 'denied' })
-    expect(h.backend.liveState!.revision).toBe(revision)
-    expect(h.trackBackendEvent).not.toHaveBeenCalled()
-    expect(h.runStore.update).not.toHaveBeenCalled()
-    expect(h.handleExtensionUiRequest).not.toHaveBeenCalled()
-    expect(h.bridge.getSubagentSessions(7).sessions).toEqual([])
-  })
-  it('unusable request IDs remain private without attempting an ACK', () => {
-    const h = fixture(false)
-    for (const id of [undefined, '', 'x'.repeat(257), 'x\0y']) h.emit({ ...admission(), id })
+  it('display publication failure leaves the real parent receipt and execution untouched', () => {
+    const h = fixture(), warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    h.send.mockImplementation(() => { throw new Error('renderer gone') })
+    expect(() => h.emit(h.packet())).not.toThrow()
+    expect(warn).toHaveBeenCalledOnce()
+    expect(h.backend.nativeToolReceipts?.get('call')).toMatchObject({ state: 'running', runId: 'run' })
+    expect(h.forbidden).not.toHaveBeenCalled()
     expect(h.respondToExtensionUi).not.toHaveBeenCalled()
-    expect(h.handleExtensionUiRequest).not.toHaveBeenCalled()
-    expect(h.trackBackendEvent).not.toHaveBeenCalled()
-    expect(h.runStore.update).not.toHaveBeenCalled()
+    h.send.mockReset()
+    h.emit(h.packet({ revision: 2, status: 'completed' }))
+    expect(h.read()?.status).toBe('completed')
+    h.internals.retireRuntimeSources(h.backend)
+    expect(h.backend.nativeToolReceipts?.size).toBe(0)
   })
   it('captured parent scope cannot use a different run path or silently alias source paths', () => {
-    const h = fixture(false)
+    const h = fixture()
     const alias = `${dirname(path)}${sep}alias${sep}..${sep}parent.jsonl`
     expect(resolve(alias)).toBe(path)
     h.backend.sessionPath = alias
-    h.emit(admission())
-    expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(h.client, 'admission', { value: 'denied' })
+    h.emit(h.packet())
+    expect(h.read()).toBeNull()
     h.backend.sessionPath = path
-    h.emit(admission())
-    expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(h.client, 'admission', { value: 'reserved' })
     h.emit(h.packet({ parentSessionPath: alias }))
     expect(h.read()).toBeNull()
     h.emit(h.packet())
     expect(h.read()?.parentSessionPath).toBe(path)
   })
-  it('receipt saturation denies admission without creating display capacity', () => {
-    const h = fixture(false)
+  it('receipt saturation omits child display without inventing a native source', () => {
+    const h = fixture()
     const receipts = h.backend.nativeToolReceipts!
     const receipt = receipts.get('call')!
     receipts.clear()
     for (let i = 0; i < 512; i++) receipts.set(`old-${i}`, { ...receipt, state: 'ended' })
     h.emit({ type: 'tool_execution_start', toolName: 'pion_subagents', toolCallId: 'call', args: { tasks: [] } })
-    h.emit(admission())
+    h.emit(h.packet())
     expect(receipts.has('call')).toBe(false)
-    expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(h.client, 'admission', { value: 'denied' })
+    expect(h.respondToExtensionUi).not.toHaveBeenCalled()
     expect(h.bridge.getSubagentSessions(7).sessions).toEqual([])
   })
-  it('global reserved capacity denies a different captured backend before any child starts', () => {
-    const h = fixture(false)
-    for (let i = 0; i < 32; i++) {
-      const toolCallId = `batch-${i}`
-      h.emit({ type: 'tool_execution_start', toolName: 'pion_subagents', toolCallId, args: { tasks: [] } })
-      h.emit(admission({ parentToolCallId: toolCallId, count: 8 }))
-      expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(h.client, 'admission', { value: 'reserved' })
-    }
-    const next = replaceBackendWithoutReservation(h)
-    next.emit(admission({ runtimeId: 'unrelated-runtime' }))
-    expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(next.client, 'admission', { value: 'denied' })
-    expect(h.bridge.getSubagentSessions(7).sessions).toEqual([])
+  it('rejects a nested same-name receipt before accepting private display', () => {
+    const h = fixture()
+    h.emit({ type: 'tool_execution_start', toolName: 'codemode', toolCallId: 'code', args: {} })
+    h.emit({ type: 'tool_execution_start', toolName: 'pion_subagents', toolCallId: 'nested-call', parentToolCallId: 'code', args: {} })
+    expect(h.backend.nativeToolReceipts?.get('nested-call')).toMatchObject({ parentId: 'code', rootId: 'code' })
+    h.emit(h.packet({ parentToolCallId: 'nested-call' }))
+    expect(h.read()).toBeNull()
   })
-  it.each([false, true])('actual root/nested end releases only unused reservations, nested=%s', (nested) => {
-    const h = fixture(false)
-    const toolCallId = nested ? 'nested-call' : 'call'
-    if (nested) {
-      h.emit({ type: 'tool_execution_start', toolName: 'codemode', toolCallId: 'code', args: {} })
-      h.emit({ type: 'tool_execution_start', toolName: 'pion_subagents', toolCallId, parentToolCallId: 'code', args: {} })
-    }
-    h.emit(admission({ parentToolCallId: toolCallId, count: 2 }))
-    expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(h.client, 'admission', { value: 'reserved' })
-    h.emit(h.packet({ parentToolCallId: toolCallId, status: 'completed' }))
-    const release = vi.spyOn(h.internals.subagentSessions(), 'releaseBatch')
-    Object.assign(h.bridge, { clearSubagentPermissions: vi.fn() })
-    h.emit({ type: 'tool_execution_end', toolName: 'pion_subagents', toolCallId,
-      ...(nested ? { parentToolCallId: 'code' } : {}), result: {}, isError: false })
-    expect(release).toHaveBeenCalledExactlyOnceWith(h.backend.liveState!.backendId, toolCallId)
-    expect(h.backend.nativeToolReceipts?.get(toolCallId)?.state).toBe('ended')
-    expect(h.read()?.status).toBe('completed')
-    h.emit(h.packet({ parentToolCallId: toolCallId, id: 'unused' }))
-    expect(h.bridge.getSubagentSession('unused', h.backend.liveState!.backendId, 7)).toBeNull()
-  })
-  it('discarded captured client cannot ACK or surface a private request', () => {
-    const h = fixture(false)
+  it('discarded captured client drops private display', () => {
+    const h = fixture()
     h.backend.client = {} as BackendRecord['client']
-    h.emit(admission())
+    h.emit(h.packet())
     expect(h.respondToExtensionUi).not.toHaveBeenCalled()
     expect(h.handleExtensionUiRequest).not.toHaveBeenCalled()
     expect(h.send).not.toHaveBeenCalled()
   })
   it('real root completion closes the receipt and cannot authorize another child', () => {
     const h = fixture()
-    h.emit(h.packet({ status: 'completed' }))
+    h.complete()
     Object.assign(h.bridge, { clearSubagentPermissions: vi.fn() })
     h.emit({ type: 'tool_execution_end', toolName: 'pion_subagents', toolCallId: 'call', result: {}, isError: false })
     expect(h.backend.nativeToolReceipts?.get('call')?.state).toBe('ended')
@@ -269,21 +234,22 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
     expect(h.send).not.toHaveBeenCalled()
     expect(h.bridge.getSubagentSessions(7).sessions).toEqual([])
   })
-  it.each(['missing', 'closed', 'wrong-name', 'wrong-backend', 'missing-run', 'wrong-run-path'])('requires a matching live native receipt: %s', (reason) => {
-    const h = fixture(false), receipt = h.backend.nativeToolReceipts!.get('call')!
+  it.each(['missing', 'closed', 'wrong-name', 'wrong-backend', 'missing-run', 'wrong-run-path', 'wrong-root', 'nested', 'old-run'])('requires a matching live native receipt: %s', (reason) => {
+    const h = fixture(), receipt = h.backend.nativeToolReceipts!.get('call')!
     if (reason === 'missing') h.backend.nativeToolReceipts!.clear()
     if (reason === 'closed') receipt.state = 'ended'
     if (reason === 'wrong-name') receipt.name = 'codemode'
     if (reason === 'wrong-backend') receipt.backendId = 'old-backend'
     if (reason === 'missing-run') (h.bridge as unknown as { runStore: { get: () => unknown } }).runStore.get = () => undefined
     if (reason === 'wrong-run-path') h.run.sessionPath = '/other'
-    h.emit(admission())
-    expect(h.respondToExtensionUi).toHaveBeenLastCalledWith(h.client, 'admission', { value: 'denied' })
+    if (reason === 'wrong-root') receipt.rootId = 'other-root'
+    if (reason === 'nested') receipt.parentId = 'codemode-root'
+    if (reason === 'old-run') h.backend.activeRunId = 'replacement-run'
     h.emit(h.packet())
     expect(h.read()).toBeNull()
   })
   it('backfills the real parent path without manufacturing a normal session or changing backend identity', async () => {
-    const h = fixture(true, null), id = h.backend.liveState!.backendId
+    const h = fixture(null), id = h.backend.liveState!.backendId
     h.backend.sessionPath = undefined
     h.emit(h.packet({ parentSessionPath: undefined }))
     expect(h.read()?.parentSessionPath).toBeUndefined()
@@ -312,8 +278,10 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
     h.backend.historyMutation = false
     h.backend.client = {} as BackendRecord['client']; h.emit(h.packet()); expect(h.read()).toBeNull()
   })
-  it('logical stop is cancelling, actual captured exit alone starts retention after eviction', () => {
+  it('logical stop and exit remain cancelling until captured stdio and actual RPCs close after eviction', async () => {
     const h = fixture()
+    let resolveRpc!: () => void
+    h.backend.controlDispatchPromises = new Set([new Promise<void>(resolve => { resolveRpc = resolve })])
     h.internals.observeSubagentProcessExit(h.backend)
     h.emit(h.packet())
     h.internals.markSubagentBackendGone(h.backend, false)
@@ -327,15 +295,35 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
     h.backend.liveState = replacement.backend.liveState
     h.client.process = null as unknown as typeof h.child // SDK early pointer loss is not exit.
     expect(h.bridge.getSubagentSessions(7).sessions.find((session) => session.backendId !== newBackend)?.status).toBe('cancelling')
+    h.child.exitCode = 0
     h.child.emit('exit', 0, null)
+    expect(h.bridge.getSubagentSessions(7).sessions.find((session) => session.backendId !== newBackend)).toMatchObject({ status: 'cancelling' })
+    expect(h.bridge.getSubagentSessions(7).sessions.find((session) => session.backendId !== newBackend)?.retentionRemainingMs).toBeUndefined()
+    h.child.stdio.forEach(stream => { stream.closed = true })
+    h.child.emit('close', 0, null)
+    await Promise.resolve()
+    expect(h.bridge.getSubagentSessions(7).sessions.find((session) => session.backendId !== newBackend)).toMatchObject({ status: 'cancelling' })
+    expect(h.bridge.getSubagentSessions(7).sessions.find((session) => session.backendId !== newBackend)?.retentionRemainingMs).toBeUndefined()
+    resolveRpc()
+    for (let i = 0; i < 5; i++) await Promise.resolve()
     expect(h.bridge.getSubagentSessions(7).sessions.find((session) => session.backendId !== newBackend)).toMatchObject({ status: 'aborted', retentionRemainingMs: expect.any(Number) })
-    expect(h.bridge.getSubagentSession('child', newBackend, 7)?.status).toBe('running')
+    expect(h.bridge.getSubagentSession('child', newBackend, 7)?.status).toBe('starting')
+  })
+  it('keeps cancelling after process/stdio close when an owned RPC reports closeUnknown', async () => {
+    const h = fixture()
+    h.backend.controlDispatchPromises = new Set([Promise.reject(Object.assign(new Error('RPC close unknown'), { closeUnknown: true }))])
+    h.internals.observeSubagentProcessExit(h.backend)
+    h.emit(h.packet())
+    h.child.finish()
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(h.read()).toMatchObject({ status: 'cancelling' })
+    expect(h.read()?.retentionRemainingMs).toBeUndefined()
   })
   it('retains completed records across pool removal, expires them, and clears only on explicit dispose', () => {
     let now = 0
     vi.spyOn(performance, 'now').mockImplementation(() => now)
     const h = fixture()
-    h.emit(h.packet({ status: 'completed' }))
+    h.complete()
     h.pool.clear()
     expect(h.read()?.status).toBe('completed')
     now = SUBAGENT_SESSION_RETENTION_MS + 1
@@ -346,9 +334,9 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
   })
   it('hides all retained parent incarnations only after undo commits, and allows a new branch backend', async () => {
     const h = fixture(), oldId = h.backend.liveState!.backendId
-    h.emit(h.packet({ status: 'completed' }))
+    h.complete()
     const current = replaceBackend(h), currentId = current.backend.liveState!.backendId
-    current.emit(h.packet({ status: 'completed' }))
+    h.complete(current.emit)
     expect(h.bridge.getSubagentSessions(7).sessions).toHaveLength(2)
     const request = prepareUndo(h, current.backend)
     const commit = vi.spyOn(messageRevert, 'revertSessionMessage').mockImplementation(() => {
@@ -366,13 +354,13 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
     expect(h.bridge.getSubagentSession('child', oldId, 7)).toBeNull()
     expect(h.bridge.getSubagentSession('child', currentId, 7)).toBeNull()
     const next = replaceBackend(h), nextId = next.backend.liveState!.backendId
-    next.emit(h.packet({ status: 'completed' }))
+    h.complete(next.emit)
     expect(h.bridge.getSubagentSessions(7).sessions.map((session) => session.backendId)).toEqual([nextId])
     expect(h.bridge.getSubagentSession('child', nextId, 7)?.status).toBe('completed')
   })
   it('a failed durable undo does not hide existing children', async () => {
     const h = fixture()
-    h.emit(h.packet({ status: 'completed' }))
+    h.complete()
     const request = prepareUndo(h, h.backend)
     const commit = vi.spyOn(messageRevert, 'revertSessionMessage').mockImplementation(() => {
       expect(h.backend.client.stop).toHaveBeenCalledOnce()
@@ -390,11 +378,11 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
     let now = 0
     vi.spyOn(performance, 'now').mockImplementation(() => now)
     const h = fixture(), oldId = h.backend.liveState!.backendId
-    h.emit(h.packet({ status: 'completed' }))
+    h.complete()
     h.internals.hiddenSubagentBackends = new Set([oldId])
     now = SUBAGENT_SESSION_RETENTION_MS / 2
     const next = replaceBackend(h), nextId = next.backend.liveState!.backendId
-    next.emit(h.packet({ status: 'completed' }))
+    h.complete(next.emit)
     const revision = h.bridge.getSubagentSessions(7).revision
     now = SUBAGENT_SESSION_RETENTION_MS + 1
     expect(h.bridge.getSubagentSession('child', oldId, 7)).toBeNull()
@@ -405,7 +393,7 @@ describe('subagent display bridge (no SDK sessions or process launches)', () => 
   })
   it('hides old branch/backend and deleted parent without deleting retained store records', () => {
     const h = fixture()
-    h.emit(h.packet({ status: 'completed' }))
+    h.complete()
     h.internals.hiddenSubagentBackends = new Set([h.backend.liveState!.backendId])
     expect(h.read()).toBeNull()
     expect(h.bridge.getSubagentSessions(7).sessions).toEqual([])

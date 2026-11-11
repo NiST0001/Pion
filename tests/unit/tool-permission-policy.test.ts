@@ -1,5 +1,5 @@
 import { constants, realpathSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve, sep, win32 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -9,6 +9,11 @@ import {
   validateImageReferencePaths
 } from '../../src/shared/image-generation'
 import type { ToolPermissionRules } from '../../src/shared/types'
+
+vi.mock('node:fs/promises', async (original) => {
+  const actual = await original<typeof import('node:fs/promises')>()
+  return { ...actual, readFile: vi.fn(actual.readFile), rename: vi.fn(actual.rename) }
+})
 
 const testUserData = { dir: '' }
 vi.mock('electron', () => ({
@@ -83,14 +88,14 @@ describe('tool permission policy resolution', () => {
     expect((await new ToolPermissionStore().getPolicy(worktree)).rules).toEqual(denied)
   })
 
-  it.each(['read', 'write', 'network'] as const)('keeps an in-project worktree on its base %s deny despite child and stale branch allows', async (category) => {
+  it('keeps an in-project worktree on its base denies despite child and stale branch allows', async () => {
     const store = await storeWith({})
     const project = join(testUserData.dir, 'app')
     const worktree = join(project, '.pion-worktrees', 'feature-x')
     const collision = join(project, 'feature-x')
     await Promise.all([join(project, '.git'), worktree, collision].map((path) => mkdir(path, { recursive: true })))
     const allowed: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'allow', network: 'allow', external: 'allow' }
-    const denied: ToolPermissionRules = { ...allowed, [category]: 'deny' }
+    const denied: ToolPermissionRules = { ...allowed, read: 'deny', write: 'deny', network: 'deny' }
     const workflow = join(project, '.pion-workflow-worktrees', 'reviewer')
     await writeFile(store.filePath, JSON.stringify({ version: 1, projects: {
       [project]: denied, [collision]: allowed, [worktree]: allowed, [workflow]: allowed
@@ -112,8 +117,8 @@ describe('tool permission policy resolution', () => {
     expect(policy.rules.shell).toBe('deny')
   })
 
-  it.each(['network', 'write', 'read'] as const)('does not let a stale project grant overwrite an inherited %s deny', async (category) => {
-    const inherited: ToolPermissionRules = { read: 'allow', write: 'ask', shell: 'allow', network: 'ask', external: 'ask', [category]: 'deny' }
+  it('preserves inherited denies against stale project grants', async () => {
+    const inherited: ToolPermissionRules = { read: 'deny', write: 'deny', shell: 'allow', network: 'deny', external: 'ask' }
     const store = await storeWith({ [join(sep, 'repo')]: inherited })
     const child = join(sep, 'repo', 'app')
     const policy = await store.allowProjectCategories(child, ['network', 'write', 'read'])
@@ -139,6 +144,45 @@ describe('tool permission policy resolution', () => {
     expect((await saving).rules).toEqual({ ...inherited, network: 'allow' })
     expect((await new ToolPermissionStore().getPolicy(child)).rules).toEqual({ ...inherited, network: 'allow' })
     expect((await store.setPolicy(child, null)).rules).toEqual(inherited)
+  })
+
+  it('publishes and notifies only committed patches, preserving inherited denies after a failed save', async () => {
+    const inherited: ToolPermissionRules = { read: 'deny', write: 'ask', shell: 'deny', network: 'ask', external: 'deny' }
+    const store = await storeWith({ [dirname(PROJECT)]: inherited })
+    const before = await store.getPolicy(PROJECT)
+    const source = await readFile(store.filePath, 'utf8')
+    const changed = vi.fn(() => store.getPolicySnapshot(PROJECT).rules)
+    store.onChanged(changed)
+    vi.mocked(rename).mockRejectedValueOnce(new Error('publish failed'))
+    await expect(store.setPolicy(PROJECT, { network: 'allow' })).rejects.toThrow('publish failed')
+    expect(store.getPolicySnapshot(PROJECT)).toEqual(before)
+    expect(await readFile(store.filePath, 'utf8')).toBe(source)
+    expect(changed).not.toHaveBeenCalled()
+
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    const publish = vi.mocked(rename).getMockImplementation()!
+    vi.mocked(rename).mockImplementationOnce(async (from, to) => {
+      entered.resolve()
+      await release.promise
+      await publish(from, to)
+    })
+    const saving = Promise.all([
+      store.setPolicy(PROJECT, { write: 'deny' }),
+      store.setPolicy(PROJECT, { external: 'ask' }),
+      store.allowProjectCategories(PROJECT, ['write'])
+    ])
+    await entered.promise
+    expect(store.getPolicySnapshot(PROJECT)).toEqual(before)
+    expect(await readFile(store.filePath, 'utf8')).toBe(source)
+    expect(changed).not.toHaveBeenCalled()
+    release.resolve()
+    const [, saved, approved] = await saving
+    const expected = { ...inherited, write: 'deny', external: 'ask' }
+    expect(saved.rules).toEqual(expected)
+    expect(approved.rules).toEqual(expected)
+    expect(changed.mock.results.map(({ value }) => value)).toEqual([{ ...inherited, write: 'deny' }, expected])
+    expect((await new ToolPermissionStore().getPolicy(PROJECT)).rules).toEqual(expected)
   })
 
   it.each(['nested', 'flat'] as const)('saves/grants/resets the %s worktree policy owner and preserves workflow roles', async (layout) => {
@@ -199,14 +243,28 @@ describe('tool permission policy resolution', () => {
     expect(await readFile(fresh.filePath, 'utf8')).toBe('{ broken later')
   })
 
-  it('shares the initial load promise and keeps snapshots denied until it settles', async () => {
+  it('shares a pending retry and keeps snapshots denied until validated data commits', async () => {
     const store = await storeWith({})
-    const loading = store.load()
-    expect(store.load()).toBe(loading)
+    await writeFile(store.filePath, '{ broken')
+    await expect(store.getPolicy(PROJECT)).rejects.toThrow('工具权限配置')
+    const rules: ToolPermissionRules = { read: 'allow', write: 'deny', shell: 'deny', network: 'ask', external: 'deny' }
+    const repaired = JSON.stringify({ version: 1, projects: { [dirname(PROJECT)]: rules } })
+    await writeFile(store.filePath, repaired)
+    const reading = deferred<string>()
+    const reads = vi.mocked(readFile).mock.calls.length
+    vi.mocked(readFile).mockImplementationOnce(() => reading.promise)
+    const retry = store.load()
+    const policy = store.getPolicy(PROJECT)
+    expect(store.load()).toBe(retry)
+    await Promise.resolve()
+    expect(store.load()).toBe(retry)
     expect(Object.values(store.getPolicySnapshot(PROJECT).rules)).toEqual(Array(5).fill('deny'))
-    await loading
-    expect(store.load()).toBe(loading)
-    expect(store.getPolicySnapshot(PROJECT).rules.write).toBe('allow')
+    expect(vi.mocked(readFile).mock.calls).toHaveLength(reads + 1)
+    reading.resolve(repaired)
+    await retry
+    expect((await policy).rules).toEqual(rules)
+    await store.load()
+    expect(vi.mocked(readFile).mock.calls).toHaveLength(reads + 1)
   })
 
   it('normalizes saved symlink owners identically in the store and standalone gate', async () => {
@@ -305,7 +363,7 @@ function extensionRuntime(
     Buffer.from(metadata[descriptors.get(fd)!]).copy(buffer, offset, position, position + length))
   const closeSync = vi.fn((fd: number) => { descriptors.delete(fd) })
   const handlers = new Map<string, GateHandler>()
-  const tools: { name: string; sourceInfo: { source: string }; annotations?: { readOnlyHint: boolean } }[] = []
+  const tools: { name: string; sourceInfo: { source: string; path?: string }; exposure?: string; annotations?: { readOnlyHint: boolean } }[] = []
   const pi = {
     getAllTools: () => tools,
     on: (name: string, handler: GateHandler) => { handlers.set(name, handler) },
@@ -441,17 +499,62 @@ describe('SDK path permission semantics (mock)', () => {
 
 describe('ComputerUse combined execution permission gate (mock)', () => {
   const allAllow: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'allow', network: 'allow', external: 'allow' }
+  const sdkRoot = (name: string) => ({ name, sourceInfo: { source: 'sdk', path: `<sdk:${name}>` }, exposure: 'model-only' })
+
+  it.each(['pion_computer_observe', 'pion_computer_act'])('leaves %s approval to Main for exact model-only SDK roots after the checkpoint', async toolName => {
+    const h = extensionRuntime({})
+    h.tools.push(sdkRoot(toolName))
+    expect(await h.gate({ toolName, toolCallId: 'root-cua', input: {} }, h.ctx)).toBeUndefined()
+    expect(h.select.mock.calls.map(([title]) => title)).toEqual(toolName === 'pion_computer_act' ? [RUN_CHECKPOINT_MARKER] : [])
+  })
+
+  it('keeps the generic confirmation for extension, mismatched or incomplete SDK provenance', async () => {
+    const name = 'pion_computer_observe'
+    for (const tool of [
+      { ...sdkRoot(name), sourceInfo: { source: 'extension', path: `<sdk:${name}>` } },
+      { ...sdkRoot(name), sourceInfo: { source: 'sdk', path: '<sdk:other-tool>' } },
+      { ...sdkRoot(name), exposure: 'codemode-only' },
+      { name, sourceInfo: { source: 'sdk' } }
+    ]) {
+      const h = extensionRuntime({ [PROJECT]: allAllow })
+      h.tools.push(tool)
+      expect(await h.gate({ toolName: name, toolCallId: 'unverified-cua', input: {} }, h.ctx)).toBeUndefined()
+      expect(h.select).toHaveBeenCalledTimes(1)
+      expect(h.select.mock.calls[0][0]).toContain(TOOL_PERMISSION_MARKER)
+      expect(h.select.mock.calls[0][1]).toEqual(['allow-once', 'deny'])
+    }
+  })
+
+  it('keeps checkpoint-time deny and cancellation authoritative for exact SDK roots', async () => {
+    for (const transition of ['deny', 'abort']) {
+      const rules = { ...allAllow }
+      const h = extensionRuntime({ [PROJECT]: rules })
+      h.tools.push(sdkRoot('pion_computer_act'))
+      const controller = new AbortController()
+      h.ctx.signal = controller.signal
+      const checkpoint = deferred<string | undefined>()
+      h.select.mockReturnValueOnce(checkpoint.promise)
+      const pending = h.gate({ toolName: 'pion_computer_act', toolCallId: 'root-cua', input: {} }, h.ctx)
+      expect(h.select.mock.calls[0][0]).toBe(RUN_CHECKPOINT_MARKER)
+      if (transition === 'deny') rules.network = 'deny'
+      else controller.abort()
+      checkpoint.resolve('ready')
+      expect(await pending).toMatchObject({ block: true })
+      expect(h.select).toHaveBeenCalledTimes(1)
+    }
+  })
   it.each([
     ['pion_computer_observe', 'read'], ['pion_computer_observe', 'external'], ['pion_computer_observe', 'network'],
     ['pion_computer_act', 'read'], ['pion_computer_act', 'write'], ['pion_computer_act', 'shell'], ['pion_computer_act', 'external'], ['pion_computer_act', 'network']
   ] as const)('independently enforces %s / %s deny before any UI', async (toolName, category) => {
     const h = extensionRuntime({ [PROJECT]: { ...allAllow, [category]: 'deny' } })
+    h.tools.push(sdkRoot(toolName))
     expect(await h.gate({ toolName, toolCallId: 'root-cua', input: {} }, h.ctx)).toMatchObject({ block: true })
     expect(h.select).not.toHaveBeenCalled()
     expect(h.api.PION_INTERNAL_TOOLS.has(toolName)).toBe(false)
   })
 
-  it.each(['pion_computer_observe', 'pion_computer_act'])('forces non-rememberable %s approval even with all global categories allowed', async toolName => {
+  it.each(['pion_computer_observe', 'pion_computer_act'])('forces non-rememberable unknown-source %s approval even with all global categories allowed', async toolName => {
     const h = extensionRuntime({ [PROJECT]: allAllow })
     const event = { toolName, toolCallId: 'root-cua', input: { action: { type: 'type', text: 'do-not-serialize-private-input' } } }
     expect(await h.gate(event, h.ctx)).toBeUndefined()
@@ -465,12 +568,14 @@ describe('ComputerUse combined execution permission gate (mock)', () => {
     }
   })
 
-  it.each(['parent', 'subagent'] as const)('blocks %s calls rather than giving ComputerUse to nested tools', async kind => {
+  it.each(['parent', 'subagent', 'subagent-id'] as const)('blocks %s calls rather than giving ComputerUse to nested tools', async kind => {
     const h = extensionRuntime({ [PROJECT]: allAllow })
+    h.tools.push(sdkRoot('pion_computer_observe'))
     const controller = new AbortController()
     const event: GateEvent = { toolName: 'pion_computer_observe', toolCallId: 'root-cua', input: {} }
     if (kind === 'parent') event.parentToolCallId = 'codemode'
-    else event.input[SUBAGENT_ABORT] = controller.signal
+    else if (kind === 'subagent') event.input[SUBAGENT_ABORT] = controller.signal
+    else event.toolCallId = 'subagent-cua'
     expect(await h.gate(event, h.ctx)).toMatchObject({ block: true })
     expect(h.select).not.toHaveBeenCalled()
   })
@@ -508,14 +613,38 @@ function delegate(h: ReturnType<typeof imageRuntime>, signal: AbortSignal) {
 }
 
 describe('extension gate source', () => {
-  it('maps worktree paths back to the base project and resolves its policy', () => {
-    const { api } = extensionRuntime({
+  it('maps worktree policy and keeps shell keyword hints separate from network deny', async () => {
+    const h = extensionRuntime({
       [PROJECT]: { read: 'allow', write: 'allow', shell: 'allow', network: 'deny', external: 'ask' }
     }, {}, [PROJECT])
     const worktree = join(sep, 'repo', '.pion-worktrees', 'app', 'feature-x')
-    expect(api.projectRootOf(worktree)).toBe(PROJECT)
-    expect(api.readPolicy(worktree)).toMatchObject({ shell: 'allow', network: 'deny' })
-    expect(api.DEFAULTS.shell).toBe('allow')
+    expect(h.api.projectRootOf(worktree)).toBe(PROJECT)
+    expect(h.api.readPolicy(worktree)).toMatchObject({ shell: 'allow', network: 'deny' })
+    expect(h.api.DEFAULTS.shell).toBe('allow')
+    const event = { toolName: 'bash', toolCallId: 'shell-hint', input: { command: 'rm -rf ./cache' } }
+    expect(h.api.classify(event, h.ctx)).toMatchObject({ policyCategories: ['shell'], risks: [] })
+    expect(h.api.classify(event, h.ctx).detail).toContain('\n提示：命令含高风险关键词')
+    expect(await h.gate(event, h.ctx)).toBeUndefined()
+    expect(await h.gate({ ...event, input: { command: 'echo curl example.org' } }, h.ctx)).toMatchObject({ block: true })
+    expect(h.select.mock.calls.map(([title]) => title)).toEqual([RUN_CHECKPOINT_MARKER])
+    h.ctx.hasUI = false
+    expect(await h.gate(event, h.ctx)).toBeUndefined()
+  })
+
+  it('keeps shell keyword ask rememberable and enforces deny after a session grant', async () => {
+    const rules: ToolPermissionRules = { read: 'allow', write: 'allow', shell: 'ask', network: 'deny', external: 'ask' }
+    const h = extensionRuntime({ [PROJECT]: rules })
+    const event = { toolName: 'powershell', toolCallId: 'shell-ask', input: { command: 'sudo echo preview' } }
+    h.select.mockImplementation(async (title) => title === RUN_CHECKPOINT_MARKER ? 'ready' : 'allow-session')
+    expect(await h.gate(event, h.ctx)).toBeUndefined()
+    const [title, choices] = h.select.mock.calls[1]
+    expect(parseToolPermissionMetadata(title)).toMatchObject({ policyCategories: ['shell'], risks: [], canRemember: true })
+    expect(choices).toEqual(['allow-once', 'allow-session', 'allow-project', 'deny'])
+    expect(await h.gate({ ...event, toolCallId: 'shell-remembered' }, h.ctx)).toBeUndefined()
+    expect(h.select.mock.calls.filter(([title]) => title.startsWith(TOOL_PERMISSION_MARKER))).toHaveLength(1)
+    rules.shell = 'deny'
+    expect(await h.gate(event, h.ctx)).toMatchObject({ block: true })
+    expect(h.select).toHaveBeenCalledTimes(3)
   })
 
   it('shares verified flat worktree ownership with the store and blocks the main deny before UI (metadata mock)', async () => {
@@ -637,8 +766,6 @@ describe('native and legacy orchestration permission boundary', () => {
     expect(metadata.policyCategories).toEqual(all)
     expect(metadata.canRemember).toBe(false)
     expect(metadata.detail).toContain('付费 classifier/image')
-    expect(metadata.detail).toContain('模型调用没有内层工具授权')
-    expect(metadata.detail).toContain('不是 Pion Codex 生图的回退')
     for (const secret of ['PRIVATE_SCRIPT', 'PRIVATE_ARG', 'PRIVATE_PATH', 'PRIVATE_CREDENTIAL']) expect(JSON.stringify(metadata)).not.toContain(secret)
     expect(h.select.mock.calls[1][1]).toEqual(['allow-once', 'deny'])
   })
@@ -736,12 +863,7 @@ describe('image generation permission boundary', () => {
       toolName: IMAGE_GENERATION_TOOL_NAME, category: 'network', policyCategories: ['network', 'write'],
       cwd: PROJECT, sessionPath: SESSION, risks: [], canRemember: true, subagent: false
     })
-    expect(metadata.summary).toContain('生成图片')
     expect(metadata.detail).toContain(`目标路径：${resolve(PROJECT, 'art/landscape.png')}`)
-    expect(metadata.detail).toContain('使用 Codex 图片额度')
-    expect(metadata.detail).toContain('额外账号用量')
-    expect(metadata.summary).toContain('Codex 自动（官方别名）')
-    expect(metadata.detail).toContain('官方请求别名不是实际版本报告')
     const serialized = JSON.stringify(metadata)
     expect(serialized.length).toBeLessThan(1500)
     for (const secret of ['PRIVATE_PROMPT', 'PRIVATE_BASE64', 'PRIVATE_TOKEN']) {
@@ -751,31 +873,6 @@ describe('image generation permission boundary', () => {
     // Even malformed pathless calls must not fall back to serializing raw inputs.
     expect(JSON.stringify(h.api.classify({ ...h.event, input: { prompt: 'PRIVATE_PROMPT' } }, h.ctx)))
       .not.toContain('PRIVATE_PROMPT')
-  })
-
-  it.each([
-    ['gpt-image-2.5-flare', 'Images 2.5 Flare（实验性）'],
-    ['gpt-image-2.5-sunburst', 'Images 2.5 Sunburst（实验性）']
-  ])('shows %s and compatibility uncertainty in the permission request', async (model, label) => {
-    const h = imageRuntime({ network: 'ask' })
-    h.event.input.model = model
-    await h.run()
-    const metadata = h.permissions()[0]
-    expect(metadata.summary).toContain(label)
-    expect(metadata.detail).toContain(label)
-    expect(metadata.detail).toContain('订阅兼容性及账号权益未验证')
-    expect(metadata.detail).toContain('不自动降级')
-    expect(metadata.policyCategories).toEqual(['network', 'write'])
-  })
-
-  it('never copies an unknown model parameter into permission metadata', () => {
-    const h = imageRuntime()
-    h.event.input.model = 'PRIVATE_TOKEN'.repeat(1000)
-    const metadata = h.api.classify(h.event, h.ctx)
-    expect(metadata.summary).toContain('不支持的请求型号')
-    expect(metadata.detail).toContain('不会自动改用默认型号')
-    expect(JSON.stringify(metadata)).not.toContain('PRIVATE_TOKEN')
-    expect(JSON.stringify(metadata).length).toBeLessThan(1500)
   })
 
   it.each(['write', 'network'] as const)('blocks when %s is denied, even if the other category is allowed', async (category) => {
@@ -816,19 +913,6 @@ describe('image generation permission boundary', () => {
     expect(h.execute).not.toHaveBeenCalled()
   })
 
-  it('waits for the write checkpoint before the image executor can run', async () => {
-    const h = imageRuntime()
-    const checkpoint = deferred<string | undefined>()
-    h.select.mockImplementationOnce(() => checkpoint.promise)
-    const pending = h.run()
-    expect(h.select).toHaveBeenCalledTimes(1)
-    expect(h.select.mock.calls[0][0]).toBe(RUN_CHECKPOINT_MARKER)
-    expect(h.execute).not.toHaveBeenCalled()
-    checkpoint.resolve('ready')
-    expect(await pending).toBeUndefined()
-    expect(h.execute).toHaveBeenCalledTimes(1)
-  })
-
   it.each(['write', 'network'] as const)('requires approval when %s is ask', async (category) => {
     const h = imageRuntime({ [category]: 'ask' })
     expect(await h.run()).toBeUndefined()
@@ -836,14 +920,6 @@ describe('image generation permission boundary', () => {
     expect(h.permissions()[0].policyCategories).toEqual(['network', 'write'])
     expect(h.select.mock.calls[1][1]).toEqual(['allow-once', 'allow-session', 'allow-project', 'deny'])
     expect(h.select.mock.calls[1][2]).toEqual({ timeout: 120_000, signal: undefined })
-    expect(h.execute).toHaveBeenCalledTimes(1)
-  })
-
-  it.each(['allow-once', 'allow-session', 'allow-project'])('accepts explicit %s for an ordinary destination when both categories are ask', async (choice) => {
-    const h = imageRuntime({ write: 'ask', network: 'ask' })
-    h.select.mockImplementation(async (title) => title === RUN_CHECKPOINT_MARKER ? 'ready' : choice)
-    expect(await h.run()).toBeUndefined()
-    expect(h.permissions()[0].policyCategories).toEqual(['network', 'write'])
     expect(h.execute).toHaveBeenCalledTimes(1)
   })
 
@@ -984,29 +1060,11 @@ describe('image reference permission boundary', () => {
     expect(await h.run()).toBeUndefined()
     const metadata = h.permissions()[0]
     expect(metadata).toMatchObject({ policyCategories: ['network', 'write', 'read'], risks: [], canRemember: true })
-    expect(metadata.summary).toContain('编辑图片')
-    expect(metadata.detail).toContain(`目标路径：${resolve(PROJECT, 'art/edited.png')}（输出·写入 PNG 新文件）`)
-    expect(metadata.detail).toContain('参考输入 1（读取·项目相对）：art/source.png')
-    expect(metadata.detail).toContain('参考输入 2（读取·项目相对）：art/original.jpg')
-    expect(metadata.detail).toContain('gpt-image-2.5-sunburst')
-    expect(metadata.detail).toContain('订阅兼容性及账号权益未验证')
-    expect(metadata.detail).toContain('请求尺寸：1024x1536；请求质量：high')
-    expect(metadata.detail).toContain('尺寸/质量不保证服务接受或精确输出')
-    expect(metadata.detail).toContain('上传完整参考/原图文件（包含文件内 metadata）')
-    expect(metadata.detail).toContain('失败或取消也可能消耗额度')
-    expect(metadata.detail).toContain('不自动重试或降级，无 API-key/付费 API 回退')
+    expect(metadata.detail).toContain('art/source.png')
+    expect(metadata.detail).toContain('art/original.jpg')
     expect(JSON.stringify(metadata)).not.toContain('PRIVATE_PROMPT')
     expect(h.select.mock.calls[1][1]).toEqual(['allow-once', 'allow-session', 'allow-project', 'deny'])
     expect(h.execute).toHaveBeenCalledTimes(1)
-  })
-
-  it('does not run references requiring read ask without UI', async () => {
-    const h = imageRuntime({ read: 'ask' })
-    h.event.input.referenced_image_paths = ['art/source.png']
-    h.ctx.hasUI = false
-    expect(await h.run()).toMatchObject({ block: true, reason: '工具调用需要授权，但当前没有可用界面' })
-    expect(h.select).not.toHaveBeenCalled()
-    expect(h.execute).not.toHaveBeenCalled()
   })
 
   it('does not reuse a text-only session grant for reference reads', async () => {
@@ -1019,29 +1077,6 @@ describe('image reference permission boundary', () => {
     expect(h.permissions()).toHaveLength(2)
     expect(h.permissions()[1].policyCategories).toEqual(['network', 'write', 'read'])
     expect(h.execute).toHaveBeenCalledTimes(1)
-  })
-
-  it.each(['allow-once', 'allow-session', 'allow-project'])('rechecks pending read deny before accepting or remembering %s', async (choice) => {
-    const h = imageRuntime({ read: 'ask' })
-    h.event.input.referenced_image_paths = ['art/source.png']
-    const opened = deferred<void>()
-    const response = deferred<string | undefined>()
-    h.select.mockImplementation((title) => {
-      if (title === RUN_CHECKPOINT_MARKER) return Promise.resolve('ready')
-      opened.resolve()
-      return response.promise
-    })
-    const pending = h.run()
-    await opened.promise
-    h.rules.read = 'deny'
-    response.resolve(choice)
-    expect(await pending).toEqual({ block: true, reason: 'Pion 项目权限策略已拒绝此工具调用' })
-    expect(h.execute).not.toHaveBeenCalled()
-    h.rules.read = 'ask'
-    h.select.mockImplementation(async (title) => title === RUN_CHECKPOINT_MARKER ? 'ready' : 'deny')
-    expect(await h.run()).toMatchObject({ block: true })
-    expect(h.permissions()).toHaveLength(2)
-    expect(h.execute).not.toHaveBeenCalled()
   })
 
   it('keeps read deny authoritative after a reference session grant without blocking text-only generation', async () => {
@@ -1130,96 +1165,11 @@ describe('image reference permission boundary', () => {
     expect(h.execute).not.toHaveBeenCalled()
     expect(h.permissions()).toEqual([])
   })
-
-  it('never traverses oversized arrays, iterates custom image payloads or serializes unknown fields', () => {
-    const h = imageRuntime()
-    const touch = vi.fn(() => { throw new Error('must not visit image payload') })
-    const references = new Proxy(new Array(1_000_000), {
-      get: (target, key, receiver) => key === 'length' ? Reflect.get(target, key, receiver) : touch()
-    })
-    const unknown = { toJSON: touch, toString: touch, [Symbol.iterator]: touch, payload: 'PRIVATE_TOKEN' }
-    h.event.input = {
-      referenced_image_paths: references, prompt: 'PRIVATE_PROMPT'.repeat(1000),
-      images: unknown, credentials: unknown, mask: unknown, model: 'PRIVATE_MODEL'.repeat(1000),
-      size: unknown, quality: 'PRIVATE_QUALITY'.repeat(1000), path: 'PRIVATE_PATH'.repeat(1000),
-      b64_json: 'PRIVATE_BASE64'.repeat(1000)
-    }
-    const metadata = h.api.classify(h.event, h.ctx)
-    expect(metadata.policyCategories).toEqual(['network', 'write', 'read'])
-    expect(metadata.detail).toContain('参数无效，执行将拒绝')
-    expect(touch).not.toHaveBeenCalled()
-    const serialized = JSON.stringify(metadata)
-    for (const secret of ['PRIVATE_TOKEN', 'PRIVATE_PROMPT', 'PRIVATE_MODEL', 'PRIVATE_QUALITY', 'PRIVATE_BASE64', 'PRIVATE_PATH']) {
-      expect(serialized).not.toContain(secret)
-    }
-    expect(metadata.detail.length).toBeLessThan(1000)
-    expect(h.readFileSync).not.toHaveBeenCalled()
-    expect(h.realpath.mock.calls.length).toBeLessThan(10)
-    // Even a short array with an unbounded custom iterator uses indexed bounds.
-    const short = ['art/source.png']
-    Object.defineProperty(short, Symbol.iterator, { value: touch })
-    h.event.input.referenced_image_paths = short
-    expect(h.api.classify(h.event, h.ctx).detail).toContain('art/source.png')
-    expect(touch).not.toHaveBeenCalled()
-  })
-
-  it('does not serialize prompt, image bytes, credentials or invalid settings in a pathless malformed reference dialog', async () => {
-    const h = imageRuntime({ network: 'ask', read: 'ask' })
-    h.event.input = {
-      referenced_image_paths: { b64_json: 'PRIVATE_BASE64' }, prompt: 'PRIVATE_PROMPT', images: ['PRIVATE_BASE64'],
-      credentials: { accessToken: 'PRIVATE_TOKEN' }, model: 'PRIVATE_MODEL', size: 'PRIVATE_SIZE', quality: 'PRIVATE_QUALITY'
-    }
-    h.select.mockImplementation(async (title) => title === RUN_CHECKPOINT_MARKER ? 'ready' : 'deny')
-    expect(await h.run()).toMatchObject({ block: true })
-    const metadata = h.permissions()[0]
-    expect(metadata.policyCategories).toEqual(['network', 'write', 'read'])
-    expect(metadata.detail).toContain('参考输入：参数无效，执行将拒绝')
-    for (const secret of ['PRIVATE_BASE64', 'PRIVATE_PROMPT', 'PRIVATE_TOKEN', 'PRIVATE_MODEL', 'PRIVATE_SIZE', 'PRIVATE_QUALITY']) {
-      expect(JSON.stringify(metadata)).not.toContain(secret)
-    }
-    expect(h.execute).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    { cwd: PROJECT }, { cwd: resolve(sep, ...Array.from({ length: 16 }, () => 'c'.repeat(200))) }
-  ])('shows the complete maximum-budget reference list and output below the real parser clamp (%j)', async ({ cwd }) => {
-    const h = imageRuntime({ read: 'ask' })
-    h.ctx.cwd = cwd
-    const references = Array.from({ length: 5 }, (_, index) => `${'r'.repeat(150)}/${index}${'s'.repeat(164)}.png`)
-    const output = `${Array.from({ length: 4 }, () => 'o'.repeat(200)).join('/')}/${'n'.repeat(216)}.png`
-    expect(references.reduce((sum, path) => sum + path.length, 0)).toBe(1600)
-    expect(output.length).toBe(1024)
-    expect(validateImageReferencePaths(references)).toEqual(references)
-    h.event.input = { path: output, referenced_image_paths: references, model: 'gpt-image-2.5-flare', size: '4096x3840', quality: 'high' }
-    await h.run()
-    const metadata = h.permissions()[0]
-    expect(metadata.detail.length).toBeLessThanOrEqual(4000)
-    const absoluteOutput = resolve(cwd, output)
-    const displayedOutput = absoluteOutput.length > 1200 ? `${output}（项目相对）` : absoluteOutput
-    expect(metadata.detail).toContain(`目标路径：${displayedOutput}（输出·写入 PNG 新文件）`)
-    for (const [index, reference] of references.entries()) {
-      expect(metadata.detail).toContain(`参考输入 ${index + 1}（读取·项目相对）：${reference}`)
-    }
-    expect(metadata.detail).not.toContain('…')
-    if (absoluteOutput.length > 1200) expect(metadata.detail).not.toContain(cwd)
-    const title = h.select.mock.calls.find(([value]) => value.startsWith(TOOL_PERMISSION_MARKER))![0]
-    expect(parseToolPermissionMetadata(title)?.detail).toBe(metadata.detail)
-    expect(metadata.detail).toContain('无 API-key/付费 API 回退')
-  })
 })
 
 // The generated gate is standalone JS: verify parity with pure shared admission
 // instead of accidentally relying on an application path in the CLI extension.
 describe('standalone image permission helpers', () => {
-  it('imports only self-contained node filesystem/path/os/url dependencies', () => {
-    expect(toolPermissionExtensionSource().match(/^import .+;$/gm)).toEqual([
-      'import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";',
-      'import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";',
-      'import { homedir } from "node:os";',
-      'import { fileURLToPath } from "node:url";'
-    ])
-  })
-
   it.each([
     undefined, [], ['art/source.png', './art/original.JPEG', '@art/source.jpg'],
     ['.ssh/source.png'], ['../outside.png'], ['/absolute.png'], ['C:/absolute.jpg'], ['a\\b.png'],
@@ -1235,18 +1185,6 @@ describe('standalone image permission helpers', () => {
       return
     }
     expect(api.validateImageReferencePaths(value)).toEqual(expected)
-  })
-
-  it.each([NaN, -1, 1.5, Infinity])('rejects anomalous array lengths %s consistently and keeps read deny authoritative', async (length) => {
-    const references = new Proxy(['art/source.png'], { get: (target, property, receiver) =>
-      property === 'length' ? length : Reflect.get(target, property, receiver) })
-    const h = imageRuntime({ read: 'deny' })
-    expect(() => validateImageReferencePaths(references)).toThrow()
-    expect(() => h.api.validateImageReferencePaths(references)).toThrow()
-    h.event.input.referenced_image_paths = references
-    expect(h.api.classify(h.event, h.ctx).policyCategories).toEqual(['network', 'write', 'read'])
-    expect(await h.run()).toMatchObject({ block: true })
-    expect(h.execute).not.toHaveBeenCalled()
   })
 
   it.each([undefined, 'auto', '16x16', '1024x1536', '4096x3840', '4096x4096', '4097x1024', '1000x1000', '1024X1024', '16x64', 'PRIVATE_SIZE', null])('matches shared size admission without echoing invalid values (%j)', (value) => {

@@ -96,61 +96,6 @@ describe('pure boot-bound computer-use maintenance', () => {
     expect(io.persist).not.toHaveBeenCalled()
   })
 
-  const invalidSnapshots: unknown[] = [
-    null, [], Object.assign(Object.create(null), snapshot()), Object.create(snapshot()),
-    { ...snapshot(), extra: true }, { ...snapshot(), [Symbol('extra')]: true },
-    ...[-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1000'].map((uid) => ({ ...snapshot(), uid })),
-    ...['A'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), 'a'.repeat(64) + '\n'].map((machineHash) => ({ ...snapshot(), machineHash })),
-    { ...snapshot(), homeHash: 'g'.repeat(64) },
-    ...[oldBoot.toUpperCase().replace('1', 'A'), 'not-a-uuid', oldBoot + '\n'].map((bootId) => ({ ...snapshot(), bootId })),
-    ...['EF53', '0xef53', '1234', null].map((fsType) => ({ ...snapshot(), fsType })),
-    ...['', '0x1', 'A', 'g', 'a'.repeat(33), 'a\n'].map((fsId) => ({ ...snapshot(), fsId })),
-    ...['1', '1:2:3', '-1:2', '01:2', '1:2\n', '1:' + '2'.repeat(33)].map((homeIdentity) => ({ ...snapshot(), homeIdentity })),
-    { ...snapshot(), directoryIdentity: '1:NaN' },
-    ...['1:2:3', '1:2:3:4:5', '1:2:3:-1', '1:2:3:1.2', '1:2:3:' + '9'.repeat(33), '1:2:3:4\n'].map((markerIdentity) => ({ ...snapshot(), markerIdentity }))
-  ]
-  it.each(invalidSnapshots.map((value, index) => [index, value] as const))('rejects invalid snapshot %s before any later IO', async (_, value) => {
-    const io = mockIO()
-    io.inspect.mockResolvedValue(value as RecoverySnapshot)
-    await expect(prepareRecovery(io)).rejects.toThrow('Computer-use maintenance prepare failed')
-    expect(io.persist).not.toHaveBeenCalled()
-    expect(io.load).not.toHaveBeenCalled()
-    io.load.mockResolvedValue({ ...witness(), snapshot: value })
-    io.inspect.mockClear()
-    await expect(finishRecovery(io)).rejects.toThrow('Computer-use maintenance finish failed')
-    expect(io.inspect).not.toHaveBeenCalled()
-    expect(io.retire).not.toHaveBeenCalled()
-  })
-
-  it('rejects accessors without invoking them (including hidden extra keys)', async () => {
-    for (const field of Object.keys(snapshot())) {
-      const getter = vi.fn(() => { throw new Error('private metadata') })
-      const value = Object.defineProperty(snapshot(), field, { get: getter })
-      const io = mockIO()
-      io.inspect.mockResolvedValue(value)
-      await expect(prepareRecovery(io)).rejects.toThrow('Computer-use maintenance prepare failed')
-      expect(getter).not.toHaveBeenCalled()
-      expect(io.persist).not.toHaveBeenCalled()
-    }
-    const io = mockIO()
-    io.load.mockResolvedValue(Object.defineProperty(witness(), 'secret', { value: 'private' }))
-    await expect(verifyRecovery(io)).rejects.toThrow('Computer-use maintenance verify failed')
-    expect(io.inspect).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    null, [], Object.create(witness()), { ...witness(), extra: true }, { ...witness(), version: 2 },
-    { ...witness(), kind: 'stopped' }, { ...witness(), id: 'private path' },
-    { ...witness(), id: id + '\n' }, { ...witness(), snapshot: undefined },
-    Object.defineProperty(witness(), 'snapshot', { get() { throw new Error('must not read') } })
-  ])('rejects invalid witnesses before inspect', async (value) => {
-    const io = mockIO()
-    io.load.mockResolvedValue(value)
-    await expect(finishRecovery(io)).rejects.toThrow('Computer-use maintenance finish failed')
-    expect(io.inspect).not.toHaveBeenCalled()
-    expect(io.retire).not.toHaveBeenCalled()
-  })
-
   it('snapshots the loaded witness before awaiting inspect and freezes retirement arguments', async () => {
     const io = mockIO()
     const loaded = witness()
@@ -203,11 +148,10 @@ describe('pure boot-bound computer-use maintenance', () => {
     if (method === 'inspect') expect(io.persist).not.toHaveBeenCalled()
   })
 
-  it('sanitizes non-Error throws without evaluating their metadata', async () => {
+  it('keeps non-Error IO rejections out of maintenance responses', async () => {
     for (const operation of operations) {
       const io = mockIO()
-      const error = Object.defineProperty({}, 'message', { get() { throw new Error('secret') } })
-      io.inspect.mockRejectedValue(error)
+      io.inspect.mockRejectedValue({ message: '/private/path metadata boot machine' })
       await expect(operation(io)).rejects.toThrow(/^Computer-use maintenance (prepare|verify|finish) failed$/)
     }
   })

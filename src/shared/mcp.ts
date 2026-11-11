@@ -143,14 +143,3 @@ export function readMcpStatusNotice(lines: unknown): McpStatusNotice | undefined
       revision: value.revision, cwd: value.cwd, ...(value.sessionPath !== undefined ? { sessionPath: value.sessionPath } : {}) } : undefined
   } catch { return undefined }
 }
-
-export function projectMcpStatusSnapshot(value: unknown): McpStatusSnapshot | undefined {
-  if (!record(value) || !counter(value.revision) || !counter(value.receivedAt)
-    || (value.cwd !== undefined && !mcpScopeString(value.cwd)) || (value.sessionPath !== undefined && !mcpScopeString(value.sessionPath))
-    || (value.backendId !== undefined && (!mcpScopeString(value.backendId) || value.backendId.length > 128))
-    || (value.runtimeId !== undefined && (!mcpScopeString(value.runtimeId) || value.runtimeId.length > 128))) return undefined
-  const status = projectMcpObservedStatus(value)
-  return status ? { ...status, revision: value.revision, receivedAt: value.receivedAt,
-    ...(value.cwd !== undefined ? { cwd: value.cwd } : {}), ...(value.sessionPath !== undefined ? { sessionPath: value.sessionPath } : {}),
-    ...(value.backendId !== undefined ? { backendId: value.backendId } : {}), ...(value.runtimeId !== undefined ? { runtimeId: value.runtimeId } : {}) } : undefined
-}

@@ -620,6 +620,36 @@ describe('scoped live-session display snapshots', () => {
     expect(different.timeline).toHaveLength(2)
   })
 
+  it('fills clipped snapshot fields from a cache-only final while accepting fresh complete fields and retaining its terminal state', () => {
+    const cached = { kind: 'assistant' as const, id: 997, liveMessageId: 'cache-only-final',
+      text: 'complete cached answer', thinking: 'old cached reasoning', streaming: false, historyReconciled: true }
+    const restored = snapshot({ ...seed, timeline: [cached] }, 4, [
+      { type: 'message_start', message: { role: 'assistant', content: [],
+        _pionLiveMessageId: cached.liveMessageId, _pionLiveTruncatedFields: ['text'] } },
+      delta('clipped'), { type: 'message_update', usage: null,
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'fresh complete reasoning' } }
+    ])
+    expect(restored.timeline).toHaveLength(1)
+    expect(restored.timeline[0]).toMatchObject({ id: cached.id, text: cached.text,
+      thinking: 'fresh complete reasoning', streaming: false })
+    expect(restored.timeline[0]).not.toHaveProperty('partialFields')
+  })
+
+  it('retains streaming cache fragments as partial while accepting fresh complete snapshot fields', () => {
+    const cached = { kind: 'assistant' as const, id: 996, liveMessageId: 'cache-only-prefix',
+      text: 'longer provisional cache fragment', thinking: 'old cached reasoning', streaming: true }
+    const restored = snapshot({ ...seed, timeline: [cached] }, 4, [
+      { type: 'message_start', message: { role: 'assistant', content: [],
+        _pionLiveMessageId: cached.liveMessageId, _pionLiveTruncatedFields: ['text'] } },
+      delta('clipped'), { type: 'message_update', usage: null,
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'fresh complete reasoning' } }
+    ])
+    expect(restored.timeline).toHaveLength(1)
+    expect(restored.timeline[0]).toMatchObject({ id: cached.id, text: cached.text,
+      thinking: 'fresh complete reasoning', streaming: true, partialFields: ['text'] })
+    expect(cached).not.toHaveProperty('partialFields')
+  })
+
   it('does not revive a completed tool from a partial snapshot, or finish other tools while the backend is busy', () => {
     const toolStart = (id: string): WireEventInput => ({ type: 'tool_execution_start', toolCallId: id, toolName: 'read', args: {} })
     let state = snapshot({ ...seed, timeline: [] }, 2, [toolStart('first'), toolStart('second')])
@@ -789,11 +819,77 @@ describe('scoped live-session display snapshots', () => {
     const state = snapshot(seed, 2, [start, delta('complete active output')])
     const truncated = snapshot(state, 4, [{ type: 'message_start', message: {
       role: 'assistant', timestamp, content: [], _pionLiveTruncatedFields: ['text'] } }, delta('suffix only')], { truncated: true })
-    expect(truncated.timeline[1]).toBe(state.timeline[1])
+    expect(state.timeline[1]).toMatchObject({ text: 'complete active output', streaming: true })
+    expect(state.timeline[1]).not.toHaveProperty('partialFields')
+    expect(truncated.timeline[1]).toMatchObject({ id: state.timeline[1].id,
+      text: 'complete active output', thinking: '', streaming: true, partialFields: ['text'] })
   })
 })
 
 describe('assistant error state', () => {
+  const identity = { _pionLiveMessageId: 'projected-assistant', _pionLiveEntryId: 'projected-entry' }
+  const call = { type: 'toolCall', id: 'projected-call', name: 'read', arguments: {} }
+  const streamingDraft = (): AgentState => ([
+    { type: 'message_start', message: { role: 'assistant', ...identity, content: [] } },
+    { type: 'message_update', _pionLiveMessageId: identity._pionLiveMessageId, usage: null,
+      assistantMessageEvent: { type: 'text_delta', delta: 'textA' } },
+    { type: 'message_update', _pionLiveMessageId: identity._pionLiveMessageId, usage: null,
+      assistantMessageEvent: { type: 'thinking_delta', delta: 'thinkingA' } },
+    { type: 'tool_execution_start', toolCallId: call.id, toolName: call.name, args: { path: 'retained.ts' } },
+    { type: 'message_update', _pionLiveMessageId: identity._pionLiveMessageId, usage: null,
+      assistantMessageEvent: { type: 'text_delta', delta: 'textB' } },
+    { type: 'message_update', _pionLiveMessageId: identity._pionLiveMessageId, usage: null,
+      assistantMessageEvent: { type: 'thinking_delta', delta: 'thinkingB' } },
+    { type: 'message_update', _pionLiveMessageId: identity._pionLiveMessageId, usage: null,
+      assistantMessageEvent: { type: 'error', error: { role: 'assistant', errorMessage: 'provisional error' } } }
+  ] satisfies WireEventInput[]).reduce(applyEvent, { ...initialState, busy: true })
+
+  it.each([
+    { field: 'text', projected: 'textA' }, { field: 'thinking', projected: 'thinkingA' },
+    { field: 'text', projected: '' }, { field: 'thinking', projected: '' }
+  ] as const)('keeps complete live $field through a cropped final ($projected) and accepts the other field', ({ field, projected }) => {
+    const draft = streamingDraft()
+    const text = field === 'text' ? projected : projected ? 'final' : ''
+    const thinking = field === 'thinking' ? projected : projected ? 'brief' : ''
+    const usage = { input: 3, output: 2 }
+    const message = { role: 'assistant', ...identity, stopReason: 'stop', usage,
+      _pionLiveTruncatedFields: [field], content: [{ type: 'text', text }, call, { type: 'thinking', thinking }] }
+    const ended = applyEvent(draft, { type: 'message_end', message })
+    expect(ended.timeline).toHaveLength(2)
+    expect(ended.timeline[0]).toMatchObject({ id: draft.timeline[0].id, entryId: identity._pionLiveEntryId,
+      liveMessageId: identity._pionLiveMessageId, text: field === 'text' ? 'textAtextB' : text,
+      thinking: field === 'thinking' ? 'thinkingAthinkingB' : thinking, streaming: false })
+    expect(ended.timeline[0]).not.toHaveProperty('error')
+    expect(ended.timeline[1]).toBe(draft.timeline[1])
+    expect(message.usage).toBe(usage)
+    expect(message.content[1]).toBe(call)
+    expect(ended.busy).toBe(true)
+  })
+
+  it('keeps known text through a longer cropped placeholder and shows it when no text is known', () => {
+    const draft = streamingDraft()
+    const placeholder = '[输出过长，显示已省略]'
+    const end: WireEventInput = { type: 'message_end', message: {
+      role: 'assistant', ...identity, _pionLiveTruncatedFields: ['text'],
+      content: [call, { type: 'text', text: placeholder }]
+    } }
+    expect(applyEvent(draft, end).timeline[0]).toMatchObject({ id: draft.timeline[0].id,
+      entryId: identity._pionLiveEntryId, liveMessageId: identity._pionLiveMessageId,
+      text: 'textAtextB', thinking: '', streaming: false })
+    const empty = applyEvent(initialState, { type: 'message_start', message: { role: 'assistant', ...identity, content: [] } })
+    expect(applyEvent(empty, end).timeline[0]).toMatchObject({ text: placeholder, thinking: '', streaming: false })
+  })
+
+  it('clears a truly empty live final with clipped arguments and keeps its tool identity', () => {
+    const draft = streamingDraft()
+    const ended = applyEvent(draft, { type: 'message_end', message: {
+      role: 'assistant', ...identity, stopReason: 'stop', content: [call]
+    } })
+    expect(ended.timeline).toEqual([draft.timeline[1]])
+    expect(ended.timeline[0]).toBe(draft.timeline[1])
+    expect(ended.busy).toBe(true)
+  })
+
   it('drops a nonempty streamed draft when the authoritative final message is empty', () => {
     const streaming: AgentState = { ...initialState, timeline: [{
       kind: 'assistant', id: 1, text: 'removed draft', thinking: 'removed reasoning', streaming: true

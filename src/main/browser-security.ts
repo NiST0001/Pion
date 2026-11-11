@@ -71,8 +71,7 @@ export function bindBrowserSecurity(win: BrowserWindow): void {
       plugins: false,
       experimentalFeatures: false,
       navigateOnDragDrop: false,
-      disableDialogs: true,
-      safeDialogs: true
+      disableDialogs: true
     })
   })
 
@@ -92,9 +91,7 @@ export function bindBrowserSecurity(win: BrowserWindow): void {
     guest.once('destroyed', () => { guests.delete(guest); owners.delete(guest.id) })
     guest.setWindowOpenHandler(() => ({ action: 'deny' }))
     guest.on('will-attach-webview', (event) => event.preventDefault())
-    guest.on('will-navigate', (event) => {
-      if (!alive() || !isAllowedBrowserUrl(event.url)) event.preventDefault()
-    })
+    // Includes main-frame navigation; programmatic loads also pass the request gate.
     guest.on('will-frame-navigate', (event) => {
       if (!alive() || !isAllowedBrowserUrl(event.url)) event.preventDefault()
     })

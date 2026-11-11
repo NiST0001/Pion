@@ -4,7 +4,7 @@ import type { UsageLedgerCollector, UsageOverview, UsageOverviewQuery, UsageOver
 import { cycleMonth, usageDayPeriod, usagePeriod, usageYearPeriod, validateUsageOverviewQuery } from '../shared/usage-period'
 import { readSessionUsageSnapshot, sessionUsageFileStamp, SessionUsageReadError, type SessionUsageSnapshot } from './agent/session-token-total'
 import {
-  addUsage, checkDirectories, directoryChain, UsageLedgerError, UsageLedgerStore, usageHash, zeroUsage,
+  addUsage, checkDirectories, directoryProof, UsageLedgerError, UsageLedgerStore, usageHash, zeroUsage,
   type LedgerDocument, type LedgerReceipt, type LedgerSession
 } from './usage-ledger-store'
 
@@ -26,6 +26,7 @@ interface AliasProof {
   id: string
   receipt: string
   stamp: string
+  directories: Awaited<ReturnType<typeof directoryProof>>
 }
 interface TransactionIndex {
   data: LedgerDocument
@@ -48,8 +49,8 @@ class AliasConflict extends UsageLedgerError {
   constructor(readonly changed: boolean) { super('collection-failed') }
 }
 
-function snapshotProof(path: string, snapshot: SessionUsageSnapshot): AliasProof {
-  return { path, id: sessionHash(snapshot.id), receipt: snapshot.receipt, stamp: snapshot.stamp }
+function snapshotProof(path: string, snapshot: SessionUsageSnapshot, directories: AliasProof['directories']): AliasProof {
+  return { path, id: sessionHash(snapshot.id), receipt: snapshot.receipt, stamp: snapshot.stamp, directories }
 }
 
 /** Build only inside the owning store transaction; merge keeps both maps current. */
@@ -62,30 +63,19 @@ function indexTransaction(data: LedgerDocument): TransactionIndex {
   return index
 }
 
-/** Historical aliases alone cannot establish a new edge: their paths may be reused. */
-async function bindLineage(index: TransactionIndex, proofs: Map<string, AliasProof>, rejected?: (path: string) => void): Promise<AliasProof[]> {
-  const { data, aliases } = index
-  const needed = new Set(data.sessions.filter(session => session.parent && !session.parentId).map(session => session.parent!))
-  const verified = new Map<string, AliasProof>()
-  for (const parent of needed) {
-    const proof = proofs.get(parent)
-    const current = aliases.get(parent)
+/** Only this transaction's sources can establish edges; publication verifies them together. */
+function bindLineage(index: TransactionIndex, proofs: Map<string, AliasProof>): boolean {
+  let changed = false
+  for (const session of index.data.sessions) {
+    if (!session.parent || session.parentId) continue
+    const proof = proofs.get(session.parent)
+    const current = index.aliases.get(session.parent)
     if (!proof || !current || current.session.id !== proof.id || current.alias.conflict
       || current.alias.receipt !== proof.receipt || current.alias.stamp !== proof.stamp) continue
-    try {
-      // Recheck this round's successful source immediately before establishing
-      // durable edges. Missing/deferred/changed parents remain unresolved.
-      await verifySource(proof.path, proof.stamp)
-      verified.set(parent, proof)
-    } catch { rejected?.(proof.path) }
+    session.parentId = proof.id
+    changed = true
   }
-  for (const session of data.sessions) {
-    if (session.parent && !session.parentId) {
-      const parent = verified.get(session.parent)
-      if (parent) session.parentId = parent.id
-    }
-  }
-  return [...verified.values()]
+  return changed
 }
 
 /**
@@ -190,11 +180,11 @@ function mergeSnapshot(index: TransactionIndex, path: string, snapshot: SessionU
     if (!old) { added.push(receipt); previous.set(receipt.entry, receipt) }
   }
   const oldAlias = known?.alias
-  if (oldAlias?.conflict) throw unavailable()
   if (existing) {
     for (const receipt of added) existing.receipts.push(receipt)
     if (oldAlias) {
-      const changed = oldAlias.receipt !== snapshot.receipt || oldAlias.stamp !== snapshot.stamp
+      const changed = !!oldAlias.conflict || oldAlias.receipt !== snapshot.receipt || oldAlias.stamp !== snapshot.stamp
+      delete oldAlias.conflict
       oldAlias.receipt = snapshot.receipt
       oldAlias.stamp = snapshot.stamp
       return changed || added.length > 0
@@ -212,10 +202,11 @@ function mergeSnapshot(index: TransactionIndex, path: string, snapshot: SessionU
   return true
 }
 
-async function discover(root: string, yieldWork: () => Promise<void>, shouldContinue: () => boolean): Promise<Scan> {
+async function discover(root: string, directoryProofs: Map<string, AliasProof['directories']>,
+  yieldWork: () => Promise<void>, shouldContinue: () => boolean): Promise<Scan> {
   const result: Scan = { paths: [], failed: false }
-  let directories: Awaited<ReturnType<typeof directoryChain>>
-  try { directories = await directoryChain(root) } catch (error) {
+  let directories: AliasProof['directories']
+  try { directories = await directoryProof(root) } catch (error) {
     // A not-yet-created SDK history root is a known empty local history.
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') result.failed = true
     return result
@@ -246,13 +237,12 @@ async function discover(root: string, yieldWork: () => Promise<void>, shouldCont
       const after = await lstat(path, { bigint: true })
       if (!after.isDirectory() || after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino
         || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) throw unavailable()
+      directoryProofs.set(path, path === root ? directories : [{ path, dev: after.dev, ino: after.ino }, ...directories])
     } catch {
       result.failed = true
       result.paths.length = beforeCount
     } finally {
-      if (directory) {
-        try { await directory.close() } catch { throw new UsageLedgerError('collection-failed', true) }
-      }
+      if (directory) await directory.close()
     }
     await yieldWork()
   }
@@ -260,34 +250,27 @@ async function discover(root: string, yieldWork: () => Promise<void>, shouldCont
   return result
 }
 
-async function readSnapshot(path: string, knownDirectories?: Awaited<ReturnType<typeof directoryChain>>,
-  yieldWork?: () => Promise<void>): Promise<SessionUsageSnapshot> {
-  const directories = knownDirectories ?? await directoryChain(dirname(path))
-  try {
-    const snapshot = await readSessionUsageSnapshot(path, undefined, { yield: yieldWork })
-    await checkDirectories(directories)
-    return snapshot
-  } catch (error) {
-    if (error instanceof SessionUsageReadError && error.closeUnknown) throw new UsageLedgerError('collection-failed', true)
-    throw error
+/** Reuse transaction-local identities; each phase still checks their current paths. */
+async function verifySources(proofs: AliasProof[]): Promise<void> {
+  const directories = new Map<string, AliasProof['directories'][number]>()
+  const checkFile = async (proof: AliasProof): Promise<void> => {
+    const current = await lstat(proof.path, { bigint: true })
+    if (!current.isFile() || current.isSymbolicLink() || sessionUsageFileStamp(current) !== proof.stamp) throw unavailable()
   }
+  for (const proof of proofs) {
+    await checkFile(proof)
+    for (const directory of proof.directories) {
+      const previous = directories.get(directory.path)
+      if (previous && (previous.dev !== directory.dev || previous.ino !== directory.ino)) throw unavailable()
+      directories.set(directory.path, directory)
+    }
+  }
+  // Shared owned directories are checked once per phase, between source stamps.
+  await checkDirectories([...directories.values()])
+  for (const proof of proofs) await checkFile(proof)
 }
 
-async function verifySource(path: string, stamp: string): Promise<void> {
-  const directories = await directoryChain(dirname(path))
-  const current = await lstat(path, { bigint: true })
-  if (!current.isFile() || current.isSymbolicLink() || sessionUsageFileStamp(current) !== stamp) throw unavailable()
-  await checkDirectories(directories)
-  const latest = await lstat(path, { bigint: true })
-  if (!latest.isFile() || latest.isSymbolicLink() || sessionUsageFileStamp(latest) !== stamp) throw unavailable()
-}
-
-async function verifyLineageProofs(proofs: AliasProof[]): Promise<void> {
-  for (const proof of proofs) await verifySource(proof.path, proof.stamp)
-}
-
-function overview(data: LedgerDocument, collection: Collection, pendingFailure: boolean, query?: UsageOverviewQuery): UsageOverview {
-  const resolution = resolveLineage(data)
+function overview(data: LedgerDocument, collection: Collection, pendingFailure: boolean, query?: UsageOverviewQuery, resolution = resolveLineage(data)): UsageOverview {
   const totals = zeroUsage()
   const byProject = new Map<string, UsageOverview['byProject'][number]>()
   const byModel = new Map<string, UsageOverview['byModel'][number]>()
@@ -492,13 +475,26 @@ export class UsageLedger implements UsageLedgerCollector {
     this.failures.add(pathHash(path))
   }
 
-  private async collect(paths?: string[], background = false): Promise<{ data: LedgerDocument; collection: Collection }> {
+  private async collect(paths?: string[], background = false, required = false): Promise<{ data: LedgerDocument; collection: Collection }> {
     const yieldWork = () => this.yieldCollection(background)
     const shouldContinue = () => !background || this.backgroundActive() || this.foregroundRequests > 0
-    let bindings: AliasProof[] = []
+    const sources: AliasProof[] = []
     const result = await this.store.transaction(async data => {
       const transaction = indexTransaction(data)
-      const scan = paths ? { paths, failed: false } : await discover(this.root, yieldWork, shouldContinue)
+      const directoryProofs = new Map<string, AliasProof['directories']>()
+      const directoriesFor = async (parent: string): Promise<AliasProof['directories']> => {
+        const known = directoryProofs.get(parent)
+        if (known) return known
+        const directories = await directoryProof(parent)
+        if (dirname(parent) === this.root) {
+          const root = directoryProofs.get(this.root) ?? await directoryProof(this.root)
+          directoryProofs.set(this.root, root)
+          directories.push(...root)
+        }
+        directoryProofs.set(parent, directories)
+        return directories
+      }
+      const scan = paths ? { paths: [...new Set(paths)], failed: false } : await discover(this.root, directoryProofs, yieldWork, shouldContinue)
       const collection: Collection = { discovered: scan.paths, successful: new Set(), unavailable: 0, failed: scan.failed }
       let dirty = data.revision === 0
       const proofs = new Map<string, AliasProof>()
@@ -512,7 +508,7 @@ export class UsageLedger implements UsageLedgerCollector {
           break
         }
         try {
-          const directories = await directoryChain(dirname(path))
+          const directories = await directoriesFor(dirname(path))
           const size = await lstat(path, { bigint: true })
           if (!size.isFile() || size.isSymbolicLink()) throw unavailable()
           if (!shouldContinue()) {
@@ -521,17 +517,30 @@ export class UsageLedger implements UsageLedgerCollector {
           }
           const known = transaction.aliases.get(pathHash(path))
           const previous = known?.alias
-          if (previous && !previous.conflict && previous.stamp === sessionUsageFileStamp(size)) {
-            // Previously validated, unchanged files need only their stat checks.
-            await checkDirectories(directories)
-            const current = await lstat(path, { bigint: true })
-            if (!current.isFile() || current.isSymbolicLink() || sessionUsageFileStamp(current) !== previous.stamp) throw unavailable()
-            proofs.set(pathHash(path), { path, id: known!.session.id, receipt: previous.receipt, stamp: previous.stamp })
+          if (previous && !previous.conflict && previous.stamp === sessionUsageFileStamp(size)
+            && (!required || !known!.session.parent || known!.session.parentId)) {
+            const proof = { path, id: known!.session.id, receipt: previous.receipt, stamp: previous.stamp, directories }
+            sources.push(proof)
+            proofs.set(pathHash(path), proof)
           } else {
-            const snapshot = await readSnapshot(path, directories, yieldWork)
-            await verifySource(path, snapshot.stamp)
+            const snapshot = await readSessionUsageSnapshot(path, undefined, { yield: yieldWork })
+            const proof = snapshotProof(path, snapshot, directories)
+            sources.push(proof)
             dirty = mergeSnapshot(transaction, path, snapshot) || dirty
-            proofs.set(pathHash(path), snapshotProof(path, snapshot))
+            proofs.set(pathHash(path), proof)
+            const session = transaction.sessions.get(proof.id)!
+            if (required && snapshot.parentSession && !session.parentId) {
+              // A known exact alias may be stat-checked; arbitrary parents are never read.
+              const parentPath = this.normalize(snapshot.parentSession)
+              const parent = transaction.aliases.get(session.parent!)
+              if (parent && !parent.alias.conflict) {
+                const parentDirectories = await directoriesFor(dirname(parentPath))
+                const parentProof = { path: parentPath, id: parent.session.id, receipt: parent.alias.receipt,
+                  stamp: parent.alias.stamp, directories: parentDirectories }
+                sources.push(parentProof)
+                proofs.set(session.parent!, parentProof)
+              }
+            }
           }
           collection.successful.add(path)
           this.dirty.delete(path)
@@ -539,23 +548,18 @@ export class UsageLedger implements UsageLedgerCollector {
         } catch (error) {
           if (error instanceof AliasConflict && error.changed) dirty = true
           this.fail(path)
-          if (error instanceof SessionUsageReadError && error.closeUnknown) throw new UsageLedgerError('collection-failed', true)
-          if (error instanceof UsageLedgerError && error.closeUnknown) throw error
           collection.unavailable++
           if (!(error instanceof SessionUsageReadError)) collection.failed = true
         }
       }
-      bindings = await bindLineage(transaction, proofs, path => {
-        collection.successful.delete(path)
-        collection.unavailable++
-        collection.failed = true
-        this.fail(path)
-      })
-      dirty = bindings.length > 0 || dirty
-      // Validate aggregate arithmetic and projection before committing a new durable revision.
-      overview(data, collection, false)
+      dirty = bindLineage(transaction, proofs) || dirty
+      const resolution = dirty || required ? resolveLineage(data) : undefined
+      if (required && (collection.successful.size !== scan.paths.length
+        || [...proofs.values()].some(proof => !resolution!.resolved.has(proof.id)))) throw unavailable()
+      // Unchanged captures reuse receipts; only new durable data needs aggregate validation.
+      if (dirty) overview(data, collection, false, undefined, resolution)
       return { dirty, value: collection }
-    }, () => verifyLineageProofs(bindings))
+    }, () => verifySources(sources), required)
     return { data: result.data, collection: result.value }
   }
 
@@ -590,38 +594,7 @@ export class UsageLedger implements UsageLedgerCollector {
     return this.enqueue(async () => {
       this.dirty.delete(target)
       try {
-        let bindings: AliasProof[] = []
-        await this.store.transaction(async data => {
-          const transaction = indexTransaction(data)
-          const snapshot = await readSnapshot(target, undefined, () => this.yieldCollection(false))
-          const changed = mergeSnapshot(transaction, target, snapshot)
-          const proofs = new Map([[pathHash(target), snapshotProof(target, snapshot)]])
-          const session = transaction.sessions.get(sessionHash(snapshot.id))!
-          if (snapshot.parentSession && !session.parentId) {
-            // Only stat-check an already-known exact alias, never chase an
-            // arbitrary header path or infer a parent from another same-ID path.
-            const parentPath = this.normalize(snapshot.parentSession)
-            const parent = transaction.aliases.get(session.parent!)
-            if (parent && !parent.alias.conflict) {
-              const { alias } = parent
-              try {
-                await verifySource(parentPath, alias.stamp)
-                proofs.set(session.parent!, { path: parentPath, id: parent.session.id, receipt: alias.receipt, stamp: alias.stamp })
-              } catch { /* Unknown/changed parents must not acquire a durable edge. */ }
-            }
-          }
-          await verifySource(target, snapshot.stamp)
-          bindings = await bindLineage(transaction, proofs)
-          const dirty = bindings.length > 0 || changed
-          const resolution = resolveLineage(data)
-          if (!resolution.resolved.has(sessionHash(snapshot.id))) throw unavailable()
-          const collection: Collection = { discovered: [target], successful: new Set([target]), unavailable: 0, failed: false }
-          overview(data, collection, false)
-          return { dirty, value: snapshot.stamp }
-        }, async stamp => {
-          await verifySource(target, stamp)
-          await verifyLineageProofs(bindings)
-        })
+        await this.collect([target], false, true)
         this.failures.delete(pathHash(target))
       } catch (error) {
         this.fail(target)
@@ -639,7 +612,6 @@ export class UsageLedger implements UsageLedgerCollector {
       const tail = this.tail
       await tail
       if (!this.dirty.size && !this.scheduled && tail === this.tail) {
-        this.store.assertSettled()
         if (this.failures.size) throw unavailable()
         return
       }

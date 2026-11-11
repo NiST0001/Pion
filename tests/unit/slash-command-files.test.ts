@@ -2,7 +2,7 @@ import { constants, type BigIntStats } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { SessionManager, VERSION } from '@earendil-works/pi-coding-agent'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   PI_CHANGELOG_MAX_BYTES,
   SESSION_COMMAND_EXPORT_MAX_BYTES,
@@ -15,7 +15,7 @@ import {
 } from '../../src/main/agent/slash-command-files'
 
 const io = vi.hoisted(() => ({
-  lstat: vi.fn(), link: vi.fn(), mkdtemp: vi.fn(), open: vi.fn(), realpath: vi.fn(), rmdir: vi.fn(), unlink: vi.fn()
+  lstat: vi.fn(), link: vi.fn(), mkdtemp: vi.fn(), open: vi.fn(), readFile: vi.fn(), realpath: vi.fn(), rmdir: vi.fn(), unlink: vi.fn()
 }))
 const sdk = vi.hoisted(() => ({ getPackageDir: vi.fn() }))
 // These strict flags model the virtual filesystem only; they never reach real FS.
@@ -35,7 +35,7 @@ vi.mock('@earendil-works/pi-coding-agent', async (original) => ({
 }))
 
 type VirtualFile = {
-  kind: 'file' | 'directory' | 'symlink'; data: Buffer; ino: bigint; mode: bigint; ctimeNs: bigint; sizeOverride?: bigint
+  kind: 'file' | 'directory' | 'symlink' | 'device'; data: Buffer; ino: bigint; mode: bigint; mtimeNs: bigint; ctimeNs: bigint; sizeOverride?: bigint
 }
 const files = new Map<string, VirtualFile>()
 const handles: Array<ReturnType<typeof fileHandle>> = []
@@ -54,7 +54,7 @@ function deferred<T>() {
 }
 
 function put(path: string, content = '', kind: VirtualFile['kind'] = 'file', mode = kind === 'directory' ? 0o40700n : 0o100600n) {
-  const file: VirtualFile = { kind, data: Buffer.from(content), ino: ++inode, mode, ctimeNs: 1n }
+  const file: VirtualFile = { kind, data: Buffer.from(content), ino: ++inode, mode, mtimeNs: 1n, ctimeNs: 1n }
   files.set(path, file)
   return file
 }
@@ -62,7 +62,7 @@ function put(path: string, content = '', kind: VirtualFile['kind'] = 'file', mod
 function snapshot(file: VirtualFile): BigIntStats {
   return {
     dev: 1n, ino: file.ino, mode: file.mode,
-    size: file.sizeOverride ?? BigInt(file.data.length), mtimeNs: 1n, ctimeNs: file.ctimeNs,
+    size: file.sizeOverride ?? BigInt(file.data.length), mtimeNs: file.mtimeNs, ctimeNs: file.ctimeNs,
     isFile: () => file.kind === 'file', isDirectory: () => file.kind === 'directory'
   } as BigIntStats
 }
@@ -72,9 +72,7 @@ function errno(code: string): Error { return Object.assign(new Error(code), { co
 function fileHandle(path: string, file: VirtualFile) {
   return {
     path, stat: vi.fn(async () => snapshot(file)),
-    read: vi.fn(async (buffer: Buffer, offset: number, length: number, position: number) => ({
-      bytesRead: file.data.copy(buffer, offset, position, position + length), buffer
-    })),
+    read: vi.fn(async () => { throw new Error('export body must stay unread') }),
     chmod: vi.fn(async (mode: number) => { file.mode = 0o100000n | BigInt(mode); file.ctimeNs++ }),
     sync: vi.fn(async () => {}), close: vi.fn(async () => {}),
     writeFile: vi.fn(async (content: string) => { file.data = Buffer.from(content) })
@@ -82,6 +80,7 @@ function fileHandle(path: string, file: VirtualFile) {
 }
 
 beforeEach(() => {
+  vi.stubGlobal('process', Object.create(process, { platform: { value: 'linux' } }))
   files.clear()
   handles.length = 0
   inode = 0n
@@ -97,14 +96,19 @@ beforeEach(() => {
   })
   io.mkdtemp.mockImplementation(async (prefix: string) => {
     const path = `${prefix}private`
-    put(path, '', 'directory')
+    put(path, '', 'directory', process.platform === 'win32' ? 0o40777n : 0o40700n)
     return path
+  })
+  io.readFile.mockImplementation(async (path: string) => {
+    const file = files.get(path)
+    if (!file) throw errno('ENOENT')
+    return file.data
   })
   io.open.mockImplementation(async (path: string, flags: number | string, mode?: number) => {
     if (flags === 'wx') {
       if (files.has(path)) throw errno('EEXIST')
       put(path, '', 'file', 0o100000n | BigInt(mode!))
-    } else if (flags !== (constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)) {
+    } else if (flags !== (process.platform === 'win32' ? constants.O_RDWR : constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)) {
       throw errno('EINVAL')
     }
     const file = files.get(path)
@@ -123,6 +127,8 @@ beforeEach(() => {
   io.unlink.mockImplementation(async (path: string) => { files.delete(path) })
   io.rmdir.mockImplementation(async (path: string) => { files.delete(path) })
 })
+
+afterEach(() => { vi.unstubAllGlobals() })
 
 describe('command export path and branch serialization (public SDK only)', () => {
   it('resolves relative/~/ paths without a shell and defaults to a fresh visible HTML filename', () => {
@@ -194,21 +200,42 @@ describe('command export path and branch serialization (public SDK only)', () =>
   })
 })
 
-describe('private no-replace command export publication (virtual filesystem)', () => {
-  it('publishes a bounded private file by hard link, preserves content identity and awaits cleanup', async () => {
+describe.each(['linux', 'win32'] as const)('private no-replace command export publication (%s virtual filesystem)', (platform) => {
+  beforeEach(() => { vi.stubGlobal('process', Object.create(process, { platform: { value: platform } })) })
+
+  it('publishes a bounded private file by hard link, preserves content identity and awaits cleanup without reading its body', async () => {
     const produce = vi.fn(async (path: string) => { put(path, '<html>session</html>', 'file', 0o100644n) })
     const assert = vi.fn()
     await expect(publishSessionCommandExport(destination, produce, assert)).resolves.toBe(destination)
     expect(produce).toHaveBeenCalledExactlyOnceWith(scratchPath)
     expect(io.link).toHaveBeenCalledExactlyOnceWith(scratchPath, destination)
     expect(files.get(destination)?.data.toString()).toBe('<html>session</html>')
-    expect(files.get(destination)?.mode).toBe(0o100600n)
+    expect(files.get(destination)?.mode).toBe(platform === 'win32' ? 0o100644n : 0o100600n)
+    expect(handles[0].chmod.mock.calls).toEqual(platform === 'win32' ? [] : [[0o600]])
+    expect(handles[0].sync).toHaveBeenCalledOnce()
+    expect(handles[0].read).not.toHaveBeenCalled()
+    expect(io.readFile).not.toHaveBeenCalled()
     expect(files.has(scratchPath)).toBe(false)
     expect(files.has(scratchDir)).toBe(false)
     expect(handles[0].close).toHaveBeenCalledOnce()
     expect(io.unlink).toHaveBeenCalledExactlyOnceWith(scratchPath)
     expect(io.rmdir).toHaveBeenCalledExactlyOnceWith(scratchDir)
-    expect(io.open).toHaveBeenCalledExactlyOnceWith(scratchPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    expect(io.open).toHaveBeenCalledExactlyOnceWith(scratchPath, platform === 'win32' ? constants.O_RDWR : constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  })
+
+  it('accepts the exact size budget without allocating or reading the body', async () => {
+    const allocate = vi.spyOn(Buffer, 'alloc')
+    try {
+      await expect(publishSessionCommandExport(destination, async (path) => {
+        put(path, 'sparse fixture').sizeOverride = BigInt(SESSION_COMMAND_EXPORT_MAX_BYTES)
+      }, () => {})).resolves.toBe(destination)
+      expect(allocate.mock.calls.filter(([bytes]) => bytes >= SESSION_COMMAND_EXPORT_MAX_BYTES)).toEqual([])
+      expect(handles[0].read).not.toHaveBeenCalled()
+      expect(io.readFile).not.toHaveBeenCalled()
+      expect(files.get(destination)?.sizeOverride).toBe(BigInt(SESSION_COMMAND_EXPORT_MAX_BYTES))
+    } finally {
+      allocate.mockRestore()
+    }
   })
 
   it('never invokes the producer or touches an existing file or final symlink', async () => {
@@ -246,27 +273,44 @@ describe('private no-replace command export publication (virtual filesystem)', (
     expect(io.link).not.toHaveBeenCalled()
   })
 
-  it.each(['symlink', 'empty', 'large', 'device'])('rejects a %s scratch output without linking it', async (kind) => {
+  it.each(['symlink', 'empty', 'large', 'directory', 'device'] as const)('rejects a %s scratch output before opening or linking it', async (kind) => {
     await expect(publishSessionCommandExport(destination, async (path) => {
-      const file = put(path, kind === 'empty' ? '' : 'output', kind === 'symlink' ? 'symlink' : 'file')
+      const file = put(path, kind === 'empty' ? '' : 'output', kind === 'empty' || kind === 'large' ? 'file' : kind)
       if (kind === 'large') file.sizeOverride = BigInt(SESSION_COMMAND_EXPORT_MAX_BYTES) + 1n
-      if (kind === 'device') file.kind = 'directory'
     }, () => {})).rejects.toThrow()
+    expect(io.open).not.toHaveBeenCalled()
     expect(io.link).not.toHaveBeenCalled()
     expect(files.has(destination)).toBe(false)
   })
 
-  it('rechecks the content bound after chmod/sync instead of accepting growth during preparation', async () => {
+  it('rejects a file replaced between path preflight and descriptor capture', async () => {
+    const originalOpen = io.open.getMockImplementation()!
+    io.open.mockImplementationOnce(async (...args: unknown[]) => {
+      put(scratchPath, 'replacement')
+      return originalOpen(...args)
+    })
+    await expect(publishSessionCommandExport(destination, async (path) => { put(path, 'output') }, () => {}))
+      .rejects.toThrow('文件身份已变化')
+    expect(handles[0].close).toHaveBeenCalledOnce()
+    expect(io.link).not.toHaveBeenCalled()
+  })
+
+  it.each(['size', 'mtime', 'inode', 'type', 'path'])('rejects a changed %s after sync and closes the captured descriptor', async (kind) => {
     const originalOpen = io.open.getMockImplementation()!
     io.open.mockImplementationOnce(async (...args: unknown[]) => {
       const handle = await originalOpen(...args)
       handle.sync.mockImplementationOnce(async () => {
-        files.get(scratchPath)!.sizeOverride = BigInt(SESSION_COMMAND_EXPORT_MAX_BYTES) + 1n
+        const file = files.get(scratchPath)!
+        if (kind === 'size') file.sizeOverride = BigInt(SESSION_COMMAND_EXPORT_MAX_BYTES) + 1n
+        if (kind === 'mtime') file.mtimeNs++
+        if (kind === 'inode') file.ino++
+        if (kind === 'type') file.kind = 'device'
+        if (kind === 'path') put(scratchPath, 'replacement')
       })
       return handle
     })
     await expect(publishSessionCommandExport(destination, async (path) => { put(path, 'output') }, () => {}))
-      .rejects.toThrow('暂存文件内容已变化')
+      .rejects.toThrow(kind === 'path' ? '文件身份已变化' : '暂存文件内容已变化')
     expect(io.link).not.toHaveBeenCalled()
     expect(handles[0].close).toHaveBeenCalledOnce()
   })
@@ -359,10 +403,56 @@ describe('private no-replace command export publication (virtual filesystem)', (
   })
 })
 
-describe('bundled Pi changelog bounded reads', () => {
+describe('bundled Pi changelog and export read boundaries', () => {
+  it.each(['html', 'jsonl'] as const)('publishes %s on simulated Windows with absent POSIX flags and non-Unix modes', async (format) => {
+    vi.stubGlobal('process', Object.create(process, { platform: { value: 'win32' } }))
+    vi.resetModules()
+    try {
+      vi.doMock('node:fs', async (original) => {
+        const actual = await original<typeof import('node:fs')>()
+        const mockConstants: Record<string, number> = { ...actual.constants }
+        delete mockConstants.O_NOFOLLOW
+        delete mockConstants.O_NONBLOCK
+        return { ...actual, constants: mockConstants }
+      })
+      const commands = await import('../../src/main/agent/slash-command-files')
+      const output = join(parent, `session.${format}`)
+      const privatePath = join(scratchDir, `session.${format}`)
+      await expect(commands.publishSessionCommandExport(output, async (path) => {
+        if (format === 'jsonl') await commands.writeSessionCommandJsonl(path, 'jsonl\n', () => {})
+        else put(path, '<html>session</html>', 'file', 0o100666n)
+      }, () => {})).resolves.toBe(output)
+      expect(io.open).toHaveBeenLastCalledWith(privatePath, constants.O_RDWR)
+      const prepared = handles.at(-1)!
+      expect(prepared.chmod).not.toHaveBeenCalled()
+      expect(prepared.read).not.toHaveBeenCalled()
+      expect(prepared.sync).toHaveBeenCalledOnce()
+      expect(prepared.close).toHaveBeenCalledOnce()
+      expect(io.link).toHaveBeenCalledExactlyOnceWith(privatePath, output)
+      expect(files.has(scratchDir)).toBe(false)
+      expect(io.readFile).not.toHaveBeenCalled()
+    } finally {
+      mockSafeFsConstants()
+      vi.resetModules()
+    }
+  })
+
+  it('requires a private Unix scratch directory before invoking its producer', async () => {
+    io.mkdtemp.mockImplementationOnce(async (prefix: string) => {
+      const path = `${prefix}private`
+      put(path, '', 'directory', 0o40777n)
+      return path
+    })
+    const produce = vi.fn()
+    await expect(publishSessionCommandExport(destination, produce, () => {})).rejects.toThrow('同设备私有目录')
+    expect(produce).not.toHaveBeenCalled()
+    expect(io.open).not.toHaveBeenCalled()
+    expect(io.link).not.toHaveBeenCalled()
+  })
+
   it.each((['O_NOFOLLOW', 'O_NONBLOCK'] as const).flatMap((flag) =>
     [undefined, 0, NaN, 0.5, -1, 2 ** 32, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1].map((value) => ({ flag, value }))
-  ))('rejects invalid $flag=$value for changelog and export before opening a file', async ({ flag, value }) => {
+  ))('keeps changelog readable with invalid $flag=$value while rejecting export before opening', async ({ flag, value }) => {
     vi.resetModules()
     try {
       const mockConstants: Record<string, number> = { ...constants, O_NOFOLLOW: 0x20000, O_NONBLOCK: 0x800 }
@@ -373,7 +463,7 @@ describe('bundled Pi changelog bounded reads', () => {
         return { ...actual, constants: mockConstants }
       })
       const commands = await import('../../src/main/agent/slash-command-files')
-      await expect(commands.readPiChangelog(() => {})).rejects.toThrow('当前系统不支持安全读取导出文件')
+      await expect(commands.readPiChangelog(() => {})).resolves.toEqual({ version: VERSION, markdown: '# Bundled Pi changelog\n' })
       const error: unknown = await commands.publishSessionCommandExport(destination, async (path) => { put(path, 'private output') }, () => {})
         .catch((failure: unknown) => failure)
       expect(error).toBeInstanceOf(Error)
@@ -392,7 +482,7 @@ describe('bundled Pi changelog bounded reads', () => {
     }
   })
 
-  it('uses actual host flags and rejects without opening when a strict flag is unavailable', async () => {
+  it('uses actual host flags for export and rejects before opening when a strict flag is unavailable', async () => {
     vi.resetModules()
     vi.doUnmock('node:fs')
     try {
@@ -402,10 +492,11 @@ describe('bundled Pi changelog bounded reads', () => {
       const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = actual.constants
       if (Number.isSafeInteger(O_NOFOLLOW) && O_NOFOLLOW > 0 && O_NOFOLLOW <= 0x7fffffff
         && Number.isSafeInteger(O_NONBLOCK) && O_NONBLOCK > 0 && O_NONBLOCK <= 0x7fffffff) {
-        await expect(commands.readPiChangelog(() => {})).rejects.toThrow('ENOTSUP')
-        expect(io.open).toHaveBeenCalledExactlyOnceWith(changelogPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        await expect(commands.publishSessionCommandExport(destination, async (path) => { put(path, 'export') }, () => {})).rejects.toThrow('ENOTSUP')
+        expect(io.open).toHaveBeenCalledExactlyOnceWith(scratchPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
       } else {
-        await expect(commands.readPiChangelog(() => {})).rejects.toThrow('当前系统不支持安全读取导出文件')
+        await expect(commands.publishSessionCommandExport(destination, async (path) => { put(path, 'export') }, () => {}))
+          .rejects.toThrow('当前系统不支持安全读取导出文件')
         expect(io.open).not.toHaveBeenCalled()
       }
       expect(handles).toHaveLength(0)
@@ -415,7 +506,7 @@ describe('bundled Pi changelog bounded reads', () => {
     }
   })
 
-  it('accepts O_RDONLY=0 when both strict flags are valid', async () => {
+  it('accepts O_RDONLY=0 for export when both strict flags are valid', async () => {
     vi.resetModules()
     try {
       vi.doMock('node:fs', async (original) => {
@@ -424,8 +515,8 @@ describe('bundled Pi changelog bounded reads', () => {
       })
       const commands = await import('../../src/main/agent/slash-command-files')
       io.open.mockRejectedValue(errno('ENOTSUP'))
-      await expect(commands.readPiChangelog(() => {})).rejects.toThrow('ENOTSUP')
-      expect(io.open).toHaveBeenCalledExactlyOnceWith(changelogPath, 0x20000 | 0x800)
+      await expect(commands.publishSessionCommandExport(destination, async (path) => { put(path, 'export') }, () => {})).rejects.toThrow('ENOTSUP')
+      expect(io.open).toHaveBeenCalledExactlyOnceWith(scratchPath, 0x20000 | 0x800)
     } finally {
       mockSafeFsConstants()
       vi.resetModules()
@@ -434,8 +525,9 @@ describe('bundled Pi changelog bounded reads', () => {
 
   it('reads only the fixed package CHANGELOG.md and returns public SDK VERSION', async () => {
     await expect(readPiChangelog(() => {})).resolves.toEqual({ version: VERSION, markdown: '# Bundled Pi changelog\n' })
-    expect(io.open).toHaveBeenCalledExactlyOnceWith(changelogPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    expect(handles[0].close).toHaveBeenCalledOnce()
+    expect(io.readFile).toHaveBeenCalledExactlyOnceWith(changelogPath)
+    expect(io.open).not.toHaveBeenCalled()
+    expect(io.lstat).not.toHaveBeenCalled()
     expect(io.mkdtemp).not.toHaveBeenCalled()
   })
 
@@ -445,42 +537,35 @@ describe('bundled Pi changelog bounded reads', () => {
     const virtualPath = join(virtualPackage, 'CHANGELOG.md')
     const unpackedPath = join(unpackedPackage, 'CHANGELOG.md')
     sdk.getPackageDir.mockReturnValue(archive === 'app.asar' ? virtualPackage : unpackedPackage)
-    put(virtualPath, '# Packaged Pi changelog\n')
-    put(unpackedPath, '# Packaged Pi changelog\n') // different inode from Electron's virtual lstat
-    const originalOpen = io.open.getMockImplementation()!
-    io.open.mockImplementation(async (path: string, flags: number | string, mode?: number) => {
-      // Model an asar open yielding a real FD while named lstat remains virtual.
-      return originalOpen(path === virtualPath ? unpackedPath : path, flags, mode)
-    })
+    put(virtualPath, '# Virtual Pi changelog\n')
+    put(unpackedPath, '# Packaged Pi changelog\n')
     await expect(readPiChangelog(() => {})).resolves.toEqual({ version: VERSION, markdown: '# Packaged Pi changelog\n' })
-    expect(io.open).toHaveBeenCalledExactlyOnceWith(unpackedPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-    expect(io.lstat).toHaveBeenCalledWith(unpackedPath, { bigint: true })
-    expect(io.lstat).not.toHaveBeenCalledWith(virtualPath, expect.anything())
-    expect(handles[0].close).toHaveBeenCalledOnce()
+    expect(io.readFile).toHaveBeenCalledExactlyOnceWith(unpackedPath)
+    expect(io.open).not.toHaveBeenCalled()
+    expect(io.lstat).not.toHaveBeenCalled()
   })
 
   it('rejects oversized or invalid UTF-8 changelogs instead of truncating or replacing data', async () => {
-    files.get(changelogPath)!.sizeOverride = BigInt(PI_CHANGELOG_MAX_BYTES) + 1n
+    files.get(changelogPath)!.data = Buffer.alloc(PI_CHANGELOG_MAX_BYTES + 1, 'x')
     await expect(readPiChangelog(() => {})).rejects.toThrow('超过读取上限')
-    delete files.get(changelogPath)!.sizeOverride
     files.get(changelogPath)!.data = Buffer.from([0xff])
     await expect(readPiChangelog(() => {})).rejects.toThrow()
-    expect(handles.every((handle) => handle.close.mock.calls.length === 1)).toBe(true)
+    expect(io.open).not.toHaveBeenCalled()
   })
 
-  it('rejects file growth while still closing the real captured descriptor', async () => {
-    const originalOpen = io.open.getMockImplementation()!
-    io.open.mockImplementationOnce(async (...args: unknown[]) => {
-      const handle = await originalOpen(...args)
-      const read = handle.read.getMockImplementation()!
-      handle.read.mockImplementationOnce(async (...readArgs: [Buffer, number, number, number]) => {
-        const result = await read(...readArgs)
-        files.get(changelogPath)!.data = Buffer.from('longer changelog content that grew during the read')
-        return result
-      })
-      return handle
-    })
-    await expect(readPiChangelog(() => {})).rejects.toThrow('读取期间文件大小已变化')
-    expect(handles[0].close).toHaveBeenCalledOnce()
+  it('awaits the actual read and rejects its result after ownership changes', async () => {
+    const finished = deferred<Buffer>()
+    io.readFile.mockReturnValueOnce(finished.promise)
+    let owned = true
+    const reading = readPiChangelog(() => { if (!owned) throw new Error('owner changed') })
+    const observed = expect(reading).rejects.toThrow('owner changed')
+    owned = false
+    let settled = false
+    void reading.then(() => { settled = true }, () => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    finished.resolve(Buffer.from('# Changelog\n'))
+    await observed
+    expect(io.open).not.toHaveBeenCalled()
   })
 })

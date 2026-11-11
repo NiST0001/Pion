@@ -574,9 +574,9 @@ const eventWith = (toolName: string, content: ToolResultEvent['content'], detail
 // Valid static PNG fixture; projection is structural validation, not a new decoder.
 const safePng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII='
 
-it.each(['codemode', 'mcp'] as const)('projects %s image blocks fail-closed without losing text/errors/usage', async (name) => {
-  const handler = await resultHandler(name)
-  const event = eventWith(name === 'mcp' ? 'mcp__server__resource' : name, [
+it('projects MCP preview blocks while preserving the SDK structured result and existing errors/usage', async () => {
+  const handler = await resultHandler('mcp')
+  const event = eventWith('mcp__server__resource', [
     { type: 'text', text: 'Original image path: /tmp/native.png' },
     { type: 'image', mimeType: 'image/png', data: 'A'.repeat(200_000) }
   ], { calls: [{ name: 'models.generateImages', durationMs: Infinity, args: 'unbounded', error: 'provider failure' }], rawImage: safePng })
@@ -584,7 +584,7 @@ it.each(['codemode', 'mcp'] as const)('projects %s image blocks fail-closed with
   expect(result.content!.every((part) => part.type === 'text')).toBe(true)
   expect(result.content![0]).toEqual(event.content[0])
   expect(result.details).toEqual({ calls: [{ name: 'models.generateImages', error: 'provider failure' }] })
-  expect(result).not.toHaveProperty('structuredContent') // public content replacement drops it
+  expect(result.structuredContent).toBe(event.structuredContent) // programmatic value is independent of the preview
   expect(result).not.toHaveProperty('usage') // retain SDK usage, do not duplicate it
   expect(result).not.toHaveProperty('isError') // retain SDK error state
   expect(handler(eventWith('unrelated', event.content))).toBeUndefined()
@@ -607,13 +607,74 @@ it('does not throw for malformed image output (which would let SDK result hooks 
   expect(handler(event)!.content).toEqual([{ type: 'text', text: '原生工具输出无法安全预览，已省略。' }])
 })
 
-it('keeps up to four valid safe static previews and bounds text/details without claiming text redaction', async () => {
-  const handler = await resultHandler('codemode')
+it.each([false, true])('keeps the MCP CallToolResult through SDK tool_result composition into real codemode (isError=%s)', async (isError) => {
+  const sdk = await vi.importActual<typeof import('@earendil-works/pi-coding-agent')>('@earendil-works/pi-coding-agent')
+  mocks.codemode.mockImplementation(sdk.createCodemodeExtension)
+  const { resourceLoader } = await loader()
+  const loaded = resourceLoader.getExtensions()
+  const runner = new sdk.ExtensionRunner(loaded.extensions, loaded.runtime, root, sdk.SessionManager.inMemory(root),
+    {} as ConstructorParameters<typeof sdk.ExtensionRunner>[4])
+  const tool = loaded.extensions.find((entry) => entry.path === 'builtin:codemode')!.tools.get('codemode')!.definition
+  const mcp = { ...definition('mcp__fixture__inspect'), outputSchema: Type.Object({}) }
+  const noop = () => {}
+  const getAllTools = vi.fn<ExtensionAPI['getAllTools']>(() => [{ ...mcp, exposure: 'codemode',
+    sourceInfo: loaded.extensions.find((entry) => entry.path === 'builtin:mcp')!.sourceInfo }])
+  // Real codemode reads pi.getAllTools lazily; bind inert SDK actions without starting a session.
+  runner.bindCore({
+    sendMessage: noop, sendUserMessage: noop, appendEntry: noop, setSessionName: noop,
+    getSessionName: () => undefined, setLabel: noop, getActiveTools: () => ['codemode'], getAllTools,
+    getSettings: () => ({}), setActiveTools: noop, refreshTools: noop, getCommands: () => [],
+    setModel: async () => false, getThinkingLevel: () => 'off', setThinkingLevel: noop
+  }, {
+    getModel: () => undefined, getScopedModels: () => [], isIdle: () => true, isProjectTrusted: () => false,
+    getSignal: () => undefined, abort: noop, hasPendingMessages: () => false, shutdown: noop,
+    getContextUsage: () => undefined, compact: noop, getSystemPrompt: () => ''
+  })
+  expect(getAllTools).not.toHaveBeenCalled()
+  const image = { type: 'image' as const, mimeType: 'image/png', data: 'A'.repeat(200_000) }
+  const value = { content: [{ type: 'text' as const, text: 'X'.repeat(80_000) }, image], structuredContent: { answer: 42 }, isError }
+  const executeTool = vi.fn(async (name: string, args: Record<string, unknown>) => {
+    const event = { ...eventWith(name, value.content), structuredContent: value, isError,
+      toolCallId: 'outer/1', parentToolCallId: 'outer' } as ToolResultEvent
+    const result = { content: event.content, details: event.details, structuredContent: value,
+      ...await runner.emitToolResult(event) }
+    expect(result.structuredContent).toBe(value)
+    expect(result.isError).toBe(isError)
+    expect((result.content[0] as { text: string }).text.length).toBe(64 * 1024)
+    expect(result.content.some((part) => part.type === 'image')).toBe(false)
+    expect(result.structuredContent).toHaveProperty('content.1', image)
+    return { toolCall: { type: 'toolCall' as const, id: event.toolCallId, name, arguments: args }, result, isError }
+  })
+  const context = { modelRegistry: {}, tools: [mcp], executeTool,
+    sessionManager: { getBranch: () => [] } } as unknown as ExtensionToolContext
+  const result = await tool.execute('outer', { code: `
+    const value = await tools.mcp__fixture__inspect({});
+    return { answer: value.structuredContent.answer, length: value.content[0].text.length,
+      imageBytes: value.content[1].data.length, isError: value.isError };
+  ` }, undefined, undefined, context)
+  expect(result.isError).not.toBe(true)
+  const output = result.content.filter((part) => part.type === 'text').map((part) => part.text).join('\n')
+  expect(output).toMatch(/"answer":\s*42/)
+  expect(output).toMatch(/"length":\s*80000/)
+  expect(output).toMatch(/"imageBytes":\s*200000/)
+  expect(result.content.some((part) => part.type === 'image')).toBe(false)
+  expect(output).not.toContain(image.data)
+  expect(output).toMatch(new RegExp(`"isError":\\s*${isError}`))
+  expect(getAllTools).toHaveBeenCalled()
+  expect(executeTool).toHaveBeenCalledTimes(1)
+})
+
+it('projects the codemode final result once, retaining four static previews and bounded text/details', async () => {
+  expect(await resultHandler('codemode')).toBeUndefined()
   const image = { type: 'image' as const, data: safePng, mimeType: 'image/png' }
-  const result = handler(eventWith('codemode', [
+  const event = eventWith('codemode', [
     { type: 'text', text: 'literal base64 text remains: ' + safePng }, ...Array.from({ length: 5 }, () => image),
     { type: 'text', text: 'X'.repeat(80_000) }
-  ], { summary: 'S'.repeat(8_000), calls: Array.from({ length: 200 }, () => ({ status: 'ok', durationMs: 1, cost: 2 })) }))!
+  ], { summary: 'S'.repeat(8_000), calls: Array.from({ length: 200 }, () => ({ status: 'ok', durationMs: 1, cost: 2 })) })
+  const tool = await guardedTool(async () => event)
+  const result = await tool.execute('outer', {}, undefined, undefined, contextWith({}))
+  expect(result.usage).toBe(event.usage)
+  expect(result.structuredContent).toBe(event.structuredContent)
   expect(result.content!.filter((part) => part.type === 'image')).toHaveLength(4)
   expect(result.content![0]).toEqual({ type: 'text', text: 'literal base64 text remains: ' + safePng })
   const details = result.details as { summary: string; calls: unknown[] }
@@ -627,8 +688,9 @@ function boundaryHarness(selection: string[] | undefined, initial: string[]) {
   const handlers = new Map<string, ((event: any) => unknown)[]>()
   let active = [...initial]
   const setActiveTools = vi.fn((names: string[]) => { active = [...names] })
+  const getActiveTools = vi.fn(() => [...active])
   const pi = {
-    getActiveTools: () => [...active], setActiveTools,
+    getActiveTools, setActiveTools,
     on: (event: string, handler: (event: any) => unknown) => {
       handlers.set(event, [...(handlers.get(event) ?? []), handler])
       return () => {}
@@ -646,7 +708,7 @@ function boundaryHarness(selection: string[] | undefined, initial: string[]) {
     }
     return blocked
   }
-  return { emit, active: () => [...active], set: (names: string[]) => { active = [...names] }, setActiveTools,
+  return { emit, active: () => [...active], set: (names: string[]) => { active = [...names] }, setActiveTools, getActiveTools,
     call: (name: string, nested = false) => emit('tool_call', { toolName: name, input: {}, ...(nested ? { parentToolCallId: 'outer' } : {}) }),
     prompt: async () => {
       const event = { systemPromptOptions: { selectedTools: [...active] } }
@@ -661,6 +723,7 @@ it.each([{ selection: [] }, { selection: ['read'] }, { selection: ['-codemode', 
   // Simulate MCP session_start autoactivation BEFORE the inline handlers run.
   host.set([...initial, 'codemode', 'tool_search', 'mcp__late__call'])
   await host.emit('session_start')
+  expect(host.getActiveTools).toHaveBeenCalledOnce()
   expect(host.active()).toEqual(selection.length === 0 ? [] : initial)
   for (const name of ['codemode', 'tool_search', 'mcp__late__call', 'list_mcp_resources']) {
     expect(await host.call(name)).toMatchObject({ block: true })
@@ -686,10 +749,10 @@ it.each([{ selection: ['+codemode'] }, { selection: ['+grep'] }])('retains initi
   expect(host.setActiveTools).not.toHaveBeenCalled()
 })
 
-it('allows only explicit late MCP exact/*/? matches and applies negative expressions in order', async () => {
+it('uses SDK exact/* semantics for late MCP tools, with literal ? and ordered negative ceilings', async () => {
   const host = boundaryHarness(['read', 'codemode', 'mcp__docs__*', '-mcp__docs__delete*', '+mcp__docs__delete_one', '+mcp__x__get_?'], ['read', 'codemode'])
-  for (const name of ['mcp__docs__get', 'mcp__docs__delete_one', 'mcp__x__get_a']) expect(await host.call(name, true)).toBeUndefined()
-  for (const name of ['mcp__other__get', 'mcp__docs__delete_all', 'mcp__x__get_ab', 'write', 'tool_search']) expect(await host.call(name, true)).toMatchObject({ block: true })
+  for (const name of ['mcp__docs__get', 'mcp__docs__delete_one', 'mcp__x__get_?']) expect(await host.call(name, true)).toBeUndefined()
+  for (const name of ['mcp__other__get', 'mcp__docs__delete_all', 'mcp__x__get_a', 'mcp__x__get_ab', 'write', 'tool_search']) expect(await host.call(name, true)).toMatchObject({ block: true })
   host.set(['read', 'mcp__docs__get', 'mcp__docs__delete_all'])
   expect(await host.prompt()).toEqual(['read', 'mcp__docs__get'])
 })
@@ -710,11 +773,12 @@ it('does not restrict normal native discovery without an explicit user loadout',
   expect(host.setActiveTools).not.toHaveBeenCalled()
 })
 
-it('fails closed with an explicit diagnostic for unsupported glob syntax', async () => {
+it('treats SDK non-star syntax literally without disabling unrelated selected tools', async () => {
   const host = boundaryHarness(['read', 'mcp__docs__[ab]'], ['read'])
-  expect(await host.call('mcp__docs__a', true)).toMatchObject({ block: true, reason: expect.stringContaining('Unsupported') })
-  expect(await host.call('read')).toMatchObject({ block: true })
-  expect(await host.prompt()).toEqual([])
+  expect(await host.call('mcp__docs__a', true)).toMatchObject({ block: true })
+  expect(await host.call('mcp__docs__[ab]', true)).toBeUndefined()
+  expect(await host.call('read')).toBeUndefined()
+  expect(await host.prompt()).toEqual(['read'])
 })
 
 it('freezes each backend ceiling and never recaptures an expanded subset on reload', async () => {

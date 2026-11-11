@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useRef, useState, type MutableRefObject, type ReactElement } from 'react'
 import type { PionApi } from '../../../../shared/pion-api'
 import { Download, Loader2, RefreshCw } from 'lucide-react'
 import type { ModelOption, SessionInfo } from '../../../../shared/types'
@@ -10,6 +10,7 @@ import type { SessionPreviewDensity } from '../../utils/sessionPreview'
 
 interface SessionPageProps {
   models?: ModelOption[]
+  providerActionSlot?: MutableRefObject<Promise<void> | null>
   session: Pick<SessionInfo, 'sessionName' | 'autoCompactionEnabled' | 'steeringMode' | 'followUpMode'> | null
   name: string
   nameSaved: boolean
@@ -43,6 +44,7 @@ interface SessionPageProps {
 
 export function SessionPage({
   models = [],
+  providerActionSlot,
   session,
   name,
   nameSaved,
@@ -244,7 +246,7 @@ export function SessionPage({
 
       <UsageCollectionSettings />
       <QuestionSettings />
-      <SubagentSettings models={models} />
+      <SubagentSettings models={models} providerActionSlot={providerActionSlot} />
 
       <div className="settings-section">
         <div className="settings-section-title">通知</div>

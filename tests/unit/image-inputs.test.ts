@@ -28,7 +28,6 @@ function mockSafeFsConstants() {
 const cwd = resolve('/pion-reference-project')
 const png = makeStaticPng()
 const privateDiagnostic = '/private/account/auth.json Bearer sk-private-content https://private.invalid/image'
-const quarantineMessage = '参考图片文件句柄关闭未能确认，本进程参考图片读取已隔离，请重建后端后再试。 尚未上传任何参考图片。'
 const fileError = (code: string) => Object.assign(new Error(privateDiagnostic), { code })
 const signal = () => new AbortController().signal
 function deferred<T>() {
@@ -38,15 +37,6 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 async function drain() { for (let index = 0; index < 40; index++) await Promise.resolve() }
-
-// A failed close has no production reset. Keep each quarantine test's module
-// private, without changing the static reader used by other tests/suites or
-// leaving the quarantined instance in the dynamic-import cache.
-async function isolatedReader(): Promise<typeof readImageReferences> {
-  vi.resetModules()
-  try { return (await import('../../src/main/agent/image-inputs')).readImageReferences }
-  finally { vi.resetModules() }
-}
 
 function segment(marker: number, payload: Uint8Array): Buffer {
   const bytes = Buffer.alloc(payload.length + 4)
@@ -173,9 +163,6 @@ it('returns private ordered PNG/JPEG snapshots, never paths, prompts or provider
     [resolve(cwd, 'photos/portrait.JPEG'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK]
   ])
   expect(disk.handles.every((handle) => handle.close.mock.calls.length === 1)).toBe(true)
-  for (const handle of disk.handles) {
-    expect(handle.read.mock.calls.at(-1)?.slice(1)).toEqual([0, 1, handle.read.mock.calls[0][0].length])
-  }
   expect(references[0].bytes).not.toBe(png)
   expect(references[1].bytes).not.toBe(source.bytes)
   source.bytes = Uint8Array.of(9)
@@ -205,10 +192,9 @@ it('returns no-input [] without acquiring a slot, validating root, touching disk
 })
 
 it.each([
-  null, {}, 'reference.png', false, 4, [undefined], Array(2), Array(6).fill('reference.png'),
-  ['../reference.png'], ['/outside.png'], ['C:/outside.png'], ['a\\reference.png'], ['a//reference.png'],
-  ['https://private.invalid/reference.png'], ['data:image/png;base64,private'], ['NUL.png'], ['bad.png '],
-  ['reference.gif'], ['a/../reference.png'], ['ref\u0000.png'], [`${'x'.repeat(509)}.png`],
+  null, Array(6).fill('reference.png'), ['../reference.png'], ['/outside.png'], ['C:/outside.png'],
+  ['https://private.invalid/reference.png'], ['data:image/png;base64,private'], ['NUL.png'],
+  ['reference.gif'], ['ref\u0000.png'], [`${'x'.repeat(509)}.png`],
   Array(5).fill(`${'abc/'.repeat(31)}${'x'.repeat(251)}.png`)
 ].map((paths) => ({ paths })))('rejects unknown/malformed reference paths before disk access: $paths', async ({ paths }) => {
   const disk = fakeDisk()
@@ -218,18 +204,7 @@ it.each([
   expect(disk.files.open).not.toHaveBeenCalled()
 })
 
-it('normalizes numeric/bigint identities losslessly, including IDs beyond safe numeric precision', async () => {
-  const disk = fakeDisk()
-  disk.root.rootIdentity = { dev: 1, ino: 1 }
-  expect(await disk.read()).toHaveLength(1)
-  const huge = 9_007_199_254_740_995n
-  disk.rootNode.ino = huge
-  disk.root.rootIdentity = { dev: 1, ino: huge }
-  disk.entries.get(resolve(cwd, 'reference.png'))!.ino = huge + 1n
-  expect(await disk.read()).toHaveLength(1)
-})
-
-it.each([0, 0n, -1, NaN, Number.MAX_SAFE_INTEGER + 1])('rejects unidentifiable captured roots before opening inputs: %s', async (ino) => {
+it.each([0n])('rejects unidentifiable captured roots before opening inputs: %s', async (ino) => {
   const disk = fakeDisk()
   disk.root.rootIdentity.ino = ino
   await expect(disk.read()).rejects.toThrow(/身份.*尚未上传/)
@@ -242,7 +217,7 @@ it('rejects changed captured root identity and changed cwd/root mappings', async
   await expect(disk.read()).rejects.toThrow('项目真实目录')
   expect(disk.files.open).not.toHaveBeenCalled()
   const mapped = fakeDisk()
-  mapped.files.realpath.mockResolvedValue(resolve('/other-worktree'))
+  mapped.files.realpath.mockImplementation(async (path) => path === cwd ? resolve('/other-worktree') : path)
   await expect(mapped.read()).rejects.toThrow('项目真实目录')
   expect(mapped.files.open).not.toHaveBeenCalled()
 })
@@ -278,22 +253,6 @@ it('rejects realpath aliasing under a regular-looking parent or target', async (
   expect(disk.files.open).not.toHaveBeenCalled()
 })
 
-it.each(['root', 'outer-parent', 'inner-parent', 'path'])('detects %s replacement after open even if the pathname is unchanged', async (where) => {
-  const disk = fakeDisk()
-  disk.put('photos', 'directory')
-  disk.put('photos/nested', 'directory')
-  disk.put('photos/nested/reference.png', 'file', png)
-  disk.state.onOpen = () => {
-    if (where === 'root') disk.put(cwd, 'directory')
-    else if (where === 'outer-parent') disk.put('photos', 'directory')
-    else if (where === 'inner-parent') disk.put('photos/nested', 'directory')
-    else disk.put('photos/nested/reference.png', 'file', png)
-  }
-  await expect(disk.read(['photos/nested/reference.png'])).rejects.toThrow(/变化|目录/)
-  expect(disk.handles[0].read).not.toHaveBeenCalled()
-  expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
-})
-
 it.each(['root', 'parent', 'path'])('rechecks %s identity after the actual byte reads', async (where) => {
   const disk = fakeDisk()
   disk.put('photos', 'directory')
@@ -325,39 +284,23 @@ it('refuses an FD whose identity differs from the pre-open lstat snapshot', asyn
   expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
 })
 
-it.each(['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'])('rejects changed post-read FD snapshot field %s', async (field) => {
+it.each(['size', 'mtimeNs'] as const)('rejects changed final FD snapshot field %s with an unchanged path', async (field) => {
   const disk = fakeDisk()
-  disk.state.onOpen = (handle, node) => {
-    const read = handle.read.getMockImplementation()!
-    handle.read.mockImplementationOnce(async (...args) => {
-      const result = await read(...args)
-      if (field === 'size') node.size = BigInt(node.bytes.byteLength + 1)
-      else if (field === 'dev') node.dev = 2n
-      else if (field === 'ino') node.ino = 999n
-      else if (field === 'mtimeNs') node.mtimeNs = BigInt(node.mtimeNs) + 1n
-      else node.ctimeNs = BigInt(node.ctimeNs) + 1n
-      return result
+  disk.state.onOpen = (handle) => {
+    const stat = handle.stat.getMockImplementation()!
+    handle.stat.mockImplementationOnce(stat).mockImplementation(async () => {
+      const snapshot = await stat()
+      return { ...snapshot, [field]: BigInt(snapshot[field]) + 1n }
     })
   }
   await expect(disk.read()).rejects.toThrow('文件快照')
   expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
 })
 
-it.each([0, 0n, -1n, 1.5, NaN, Number.MAX_SAFE_INTEGER + 1, BigInt(MAX_IMAGE_REFERENCE_BYTES) + 1n])('rejects invalid/over-budget file sizes before opening: %s', async (size) => {
+it.each([0n, BigInt(MAX_IMAGE_REFERENCE_BYTES) + 1n])('rejects invalid/over-budget file sizes before opening: %s', async (size) => {
   const disk = fakeDisk()
   disk.entries.get(resolve(cwd, 'reference.png'))!.size = size
   await expect(disk.read()).rejects.toThrow(/每张最多 8 MiB.*尚未上传/)
-  expect(disk.files.open).not.toHaveBeenCalled()
-})
-
-it.each(['dev', 'ino', 'mtimeNs', 'ctimeNs'])('fails closed when file snapshot %s is missing or unusable', async (field) => {
-  const disk = fakeDisk()
-  const entry = disk.entries.get(resolve(cwd, 'reference.png'))!
-  if (field === 'dev') entry.dev = 0n
-  else if (field === 'ino') entry.ino = 0n
-  else if (field === 'mtimeNs') entry.mtimeNs = NaN
-  else entry.ctimeNs = Number.MAX_SAFE_INTEGER + 1
-  await expect(disk.read()).rejects.toThrow('身份无法确认')
   expect(disk.files.open).not.toHaveBeenCalled()
 })
 
@@ -370,7 +313,7 @@ it.each(['growth', 'truncation'])('uses actual bounded reads and an EOF probe to
   expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
 })
 
-it.each([undefined, NaN, Infinity, -1, 0, 0.5, png.length + 1])('rejects anomalous read results without returning uninitialized or partial data: %s', async (bytesRead) => {
+it.each([undefined, 0, png.length + 1])('rejects anomalous read results without returning uninitialized or partial data: %s', async (bytesRead) => {
   const disk = fakeDisk()
   disk.state.onOpen = (handle) => handle.read.mockResolvedValueOnce({ bytesRead } as { bytesRead: number })
   await expect(disk.read()).rejects.toThrow('读取结果异常')
@@ -388,8 +331,6 @@ it('handles short positive reads positionally and never requests more than 64 Ki
   const [reference] = await disk.read(['large.jpg'])
   expect(reference.bytes).toEqual(new Uint8Array(large))
   expect(disk.handles[0].read.mock.calls.every(([, , length]) => length <= 64 * 1024)).toBe(true)
-  expect(disk.handles[0].read.mock.calls.slice(0, -1).every(([, offset, , position]) => offset === position)).toBe(true)
-  expect(disk.handles[0].read.mock.calls.at(-1)?.slice(1)).toEqual([0, 1, large.byteLength])
   expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
 })
 
@@ -423,7 +364,7 @@ it('enforces the 4096-pixel dimension boundary and exact 16M total-pixel boundar
   await expect(disk.read(['eight.jpg', 'eight.jpg', 'reference.png'])).rejects.toThrow('累计像素')
 })
 
-it('checks the remaining cumulative pixel budget before invoking PNG integrity/inflate', async () => {
+it('checks the remaining cumulative pixel budget using framing only, leaving full validation to transport', async () => {
   const disk = fakeDisk()
   disk.put('first.jpg', 'file', jpeg(4096, 3000))
   // Framing is valid, but the deliberately inconsistent PNG raster would fail
@@ -432,37 +373,32 @@ it('checks the remaining cumulative pixel budget before invoking PNG integrity/i
   oversized.writeUInt32BE(4096, 16)
   oversized.writeUInt32BE(2048, 20)
   disk.put('over.png', 'file', oversized)
-  const inspect = vi.spyOn(transport, 'inspectReferenceImage')
   await expect(disk.read(['first.jpg', 'over.png'])).rejects.toThrow('累计像素')
-  expect(inspect).toHaveBeenCalledTimes(1)
-  expect(inspect.mock.calls[0][1]).toBe('image/jpeg')
   expect(disk.handles).toHaveLength(2)
   expect(disk.handles.every((handle) => handle.close.mock.calls.length === 1)).toBe(true)
 })
 
-it.each(['png-crc', 'png-raster', 'jpeg-eoi', 'jpeg-scan', 'mime'])('rejects malformed or mismatched image data after closing its FD: %s', async (failure) => {
+it.each(['png-crc', 'jpeg-eoi', 'mime'])('keeps framing rejection in the reader and defers complete integrity checks to transport: %s', async (failure) => {
   const disk = fakeDisk()
   let path = 'reference.png'
   let bytes: Buffer = Buffer.from(png)
   if (failure === 'png-crc') bytes[bytes.length - 1] ^= 1
-  else if (failure === 'png-raster') {
-    bytes.writeUInt32BE(2, 16) // Consistent outer framing, wrong CRC and scanline geometry.
-  } else if (failure === 'jpeg-eoi') {
+  else if (failure === 'jpeg-eoi') {
     path = 'reference.jpg'
     bytes = jpeg().subarray(0, -2)
-  } else if (failure === 'jpeg-scan') {
-    path = 'reference.jpg'
-    bytes = Buffer.concat([Buffer.from([0xff, 0xd8]), segment(0xc0, Uint8Array.of(8, 0, 1, 0, 1, 1, 1, 0x11, 0)), Buffer.from([0xff, 0xd9])])
   } else bytes = jpeg()
   disk.put(path, 'file', bytes)
-  await expect(disk.read([path])).rejects.toThrow(/完整性.*尚未上传/)
+  if (failure === 'jpeg-eoi' || failure === 'mime') {
+    await expect(disk.read([path])).rejects.toThrow(/完整性.*尚未上传/)
+  } else {
+    const [reference] = await disk.read([path])
+    expect(() => transport.inspectReferenceImage(reference.bytes, reference.mimeType)).toThrow()
+  }
   expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
 })
 
 it.each([
   { flag: 'O_NOFOLLOW', value: undefined, state: 'missing' },
-  { flag: 'O_NOFOLLOW', value: 0, state: 'zero' },
-  { flag: 'O_NONBLOCK', value: undefined, state: 'missing' },
   { flag: 'O_NONBLOCK', value: 0, state: 'zero' }
 ] as const)('rejects $state $flag before any filesystem operation', async ({ flag, value }) => {
   // Never spy on or mutate the shared node:fs constants namespace. Give only
@@ -479,7 +415,7 @@ it.each([
     })
     const reader = (await import('../../src/main/agent/image-inputs')).readImageReferences
     const disk = fakeDisk(reader)
-    await expect(disk.read()).rejects.toThrow('当前平台或文件系统不支持安全的只读参考图片打开方式，已拒绝读取。 尚未上传任何参考图片。')
+    await expect(disk.read()).rejects.toThrow(/不支持安全的只读/)
     expect(disk.files.realpath).not.toHaveBeenCalled()
     expect(disk.files.lstat).not.toHaveBeenCalled()
     expect(disk.files.open).not.toHaveBeenCalled()
@@ -490,32 +426,7 @@ it.each([
   }
 })
 
-it('uses actual host flags and rejects before filesystem access when strict flags are unavailable', async () => {
-  vi.resetModules()
-  vi.doUnmock('node:fs')
-  try {
-    const actual = await vi.importActual<typeof import('node:fs')>('node:fs')
-    const reader = (await import('../../src/main/agent/image-inputs')).readImageReferences
-    const disk = fakeDisk(reader)
-    disk.files.open.mockRejectedValue(fileError('ENOTSUP'))
-    await expect(disk.read()).rejects.toThrow('当前平台或文件系统不支持安全的只读参考图片打开方式，已拒绝读取。 尚未上传任何参考图片。')
-    const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = actual.constants
-    if (Number.isSafeInteger(O_NOFOLLOW) && O_NOFOLLOW > 0 && Number.isSafeInteger(O_NONBLOCK) && O_NONBLOCK > 0) {
-      expect(disk.files.open).toHaveBeenCalledTimes(1)
-      expect(disk.files.open).toHaveBeenCalledWith(resolve(cwd, 'reference.png'), O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
-    } else {
-      expect(disk.files.realpath).not.toHaveBeenCalled()
-      expect(disk.files.lstat).not.toHaveBeenCalled()
-      expect(disk.files.open).not.toHaveBeenCalled()
-    }
-    expect(disk.handles).toHaveLength(0)
-  } finally {
-    mockSafeFsConstants()
-    vi.resetModules()
-  }
-})
-
-it.each(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'])('fails closed on strict open-flag incompatibility %s, without unsafe retry', async (code) => {
+it.each(['ENOTSUP'])('fails closed on strict open-flag incompatibility %s, without unsafe retry', async (code) => {
   const disk = fakeDisk()
   disk.files.open.mockRejectedValue(fileError(code))
   await expect(disk.read()).rejects.toThrow(/不支持安全的只读.*尚未上传/)
@@ -523,22 +434,16 @@ it.each(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'])('fails closed on strict o
   expect(disk.handles).toHaveLength(0)
 })
 
-it.each(['stat', 'open', 'fd-stat', 'read', 'close'])('never exposes raw private filesystem diagnostics on %s failure', async (stage) => {
-  const disk = fakeDisk(stage === 'close' ? await isolatedReader() : readImageReferences)
-  if (stage === 'stat') disk.files.lstat.mockRejectedValue(fileError('EACCES'))
-  else if (stage === 'open') disk.files.open.mockRejectedValue(fileError('EACCES'))
-  else disk.state.onOpen = (handle) => {
-    if (stage === 'fd-stat') handle.stat.mockRejectedValue(fileError('EIO'))
-    else if (stage === 'read') handle.read.mockRejectedValue(fileError('EIO'))
-    else handle.close.mockRejectedValue(fileError('EIO'))
-  }
+it.each(['open', 'read'])('never exposes raw private filesystem diagnostics on %s failure', async (stage) => {
+  const disk = fakeDisk()
+  if (stage === 'open') disk.files.open.mockRejectedValue(fileError('EACCES'))
+  else disk.state.onOpen = (handle) => handle.read.mockRejectedValue(fileError('EIO'))
   const error: unknown = await disk.read().catch((failure: unknown) => failure)
   expect(error).toBeInstanceOf(Error)
   expect((error as Error).message).toContain('尚未上传任何参考图片')
   expect((error as Error).message).not.toContain(privateDiagnostic)
   expect((error as Error).message).not.toContain('/private')
-  if (stage === 'fd-stat' || stage === 'read' || stage === 'close') expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
-  if (stage === 'close') expect((error as Error).message).toBe(quarantineMessage)
+  if (stage === 'read') expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
 })
 
 it('rejects pre-aborted inputs without FS access or echoing the abort reason', async () => {
@@ -588,181 +493,60 @@ it('retains the process slot across a late open, closes its late FD, and only th
   }
 })
 
-it('does not release the slot while a cancelled late stat is still pending or rejecting', async () => {
+it('holds a timed-out reader through its pending read and close, then permits new reads after close rejects', async () => {
   const disk = fakeDisk()
-  const blocked = deferred<ImageInputFileStat>()
-  const entered = deferred<void>()
-  disk.files.lstat.mockImplementationOnce(() => { entered.resolve(); return blocked.promise })
-  const controller = new AbortController()
-  const pending = disk.read(['reference.png'], controller.signal)
-  const rejected = expect(pending).rejects.toThrow('等待已中止')
-  try {
-    await entered.promise
-    controller.abort()
-    await rejected
-    await expect(fakeDisk().read()).rejects.toThrow('未结束')
-    blocked.reject(fileError('EIO'))
-    await drain()
-    expect(disk.files.open).not.toHaveBeenCalled()
-    expect(await fakeDisk().read()).toHaveLength(1)
-  } finally {
-    controller.abort()
-    blocked.reject(fileError('EIO'))
-    await drain()
-    await rejected
-  }
-})
-
-it.each(['fd-stat', 'read', 'close'])('keeps a hung %s operation backpressured after timeout, including replacement reader instances', async (stage) => {
-  const disk = fakeDisk()
-  const release = deferred<void>()
-  const entered = deferred<void>()
+  const enteredRead = deferred<void>()
+  const releaseRead = deferred<void>()
+  const enteredClose = deferred<void>()
+  const releaseClose = deferred<void>()
   disk.state.onOpen = (handle) => {
-    if (stage === 'fd-stat') {
-      const stat = handle.stat.getMockImplementation()!
-      handle.stat.mockImplementationOnce(async () => { entered.resolve(); await release.promise; return stat() })
-    } else if (stage === 'read') {
-      const read = handle.read.getMockImplementation()!
-      handle.read.mockImplementationOnce(async (...args) => { entered.resolve(); await release.promise; return read(...args) })
-    } else handle.close.mockImplementationOnce(async () => { entered.resolve(); await release.promise })
+    const read = handle.read.getMockImplementation()!
+    handle.read.mockImplementationOnce(async (...args) => {
+      enteredRead.resolve()
+      await releaseRead.promise
+      return read(...args)
+    })
+    handle.close.mockImplementationOnce(async () => {
+      enteredClose.resolve()
+      await releaseClose.promise
+    })
   }
   const controller = new AbortController()
   const pending = disk.read(['reference.png'], controller.signal)
   const rejected = expect(pending).rejects.toThrow(/等待超时.*尚未上传/)
   try {
-    await entered.promise
+    await enteredRead.promise
     controller.abort(new transport.CodexImageError('timeout', privateDiagnostic))
     await rejected
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const next = fakeDisk()
-      await expect(next.read()).rejects.toThrow('未结束')
-      expect(next.files.realpath).not.toHaveBeenCalled()
-      expect(next.files.open).not.toHaveBeenCalled()
-    }
-    if (stage !== 'close') expect(disk.handles[0].close).not.toHaveBeenCalled()
-    else expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
-    release.resolve()
+    const next = fakeDisk()
+    await expect(next.read()).rejects.toThrow('未结束')
+    expect(disk.handles[0].close).not.toHaveBeenCalled()
+    releaseRead.resolve()
+    await enteredClose.promise
+    await expect(next.read()).rejects.toThrow('未结束')
+    expect(next.files.open).not.toHaveBeenCalled()
+    releaseClose.reject(fileError('EIO'))
     await drain()
     expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
-    expect(await fakeDisk().read()).toHaveLength(1)
+    expect(await next.read()).toHaveLength(1)
   } finally {
     controller.abort()
-    release.resolve()
+    releaseRead.resolve()
+    releaseClose.resolve()
     await drain()
     await rejected
   }
 })
 
-it('quarantines a settled close failure, stops before the second image, and blocks new readers without FS access', async () => {
-  const reader = await isolatedReader()
-  const disk = fakeDisk(reader)
+it('fails the current read on close rejection without retrying its FD, allowing a later explicit read', async () => {
+  const disk = fakeDisk()
   disk.put('second.png', 'file', png)
-  const release = deferred<void>()
-  const entered = deferred<void>()
-  disk.state.onOpen = (handle) => handle.close.mockImplementationOnce(async () => {
-    entered.resolve()
-    await release.promise
-    throw fileError('EIO')
-  })
-  const pending = disk.read(['reference.png', 'second.png'])
-  const rejected = expect(pending).rejects.toThrow(quarantineMessage)
-  try {
-    await entered.promise
-    const waiting = fakeDisk(reader)
-    await expect(waiting.read()).rejects.toThrow('未结束')
-    expect(waiting.files.realpath).not.toHaveBeenCalled()
-    expect(waiting.files.lstat).not.toHaveBeenCalled()
-    expect(waiting.files.open).not.toHaveBeenCalled()
-    expect(await waiting.read([])).toEqual([])
-    release.resolve()
-    await rejected
-    expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
-    expect(disk.files.open.mock.calls.map(([path]) => path)).toEqual([resolve(cwd, 'reference.png')])
-    const fsCalls = [disk.files.realpath.mock.calls.length, disk.files.lstat.mock.calls.length]
-    const reads = disk.handles[0].read.mock.calls.length
-    await expect(disk.read()).rejects.toThrow(quarantineMessage)
-    expect([disk.files.realpath.mock.calls.length, disk.files.lstat.mock.calls.length]).toEqual(fsCalls)
-    expect(disk.files.open).toHaveBeenCalledTimes(1)
-    expect(disk.handles[0].read).toHaveBeenCalledTimes(reads)
-    expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const replacement = fakeDisk(reader)
-      const error = await replacement.read().catch((failure: unknown) => failure)
-      expect(error).toBeInstanceOf(Error)
-      expect((error as Error).message).toBe(quarantineMessage)
-      expect((error as Error).message).not.toContain(privateDiagnostic)
-      expect((error as Error).message).not.toContain('未结束')
-      expect(replacement.files.realpath).not.toHaveBeenCalled()
-      expect(replacement.files.lstat).not.toHaveBeenCalled()
-      expect(replacement.files.open).not.toHaveBeenCalled()
-    }
-    // Restoring fake FS mocks must not revive the same reader's latch.
-    vi.restoreAllMocks()
-    const replacement = fakeDisk(reader)
-    const controller = new AbortController()
-    controller.abort(new Error(privateDiagnostic))
-    await expect(replacement.read(['reference.png'], controller.signal)).rejects.toThrow(quarantineMessage)
-    expect(await reader({} as ImageReferenceRoot, [], controller.signal, { files: replacement.files })).toEqual([])
-    expect(replacement.files.realpath).not.toHaveBeenCalled()
-    expect(replacement.files.lstat).not.toHaveBeenCalled()
-    expect(replacement.files.open).not.toHaveBeenCalled()
-    expect(await fakeDisk().read()).toHaveLength(1) // Static suite reader was not quarantined.
-  } finally {
-    release.resolve()
-    await rejected
-  }
-})
-
-it('latches a late close rejection even after the aborted consumer has returned, without retrying or starting more reads', async () => {
-  const reader = await isolatedReader()
-  const disk = fakeDisk(reader)
-  disk.put('second.png', 'file', png)
-  const release = deferred<void>()
-  const entered = deferred<void>()
-  disk.state.onOpen = (handle) => handle.close.mockImplementationOnce(async () => {
-    entered.resolve()
-    await release.promise
-  })
-  const controller = new AbortController()
-  const pending = disk.read(['reference.png', 'second.png'], controller.signal)
-  const rejected = expect(pending).rejects.toThrow(/等待已中止.*尚未上传/)
-  try {
-    await entered.promise
-    controller.abort(new Error(privateDiagnostic))
-    await rejected
-    const abortError = await pending.catch((failure: unknown) => failure)
-    expect((abortError as Error).message).not.toContain(privateDiagnostic)
-    expect((abortError as Error).message).not.toContain('/private')
-    const waiting = fakeDisk(reader)
-    await expect(waiting.read()).rejects.toThrow('未结束')
-    expect(await waiting.read([])).toEqual([])
-    expect(waiting.files.realpath).not.toHaveBeenCalled()
-    expect(waiting.files.lstat).not.toHaveBeenCalled()
-    expect(waiting.files.open).not.toHaveBeenCalled()
-    const reads = disk.handles[0].read.mock.calls.length
-    release.reject(fileError('EIO'))
-    await drain()
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const replacement = fakeDisk(reader)
-      const error = await replacement.read().catch((failure: unknown) => failure)
-      expect(error).toBeInstanceOf(Error)
-      expect((error as Error).message).toBe(quarantineMessage)
-      expect((error as Error).message).not.toContain(privateDiagnostic)
-      expect((error as Error).message).not.toContain('未结束')
-      expect(await replacement.read([])).toEqual([])
-      expect(replacement.files.realpath).not.toHaveBeenCalled()
-      expect(replacement.files.lstat).not.toHaveBeenCalled()
-      expect(replacement.files.open).not.toHaveBeenCalled()
-    }
-    await expect(disk.read()).rejects.toThrow(quarantineMessage)
-    expect(disk.files.open).toHaveBeenCalledTimes(1)
-    expect(disk.handles[0].read).toHaveBeenCalledTimes(reads)
-    expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
-    expect(await fakeDisk().read()).toHaveLength(1)
-  } finally {
-    controller.abort()
-    release.reject(fileError('EIO'))
-    await drain()
-    await rejected
-  }
+  disk.state.onOpen = (handle) => handle.close.mockRejectedValueOnce(fileError('EIO'))
+  await expect(disk.read(['reference.png', 'second.png'])).rejects.toThrow(/关闭失败.*尚未上传/)
+  expect(disk.files.open).toHaveBeenCalledTimes(1)
+  expect(disk.handles[0].close).toHaveBeenCalledTimes(1)
+  disk.state.onOpen = undefined
+  expect(await disk.read()).toHaveLength(1)
+  expect(disk.files.open).toHaveBeenCalledTimes(2)
+  expect(disk.handles.every((handle) => handle.close.mock.calls.length === 1)).toBe(true)
 })

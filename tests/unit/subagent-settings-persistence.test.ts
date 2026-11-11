@@ -7,7 +7,7 @@ import { DEFAULT_SUBAGENT_SETTINGS } from '../../src/shared/subagents'
 
 const mocks = vi.hoisted(() => ({
   read: vi.fn<typeof import('node:fs/promises').readFile>(),
-  publish: vi.fn<(file: string, value: unknown) => Promise<void>>()
+  publish: vi.fn<typeof import('../../src/main/atomic-json-file').writeAtomicJson>()
 }))
 vi.mock('electron', () => ({ app: { getPath: () => '/unused' } }))
 vi.mock('node:fs/promises', async (importOriginal) => ({
@@ -36,7 +36,7 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'pion-subagent-settings-persistence-'))
   path = join(root, 'pion-subagents.json')
   mocks.read.mockReset().mockImplementation(actualRead)
-  mocks.publish.mockReset().mockImplementation((file, value) => publishJson(file, value))
+  mocks.publish.mockReset().mockImplementation((file, value, beforePublish) => publishJson(file, value, beforePublish))
 })
 afterEach(async () => { await rm(root, { recursive: true, force: true }) })
 
@@ -136,6 +136,28 @@ it('preserves source on non-ENOENT read failures including permission denial', a
   await expect(store.set(DEFAULT_SUBAGENT_SETTINGS)).rejects.toBe(failure)
   expect(await readFile(path, 'utf8')).toBe(source)
   expect(mocks.publish).not.toHaveBeenCalled()
+})
+
+it('retries a repaired source and preserves it when the owner retires before publication', async () => {
+  await writeFile(path, '{broken')
+  const store = new SubagentSettingsStore(() => path)
+  await expect(store.get()).rejects.toThrow()
+  await expect(store.set(DEFAULT_SUBAGENT_SETTINGS)).rejects.toThrow()
+  const source = JSON.stringify(selected)
+  await writeFile(path, source)
+  await expect(store.get()).resolves.toEqual(selected)
+  let current = true
+  mocks.publish.mockImplementationOnce(async (file, value, beforePublish) => {
+    current = false
+    await publishJson(file, value, beforePublish)
+  })
+  await expect(store.set(DEFAULT_SUBAGENT_SETTINGS, () => {
+    if (!current) throw new Error('retired owner')
+  })).rejects.toThrow('retired owner')
+  expect(await readFile(path, 'utf8')).toBe(source)
+  expect(await readdir(root)).toEqual(['pion-subagents.json'])
+  await store.set(DEFAULT_SUBAGENT_SETTINGS)
+  await expect(store.get()).resolves.toEqual(DEFAULT_SUBAGENT_SETTINGS)
 })
 
 it('retains a prior valid configuration when publication fails and permits a later explicit save', async () => {

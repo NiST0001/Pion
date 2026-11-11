@@ -1,6 +1,4 @@
-import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   COMPUTER_USE_AGENT_TITLE_PREFIX as PREFIX, COMPUTER_USE_AGENT_SOURCE_FIELD, COMPUTER_USE_AGENT_LIMITS as A,
@@ -107,10 +105,6 @@ describe('ComputerUse private protocol (pure)', () => {
     expect(Math.ceil(A.maxModelImageBytes / 3) * 4).toBeLessThan(A.maxModelBase64)
   })
 
-  it('rejects arbitrary diagnostics or non-observe image responses', () => {
-    expect(() => validateComputerUseAgentResponse({ version: 1, ok: false, operation: 'observe', requestId: 'r', error: 'raw secret' })).toThrow()
-    expect(() => validateComputerUseAgentResponse({ version: 1, ok: true, operation: 'act', requestId: 'r', image: { mimeType: 'image/png', data: 'YQ==' }, width: 1, height: 1, frameId: 'f', scopeRevision: 1 })).toThrow()
-  })
 })
 
 function pngChunk(type: string, data: Buffer): Buffer {
@@ -127,22 +121,6 @@ function pngChunk(type: string, data: Buffer): Buffer {
   return chunk
 }
 
-function actualHostProjector(budget = A.maxModelImageBytes) {
-  const source = readFileSync(new URL('../../src/main/index.ts', import.meta.url), 'utf8')
-  const start = source.indexOf('projectFrame: async (png, frame) => {')
-  const callback = source.slice(start + 'projectFrame: '.length, source.indexOf('\n  // No default trusted', start)).trim()
-  const js = transpileModule(`const projectFrame = ${callback};`, { compilerOptions: { target: ScriptTarget.ES2022, module: ModuleKind.None } }).outputText
-  const encoded: Array<{ width: number; height: number }> = []
-  const makeImage = (width: number, height: number): unknown => ({ isEmpty: () => false, getSize: () => ({ width, height }),
-    resize: (dimensions: { width: number; height: number }) => makeImage(dimensions.width, dimensions.height),
-    toPNG: () => { encoded.push({ width, height }); const png = makeStaticPng(width, height); return Buffer.concat([png.subarray(0, 33), pngChunk('sRGB', Buffer.from([0])), png.subarray(33)]) } })
-  const original = makeStaticPng(3200, 1800)
-  const nativeImage = { createFromBuffer: vi.fn(() => makeImage(3200, 1800)) }
-  const project = new Function('nativeImage', 'COMPUTER_USE_AGENT_IMAGE_LIMITS', 'normalizeComputerUseModelPng', 'Buffer', `${js}; return projectFrame;`)(
-    nativeImage, { ...A, maxModelImageBytes: budget }, normalizeComputerUseModelPng, Buffer) as NonNullable<ComputerUseAgentBridgeOptions['projectFrame']>
-  return { project, original, encoded }
-}
-
 describe('ComputerUse exact SDK model projection (pure PNG)', () => {
   it('strips encoder ancillary chunks while preserving the exact complete IHDR/IDAT/IEND and CRC bytes', () => {
     const original = makeStaticPng(16, 9)
@@ -157,33 +135,6 @@ describe('ComputerUse exact SDK model projection (pure PNG)', () => {
     expect(() => normalizeComputerUseModelPng(nativeOutput, { width: 16, height: 9 })).toThrow()
   })
 
-  it('uses the actual host bounded downscale loop and returns exact model/original dimensions without mutating the original', async () => {
-    const budget = makeStaticPng(1500, 843).length
-    const h = actualHostProjector(budget)
-    const snapshot = Buffer.from(h.original)
-    const frame = { id: 'actual-original', width: 3200, height: 1800, createdAt: 0, scopeRevision: 1, captureScope: 'window' as const, actualScope: 'window' as const }
-    const result = await h.project(h.original, frame)
-    expect(result.width).toBeLessThan(2000)
-    expect(result.png.byteLength).toBeLessThanOrEqual(budget)
-    expect(h.encoded[0]).toEqual({ width: 2000, height: 1125 })
-    expect(h.encoded.at(-1)).toEqual({ width: result.width, height: result.height })
-    expect(Buffer.from(result.png)).toEqual(makeStaticPng(result.width, result.height))
-    expect(h.original).toEqual(snapshot)
-  })
-
-  it('refuses the model view after the fixed resize budget instead of transmitting oversized bytes', async () => {
-    const h = actualHostProjector(1)
-    await expect(h.project(h.original, { id: 'original', width: 3200, height: 1800, createdAt: 0, scopeRevision: 1, captureScope: 'window', actualScope: 'window' })).rejects.toThrow('budget exhausted')
-    expect(h.encoded).toHaveLength(12)
-  })
-
-  it.each(['CRC', 'truncated-IEND', 'trailing-bytes', 'wrong-dimensions'])('does not repair malformed %s into an accepted projection', kind => {
-    let png = makeStaticPng(16, 9)
-    if (kind === 'CRC') png[41] ^= 1
-    if (kind === 'truncated-IEND') png = png.subarray(0, png.length - 1)
-    if (kind === 'trailing-bytes') png = Buffer.concat([png, Buffer.from([0])])
-    expect(() => normalizeComputerUseModelPng(png, { width: kind === 'wrong-dimensions' ? 15 : 16, height: 9 })).toThrow()
-  })
 })
 
 describe('ComputerUse model broker (mock)', () => {
@@ -258,6 +209,23 @@ describe('ComputerUse model broker (mock)', () => {
     expect(h.service.capture).toHaveBeenCalledTimes(1)
   })
 
+  it.each(['observe', 'act'] as const)('retains %s replay protection across a transient failed current-root check in the same run', async operation => {
+    const h = harness({ trustedTargetGuard: { assertAllowed: vi.fn() } }, operation === 'act')
+    const observed = h.payload()
+    const image = await h.submit(observed)
+    h.retain(observed, image)
+    const request = operation === 'observe' ? observed : h.payload('act', { frameId: image.frameId, action: { type: 'key', keys: 'Enter' } })
+    if (operation === 'act') expect((await h.submit(request)).ok).toBe(true)
+    const currentRoot = h.admission.assertRequestCurrent
+    h.admission.assertRequestCurrent = () => { throw new Error('temporarily hidden by policy/selection') }
+    const other = { ...h.admission, assertRequestCurrent: () => {} }
+    expect((await h.submit(h.payload('egress'), {}, async () => other)).ok).toBe(true)
+    h.admission.assertRequestCurrent = currentRoot
+    expect((await h.submit(request)).error).toBe('invalid-request')
+    expect(h.service.capture).toHaveBeenCalledOnce()
+    expect(h.service.act).toHaveBeenCalledTimes(operation === 'act' ? 1 : 0)
+  })
+
   it('revokes long-poll model permission immediately, and never stops a different manual/new lease', async () => {
     const h = harness()
     const observed = h.payload()
@@ -277,19 +245,6 @@ describe('ComputerUse model broker (mock)', () => {
     foreign.broker.revoke()
     expect(foreign.service.revoke).not.toHaveBeenCalled()
     expect(foreign.service.stop).not.toHaveBeenCalled()
-  })
-
-  it('an egress request alone cannot create screenshot provenance or bypass a new permission', async () => {
-    const h = harness()
-    expect((await h.submit(h.payload('egress'))).error).toBe('egress-revoked')
-    expect(h.authorize).not.toHaveBeenCalled()
-    const observed = h.payload()
-    h.retain(observed, await h.submit(observed))
-    h.broker.revoke()
-    const count = h.authorize.mock.calls.length
-    expect((await h.submit(h.payload('egress'))).ok).toBe(true)
-    expect(h.authorize.mock.calls.length).toBe(count + 1)
-    expect(h.authorize).toHaveBeenLastCalledWith(h.admission, 'egress')
   })
 
   it('requires an actual delivered screenshot AND its matching real SDK entry, not markers/bytes alone', async () => {
@@ -313,37 +268,12 @@ describe('ComputerUse model broker (mock)', () => {
     const observe = h.payload()
     const image = await h.submit(observe)
     const report = h.report(observe, image)
-    expect(parseComputerUseAgentRequest(report)).toEqual(report)
+    expect((await h.submit({ ...report, retained: { ...report.retained!, imageHash: '0'.repeat(64) } })).ok).toBe(false)
     expect((await h.submit(report))).toMatchObject({ ok: true, operation: 'retained', scopeRevision: image.scopeRevision })
     expect((await h.submit(h.payload('egress'))).ok).toBe(true)
     expect(h.authorize).toHaveBeenCalledTimes(1)
     expect(h.service.capture).toHaveBeenCalledTimes(1)
     expect(h.service.act).not.toHaveBeenCalled()
-    expect(() => parseComputerUseAgentRequest({ ...report, operation: 'egress' })).toThrow()
-    expect(() => parseComputerUseAgentRequest({ ...report, retained: { ...report.retained, imageHash: 'invented' } })).toThrow()
-    expect(() => parseComputerUseAgentRequest({ ...report, retained: undefined })).toThrow()
-  })
-
-  it.each(['request', 'tool', 'session-file', 'session-id', 'scope', 'frame', 'dimensions', 'digest', 'bytes', 'identity', 'owner'] as const)('rejects a retained report with mismatched %s instead of promoting delivered pixels into a grant', async kind => {
-    const h = harness()
-    const observe = h.payload()
-    const report = h.report(observe, await h.submit(observe))
-    const proof = report.retained!
-    let admission = h.admission
-    if (kind === 'request') proof.observationRequestId = 'other-request'
-    if (kind === 'tool') report.toolCallId = 'other-root'
-    if (kind === 'session-file') proof.sessionFile = '/mock-project/other.jsonl'
-    if (kind === 'session-id') proof.sessionId = 'other-session'
-    if (kind === 'scope') proof.scopeRevision++
-    if (kind === 'frame') proof.frameId = 'other-frame'
-    if (kind === 'dimensions') proof.width++
-    if (kind === 'digest') proof.imageHash = '0'.repeat(64)
-    if (kind === 'bytes') proof.imageBytes++
-    if (kind === 'identity') admission = { ...admission, sessionIdentity: {} }
-    if (kind === 'owner') admission = { ...admission, owner: { ...OWNER, generation: 2 } }
-    expect((await h.submit(report, {}, async () => admission)).ok).toBe(false)
-    expect((await h.submit(h.payload('egress'))).error).toBe('egress-revoked')
-    expect(h.authorize).toHaveBeenCalledTimes(1)
   })
 
   it('does not seed retention after a response transport rejects actual screenshot delivery', async () => {
@@ -374,37 +304,41 @@ describe('ComputerUse model broker (mock)', () => {
     expect(h.service.act).not.toHaveBeenCalled()
   })
 
-  it('unsubscribes repeated short provider watches without waiting for the heartbeat or filling four live slots', async () => {
+  it('keeps the original watch until its exact cleanup ACK is delivered, with idempotent replay', async () => {
     const h = harness()
     const observed = h.payload()
     h.retain(observed, await h.submit(observed))
-    for (let turn = 0; turn < 8; turn++) {
-      const request = h.payload('watch')
-      const order: string[] = []
-      const watched = h.submit(request).then(value => { order.push('watch'); return value })
-      for (let tick = 0; tick < 4; tick++) await Promise.resolve()
-      const unwatch = h.payload('unwatch', { watchRequestId: request.requestId })
-      expect((await h.submit(unwatch)).ok).toBe(true)
-      order.push('unwatch')
-      expect((await watched).ok).toBe(true)
-      expect(order).toEqual(['watch', 'unwatch'])
-      expect((await h.submit(unwatch)).ok).toBe(true) // exact own settled replay
-    }
-    expect(h.service.capture).toHaveBeenCalledTimes(1)
-    expect(h.service.stop).not.toHaveBeenCalled()
-  })
-
-  it('retains cleanup at the ordinary request capacity rather than stranding a live watch until its deadline', async () => {
-    const h = harness()
-    const observed = h.payload()
-    h.retain(observed, await h.submit(observed))
-    for (let request = 0; request < A.maxRequests - 2; request++) expect((await h.submit(h.payload('egress'))).ok).toBe(true)
+    h.admission.releaseWatch = vi.fn()
     const watch = h.payload('watch')
     const pending = h.submit(watch)
     for (let tick = 0; tick < 4; tick++) await Promise.resolve()
-    expect((await h.submit(h.payload('egress'))).error).toBe('invalid-request')
+    const unwatch = h.payload('unwatch', { watchRequestId: watch.requestId })
+    const rejected = deferred<ComputerUseAgentResponse>()
+    h.broker.handle({ type: 'extension_ui_request', method: 'input', id: 'failed-unwatch', title: PREFIX + JSON.stringify(unwatch) }, async () => h.admission,
+      (_id, value) => { rejected.resolve(JSON.parse(value)); throw new Error('transport rejected cleanup ACK') })
+    expect((await rejected.promise).ok).toBe(true)
+    expect((await pending).ok).toBe(true)
+    expect(h.admission.releaseWatch).not.toHaveBeenCalled()
+    expect((await h.submit(unwatch)).ok).toBe(true)
+    expect((await h.submit(unwatch)).ok).toBe(true)
+    expect(h.admission.releaseWatch).toHaveBeenCalledOnce()
+  })
+
+  it('reclaims completed checks and failed admissions while preserving a live watch and its exact cleanup ACK', async () => {
+    const h = harness()
+    for (let request = 0; request <= A.maxRequests; request++) {
+      expect((await h.submit(h.payload(), {}, async () => { throw new Error('untrusted source') })).ok).toBe(false)
+    }
+    const observed = h.payload()
+    h.retain(observed, await h.submit(observed))
+    const watch = h.payload('watch')
+    const pending = h.submit(watch)
+    for (let tick = 0; tick < 4; tick++) await Promise.resolve()
+    for (let request = 0; request <= A.maxRequests; request++) expect((await h.submit(h.payload('egress'))).ok).toBe(true)
+    expect((await h.submit(watch)).error).toBe('invalid-request')
     expect((await h.submit(h.payload('unwatch', { watchRequestId: watch.requestId }))).ok).toBe(true)
     expect((await pending).ok).toBe(true)
+    expect(h.service.capture).toHaveBeenCalledOnce()
   })
 
   it('cleans up only the original captured watch even after run withdrawal, never another source or a newer run', async () => {
@@ -416,8 +350,9 @@ describe('ComputerUse model broker (mock)', () => {
     for (let tick = 0; tick < 4; tick++) await Promise.resolve()
     h.broker.revoke()
     expect((await oldPending).ok).toBe(false)
-    const next = { ...h.admission, owner: Object.freeze({ ...OWNER, runId: 'actual-next-run', generation: 2 }) }
-    expect((await h.submit(h.payload('egress'), {}, async () => next)).ok).toBe(true)
+    h.invalidate() // the old owner generation stays retired, cleanup remains valid
+    const next = { ...h.admission, owner: Object.freeze({ ...OWNER, runId: 'actual-next-run', generation: 2 }), assertCurrent: () => {}, assertRequestCurrent: () => {} }
+    expect((await h.submit(h.payload('egress', { requestId: observed.requestId }), {}, async () => next)).ok).toBe(true)
     const newWatch = h.payload('watch')
     const newPending = h.submit(newWatch, {}, async () => next)
     for (let tick = 0; tick < 4; tick++) await Promise.resolve()

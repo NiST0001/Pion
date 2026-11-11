@@ -12,6 +12,8 @@ export interface BackendCapabilityState {
   requestedRevision: number
   appliedRevision?: number
   state: 'applied' | 'pending' | 'applying' | 'failed'
+  /** Local preference warning; the verified runtime remains usable. */
+  error?: string
   notice?: CapabilityRuntimeNotice
   noticeClient?: RpcClient
   noticeTrust?: string
@@ -28,6 +30,8 @@ export interface BackendCapabilityState {
   runPending?: boolean
   /** Explicit first input admitted while idle, not a fabricated settle receipt. */
   idleInputRunId?: string
+  /** Only sources awaiting verification of their actual replacement RPC epoch.
+   * A verified successor retires these receipts; this is no lifetime counter. */
   retiredRuntimeIds: string[]
   planCommandPath?: string
 }
@@ -68,30 +72,37 @@ export function capabilityBackendIdle(backend: BackendRecord): boolean {
 }
 
 export type CapabilityRpcRejection = { command: 'set_model'; provider: string; modelId: string } | { command: 'compact' }
-const negativeResponses = new WeakMap<Error, { client: RpcClient; command: string; message: string }>()
+  | { command: 'export_html'; requestId: string | undefined }
+const negativeResponses = new WeakMap<Error, { client: RpcClient; command: string; requestId: string; message: string }>()
 const observedClients = new WeakSet<RpcClient>()
 
 /** SDK 1.4.0 erases RPC negatives into ordinary Errors in getData. Observe that
- * exact decoder, not error text/stack or arbitrary transport rejections. */
-export function observeCapabilityRpcRejections(client: RpcClient): void {
-  if (VERSION !== '1.4.0' || observedClients.has(client)) return
-  type Decoder = { getData(response: unknown): unknown }
+ * exact decoder, not error text/stack or arbitrary transport rejections. The next
+ * request ID belongs to a command invoked synchronously after this observation. */
+export function observeCapabilityRpcRejections(client: RpcClient): string | undefined {
+  if (VERSION !== '1.4.0') return
+  type Decoder = { getData(response: unknown): unknown; requestId?: number }
   const decoder = client as unknown as Decoder
-  const original = (RpcClient.prototype as unknown as Decoder).getData
-  if (typeof original !== 'function' || decoder.getData !== original) return
-  decoder.getData = function (response: unknown): unknown {
-    try { return original.call(this, response) }
-    catch (error) {
-      if (error instanceof Error && record(response) && response.type === 'response' && response.success === false
-        && typeof response.id === 'string' && /^req_[1-9][0-9]*$/.test(response.id)
-        && (response.command === 'set_model' || response.command === 'compact')
-        && typeof response.error === 'string' && response.error === error.message) {
-        negativeResponses.set(error, { client, command: response.command, message: response.error })
+  if (!observedClients.has(client)) {
+    const original = (RpcClient.prototype as unknown as Decoder).getData
+    if (typeof original !== 'function' || decoder.getData !== original) return
+    decoder.getData = function (response: unknown): unknown {
+      try { return original.call(this, response) }
+      catch (error) {
+        if (error instanceof Error && record(response) && response.type === 'response' && response.success === false
+          && typeof response.id === 'string' && /^req_[1-9][0-9]*$/.test(response.id)
+          && (response.command === 'set_model' || response.command === 'compact' || response.command === 'export_html')
+          && typeof response.error === 'string' && response.error === error.message) {
+          negativeResponses.set(error, { client, command: response.command, requestId: response.id, message: response.error })
+        }
+        throw error
       }
-      throw error
     }
+    observedClients.add(client)
   }
-  observedClients.add(client)
+  const requestId = decoder.requestId
+  return typeof requestId === 'number' && Number.isSafeInteger(requestId) && requestId >= 0 && requestId < Number.MAX_SAFE_INTEGER
+    ? `req_${requestId + 1}` : undefined
 }
 
 export function knownCapabilityRpcRejection(client: RpcClient, error: unknown, expected?: CapabilityRpcRejection): boolean {
@@ -99,6 +110,7 @@ export function knownCapabilityRpcRejection(client: RpcClient, error: unknown, e
   const receipt = negativeResponses.get(error)
   negativeResponses.delete(error)
   if (!receipt || receipt.client !== client || receipt.command !== expected.command) return false
+  if (expected.command === 'export_html') return receipt.requestId === expected.requestId
   return expected.command === 'set_model'
     ? receipt.message === `Model not found: ${expected.provider}/${expected.modelId}`
       || receipt.message === `No API key for ${expected.provider}/${expected.modelId}`

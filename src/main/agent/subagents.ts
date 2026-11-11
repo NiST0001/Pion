@@ -4,6 +4,7 @@ import { DEFAULT_SUBAGENTS_ENABLED, DEFAULT_SUBAGENT_SETTINGS, SUBAGENT_LIMITS, 
 import { Type } from 'typebox'
 import type { SubagentSessionObserver, SubagentSessionPublisher } from './subagent-session-observer'
 import { projectSubagentBatchResult, type SubagentBatchTask } from '../../shared/subagent-batches'
+import { sessionMode } from './wire'
 import {
   createAgentSession, DefaultResourceLoader, defineTool, SessionManager, SettingsManager,
   type AgentSession, type AgentToolResult, type ExtensionFactory, type ModelRuntime
@@ -70,14 +71,15 @@ function addUsage(total: Usage, usage: Usage) {
 export function createSubagentControl(run: Runner, getSettings: () => SubagentSettings | Promise<SubagentSettings> = readRuntimeSubagentSettings, publisher?: SubagentSessionPublisher, getModelCatalog?: () => readonly SubagentModelSelection[], capabilityAllowed: () => boolean = () => true, onChanged: () => void = () => undefined) {
   let enabled = DEFAULT_SUBAGENTS_ENABLED
   let batchActive = false
+  let toolAvailable = () => true
   const active = new Set<AbortController>()
   const abortActive = () => { for (const controller of active) controller.abort() }
   const stop = () => { enabled = false; abortActive() }
   const extension: ExtensionFactory = (pi) => {
     let planModeActive = false
-    // `allowRestore` is only used at startup, after leaving plan mode, or by
-    // the explicit on command. During a normal turn, another mode may
-    // intentionally hide this tool.
+    toolAvailable = () => !planModeActive && pi.getActiveTools().includes(TOOL)
+    // Only startup and explicit on may restore this tool. Plan mode restores
+    // its captured active set; other modes may intentionally keep it hidden.
     const sync = (allowRestore = false) => {
       const current = pi.getActiveTools()
       const tools = current.filter((name) => name !== TOOL)
@@ -92,17 +94,11 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
       sync(true)
     })
     pi.on('session_shutdown', () => { stop(); publisher?.halt() })
-    // Plan-mode restoration can hide this tool. Explicit off remains off until
-    // the user turns it back on; fresh backends use the capability-constrained default.
-    pi.on('before_agent_start', async (event) => {
-      const nextPlanModeActive = event.systemPrompt.includes('[PION PLAN MODE]')
-      if (nextPlanModeActive) {
-        planModeActive = true
-        remove()
-      } else if (planModeActive) {
-        planModeActive = false
-        if (enabled) sync(true)
-      } else if (!enabled) sync()
+    // Preserve plan mode's restored selection, while explicit off always wins.
+    pi.on('before_agent_start', async (event, ctx) => {
+      planModeActive = sessionMode(ctx.sessionManager.getBranch()) === 'plan'
+      if (planModeActive) remove()
+      else if (!enabled) sync()
       let guidance = ''
       if (enabled) {
         try {
@@ -164,9 +160,10 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
     executionMode: 'sequential',
     async execute(_id, params, signal, onUpdate) {
       if (!enabled || !capabilityAllowed()) throw new Error('子代理已关闭；请由用户通过输入框或设置开启。')
+      if (!toolAvailable()) throw new Error('当前模式已停用子代理。')
       if (!Array.isArray(params.tasks) || params.tasks.length < 1 || params.tasks.length > SUBAGENT_LIMITS.maxParallel.max) throw new Error('子代理任务数量超出安全上限。')
       // Capture before the first await: callers cannot change selections while
-      // settings/admission are pending. Malformed selections reject the whole call.
+      // settings are pending. Malformed selections reject the whole call.
       const tasks = Object.freeze(params.tasks.map((task) => Object.freeze({ name: task.name, task: task.task,
         ...(task.model === undefined ? {} : { model: captureModel(task.model) }) })))
       if (batchActive) throw new Error('已有子代理批次正在运行，请等待完成。')
@@ -187,7 +184,10 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
         return { ...projected, tasks: projected.tasks.map((task) => ({ ...task,
           ...(task.summary !== undefined ? { summaryTruncated: task.summaryTruncated === true } : {}) })) }
       }
-      const progress = (text: string) => onUpdate?.({ content: [{ type: 'text', text }], details: { results: [...results], subagentBatch: snapshot() } })
+      const progress = (text: string) => {
+        try { onUpdate?.({ content: [{ type: 'text', text }], details: { results: [...results], subagentBatch: snapshot() } }) }
+        catch { /* Display callbacks never cancel execution or discard returned usage. */ }
+      }
       const settled = (index: number, result: SubagentResult) => {
         batchTasks[index] = { index, name: batchTasks[index].name, status: result.status,
           summary: result.text.slice(0, 2048), summaryTruncated: result.text.length > 2048 }
@@ -196,40 +196,23 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
       try {
         const validated = validateSubagentSettings(await getSettings())
         const settings = Object.freeze({ ...validated, defaultModel: captureModel(validated.defaultModel ?? null) })
-        if (!enabled || controller.signal.aborted) throw new Error('子代理调用已中止。')
+        if (!enabled || !capabilityAllowed() || !toolAvailable() || controller.signal.aborted) throw new Error('子代理调用已中止。')
         if (tasks.length > settings.maxParallel) throw new Error(`当前设置每批最多 ${settings.maxParallel} 个子代理，请减少任务数量。`)
         timer = setTimeout(abort, settings.timeoutMinutes * 60_000)
-        progress('等待子代理批次启动确认')
-        let admitted = !publisher
-        if (publisher) {
-          try { admitted = await publisher.reserve(_id, tasks.length, controller.signal) }
-          catch { /* Missing/failed RPC ACK is never permission to start children. */ }
-        }
-        if (!enabled || controller.signal.aborted) admitted = false
-        if (!admitted && publisher) progress('临时子会话准入未确认（拒绝、超时或取消），未启动此批子代理')
+        progress('准备子代理批次')
         const ordered = await Promise.all(tasks.map(async (task, index) => {
           let result: SubagentResult
           // Only the runtime host opts into this private display channel. Keep
           // the legacy four-argument runner call exactly unchanged otherwise.
           try {
-            if (!admitted) {
-              const text = '临时子会话不可用，未启动子代理'
-              result = { name: task.name, status: 'failed', text }
-              settled(index, result)
-              progress(`${task.name}：${text}`)
-              return result
-            }
+            if (!enabled || !capabilityAllowed() || !toolAvailable()) controller.abort()
+            if (controller.signal.aborted) throw new Error('已中止')
             let observer: SubagentSessionObserver | undefined
             if (publisher) {
-              try { observer = publisher.begin({ name: task.name }, _id) } catch { /* Fail admission closed. */ }
-              if (!observer) {
-                const text = '临时子会话不可用，未启动子代理'
-                result = { name: task.name, status: 'failed', text }
-                settled(index, result)
-                progress(`${task.name}：${text}`)
-                return result
-              }
+              try { observer = publisher.begin({ name: task.name }, _id) } catch { /* Display-only. */ }
+              if (!observer) progress(`${task.name}：临时子会话显示不可用，仅保留批次摘要`)
             }
+            if (!enabled || !capabilityAllowed() || !toolAvailable()) controller.abort()
             if (controller.signal.aborted) {
               try { observer?.finish('aborted') } catch { /* Display-only. */ }
               throw new Error('已中止')

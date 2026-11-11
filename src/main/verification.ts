@@ -1,7 +1,7 @@
 import type { BrowserWindow } from 'electron'
-import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { access, readFile } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
-import { delimiter, dirname, join, resolve } from 'node:path'
+import { delimiter, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { IPC_EVENTS } from '../shared/ipc'
 import type {
@@ -17,6 +17,7 @@ import type {
   VerificationStepResult
 } from '../shared/operations'
 import { CommandRunner } from './command-runner'
+import { writeAtomicJson } from './atomic-json-file'
 
 interface VerificationFile {
   version: 1
@@ -140,24 +141,49 @@ function normalizeRun(value: unknown): VerificationRun | null {
   }
 }
 
+class VerificationStorageWriteError extends Error {
+  readonly closeUnknown?: true
+
+  constructor(cause: unknown) {
+    super(`验证存储保存失败，已保留现场：${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+    if ((cause as { closeUnknown?: boolean } | null)?.closeUnknown === true) this.closeUnknown = true
+  }
+}
+
+function settledFailure(error: unknown): unknown {
+  // Current command receipts supersede a prior bounded stop's unknown flag.
+  if (!(error instanceof VerificationStorageWriteError) && (error as { closeUnknown?: boolean } | null)?.closeUnknown === true) {
+    return Object.assign(new Error(error instanceof Error ? error.message : String(error)), { cause: error })
+  }
+  return error
+}
+
+export class VerificationCommandExitError extends Error {
+  readonly closeUnknown = true
+  constructor() { super('验证命令实际收尾尚未确认') }
+}
+
 export class VerificationService {
   private readonly runner: CommandRunner
   private readonly runs = new Map<string, VerificationRun>()
   private readonly policies = new Map<string, VerificationPolicy>()
   private readonly activeByCwd = new Map<string, string>()
   private readonly executions = new Map<string, { cwd: string; controller: AbortController; settled: Promise<void> }>()
+  private readonly executionResults = new Map<string, Promise<void>>()
   private readonly cancellations = new Map<string, Promise<VerificationRun>>()
-  private pendingStarts = 0
-  private commandExitUnconfirmed = false
+  private readonly pendingStarts = new Map<string, Set<Promise<void>>>()
+  private readonly unconfirmedCommandRuns = new Map<string, string>()
+  private closed = false
+  private shutdownPromise?: Promise<void>
   private mutationGuard?: () => void
 
   setMutationGuard(guard: () => void): void { this.mutationGuard = guard }
 
-  assertWorktreeDeletionIdle(_cwd: string): void {
-    // Deliberately conservative across all projects, including cancelled runs
-    // whose command/repair promise has not actually settled.
-    if (this.commandExitUnconfirmed || this.pendingStarts || this.executions.size || this.activeByCwd.size
-      || [...this.runs.values()].some((run) => run.state === 'queued' || run.state === 'running')) {
+  assertWorktreeDeletionIdle(cwd: string): void {
+    const root = resolve(cwd)
+    if ([...this.unconfirmedCommandRuns.values()].includes(root) || this.pendingStarts.get(root)?.size
+      || [...this.executions.values()].some((execution) => execution.cwd === root) || this.activeByCwd.has(root)
+      || [...this.runs.values()].some((run) => run.cwd === root && (run.state === 'queued' || run.state === 'running'))) {
       throw new Error('验证操作尚未结束，不能删除工作树')
     }
   }
@@ -191,7 +217,14 @@ export class VerificationService {
   }
 
   load(): Promise<void> {
-    return this.loading ??= this.loadStorage()
+    if (this.loading) return this.loading
+    const loading = this.loadStorage()
+    this.loading = loading
+    void loading.catch(() => {
+      // Reads were accepted before the recovery save; retain that in-memory state.
+      if (this.loading === loading) this.loading = Promise.resolve()
+    })
+    return loading
   }
 
   private async loadStorage(): Promise<void> {
@@ -222,10 +255,7 @@ export class VerificationService {
       console.error('[pion] verification storage unavailable:', this.storageError)
       return
     }
-    try { await this.persist() } catch {
-      this.storageError = new Error('验证存储保存失败，已停止后续写入并保留现场')
-      console.error('[pion] verification storage unavailable:', this.storageError)
-    }
+    await this.persist()
   }
 
   async discover(cwd: string, force = false): Promise<VerificationPlan> {
@@ -330,12 +360,16 @@ export class VerificationService {
 
   async setPolicy(cwd: string, updates: Partial<Omit<VerificationPolicy, 'cwd'>>): Promise<VerificationPolicy> {
     if (this.loading) await this.loading
+    if (this.closed) throw new Error('验证服务已关闭')
     if (this.storageError) throw this.storageError
     const root = resolve(cwd)
-    const policy = normalizePolicy(root, { ...this.getPolicy(root), ...updates })
-    this.policies.set(root, policy)
-    await this.flush()
-    return structuredClone(policy)
+    const patch = structuredClone(updates)
+    return this.queueWrite(async () => {
+      const policy = normalizePolicy(root, { ...this.getPolicy(root), ...patch })
+      await this.save(new Map(this.policies).set(root, policy))
+      this.policies.set(root, policy)
+      return structuredClone(policy)
+    })
   }
 
   listRuns(cwd?: string, sessionPath?: string): VerificationRun[] {
@@ -353,15 +387,26 @@ export class VerificationService {
     throwIfAborted(signal)
     this.mutationGuard?.()
     throwIfAborted(signal)
-    if (this.commandExitUnconfirmed) throw new Error('验证命令实际收尾尚未确认')
-    this.pendingStarts += 1
+    if (this.closed) throw new Error('验证服务已关闭')
+    const root = resolve(cwd)
+    if ([...this.unconfirmedCommandRuns.values()].includes(root)) throw new VerificationCommandExitError()
+    let finish!: () => void
+    const settled = new Promise<void>((done) => { finish = done })
+    const starts = this.pendingStarts.get(root) ?? new Set<Promise<void>>()
+    starts.add(settled)
+    this.pendingStarts.set(root, starts)
     try {
       if (this.loading) await this.loading
       throwIfAborted(signal)
+      if (this.closed) throw new Error('验证服务已关闭')
       if (this.storageError) throw this.storageError
       this.mutationGuard?.()
-      return await this.startReserved(cwd, options, signal)
-    } finally { this.pendingStarts -= 1 }
+      return await this.startReserved(root, options, signal)
+    } finally {
+      starts.delete(settled)
+      if (!starts.size) this.pendingStarts.delete(root)
+      finish()
+    }
   }
 
   private async startReserved(cwd: string, options: StartVerificationOptions, signal?: AbortSignal): Promise<VerificationRun> {
@@ -383,6 +428,8 @@ export class VerificationService {
       if ([...this.executions.values()].some((execution) => execution.cwd === root)) throw new Error('此前验证尚未实际结束')
       const plan = await this.discover(root, true)
       throwIfAborted(signal)
+      if (this.closed) throw new Error('验证服务已关闭')
+      if ([...this.unconfirmedCommandRuns.values()].includes(root)) throw new VerificationCommandExitError()
       this.mutationGuard?.()
       throwIfAborted(signal)
       const concurrentId = this.activeByCwd.get(root)
@@ -420,6 +467,8 @@ export class VerificationService {
       this.activeByCwd.set(root, run.id)
       const controller = new AbortController()
       const settled = Promise.resolve().then(() => this.execute(run.id, controller.signal)).catch(async (error: unknown) => {
+        // Preserve the first save failure; a successful second save would hide it.
+        if (error instanceof VerificationStorageWriteError) throw error
         if (run.state !== 'cancelled' && !signal?.aborted) {
           run.state = 'infrastructure-error'
           run.error = error instanceof Error ? error.message : String(error)
@@ -446,6 +495,7 @@ export class VerificationService {
         }
       })
       this.executions.set(run.id, { cwd: root, controller, settled })
+      this.executionResults.set(run.id, settled)
       void settled.catch((error) => { console.error('[pion] verification cleanup failed:', error) })
       this.trimRuns()
       this.changed(run)
@@ -460,8 +510,40 @@ export class VerificationService {
 
   /** Main-process barrier; terminal snapshots alone do not settle execution. */
   async waitForRun(runId: string): Promise<void> {
-    await this.executions.get(runId)?.settled
-    if (this.commandExitUnconfirmed) throw new Error('验证命令实际收尾尚未确认')
+    // Keep the original result after the active slot is released: a polling
+    // workflow must still receive the first save failure after settlement.
+    const [result] = await Promise.allSettled([this.executionResults.get(runId) ?? this.executions.get(runId)?.settled])
+    if (this.unconfirmedCommandRuns.has(runId)) throw new VerificationCommandExitError()
+    if (result.status === 'rejected') throw settledFailure(result.reason)
+  }
+
+  /** Close admission and retain all starts, commands, repairs and saves until settlement. */
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise
+    this.closed = true
+    this.shutdownPromise = this.shutdownReserved()
+    return this.shutdownPromise
+  }
+
+  private async shutdownReserved(): Promise<void> {
+    // Revoke existing commands now, while unrelated discovery/start promises
+    // remain joined. Closing admission prevents those discoveries from dispatching.
+    const results = await Promise.allSettled([
+      ...[...this.executions.keys()].map((id) => this.cancel(id)),
+      ...[...this.pendingStarts.values()].flatMap((starts) => [...starts])
+    ])
+    const executions = [...this.executions.entries()]
+    results.push(...await Promise.allSettled([
+      ...executions.map(([id]) => this.cancel(id)),
+      ...executions.map(([, execution]) => execution.settled),
+      ...this.cancellations.values()
+    ]))
+    // Even a rejected cancellation/save leaves the other real operations joined.
+    const [saved] = await Promise.allSettled([this.flush()])
+    if (this.unconfirmedCommandRuns.size) throw new VerificationCommandExitError()
+    const failed = results.find((result) => result.status === 'rejected')
+    if (failed?.status === 'rejected') throw settledFailure(failed.reason)
+    if (saved.status === 'rejected') throw settledFailure(saved.reason)
   }
 
   async rerun(runId: string): Promise<VerificationRun> {
@@ -487,12 +569,12 @@ export class VerificationService {
     this.executions.get(runId)?.controller.abort()
     const current = run.currentStepId
     const cancellation = Promise.resolve().then(async () => {
-      if (current) await this.runner.cancel(`${run.id}:${current}`)
-      await this.flush()
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => current ? this.runner.cancel(`${run.id}:${current}`) : false),
+        Promise.resolve().then(() => this.flush())
+      ])
+      for (const result of results) if (result.status === 'rejected') throw result.reason
       return cloneRun(run)
-    }).catch((error: unknown) => {
-      this.commandExitUnconfirmed = true
-      throw error
     }).finally(() => { this.cancellations.delete(runId) })
     this.cancellations.set(runId, cancellation)
     // Keep activeByCwd/executions until the command, persistence and repair
@@ -557,12 +639,13 @@ export class VerificationService {
         this.win?.webContents.send(LOG_CHANNEL, update)
       }).catch((error: unknown) => {
         // A custom runner rejection is not evidence of child-process close.
-        this.commandExitUnconfirmed = true
+        this.unconfirmedCommandRuns.set(run.id, run.cwd)
         throw error
       })
-      // CommandRunner also settles on 'error', potentially before 'close'.
-      // Fail closed for deletion until this service process is restarted.
-      if (result.spawnError) this.commandExitUnconfirmed = true
+      // A failed process or termination helper needs its own close receipt.
+      if ((result.spawnError || result.closeConfirmed === false) && !result.closeConfirmed && !result.spawnNotExecuted) {
+        this.unconfirmedCommandRuns.set(run.id, run.cwd)
+      }
       step.finishedAt = Date.now()
       step.durationMs = result.durationMs
       step.exitCode = result.exitCode
@@ -572,9 +655,10 @@ export class VerificationService {
         run.state = 'cancelled'
         break
       }
-      if (result.spawnError || result.timedOut) {
+      if (result.spawnError || result.timedOut || result.closeConfirmed === false && !result.spawnNotExecuted) {
         step.state = 'infrastructure-error'
-        step.error = result.spawnError ?? `超过 ${Math.round(step.timeoutMs / 1000)} 秒超时`
+        step.error = result.spawnError ?? (result.timedOut
+          ? `超过 ${Math.round(step.timeoutMs / 1000)} 秒超时` : '验证命令实际收尾尚未确认')
         run.state = 'infrastructure-error'
         run.error = step.error
         break
@@ -644,7 +728,11 @@ export class VerificationService {
     const sorted = [...this.runs.values()].sort((left, right) => left.createdAt - right.createdAt)
     while (sorted.length > MAX_RUNS) {
       const victim = sorted.shift()
-      if (victim && victim.state !== 'running' && victim.state !== 'queued' && !this.executions.has(victim.id)) this.runs.delete(victim.id)
+      if (victim && victim.state !== 'running' && victim.state !== 'queued'
+        && !this.executions.has(victim.id) && !this.unconfirmedCommandRuns.has(victim.id)) {
+        this.runs.delete(victim.id)
+        this.executionResults.delete(victim.id)
+      }
     }
   }
 
@@ -652,35 +740,44 @@ export class VerificationService {
     if (this.writeTimer) return
     this.writeTimer = setTimeout(() => {
       this.writeTimer = null
-      void this.flush()
+      void this.flush().catch((error) => {
+        console.error('[pion] verification storage unavailable:', error)
+      })
     }, 250)
   }
 
   flush(): Promise<void> {
-    if (this.writeTimer) {
-      clearTimeout(this.writeTimer)
-      this.writeTimer = null
-    }
     return this.loading ? this.loading.then(() => this.persist()) : this.persist()
   }
 
   private persist(): Promise<void> {
-    if (this.storageError) return Promise.reject(this.storageError)
-    const target = this.filePath
-    const temp = `${target}.${randomUUID()}.tmp`
+    return this.queueWrite(() => this.save())
+  }
+
+  private save(policies = this.policies): Promise<void> {
     const payload: VerificationFile = {
       version: 1,
-      policies: Object.fromEntries(this.policies),
+      policies: Object.fromEntries(policies),
       runs: [...this.runs.values()].sort((left, right) => left.createdAt - right.createdAt)
     }
-    const serialized = `${JSON.stringify(payload, null, 2)}\n`
-    const write = this.writeQueue.then(async () => {
+    return writeAtomicJson(this.filePath, payload)
+  }
+
+  private queueWrite<T>(save: () => Promise<T>): Promise<T> {
+    if (this.writeTimer) {
+      clearTimeout(this.writeTimer)
+      this.writeTimer = null
+    }
+    if (this.storageError) return Promise.reject(this.storageError)
+    const write = this.writeQueue.then(() => {
       if (this.storageError) throw this.storageError
-      await mkdir(dirname(target), { recursive: true })
-      await writeFile(temp, serialized, 'utf8')
-      await rename(temp, target)
+      return save()
+    }).catch((error: unknown) => {
+      const failure = error instanceof VerificationStorageWriteError ? error : new VerificationStorageWriteError(error)
+      if (failure.closeUnknown) this.storageError = failure
+      throw failure
     })
-    this.writeQueue = write.catch((error) => {
+    this.writeQueue = write.then(() => undefined, (error) => {
       console.error('[pion] failed to persist verification state:', error)
     })
     return write

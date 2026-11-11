@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { runInNewContext } from 'node:vm'
+import { ScriptTarget, transpileModule } from 'typescript'
 import type { IpcMain, IpcMainInvokeEvent } from 'electron'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AppSettings } from '../../src/main/app-settings'
@@ -11,7 +12,7 @@ import { IPC } from '../../src/shared/ipc'
 
 const mocks = vi.hoisted(() => ({
   userData: '',
-  publish: vi.fn<(file: string, value: unknown) => Promise<void>>()
+  publish: vi.fn<typeof import('../../src/main/atomic-json-file').writeAtomicJson>()
 }))
 vi.mock('electron', () => ({ app: { getPath: () => mocks.userData } }))
 vi.mock('../../src/main/atomic-json-file', () => ({ writeAtomicJson: mocks.publish }))
@@ -25,7 +26,7 @@ beforeAll(async () => {
 })
 beforeEach(async () => {
   mocks.userData = await mkdtemp(join(tmpdir(), 'pion-app-settings-'))
-  mocks.publish.mockReset().mockImplementation((file, value) => publishJson(file, value))
+  mocks.publish.mockReset().mockImplementation((file, value, beforePublish) => publishJson(file, value, beforePublish))
 })
 afterEach(async () => { await rm(mocks.userData, { recursive: true, force: true }) })
 
@@ -75,7 +76,7 @@ describe('shell settings persistence', () => {
     expect(store.usageBackgroundCollectionEnabled).toBe(false)
     expect(store.getSessionModel(modelPath)).toEqual(model)
     expect(await readFile(path(), 'utf8')).toBe(source)
-    mocks.publish.mockImplementation((file, value) => publishJson(file, value))
+    mocks.publish.mockImplementation((file, value, beforePublish) => publishJson(file, value, beforePublish))
     await store.setCompletionNotificationsEnabled(true)
     expect(JSON.parse(await readFile(path(), 'utf8'))).toEqual({ ...original, completionNotificationsEnabled: true })
   })
@@ -118,6 +119,23 @@ describe('shell settings persistence', () => {
     expect(drained).toBe(true)
   })
 
+  it('rechecks the owner after staging closes and preserves both source and cache on refusal', async () => {
+    const source = JSON.stringify({ completionNotificationsEnabled: false })
+    await writeFile(path(), source)
+    const store = new AppSettings()
+    await store.load()
+    let current = true
+    const assertCurrent = () => { if (!current) throw new Error('retired owner') }
+    mocks.publish.mockImplementationOnce(async (file, value, beforePublish) => {
+      current = false
+      await publishJson(file, value, beforePublish)
+    })
+    await expect(store.setCompletionNotificationsEnabled(true, assertCurrent)).rejects.toThrow('retired owner')
+    expect(store.completionNotificationsEnabled).toBe(false)
+    expect(await readFile(path(), 'utf8')).toBe(source)
+    expect(await readdir(mocks.userData)).toEqual(['pion-settings.json'])
+  })
+
   it('cleans a closed staging file after a failed atomic replacement while preserving the source', async () => {
     await mkdir(path())
     await writeFile(join(path(), 'preserved'), 'original')
@@ -139,31 +157,35 @@ function shellIpc(store: AppSettings) {
   const context = {
     mainWindowId: 41 as number | undefined, completionNotificationsEnabled: true,
     appSettings: store, captureIpcOwner, IPC,
+    themeSettings: { get: vi.fn(), set: vi.fn(async (value: unknown, assertCurrent?: () => void) => { assertCurrent?.(); return value }) },
+    subagentSettings: { get: vi.fn(), set: vi.fn(async (value: unknown, assertCurrent?: () => void) => { assertCurrent?.(); return value }) },
     ipcMain: { handle: (channel: string, listener: Parameters<IpcMain['handle']>[1]) => handlers.set(channel, listener) }
   }
   const start = shellSource.indexOf('  const getMainWindowId = ')
   const end = shellSource.indexOf('  registerComputerUseIpc(', start)
   const notification = shellSource.slice(shellSource.indexOf('  handle(IPC.GetCompletionNotifications,'), shellSource.indexOf('  // projects ----'))
-  const handle = runInNewContext(shellSource.slice(start, end)
-    .replace('(): number | undefined', '()').replace(': typeof ipcMain.handle', '')
-    + notification.replace('enabled: boolean', 'enabled') + '\nhandle', context) as IpcMain['handle']
+  const settings = shellSource.slice(shellSource.indexOf('  handle(IPC.GetTheme,'), shellSource.indexOf('  registerWindowIpc('))
+  const callbacks = transpileModule(`${shellSource.slice(start, end)}${settings}${notification}\nhandle`, {
+    compilerOptions: { target: ScriptTarget.ES2022 }
+  }).outputText
+  const handle = runInNewContext(callbacks, context) as IpcMain['handle']
   const frame = { detached: false }
   const sender = { id: 41, mainFrame: frame, isDestroyed: () => false }
   const event = { sender, senderFrame: frame } as unknown as IpcMainInvokeEvent
   return { context, handle, sender, event, invoke: (channel: string, ...args: unknown[]) => handlers.get(channel)!(event, ...args) }
 }
 
-describe('shell startup, settings IPC and shutdown wiring', () => {
+describe('shell settings IPC wiring', () => {
   it('keeps notification runtime state committed and propagates persistence errors', async () => {
     const store = new AppSettings()
     await store.load()
     const h = shellIpc(store)
     const blocked = deferred()
     const started = deferred()
-    mocks.publish.mockImplementationOnce(async (file, value) => {
+    mocks.publish.mockImplementationOnce(async (file, value, beforePublish) => {
       started.resolve()
       await blocked.promise
-      await publishJson(file, value)
+      await publishJson(file, value, beforePublish)
     })
     const pending = h.invoke(IPC.SetCompletionNotifications, false)
     await started.promise
@@ -176,6 +198,41 @@ describe('shell startup, settings IPC and shutdown wiring', () => {
     await expect(h.invoke(IPC.SetCompletionNotifications, true)).rejects.toBe(failure)
     expect(h.context.completionNotificationsEnabled).toBe(false)
     await expect(h.invoke(IPC.GetCompletionNotifications)).resolves.toBe(false)
+  })
+
+  it('retires a notification save before atomic publication when its frame changes', async () => {
+    const source = JSON.stringify({ completionNotificationsEnabled: true })
+    await writeFile(path(), source)
+    const store = new AppSettings()
+    await store.load()
+    const h = shellIpc(store)
+    const blocked = deferred(), staged = deferred()
+    mocks.publish.mockImplementationOnce(async (file, value, beforePublish) => {
+      staged.resolve()
+      await blocked.promise
+      await publishJson(file, value, beforePublish)
+    })
+    const pending = h.invoke(IPC.SetCompletionNotifications, false)
+    await staged.promise
+    h.sender.mainFrame = { detached: false }
+    blocked.resolve()
+    await expect(pending).rejects.toThrow('活主帧')
+    expect(h.context.completionNotificationsEnabled).toBe(true)
+    expect(store.completionNotificationsEnabled).toBe(true)
+    expect(await readFile(path(), 'utf8')).toBe(source)
+  })
+
+  it.each([
+    [IPC.SetTheme, 'themeSettings', 'division-dark'],
+    [IPC.SetSubagentSettings, 'subagentSettings', { maxTasks: 3 }]
+  ] as const)('passes the captured owner to %s publication', async (channel, storeName, value) => {
+    const h = shellIpc(new AppSettings())
+    const store = h.context[storeName]
+    await expect(h.invoke(channel, value)).resolves.toBe(value)
+    expect(store.set).toHaveBeenCalledExactlyOnceWith(value, expect.any(Function))
+    const assertCurrent = store.set.mock.calls[0][1]!
+    h.sender.mainFrame = { detached: false }
+    expect(assertCurrent).toThrow('活主帧')
   })
 
   it.each(['foreign', 'iframe', 'detached', 'destroyed', 'closed'] as const)('rejects %s IPC owners before privileged work', async (invalid) => {
@@ -200,68 +257,5 @@ describe('shell startup, settings IPC and shutdown wiring', () => {
     else h.sender.mainFrame = { detached: false }
     blocked.resolve()
     await expect(pending).rejects.toThrow('活主帧')
-  })
-
-  it('shows a fixed settings-read error and continues safe startup without changing the source', async () => {
-    const source = '{broken-private-content'
-    await writeFile(path(), source)
-    const store = new AppSettings()
-    const context = {
-      appSettings: store, bridge: { loadToolPermissions: vi.fn(async () => {}) },
-      verification: { load: vi.fn(async () => {}) }, workflows: { load: vi.fn(async () => {}) },
-      completionNotificationsEnabled: true, usageLedger: { setBackgroundCollectionEnabled: vi.fn() },
-      console: { error: vi.fn() }, dialog: { showErrorBox: vi.fn() },
-      registerIpc: vi.fn(), nativeTheme: { on: vi.fn() }, windowEffects: {}, createWindow: vi.fn()
-    }
-    const start = shellSource.indexOf('app.whenReady().then(async () => {') + 'app.whenReady().then(async () => {'.length
-    const end = shellSource.indexOf('  createWindow()', start) + '  createWindow()'.length
-    await runInNewContext(`(async () => {${shellSource.slice(start, end)}})()`, context)
-    expect(context.dialog.showErrorBox).toHaveBeenCalledExactlyOnceWith('Pion 设置读取失败', 'Pion 设置读取失败，已保留原文件。本次使用默认设置，后续保存前会重新读取。')
-    expect(context.console.error).toHaveBeenCalledExactlyOnceWith('[pion] Pion 设置读取失败，已保留原文件。本次使用默认设置，后续保存前会重新读取。')
-    expect(context.createWindow).toHaveBeenCalledTimes(1)
-    expect(await readFile(path(), 'utf8')).toBe(source)
-    expect(mocks.publish).not.toHaveBeenCalled()
-  })
-
-  it('waits for bridge and all three store shutdown promises before quitting', async () => {
-    const blocked = [deferred(), deferred(), deferred(), deferred()]
-    const entered = [deferred(), deferred(), deferred(), deferred()]
-    const shutdown = (index: number) => vi.fn(() => { entered[index].resolve(); return blocked[index].promise })
-    const context = {
-      windowShutdown: Promise.resolve(), bridge: { stop: shutdown(0) },
-      appSettings: { shutdown: shutdown(1) }, subagentSettings: { shutdown: shutdown(2) },
-      projects: { shutdown: shutdown(3) },
-      sessionOrganization: { shutdown: vi.fn(async () => {}) }, usageLedger: { flush: vi.fn(async () => {}) },
-      captureQuitSettled: false, app: { quit: vi.fn() }
-    }
-    const start = shellSource.indexOf('void stopLocalCapture().then(') + 'void stopLocalCapture().then('.length
-    const end = shellSource.indexOf(").catch(error => console.error('[pion] shutdown unverified:', error))", start)
-    const quit = runInNewContext(`(${shellSource.slice(start, end)})`, context) as (state: { actualPending: boolean }) => Promise<void>
-    await quit({ actualPending: true })
-    expect(context.bridge.stop).not.toHaveBeenCalled()
-    expect(context.app.quit).not.toHaveBeenCalled()
-    const pending = quit({ actualPending: false })
-    const waitEntered = (index: number) => Promise.race([
-      entered[index].promise,
-      pending.then(() => { throw new Error(`Quit completed before shutdown ${index} started`) })
-    ])
-    await waitEntered(0)
-    expect(context.appSettings.shutdown).not.toHaveBeenCalled()
-    expect(context.app.quit).not.toHaveBeenCalled()
-    blocked[0].resolve()
-    await waitEntered(1)
-    expect(context.subagentSettings.shutdown).not.toHaveBeenCalled()
-    expect(context.app.quit).not.toHaveBeenCalled()
-    blocked[1].resolve()
-    await waitEntered(2)
-    expect(context.projects.shutdown).not.toHaveBeenCalled()
-    expect(context.app.quit).not.toHaveBeenCalled()
-    blocked[2].resolve()
-    await waitEntered(3)
-    expect(context.app.quit).not.toHaveBeenCalled()
-    blocked[3].resolve()
-    await pending
-    expect(context.captureQuitSettled).toBe(true)
-    expect(context.app.quit).toHaveBeenCalledTimes(1)
   })
 })

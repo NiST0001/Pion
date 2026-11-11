@@ -68,11 +68,18 @@ describe('RPC process exit and stdio barrier', () => {
     expect(client.stop).not.toHaveBeenCalled()
   })
 
-  it('requires positive never-started state for a null SDK process handle', async () => {
+  it('keeps a missing started handle unknown when the same client later claims never-started', async () => {
     const { client, stop } = rpcClient()
     client.process = null
     await expect(stop()).rejects.toThrow(/handle missing after start/)
     expect(client.stop).not.toHaveBeenCalled()
+    await expect(stop(false)).rejects.toThrow(/handle missing after start/)
+    expect(client.stop).not.toHaveBeenCalled()
+  })
+
+  it('stops a separately confirmed never-started client with a null process handle', async () => {
+    const { client, stop } = rpcClient()
+    client.process = null
     await expect(stop(false)).resolves.toBeUndefined()
     expect(client.stop).toHaveBeenCalledTimes(1)
   })

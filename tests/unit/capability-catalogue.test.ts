@@ -148,9 +148,10 @@ it.each([
   expect(JSON.parse(await readFile(join(agentDir, 'settings.json'), 'utf8'))).toEqual({ defaultTools })
 })
 
-it.each(['r?ad', 'r[ea]*'])('fails closed with an explicit notice for unsupported defaultTools selection %s', async (entry) => {
+it.each(['r?ad', 'r[ea]*'])('keeps SDK literal metacharacters from disrupting the remaining defaultTools selection %s', async (entry) => {
   await json(join(agentDir, 'settings.json'), { defaultTools: ['*', entry] })
-  await expect(scan()).rejects.toThrow('仅支持精确名称和 *')
+  const result = await scan()
+  for (const name of PI_CORE_TOOL_NAMES) expect(result.items.find((item) => item.id === `tool:${name}`)?.enabled).toBe(true)
 })
 
 it('discovers trusted .agents ancestors only through the repository boundary; desired on cannot grant trust', async () => {
@@ -250,7 +251,7 @@ it('keeps SDK-disabled metadata reopenable and returns only preference-selected 
   expect(JSON.parse(await readFile(join(agentDir, 'settings.json'), 'utf8'))).toEqual(settings)
 })
 
-it('never widens a package manifest, even with object-form filters or a standard-on preference', async () => {
+it('retains SDK manifest exclusions and its object-form convention fallback under desired-on preferences', async () => {
   const pkg = join(root, 'package')
   const allowed = await skill(join(pkg, 'skills', 'allowed', 'SKILL.md'), 'allowed-package-skill')
   await skill(join(pkg, 'skills', 'private', 'SKILL.md'), 'manifest-excluded')
@@ -259,6 +260,10 @@ it('never widens a package manifest, even with object-form filters or a standard
   await file(join(pkg, 'prompts', 'hidden.md'), 'not declared by manifest')
   await json(join(pkg, 'themes', 'hidden.json'), { name: 'not-declared' })
   await json(join(pkg, 'package.json'), { pi: { extensions: ['extensions/good.ts'], skills: ['skills/**/SKILL.md', '!skills/private/**'], prompts: [] } })
+  await json(join(agentDir, 'settings.json'), { packages: [pkg] })
+  const manifest = await scan()
+  expect(manifest.promptPaths).toEqual([])
+  expect(manifest.themePaths).toEqual([])
   await json(join(agentDir, 'settings.json'), { packages: [{ source: pkg, extensions: [], skills: ['skills/**'], prompts: ['prompts/*.md'], themes: ['themes/*.json'] }] })
   const inherited = await scan()
   expect(inherited.items.find((item) => item.kind === 'extension' && item.name === 'good.ts')?.enabled).toBe(false)
@@ -266,8 +271,30 @@ it('never widens a package manifest, even with object-form filters or a standard
   expect(standard.skillPaths).toEqual([allowed])
   expect(standard.items.some((item) => item.name === 'manifest-excluded' || item.name === 'undeclared.ts')).toBe(false)
   expect(standard.extensionPaths).toContain(join(pkg, 'extensions', 'good.ts'))
-  expect(standard.promptPaths).toEqual([])
-  expect(standard.themePaths).toEqual([])
+  expect(standard.promptPaths).toEqual([join(pkg, 'prompts', 'hidden.md')])
+  expect(standard.themePaths).toEqual([join(pkg, 'themes', 'hidden.json')])
+})
+
+it('limits public catalogue rows without truncating the full preference-filtered extension and Skill paths', async () => {
+  const sdk = await import('@earendil-works/pi-coding-agent')
+  const selectedSkill = await skill(join(root, 'large-catalogue-skill', 'SKILL.md'), 'after-display-limit')
+  const metadata = { source: 'fixture', scope: 'user' as const, origin: 'top-level' as const }
+  const extensions = Array.from({ length: 4100 }, (_, index) => ({
+    path: join(root, `fixture_${index}.ts`), enabled: true, metadata
+  }))
+  vi.spyOn(sdk.DefaultPackageManager.prototype, 'resolve').mockResolvedValue({
+    extensions, skills: [{ path: selectedSkill, enabled: true, metadata }], prompts: [], themes: []
+  })
+  const disabled = extensions[4098].path
+  const result = await scan(prefs({ overrides: {
+    [capabilityResourceId('extension', metadata.source, metadata.scope, disabled)]: false
+  } }))
+  expect(result.items).toHaveLength(4096)
+  expect(result.extensionPaths).toHaveLength(4099)
+  expect(result.extensionPaths).toContain(extensions[4099].path)
+  expect(result.extensionPaths).not.toContain(disabled)
+  expect(result.skillPaths).toEqual([selectedSkill])
+  expect(result.notices.join(' ')).toContain('资源加载仍按完整集合筛选')
 })
 
 it('handles installed npm tags locally and leaves missing/mismatched packages unknown without legacy probes or repairs', async () => {

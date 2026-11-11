@@ -1,6 +1,5 @@
-import { randomUUID } from 'node:crypto'
-import { mkdir, open, rename, unlink } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { open } from 'node:fs/promises'
+import { writeAtomicJson } from './atomic-json-file'
 
 const MAX_FILE_BYTES = 64 * 1024
 const MAX_PROVIDERS = 256
@@ -23,8 +22,10 @@ function parseDisabledProviders(value: unknown): Set<string> {
 
 /** Pion-owned display preferences only: never modifies SDK models, credentials or sessions. */
 export class ProviderVisibilityStore {
-  private loadPromise: Promise<void> | undefined
-  private writes: Promise<void> = Promise.resolve()
+  private loaded = false
+  private loadFailure: { error: unknown } | undefined
+  private operations: Promise<void> = Promise.resolve()
+  private closed = false
   private disabled = new Set<string>()
   private revision = 0
 
@@ -33,11 +34,22 @@ export class ProviderVisibilityStore {
   getRevision(): number { return this.revision }
   get disabledProviderIds(): readonly string[] { return [...this.disabled].sort() }
 
-  // Deliberately return the actual operation promise, including after failure: a
-  // failed read must not let a later write replace an unreadable configuration.
+  /** An explicit read may retry a settled failure; writes remain blocked meanwhile. */
   load(): Promise<void> {
-    this.loadPromise ??= this.readSettings()
-    return this.loadPromise
+    return this.enqueue(() => this.ensureLoaded(true))
+  }
+
+  private async ensureLoaded(retry = false): Promise<void> {
+    if (this.loaded) return
+    if (this.loadFailure && !retry) throw this.loadFailure.error
+    try {
+      await this.readSettings()
+      this.loaded = true
+      this.loadFailure = undefined
+    } catch (error) {
+      this.loadFailure = { error }
+      throw error
+    }
   }
 
   private async readSettings(): Promise<void> {
@@ -71,50 +83,48 @@ export class ProviderVisibilityStore {
     this.revision++
   }
 
-  async setEnabled(providerId: string, enabled: boolean): Promise<void> {
+  async setEnabled(providerId: string, enabled: boolean, assertCurrent: () => void = () => undefined): Promise<void> {
     if (!validProviderId(providerId) || typeof enabled !== 'boolean') throw new Error('提供商显示参数无效')
-    const write = this.writes.catch(() => undefined).then(async () => {
-      await this.load()
+    await this.enqueue(async () => {
+      assertCurrent()
+      await this.ensureLoaded()
+      assertCurrent()
       if (this.disabled.has(providerId) === !enabled) return
       const next = new Set(this.disabled)
       if (enabled) next.delete(providerId)
       else next.add(providerId)
       if (next.size > MAX_PROVIDERS) throw new Error('隐藏的提供商数量超过上限')
-      await this.save(next)
+      await writeAtomicJson(this.filePath, { version: 1, disabledProviderIds: [...next].sort() }, assertCurrent)
       this.disabled = next
       this.revision++
+      assertCurrent()
     })
-    this.writes = write
-    await write
-  }
-
-  private async save(disabled: Set<string>): Promise<void> {
-    const temporary = `${this.filePath}.${randomUUID()}.tmp`
-    await mkdir(dirname(this.filePath), { recursive: true })
-    // Only clean up a file after our exclusive open succeeded.
-    const handle = await open(temporary, 'wx', 0o600)
-    let closed = false
-    try {
-      await handle.writeFile(`${JSON.stringify({ version: 1, disabledProviderIds: [...disabled].sort() })}\n`, 'utf8')
-      await handle.sync()
-      closed = true
-      await handle.close()
-      await rename(temporary, this.filePath)
-    } finally {
-      if (!closed) await handle.close().catch(() => undefined)
-      await unlink(temporary).catch(() => undefined)
-    }
   }
 
   async filterModels<T extends { provider: string }>(models: T[]): Promise<T[]> {
-    await this.load()
-    await this.writes.catch(() => undefined)
-    return models.filter((model) => !this.disabled.has(model.provider))
+    return this.enqueue(async () => {
+      await this.ensureLoaded(true)
+      return models.filter((model) => !this.disabled.has(model.provider))
+    })
   }
 
   async projectProviders<T extends { id: string }>(providers: T[]): Promise<Array<T & { enabled: boolean }>> {
-    await this.load()
-    await this.writes.catch(() => undefined)
-    return providers.map((provider) => ({ ...provider, enabled: !this.disabled.has(provider.id) }))
+    return this.enqueue(async () => {
+      await this.ensureLoaded(true)
+      return providers.map((provider) => ({ ...provider, enabled: !this.disabled.has(provider.id) }))
+    })
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.closed) return Promise.reject(new Error('Provider visibility settings are closed'))
+    const result = this.operations.then(operation)
+    this.operations = result.then(() => undefined, () => undefined)
+    return result
+  }
+
+  /** Close admission and wait for actual reads, writes and staging cleanup. */
+  shutdown(): Promise<void> {
+    this.closed = true
+    return this.operations
   }
 }

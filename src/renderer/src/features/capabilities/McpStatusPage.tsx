@@ -4,11 +4,9 @@ import { RefreshCw } from 'lucide-react'
 import {
   MCP_STATUS_INTERVAL_MS,
   MCP_STATUS_QUERY_DEADLINE_MS,
-  MCP_STATUS_STALE_MS,
-  projectMcpStatusSnapshot
+  MCP_STATUS_STALE_MS
 } from '../../../../shared/mcp'
 import type { McpExposure, McpServerState, McpStatusSnapshot, McpStatusTarget } from '../../../../shared/mcp'
-import type { PionApi } from '../../../../shared/pion-api'
 
 export interface McpStatusPageProps {
   target?: McpStatusTarget
@@ -16,17 +14,13 @@ export interface McpStatusPageProps {
   selectionRef?: { readonly current: { generation: number } }
 }
 
-type ReadError = 'failed' | 'invalid' | 'timeout' | 'busy' | 'unknown'
+type ReadError = 'failed' | 'timeout' | 'unknown'
 interface StatusView {
   token: string
   snapshot?: McpStatusSnapshot
   error?: ReadError
   loading: boolean
 }
-
-// A timeout/unmount only ends this page's wait. Keep the actual IPC slot until
-// settlement, even if the user closes/reopens the modal or changes its tab.
-const actualReads = new WeakMap<PionApi, object>()
 
 const SERVER_STATES: Record<McpServerState, { label: string; tone: string }> = {
   connecting: { label: '连接中', tone: 'waiting' },
@@ -64,6 +58,7 @@ export function McpStatusPage({ target, scope, selectionRef }: McpStatusPageProp
     let active = false
     let epoch = 0
     let requestId = 0
+    let reading = false
     let pushVersion = 0
     let currentSnapshot: McpStatusSnapshot | undefined
     const supersededBackends = new Set<string>()
@@ -106,15 +101,9 @@ export function McpStatusPage({ target, scope, selectionRef }: McpStatusPageProp
       }, Math.ceil(remaining))
       return snapshot
     }
-    const accept = (value: unknown, source: 'read' | 'push'): void => {
+    // Main normalizes private notices once; IPC carries that typed snapshot.
+    const accept = (snapshot: McpStatusSnapshot, source: 'read' | 'push'): void => {
       if (!isCurrent()) return
-      let snapshot = projectMcpStatusSnapshot(value)
-      if (!snapshot) {
-        if (source === 'push') ++pushVersion
-        currentSnapshot = undefined
-        publish(undefined, 'invalid')
-        return
-      }
       const lostOwner = snapshot.phase === 'unavailable' && snapshot.servers.length === 0
         && ['no-backend', 'backend-stopped', 'scope-mismatch'].includes(snapshot.reason ?? '')
       const wrongScope = (capturedTarget.cwd !== undefined && snapshot.cwd !== capturedTarget.cwd)
@@ -146,31 +135,21 @@ export function McpStatusPage({ target, scope, selectionRef }: McpStatusPageProp
       publish(snapshot)
     }
     const read = (explicit: boolean): void => {
-      if (!isCurrent()) return
+      if (!isCurrent() || reading) return
       if (!api) { publish(undefined, 'failed'); return }
-      if (actualReads.has(api)) {
-        if (!currentSnapshot) setView((previous) => isCurrent()
-          ? { token, loading: false, error: previous.token === token ? previous.error ?? 'busy' : 'busy' }
-          : previous)
-        return
-      }
+      reading = true
       const id = ++requestId
       const readEpoch = epoch
       const readPushVersion = pushVersion
-      const readRevision = currentSnapshot?.revision
-      const readBackendId = currentSnapshot?.backendId
       let stoppedWaiting = false
       const canPublish = (): boolean => !stoppedWaiting && isCurrent(readEpoch) && id === requestId
         && pushVersion === readPushVersion
-        && currentSnapshot?.revision === readRevision && currentSnapshot?.backendId === readBackendId
-      const slot = {}
-      actualReads.set(api, slot)
       publish(currentSnapshot, undefined, explicit || !currentSnapshot)
       let pending: Promise<McpStatusSnapshot>
       try {
         pending = api.getMcpStatus(capturedTarget)
       } catch {
-        if (actualReads.get(api) === slot) actualReads.delete(api)
+        reading = false
         if (canPublish()) { currentSnapshot = undefined; publish(undefined, 'failed') }
         return
       }
@@ -185,20 +164,19 @@ export function McpStatusPage({ target, scope, selectionRef }: McpStatusPageProp
       }).catch(() => {
         if (canPublish()) { currentSnapshot = undefined; publish(undefined, 'failed') }
       }).finally(() => {
-        // Release actual work regardless of UI ownership, but never let a late
-        // finally update a new scope, selection generation, or newer push.
-        if (actualReads.get(api) === slot) actualReads.delete(api)
+        // This is a synchronous main-memory read, not an SDK/resource lease.
+        // Retired pages/visibility epochs have independent in-flight state.
+        if (id === requestId) reading = false
         window.clearTimeout(deadline)
         if (cancelWait === stopWait) cancelWait = undefined
-        if (!stoppedWaiting && isCurrent(readEpoch) && id === requestId && pushVersion === readPushVersion) {
-          setView((previous) => previous.token === token ? { ...previous, loading: false } : previous)
-        }
+        if (canPublish()) setView((previous) => previous.token === token ? { ...previous, loading: false } : previous)
       })
     }
     const deactivate = (): void => {
       active = false
       ++epoch
       ++requestId
+      reading = false
       cancelWait?.()
       cancelWait = undefined
       if (poll !== undefined) window.clearInterval(poll)
@@ -287,9 +265,7 @@ function statusSummary(view: StatusView): { title: string; description: string; 
   if (view.error) {
     const errors: Record<ReadError, { title: string; description: string; tone: string }> = {
       failed: { title: '读取状态失败', description: '连接状态未知，请点击刷新重试。', tone: 'danger' },
-      invalid: { title: '状态未知', description: '收到的状态格式无效，未显示服务器。', tone: 'waiting' },
       timeout: { title: '读取状态超时', description: '已停止等待，原读取可能仍未结束；刷新不会重连。', tone: 'waiting' },
-      busy: { title: '等待读取结束', description: '上一读取尚未结束，暂不发送重复读取。', tone: 'waiting' },
       unknown: { title: '状态未知', description: '当前会话没有匹配的状态，请刷新重试。', tone: 'waiting' }
     }
     return errors[view.error]

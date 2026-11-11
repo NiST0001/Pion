@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { IMAGE_GENERATION_TOOL_NAME } from '../../shared/image-generation'
+import { PLAN_READ_ONLY_BUILTIN_TOOL_NAMES } from '../../shared/capabilities'
 
 let extensionReady = false
 
@@ -28,7 +29,7 @@ export async function ensureNativePlanModeExtension(): Promise<string> {
 /** Exported for source-level regression tests without loading Electron. */
 export function nativePlanModeExtensionSource(): string {
   return String.raw`const STATE_ENTRY_TYPE = "plan-mode-state";
-const READ_ONLY_TOOL_NAMES = ["read", "grep", "find", "ls"];
+const READ_ONLY_TOOL_NAMES = ${JSON.stringify(PLAN_READ_ONLY_BUILTIN_TOOL_NAMES)};
 const DEFAULT_NORMAL_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls", "powershell", "pion_task", "pion_ask_user", ${JSON.stringify(IMAGE_GENERATION_TOOL_NAME)}];
 const PLAN_COMMANDS = [
   { value: "start", label: "start", description: "进入只读计划模式" },

@@ -409,6 +409,7 @@ struct State {
     xdg: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
     pointer_manager: Option<zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1>,
     keyboard_manager: Option<zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1>,
+    manager_globals: [Option<u32>; 3],
     topology: u64,
     invalid: bool,
 }
@@ -424,6 +425,16 @@ impl State {
                 u64::MAX
             }
         };
+    }
+    fn global_removed(&mut self, name: u32) {
+        if !self.outputs.contains_key(&name) && !self.seats.contains_key(&name)
+            && !self.manager_globals.contains(&Some(name)) { return; }
+        self.changed();
+        self.invalid = true;
+        self.outputs.remove(&name);
+        self.seats.remove(&name);
+        // Retain manager proxies for owned-input cleanup; their removal never
+        // authorizes a replacement device or a new frame on this worker.
     }
     fn selected(&self, g: DisplayGeometry) -> Result<u32> {
         if self.invalid
@@ -458,6 +469,13 @@ fn unique_geometry(outputs: &BTreeMap<u32, Output>, g: DisplayGeometry) -> Resul
     }
     Ok(found[0])
 }
+fn minimum_global_version(interface: &str) -> Option<u32> {
+    match interface {
+        "wl_output" | "zwlr_virtual_pointer_manager_v1" => Some(2),
+        "wl_seat" | "zxdg_output_manager_v1" | "zwp_virtual_keyboard_manager_v1" => Some(1),
+        _ => None,
+    }
+}
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
     fn event(
         state: &mut Self,
@@ -473,7 +491,11 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 interface,
                 version,
             } => {
+                let Some(minimum) = minimum_global_version(&interface) else { return; };
                 state.changed();
+                // A relevant but unsupported global is still a topology change:
+                // its output/seat geometry must never silently disappear.
+                if version < minimum { state.invalid = true; }
                 if state.invalid {
                     return;
                 }
@@ -508,28 +530,26 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                             state.invalid = true;
                         }
                         state.xdg = Some(registry.bind(name, version.min(3), qh, ()));
+                        state.manager_globals[0] = Some(name);
                     }
                     "zwlr_virtual_pointer_manager_v1" if version >= 2 => {
                         if state.pointer_manager.is_some() {
                             state.invalid = true;
                         }
                         state.pointer_manager = Some(registry.bind(name, 2, qh, ()));
+                        state.manager_globals[1] = Some(name);
                     }
                     "zwp_virtual_keyboard_manager_v1" => {
                         if state.keyboard_manager.is_some() {
                             state.invalid = true;
                         }
                         state.keyboard_manager = Some(registry.bind(name, 1, qh, ()));
+                        state.manager_globals[2] = Some(name);
                     }
                     _ => (),
                 }
             }
-            wl_registry::Event::GlobalRemove { name } => {
-                state.changed();
-                state.invalid = true;
-                state.outputs.remove(&name);
-                state.seats.remove(&name);
-            }
+            wl_registry::Event::GlobalRemove { name } => state.global_removed(name),
             _ => (),
         }
     }
@@ -552,6 +572,8 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
                     }
                 }
                 wl_output::Event::Geometry { transform, .. } => {
+                    // Geometry also carries position and physical dimensions;
+                    // unchanged transform alone cannot establish a no-op event.
                     output.normal = Some(transform == WEnum::Value(wl_output::Transform::Normal));
                     output.wl_done = false;
                     state.changed();
@@ -576,10 +598,12 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, u32> for State {
         if let Some(output) = state.outputs.get_mut(id) {
             match event {
                 zxdg_output_v1::Event::LogicalPosition { x, y } => {
+                    if output.position == Some((x, y)) { return; }
                     output.position = Some((x, y));
                     output.logical_done = false;
                 }
                 zxdg_output_v1::Event::LogicalSize { width, height } => {
+                    if output.size == Some((width, height)) { return; }
                     output.size = Some((width, height));
                     output.logical_done = false;
                 }
@@ -589,7 +613,7 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, u32> for State {
                     }
                     return;
                 }
-                _ => (),
+                _ => return,
             }
             state.changed();
         }
@@ -621,11 +645,14 @@ impl Dispatch<wl_seat::WlSeat, u32> for State {
     ) {
         if let wl_seat::Event::Capabilities { capabilities } = event {
             if let Some(seat) = state.seats.get_mut(id) {
-                seat.capabilities = match capabilities {
+                let capabilities = match capabilities {
                     WEnum::Value(caps) => Some(caps),
                     _ => None,
                 };
-                state.changed();
+                if seat.capabilities != capabilities {
+                    seat.capabilities = capabilities;
+                    state.changed();
+                }
             }
         }
     }
@@ -1267,7 +1294,9 @@ mod tests {
     #[derive(Default)]
     struct PeerControl {
         stall: AtomicBool,
-        remove: AtomicBool,
+        remove: std::sync::atomic::AtomicU32,
+        unrelated: AtomicBool,
+        geometry: std::sync::atomic::AtomicU32,
     }
     type Trace = Vec<(String, u16, Vec<u32>)>;
     fn wire_string(value: &str) -> Vec<u8> {
@@ -1436,8 +1465,45 @@ mod tests {
                         if controls.stall.load(Ordering::SeqCst) {
                             continue;
                         }
-                        if controls.remove.swap(false, Ordering::SeqCst) {
-                            event(&mut peer, registry, 1, &words(&[10]));
+                        if controls.unrelated.swap(false, Ordering::SeqCst) {
+                            let mut payload = words(&[60]);
+                            payload.extend(wire_string("wl_data_device_manager"));
+                            payload.extend(words(&[3]));
+                            event(&mut peer, registry, 0, &payload);
+                            event(&mut peer, registry, 1, &words(&[60]));
+                            let logical = *objects.iter().find(|(_, i)| i.as_str() == "zxdg_output_v1").unwrap().0;
+                            event(&mut peer, logical, 0, &words(&[(-1920i32) as u32, 0]));
+                            event(&mut peer, logical, 1, &words(&[1920, 1080]));
+                            let seat = *objects.iter().find(|(_, i)| i.as_str() == "wl_seat").unwrap().0;
+                            event(&mut peer, seat, 0, &words(&[config.capabilities]));
+                        }
+                        let change = controls.geometry.swap(0, Ordering::SeqCst);
+                        if change != 0 {
+                            let output = *objects.iter().find(|(_, i)| i.as_str() == "wl_output").unwrap().0;
+                            let logical = *objects.iter().find(|(_, i)| i.as_str() == "zxdg_output_v1").unwrap().0;
+                            match change {
+                                1 => event(&mut peer, logical, 0, &words(&[(-1919i32) as u32, 0])),
+                                2 => event(&mut peer, logical, 1, &words(&[1919, 1080])),
+                                3 => {
+                                    let mut payload = words(&[1, 0, 500, 300, 0]);
+                                    payload.extend(wire_string("fake"));
+                                    payload.extend(wire_string("bounded-peer"));
+                                    payload.extend(words(&[0]));
+                                    event(&mut peer, output, 0, &payload);
+                                }
+                                4 => event(&mut peer, output, 3, &words(&[2])),
+                                _ => {
+                                    let mut payload = words(&[11]);
+                                    payload.extend(wire_string("wl_output"));
+                                    payload.extend(words(&[1]));
+                                    event(&mut peer, registry, 0, &payload);
+                                }
+                            }
+                            event(&mut peer, output, 2, &[]);
+                        }
+                        let removed = controls.remove.swap(0, Ordering::SeqCst);
+                        if removed != 0 {
+                            event(&mut peer, registry, 1, &words(&[removed]));
                         }
                         event(&mut peer, args[0], 0, &words(&[1]));
                         event(&mut peer, 1, 1, &words(&[args[0]]));
@@ -1674,27 +1740,47 @@ mod tests {
     }
     #[tokio::test]
     async fn fake_wire_removal_invalidates_frame_without_injection() {
+        for removed in [10, 20, 30, 40, 50] {
+            let (client, control, peer) = fake_peer(PeerConfig::default());
+            let (_cancel, rx) = watch::channel(false);
+            let mut input = open_fake(client, rx).await.unwrap();
+            let topology = input.topology().await.unwrap();
+            let frame = input.bind_frame(topology, 1920, 1080).await.unwrap();
+            control.remove.store(removed, Ordering::SeqCst);
+            assert!(input.act(frame, Action::Key { keys: NamedKey::Enter }).await.is_err());
+            input.stop().await.unwrap();
+            assert!(!peer.join().unwrap().iter()
+                .any(|(i, op, _)| i == "zwp_virtual_keyboard_v1" && *op == 1));
+        }
+    }
+    #[tokio::test]
+    async fn fake_wire_geometry_scale_and_unobservable_output_changes_reject_the_bound_frame() {
+        for change in 1..=5 {
+            let (client, control, peer) = fake_peer(PeerConfig::default());
+            let (_cancel, rx) = watch::channel(false);
+            let mut input = open_fake(client, rx).await.unwrap();
+            let topology = input.topology().await.unwrap();
+            let frame = input.bind_frame(topology, 1920, 1080).await.unwrap();
+            control.geometry.store(change, Ordering::SeqCst);
+            assert!(input.act(frame, Action::Key { keys: NamedKey::Enter }).await.is_err());
+            input.stop().await.unwrap();
+            assert!(!peer.join().unwrap().iter()
+                .any(|(i, op, _)| i == "zwp_virtual_keyboard_v1" && *op == 1));
+        }
+    }
+    #[tokio::test]
+    async fn fake_wire_unrelated_globals_and_repeated_geometry_preserve_the_bound_frame() {
         let (client, control, peer) = fake_peer(PeerConfig::default());
         let (_cancel, rx) = watch::channel(false);
         let mut input = open_fake(client, rx).await.unwrap();
         let topology = input.topology().await.unwrap();
         let frame = input.bind_frame(topology, 1920, 1080).await.unwrap();
-        control.remove.store(true, Ordering::SeqCst);
-        assert!(input
-            .act(
-                frame,
-                Action::Key {
-                    keys: NamedKey::Enter
-                }
-            )
-            .await
-            .is_err());
+        control.unrelated.store(true, Ordering::SeqCst);
+        assert_eq!(input.topology().await.unwrap(), topology);
+        input.act(frame, Action::Key { keys: NamedKey::Enter }).await.unwrap();
         input.stop().await.unwrap();
-        assert!(!peer
-            .join()
-            .unwrap()
-            .iter()
-            .any(|(i, op, _)| i == "zwp_virtual_keyboard_v1" && *op == 1));
+        assert_eq!(peer.join().unwrap().iter()
+            .filter(|(i, op, _)| i == "zwp_virtual_keyboard_v1" && *op == 1).count(), 2);
     }
     #[tokio::test]
     async fn fake_wire_failed_press_ack_never_claims_cleanup() {

@@ -69,8 +69,8 @@ it('strips all preload/session overrides and locks security flags without any gu
   const h = setup()
   const { event, prefs, params } = h.attach()
   expect(event.preventDefault).not.toHaveBeenCalled()
-  expect(prefs).toMatchObject({ partition: BROWSER_PARTITION, nodeIntegration: false, nodeIntegrationInSubFrames: false, nodeIntegrationInWorker: false, contextIsolation: true, sandbox: true, webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, plugins: false, experimentalFeatures: false })
-  for (const key of ['preload', 'preloadURL', 'session', 'enableBlinkFeatures']) expect(prefs).not.toHaveProperty(key)
+  expect(prefs).toMatchObject({ partition: BROWSER_PARTITION, nodeIntegration: false, nodeIntegrationInSubFrames: false, nodeIntegrationInWorker: false, contextIsolation: true, sandbox: true, webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, plugins: false, experimentalFeatures: false, disableDialogs: true })
+  for (const key of ['preload', 'preloadURL', 'session', 'enableBlinkFeatures', 'safeDialogs']) expect(prefs).not.toHaveProperty(key)
   for (const key of ['preload', 'webpreferences', 'allowpopups']) expect(params).not.toHaveProperty(key)
   expect(h.ses.unregisterPreloadScript).toHaveBeenCalledWith('unsafe')
   expect(electron.fromPartition).toHaveBeenLastCalledWith('pion-browser')
@@ -109,13 +109,16 @@ it('preserves the existing plugin-store guest without initializing or changing i
 it('gates every navigation/redirect including subframes, denies popup and nested webview', () => {
   const h = setup()
   const g = h.guest()
-  for (const name of ['will-navigate', 'will-frame-navigate', 'will-redirect']) {
-    const bad = { url: 'javascript:alert(1)', preventDefault: vi.fn() }
-    g.emit(name, bad)
-    expect(bad.preventDefault).toHaveBeenCalled()
-    const good = { url: 'https://site.test/path', preventDefault: vi.fn() }
-    g.emit(name, good)
-    expect(good.preventDefault).not.toHaveBeenCalled()
+  expect(g.listenerCount('will-navigate')).toBe(0)
+  for (const name of ['will-frame-navigate', 'will-redirect']) {
+    for (const isMainFrame of [true, false]) {
+      const bad = { url: 'javascript:alert(1)', isMainFrame, preventDefault: vi.fn() }
+      g.emit(name, bad)
+      expect(bad.preventDefault).toHaveBeenCalled()
+      const good = { url: 'https://site.test/path', isMainFrame, preventDefault: vi.fn() }
+      g.emit(name, good)
+      expect(good.preventDefault).not.toHaveBeenCalled()
+    }
   }
   const popup = g.setWindowOpenHandler.mock.calls[0][0]
   expect(popup({ url: 'https://site.test' })).toEqual({ action: 'deny' })

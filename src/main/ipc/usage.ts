@@ -1,4 +1,5 @@
-import type { IpcMain, IpcMainInvokeEvent } from 'electron'
+import type { IpcMain } from 'electron'
+import { captureIpcOwner } from './owner'
 import type { AppSettings } from '../app-settings'
 import { IPC } from '../../shared/ipc'
 import type { UsageOverview, UsageOverviewQuery } from '../../shared/usage-overview'
@@ -13,35 +14,22 @@ interface UsageIpcDependencies {
 
 /** Explicit wiring only. The main process owns the ledger and its lifetime. */
 export function registerUsageIpc({ ipcMain, ledger, appSettings, getMainWindowId }: UsageIpcDependencies): void {
-  const assertOwner = (event: IpcMainInvokeEvent): (() => void) => {
-    const owner = getMainWindowId()
-    const sender = event.sender
-    const frame = event.senderFrame
-    const assertCurrent = (): void => {
-      if (owner === undefined || getMainWindowId() !== owner || sender.id !== owner
-        || sender.isDestroyed() || !frame || frame.detached
-        || event.senderFrame !== frame || sender.mainFrame !== frame) {
-        throw new Error('只允许所属主窗口读取使用总览')
-      }
-    }
-    assertCurrent()
-    return assertCurrent
-  }
   ipcMain.handle(IPC.UsageOverview, async (event, value: unknown) => {
-    const assertCurrent = assertOwner(event)
+    const assertCurrent = captureIpcOwner(event, getMainWindowId)
     const query = validateUsageOverviewQuery(value)
     const snapshot = await (query === undefined ? ledger.getOverview() : ledger.getOverview(query))
     assertCurrent()
     return snapshot
   })
   ipcMain.handle(IPC.GetUsageBackgroundCollection, (event) => {
-    assertOwner(event)
+    captureIpcOwner(event, getMainWindowId)
     return appSettings.usageBackgroundCollectionEnabled
   })
   ipcMain.handle(IPC.SetUsageBackgroundCollection, async (event, enabled: unknown) => {
-    const assertCurrent = assertOwner(event)
+    const assertCurrent = captureIpcOwner(event, getMainWindowId)
     if (typeof enabled !== 'boolean') throw new Error('后台自动采集开关必须是布尔值')
-    await appSettings.setUsageBackgroundCollectionEnabled(enabled)
+    await appSettings.setUsageBackgroundCollectionEnabled(enabled, assertCurrent)
+    assertCurrent()
     ledger.setBackgroundCollectionEnabled(enabled)
     assertCurrent()
     return appSettings.usageBackgroundCollectionEnabled

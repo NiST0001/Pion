@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Private SDK/main transport. Correlation fields are NOT peer authentication.
-import { validateComputerUseAction, type ComputerUseAction } from './computer-use'
+import { validateComputerUseAction, validateComputerUseRecord as object, type ComputerUseAction } from './computer-use'
 
 export const COMPUTER_USE_AGENT_TITLE_PREFIX = '__pion_computer_use_v1__:'
 export const COMPUTER_USE_OBSERVE_TOOL = 'pion_computer_observe'
@@ -65,18 +65,6 @@ export interface ComputerUseAgentSource {
 }
 
 function invalid(): never { throw new Error('Invalid ComputerUse Agent protocol') }
-function object(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
-  const proto = Object.getPrototypeOf(value)
-  if (proto !== Object.prototype && proto !== null) return invalid()
-  const keys = Reflect.ownKeys(value)
-  if (keys.length > required.length + optional.length || required.some(key => !Object.hasOwn(value, key))) return invalid()
-  for (const key of keys) {
-    const d = Object.getOwnPropertyDescriptor(value, key)
-    if (typeof key !== 'string' || (!required.includes(key) && !optional.includes(key)) || !d?.enumerable || !('value' in d)) return invalid()
-  }
-  return value as Record<string, unknown>
-}
 function token(value: unknown): string {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_.:-]{1,256}$/.test(value)) return invalid()
   return value

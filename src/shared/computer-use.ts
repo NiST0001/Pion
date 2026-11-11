@@ -71,13 +71,15 @@ export interface ComputerUseReceipt {
 export interface ComputerUseBudget {
   actions: number
   captures: number
+  /** Confirmed frame totals; unknown capture outcomes may leave these incomplete. */
   frameBytes: number
   framePixels: number
 }
 /** Bounded display metadata only; no lock path, receipt or peer identity.
  * unclaimed: positive proof this instance acquired no marker and has no own
  * pending resources; not a release of anyone else's marker or global Stop.
- * not-checked (also legacy omission) supplies no such positive proof. */
+ * not-checked also covers active read-only observation, which skips marker IO.
+ * It (and legacy omission) supplies no closure or control-lease proof. */
 export type ComputerUseCoordination = 'not-checked' | 'held' | 'blocked' | 'unknown' | 'released' | 'unclaimed'
 export interface ComputerUseStatus {
   /** Read-only host development configuration, not OS capability, consent or a reusable grant. Legacy omission is disabled. */
@@ -118,24 +120,25 @@ export const COMPUTER_USE_LIMITS = Object.freeze({
   maxScrollDelta: 1200,
   maxIdBytes: 256
 })
+/** Fixed display copy only; no additional IPC error payload or native diagnostics. */
+export const COMPUTER_USE_CAPTURE_MESSAGES = Object.freeze({
+  budget: '本次截图预算已耗尽；停止后可重新确认。',
+  failed: '无法获取本地静态截图。',
+  unknown: '本次截图产图统计未知；字节/像素计数仅含已确认值，本轮后续截图已停用。'
+})
 export const DEFAULT_COMPUTER_USE_CONSENT: Readonly<ComputerUseConsent> = Object.freeze({ capture: false, upload: false, retention: 'sdk-session', control: false })
 export const DEFAULT_COMPUTER_USE_CAPABILITY: Readonly<ComputerUseCapability> = Object.freeze({ platform: 'linux-wayland', method: 'unavailable', capture: false, control: false, unsupportedReason: 'not-probed', scope: 'unknown-window-or-display' })
 
 function invalid(): never { throw new Error('Invalid ComputerUse contract') }
-function record(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
-  const proto = Object.getPrototypeOf(value)
-  if (proto !== Object.prototype && proto !== null) return invalid()
-  const keys = Reflect.ownKeys(value)
-  if (keys.length > required.length + optional.length) return invalid()
-  for (const key of keys) {
-    if (typeof key !== 'string' || (!required.includes(key) && !optional.includes(key))) return invalid()
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)
-    if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) return invalid()
-  }
-  if (required.some(key => !Object.hasOwn(value, key))) return invalid()
+/** JSON / structured-clone schema shape. Source authentication and live owner
+ * checks stay at the transport boundary; descriptors are not a wire format. */
+export function validateComputerUseRecord(value: unknown, required: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || required.some(key => !Object.hasOwn(value, key))
+    || Object.keys(value).some(key => !required.includes(key) && !optional.includes(key))) return invalid()
   return value as Record<string, unknown>
 }
+const record = validateComputerUseRecord
 function integer(value: unknown, min = 0, max = Number.MAX_SAFE_INTEGER): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) return invalid()
   return value
@@ -200,24 +203,26 @@ export function validateComputerUseFrame(value: unknown): ComputerUseFrame {
 
 /** Only checks pixels in the delivered frame. Does NOT map to OS coordinates. */
 export function validateComputerUseAction(value: unknown, frame: ComputerUseFrame): ComputerUseAction {
-  const f = validateComputerUseFrame(frame)
-  const v = record(value, ['type'], ['x', 'y', 'button', 'keys', 'text', 'deltaX', 'deltaY'])
+  return parseAction(value, validateComputerUseFrame(frame))
+}
+function parseAction(value: unknown, f: ComputerUseFrame): ComputerUseAction {
+  if (!value || typeof value !== 'object') return invalid()
   let result: ComputerUseAction
-  switch (v.type) {
+  switch ((value as { type?: unknown }).type) {
     case 'click': {
-      record(value, ['type', 'x', 'y', 'button'])
+      const v = record(value, ['type', 'x', 'y', 'button'])
       result = { type: 'click', x: integer(v.x, 0, f.width - 1), y: integer(v.y, 0, f.height - 1), button: choice(v.button, ['left']) }; break
     }
     case 'key': {
-      record(value, ['type', 'keys'])
+      const v = record(value, ['type', 'keys'])
       result = { type: 'key', keys: choice(v.keys, COMPUTER_USE_KEYS) }; break
     }
     case 'type': {
-      record(value, ['type', 'text'])
+      const v = record(value, ['type', 'text'])
       result = { type: 'type', text: text(v.text, COMPUTER_USE_LIMITS.maxTextBytes) }; break
     }
     case 'scroll': {
-      record(value, ['type', 'x', 'y', 'deltaX', 'deltaY'])
+      const v = record(value, ['type', 'x', 'y', 'deltaX', 'deltaY'])
       result = { type: 'scroll', x: integer(v.x, 0, f.width - 1), y: integer(v.y, 0, f.height - 1), deltaX: integer(v.deltaX, -COMPUTER_USE_LIMITS.maxScrollDelta, COMPUTER_USE_LIMITS.maxScrollDelta), deltaY: integer(v.deltaY, -COMPUTER_USE_LIMITS.maxScrollDelta, COMPUTER_USE_LIMITS.maxScrollDelta) }; break
     }
     default: return invalid()
@@ -257,6 +262,27 @@ export function validateComputerUseStatus(value: unknown): ComputerUseStatus {
   if ((result.actualPending && ['disabled', 'ready', 'stopped'].includes(result.state)) || (result.receipt?.actualPending && !result.actualPending) || (result.frame && result.frame.scopeRevision !== result.scopeRevision) || (result.receipt && result.receipt.scopeRevision !== result.scopeRevision)) return invalid()
   return result
 }
+/** Capture admission only; successful final frames may use the exact limit. */
+export function isComputerUseCaptureBudgetExhausted(budget: ComputerUseBudget): boolean {
+  return budget.captures >= COMPUTER_USE_LIMITS.maxCaptures
+    || budget.frameBytes >= COMPUTER_USE_LIMITS.maxTotalFrameBytes
+    || budget.framePixels >= COMPUTER_USE_LIMITS.maxTotalFramePixels
+}
+/** Display lifecycle/consent readiness, including a delivered final-budget frame.
+ * Observation skips the marker; control still requires a held control lease. */
+export function isComputerUseObservationReady(state: ComputerUseStatus): boolean {
+  if (state.state !== 'ready' || state.actualPending || state.consent?.capture !== true || state.capability?.capture !== true) return false
+  if (state.consent.control === false) return (state.coordination === 'not-checked' || state.coordination === 'held')
+    && state.consent.captureScope !== 'display' && state.capability.control === false
+    && state.capability.method === 'portal-screencast' && state.capability.scope === 'window'
+  return state.coordination === 'held' && state.consent.control === true
+    && state.consent.captureScope === 'display' && state.capability.control === true
+    && state.capability.method === 'portal-screencast+wayland-virtual-input' && state.capability.scope === 'display'
+}
+/** Display admission only; Main independently checks actual totals and reserves attempts. */
+export function isComputerUseCaptureReady(state: ComputerUseStatus): boolean {
+  return !isComputerUseCaptureBudgetExhausted(state.budget) && isComputerUseObservationReady(state)
+}
 export interface ComputerUseActRequest { frameId: string; action: ComputerUseAction }
 /** Local host IPC only; no caller-supplied owner, native fence or SDK identity. */
 export interface ComputerUseLocalActRequest extends ComputerUseActRequest { scopeRevision: number }
@@ -265,7 +291,7 @@ export function validateComputerUseActRequest(value: unknown, frame: ComputerUse
   const f = validateComputerUseFrame(frame)
   const frameId = id(v.frameId)
   if (frameId !== f.id) return invalid()
-  return { frameId, action: validateComputerUseAction(v.action, f) }
+  return { frameId, action: parseAction(v.action, f) }
 }
 /** Caller must atomically reserve before dispatch; failed/expired captures still count.
  * No rollback, deadline, lifecycle, authorization or OS mapping is implemented here.

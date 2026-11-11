@@ -71,7 +71,7 @@ export function decodeHelperPreview(value: unknown): Promise<Uint8Array> {
   })
 }
 export class HelperPacketReader {
-  constructor(private readonly control = false, private readonly accounting = false, private readonly dmaBufReadback = false) {}
+  constructor(private readonly control = false, private readonly dmaBufReadback = false) {}
   private header = Buffer.alloc(12)
   private headerUsed = 0
   private body?: Buffer
@@ -100,11 +100,11 @@ export class HelperPacketReader {
       const v = value as Record<string, unknown>
       if (Object.keys(v).some(k => !['id', 'generation', 'kind', 'width', 'height', 'sourceType', 'streamId', 'previewPng', 'deliverable', 'diagnosticCode', 'closeReceipt', 'inputProtocolVersion', 'inputFrame', 'captureAccountingVersion', 'noFrameReceipt', 'dmaBufReadbackVersion'].includes(k)) || !Number.isSafeInteger(v.id) || (v.id as number) < 0 || !Number.isSafeInteger(v.generation) || (v.generation as number) < 0 || !['hello', 'unavailable', 'opened', 'frame', 'acted', 'closed', 'error', 'revoked'].includes(v.kind as string) || (v.id === 0) !== (v.kind === 'revoked')) throw new Error('helper-protocol')
       if (Object.hasOwn(v, 'inputProtocolVersion') && (!this.control || v.kind !== 'hello' || v.inputProtocolVersion !== 1)) throw new Error('helper-protocol')
-      if (Object.hasOwn(v, 'captureAccountingVersion') && (!this.accounting || v.kind !== 'hello' || v.captureAccountingVersion !== 1)) throw new Error('helper-protocol')
+      if (Object.hasOwn(v, 'captureAccountingVersion') && (v.kind !== 'hello' || v.captureAccountingVersion !== 1)) throw new Error('helper-protocol')
       if (Object.hasOwn(v, 'dmaBufReadbackVersion') && (!this.dmaBufReadback || v.kind !== 'hello' || v.dmaBufReadbackVersion !== 1)) throw new Error('helper-protocol')
       if (Object.hasOwn(v, 'noFrameReceipt')) {
         const receipt = v.noFrameReceipt
-        if (!this.accounting || v.kind !== 'error' || v.diagnosticCode !== 'capture-frame-failed' || !receipt || typeof receipt !== 'object' || Object.getPrototypeOf(receipt) !== Object.prototype) throw new Error('helper-protocol')
+        if (v.kind !== 'error' || v.diagnosticCode !== 'capture-frame-failed' || !receipt || typeof receipt !== 'object' || Object.getPrototypeOf(receipt) !== Object.prototype) throw new Error('helper-protocol')
         const r = receipt as Record<string, unknown>
         if (Object.keys(r).length !== 2 || !Object.hasOwn(r, 'version') || !Object.hasOwn(r, 'outcome') || r.version !== 1 || r.outcome !== 'no-complete-png') throw new Error('helper-protocol')
       }
@@ -172,7 +172,7 @@ export class ComputerUseHelperClient {
   private startupIoEnded = false
   private preexecErrno?: number
   private stdioClosed?: Promise<void>
-  constructor(private readonly binary: string, private readonly generation: number, private readonly start?: HelperSpawn, private readonly control = false, private readonly accounting = false, private readonly dmaBufReadback = false) {
+  constructor(private readonly binary: string, private readonly generation: number, private readonly start?: HelperSpawn, private readonly control = false, private readonly dmaBufReadback = false) {
     if (!isAbsolute(binary)) throw new Error('helper-path')
   }
   /** Pure bounded cache; never connects or probes the helper/OS. */
@@ -192,7 +192,7 @@ export class ComputerUseHelperClient {
   }
   request(kind: 'hello' | 'open' | 'capture', limits?: { maxFrameBytes: number; maxFramePixels: number; maxFrameEdge: number }): Promise<HelperResult> {
     if (this.poisoned || this.preexecErrno !== undefined || this.closingGate || this.revoked || this.pending.size) return Promise.reject(new Error('helper-busy'))
-    if (this.accounting && kind !== 'hello' && !this.accountingNegotiated) return Promise.reject(new Error('helper-accounting-unavailable'))
+    if (kind !== 'hello' && !this.accountingNegotiated) return Promise.reject(new Error('helper-accounting-unavailable'))
     if (this.control && kind !== 'hello' && !this.inputNegotiated) return Promise.reject(new Error('helper-input-unavailable'))
     if (this.dmaBufReadback && kind !== 'hello' && !this.dmaBufNegotiated) return Promise.reject(new Error('helper-dmabuf-unavailable'))
     if (!this.child) {
@@ -204,7 +204,7 @@ export class ComputerUseHelperClient {
     return this.send(kind, { ...(limits ? { limits } : {}), ...(kind === 'open' && this.control ? { control: true, captureScope: 'display' } : {}) })
   }
   act(action: ComputerUseAction, frame: ComputerUseNativeInputFence): Promise<HelperResult> {
-    if (!this.control || !this.inputNegotiated || (this.accounting && !this.accountingNegotiated) || (this.dmaBufReadback && !this.dmaBufNegotiated) || !this.child || this.poisoned || this.closingGate || this.revoked || this.pending.size) return Promise.reject(new Error('helper-input-unavailable'))
+    if (!this.control || !this.inputNegotiated || !this.accountingNegotiated || (this.dmaBufReadback && !this.dmaBufNegotiated) || !this.child || this.poisoned || this.closingGate || this.revoked || this.pending.size) return Promise.reject(new Error('helper-input-unavailable'))
     try {
       const nativeFrame = validateNativeInputFence(frame)
       // Service checks actual image bounds/provenance; native repeats these checks.
@@ -215,9 +215,9 @@ export class ComputerUseHelperClient {
     } catch { return Promise.reject(new Error('helper-input-invalid')) }
   }
   private launch(): void {
-    const args = ['--client-close-receipt-v1', ...(this.control ? ['--wayland-virtual-input-v1'] : []), ...(this.accounting ? ['--capture-accounting-v1'] : []), ...(this.dmaBufReadback ? ['--dmabuf-readback-v1'] : [])]
+    const args = ['--client-close-receipt-v1', ...(this.control ? ['--wayland-virtual-input-v1'] : []), '--capture-accounting-v1', ...(this.dmaBufReadback ? ['--dmabuf-readback-v1'] : [])]
     const child = this.start ? this.start(this.binary) : spawn(this.binary, args, { stdio: ['pipe', 'pipe', 'pipe'], shell: false }); this.child = child
-    const reader = new HelperPacketReader(this.control, this.accounting, this.dmaBufReadback)
+    const reader = new HelperPacketReader(this.control, this.dmaBufReadback)
     this.stdioClosed = Promise.all([child.stdin, child.stdout, child.stderr].map(stream => new Promise<void>(resolve => stream.once('close', resolve)))).then(() => {})
     child.once('spawn', () => {
       if (this.child !== child) return
@@ -267,7 +267,7 @@ export class ComputerUseHelperClient {
         if (reply.noFrameReceipt !== undefined && (p.kind !== 'capture' || !this.accountingNegotiated || this.poisoned)) throw new Error('helper-protocol')
         if (p.kind === 'hello') {
           this.inputNegotiated = reply.kind === 'hello' && reply.inputProtocolVersion === 1
-          this.accountingNegotiated = this.accounting && reply.kind === 'hello' && reply.captureAccountingVersion === 1
+          this.accountingNegotiated = reply.kind === 'hello' && reply.captureAccountingVersion === 1
           this.dmaBufNegotiated = this.dmaBufReadback && reply.kind === 'hello' && reply.dmaBufReadbackVersion === 1
         }
         p.received = true

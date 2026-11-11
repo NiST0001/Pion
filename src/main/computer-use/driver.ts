@@ -27,7 +27,7 @@ export interface ComputerUseDriverFrame {
 }
 
 export interface ComputerUseDriver {
-  /** Starts the OS chooser/session only after consent and durable coordination claim. */
+  /** Starts the OS chooser/session after consent; control mode also requires a durable coordination claim. */
   open(owner: ComputerUseOwner, limits: ComputerUseDriverLimits, signal: AbortSignal, options?: ComputerUseDriverOpenOptions): Promise<ComputerUseCapability>
   /** Remaining per-call limits prevent generation beyond the workflow budget. */
   capture(signal: AbortSignal, limits?: ComputerUseDriverLimits): Promise<ComputerUseDriverFrame>
@@ -49,8 +49,11 @@ export interface ComputerUseDriver {
    * zero process/stdio close (not exit). The only no-helper exception is a bound
    * trusted Node ENOENT/EACCES pre-exec failure, verified negative-errno close and
    * all stdio/request settlement with no execution/output or prior poison; it is
-   * proof no helper executed, not PID absence or an arbitrary nonzero exit. No receipt resets transport/capture poison,
-   * changes a failed start to success, or retrospectively releases old markers.
+   * proof no helper executed, not PID absence or an arbitrary nonzero exit. Transport
+   * poison still rejects closure. Capture accounting uncertainty remains a separate
+   * failed operation and forbids more capture; successful closure proves only
+   * resources ended, without supplying missing image statistics or a negative
+   * frame receipt. It never changes a failed start to success or releases old markers.
    * No separate revoked/Closed notice is required after successful Session.Close.
    * ACK alone, errors, timeout, logical abort or
    * watcher unsubscribe cannot prove cleanup. The service additionally waits for

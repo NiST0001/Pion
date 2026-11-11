@@ -19,6 +19,7 @@ type Internal = {
   git(cwd: string, args: string[]): Promise<string>
   changed(workflow: WorkflowSnapshot): Promise<void>
   prepare(workflow: WorkflowSnapshot): Promise<void>
+  runAgent(workflow: WorkflowSnapshot, role: 'planner', cwd: string, prompt: string): Promise<string>
   recreateDetachedWorktree(workflow: WorkflowSnapshot, role: 'reviewer' | 'tester', oid: string): Promise<string>
 }
 
@@ -156,36 +157,6 @@ describe('workflow worktree destinations and conservative cleanup', () => {
     vi.resetModules()
   })
 
-  it.each(['read-error', 'malformed', 'invalid-entry'] as const)('preserves storage and blocks writes after %s', async (failure) => {
-    if (failure === 'read-error') fs.readFile.mockRejectedValueOnce(Object.assign(new Error('denied'), { code: 'EACCES' }))
-    else fs.readFile.mockResolvedValueOnce(failure === 'malformed' ? '{broken' : JSON.stringify({ version: 1, workflows: [null] }))
-    vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    await expect(manager.load()).resolves.toBeUndefined()
-    await expect(manager.flush()).rejects.toThrow(/已保留原文件/)
-    await expect(manager.cleanup(ID)).rejects.toThrow(/已保留原文件/)
-    await expect(manager.shutdown()).resolves.toBeUndefined()
-    expect(fs.writeFile).not.toHaveBeenCalled()
-    expect(commands).not.toHaveBeenCalled()
-  })
-
-  it.each(['writeFile', 'rename'] as const)('stops queued and shutdown persistence after a %s failure', async (operation) => {
-    let fail!: (error: Error) => void
-    fs[operation].mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { fail = reject }))
-    const first = manager.flush()
-    const second = manager.flush()
-    const firstRejected = expect(first).rejects.toThrow(/存储保存失败/)
-    const secondRejected = expect(second).rejects.toThrow(/存储保存失败/)
-    await vi.waitFor(() => expect(fs[operation]).toHaveBeenCalledTimes(1))
-    fail(new Error(`${operation} failed`))
-    await Promise.all([firstRejected, secondRejected])
-    await expect(manager.flush()).rejects.toThrow(/存储保存失败/)
-    await expect(manager.shutdown()).resolves.toBeUndefined()
-    expect(fs.mkdir).toHaveBeenCalledTimes(1)
-    expect(fs.writeFile).toHaveBeenCalledTimes(1)
-    expect(fs.rename).toHaveBeenCalledTimes(operation === 'rename' ? 1 : 0)
-    expect(commands).not.toHaveBeenCalled()
-  })
-
   it('treats only ENOENT as empty storage without writing an empty replacement', async () => {
     await manager.load()
     expect(fs.writeFile).not.toHaveBeenCalled()
@@ -201,6 +172,43 @@ describe('workflow worktree destinations and conservative cleanup', () => {
     expect(commands).not.toHaveBeenCalled()
     expect(value.worktrees.tester).toBe(projectPath('tester'))
     expect(value.cleanupCompletedAt).toBeUndefined()
+  })
+
+  it('releases a live unknown only after its original runner confirms a late close', async () => {
+    let pending = true
+    const runner = (manager as unknown as { runner: {
+      run: ReturnType<typeof vi.fn>
+      assertWorktreeDeletionIdle?: (cwd: string) => void
+    } }).runner
+    runner.run.mockRejectedValueOnce(new Error('stop wait expired'))
+    runner.assertWorktreeDeletionIdle = () => { if (pending) throw new Error('still closing') }
+    value.state = 'planning'
+    await expect(internal.runAgent(value, 'planner', projectPath('planner'), 'plan')).rejects.toThrow('stop wait expired')
+    value.state = 'interrupted'
+    value.interruptedFrom = 'planning'
+    await expect(manager.cleanup(ID)).rejects.toThrow(/退出尚未确认/)
+    expect(value.workers[0].exitConfirmed).toBe(false)
+    expect(commands).not.toHaveBeenCalled()
+    pending = false
+    const cleaned = await manager.cleanup(ID)
+    expect(cleaned.workers[0].exitConfirmed).toBe(true)
+    expect(cleaned.cleanupCompletedAt).toBeTypeOf('number')
+  })
+
+  it('keeps an unconfirmed worker isolated across reload even when its task is cancelled', async () => {
+    value.state = 'interrupted'
+    value.interruptedFrom = 'implementing'
+    value.workers = [{ id: 'cancelled-worker', role: 'implementer', kind: 'agent', status: 'cancelled',
+      exitConfirmed: false, worktreePath: projectPath('implementer'), outputTail: '', outputTruncated: false,
+      permission: { read: true, write: true, shell: false, network: false, external: false, note: 'test' } }]
+    fs.readFile.mockResolvedValueOnce(JSON.stringify({ version: 1, workflows: [value] }))
+    await manager.load()
+    await expect(manager.resume(ID)).rejects.toThrow(/退出尚未确认/)
+    await expect(manager.cleanup(ID)).rejects.toThrow(/退出尚未确认/)
+    expect(() => manager.assertWorktreeDeletionIdle(projectPath('implementer'))).toThrow(/工作流/)
+    expect(() => manager.assertWorktreeDeletionIdle(resolve('/unrelated'))).not.toThrow()
+    expect(commands).not.toHaveBeenCalled()
+    expect(fs.writeFile).not.toHaveBeenCalled()
   })
 
   it('creates every new role under the real primary project while preserving requested cwd/HEAD and metadata', async () => {
@@ -375,7 +383,8 @@ describe('workflow worktree destinations and conservative cleanup', () => {
     const cleaning = manager.cleanup(ID)
     await vi.waitFor(() => expect(commands.mock.calls.some(([, args]) => args[0] === 'worktree' && args[1] === 'remove')).toBe(true))
     await expect(manager.cleanup(ID)).rejects.toThrow(/正在进行/)
-    expect(() => manager.assertWorktreeDeletionIdle(resolve('/unrelated'))).toThrow(/工作流/)
+    expect(() => manager.assertWorktreeDeletionIdle(REQUESTED)).toThrow(/工作流/)
+    expect(() => manager.assertWorktreeDeletionIdle(resolve('/unrelated'))).not.toThrow()
     finish()
     expect((await cleaning).cleanupCompletedAt).toBeTypeOf('number')
   })

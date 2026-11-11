@@ -7,7 +7,7 @@ import {
 } from '../../shared/image-generation'
 import { inspectRasterImage } from '../../shared/tool-images'
 import {
-  checkImageAbort, CodexImageError, inspectReferenceImage, waitForImageOperation,
+  checkImageAbort, CodexImageError, waitForImageOperation,
   type CodexImageReference
 } from './codex-image-transport'
 
@@ -61,7 +61,7 @@ const ERRORS = {
   raster: '参考图片格式、完整性、尺寸或累计像素超过安全限制。',
   read: '参考图片读取结果异常、增长或截断，已拒绝使用。',
   flags: '当前平台或文件系统不支持安全的只读参考图片打开方式，已拒绝读取。',
-  close: '参考图片文件句柄关闭未能确认，本进程参考图片读取已隔离，请重建后端后再试。',
+  close: '参考图片文件句柄关闭失败，本次读取已拒绝。',
   busy: '本进程仍有未结束的参考图片读取或关闭操作，已拒绝启动新读取。',
   aborted: '参考图片读取等待已中止；底层操作仍须收尾。',
   timeout: '参考图片读取等待超时；底层操作仍须收尾。',
@@ -74,7 +74,6 @@ export class ImageInputError extends Error {
   }
 }
 function safeError(error: unknown, signal: AbortSignal): ImageInputError {
-  if (readerQuarantined) return new ImageInputError('close')
   if (signal.aborted) {
     try { checkImageAbort(signal) }
     catch (abort) { return new ImageInputError(abort instanceof CodexImageError && abort.kind === 'timeout' ? 'timeout' : 'aborted') }
@@ -154,16 +153,18 @@ async function inspectDirectory(
 }
 async function checkRoot(files: ImageInputFileSystem, root: CapturedRoot, signal: AbortSignal): Promise<void> {
   checkImageAbort(signal)
-  // A captured cwd alias is allowed only while it still maps to this worktree.
-  if (!samePath(resolve(await files.realpath(root.cwd)), root.root)) throw new ImageInputError('root')
-  checkImageAbort(signal)
+  // inspectDirectory already checks the real root's mapping and identity.
+  // Resolve a distinct captured cwd alias only while it maps to this worktree.
+  if (!samePath(root.cwd, root.root)) {
+    if (!samePath(resolve(await files.realpath(root.cwd)), root.root)) throw new ImageInputError('root')
+    checkImageAbort(signal)
+  }
   await inspectDirectory(files, root.root, signal, 'root', root.identity)
 }
 async function inspectInput(
   files: ImageInputFileSystem, root: CapturedRoot, parts: readonly string[],
   signal: AbortSignal, expected?: InputSnapshot
 ): Promise<InputSnapshot> {
-  await checkRoot(files, root, signal)
   const parents: Identity[] = []
   let path = root.root
   for (const [index, part] of parts.slice(0, -1).entries()) {
@@ -203,7 +204,6 @@ async function readSnapshot(
     checkImageAbort(signal)
     const opened = assertFile(await handle.stat(), before.file)
     checkImageAbort(signal)
-    await inspectInput(files, root, parts, signal, before)
     const bytes = new Uint8Array(opened.size) // One private, zero-initialized bounded snapshot.
     let position = 0
     let reads = 0
@@ -221,23 +221,16 @@ async function readSnapshot(
     const end = await handle.read(new Uint8Array(1), 0, 1, position)
     checkImageAbort(signal)
     if (!end || end.bytesRead !== 0) throw new ImageInputError('read')
-    assertFile(await handle.stat(), opened)
-    checkImageAbort(signal)
     await inspectInput(files, root, parts, signal, before)
     assertFile(await handle.stat(), opened)
     checkImageAbort(signal)
     return bytes
   } finally {
     if (handle) {
-      // Await even after cancellation; a pending close keeps the real slot.
-      // Rejection settles the operation but cannot confirm FD closure. Latch
-      // before propagating even if the consumer has already stopped waiting;
-      // never retry the uncertain FD or retain it/buffers in the quarantine.
+      // Await after cancellation; pending close keeps the real slot. A rejected
+      // close fails this read without retrying the FD; later reads use new FDs.
       try { await handle.close() }
-      catch {
-        readerQuarantined = true
-        throw new ImageInputError('close')
-      }
+      catch { throw new ImageInputError('close') }
     }
   }
 }
@@ -257,8 +250,8 @@ async function readOperation(
     checkImageAbort(signal)
     totalBytes += bytes.byteLength
     const mimeType = /\.png$/i.test(path) ? 'image/png' : 'image/jpeg'
-    // Admission uses the REMAINING aggregate pixel budget BEFORE the PNG
-    // helper can inflate raster/metadata. Never decode an over-budget image.
+    // Framing-only admission bounds the reader's aggregate budget. Complete
+    // PNG/JPEG validation runs once on the transport's private upload snapshot.
     const remainingPixels = MAX_IMAGE_REFERENCE_TOTAL_PIXELS - totalPixels
     const dimensions = remainingPixels > 0 && inspectRasterImage(bytes, mimeType, {
       maxDimension: MAX_IMAGE_REQUEST_DIMENSION, maxPixels: remainingPixels,
@@ -266,13 +259,8 @@ async function readOperation(
     })
     if (!dimensions) throw new ImageInputError('raster')
     checkImageAbort(signal)
-    let checked: { width: number; height: number }
-    try { checked = inspectReferenceImage(bytes, mimeType) }
-    catch { throw new ImageInputError('raster') }
-    if (checked.width !== dimensions.width || checked.height !== dimensions.height) throw new ImageInputError('raster')
-    checkImageAbort(signal)
-    totalPixels += checked.width * checked.height
-    images.push(Object.freeze({ bytes, mimeType, width: checked.width, height: checked.height }))
+    totalPixels += dimensions.width * dimensions.height
+    images.push(Object.freeze({ bytes, mimeType, ...dimensions }))
   }
   checkImageAbort(signal)
   return images
@@ -281,12 +269,8 @@ async function readOperation(
 /** One real operation in this process, across tool/backend replacements. No
  * queue: abort only stops the consumer waiting; late stat/open/read/close keeps
  * the slot until the underlying promise actually settles. A permanently hung
- * operation continues to block new reads, bounding retained private buffers.
- * A rejected close instead settles and releases the slot, but permanently
- * quarantines new reference reads in this process; only backend process
- * reconstruction can recover. The latch holds no handles, errors or buffers. */
+ * operation continues to block new reads, bounding retained private buffers. */
 let readerOperationInFlight = false
-let readerQuarantined = false
 export async function readImageReferences(
   root: ImageReferenceRoot, paths: readonly string[], signal: AbortSignal,
   options: { files?: ImageInputFileSystem } = {}
@@ -295,7 +279,6 @@ export async function readImageReferences(
   try { normalized = validateImageReferencePaths(paths) }
   catch { throw new ImageInputError('paths') }
   if (!normalized.length) return [] // No slot, disk access, or image operation.
-  if (readerQuarantined) throw new ImageInputError('close') // Before any FS or slot acquisition.
   try {
     checkImageAbort(signal)
     if (readerOperationInFlight) throw new ImageInputError('busy')
@@ -314,5 +297,5 @@ export async function readImageReferences(
 // Node path checks and no-follow final opens are defense in depth, not openat
 // traversal or an OS sandbox. They cannot eliminate every concurrent directory
 // replacement, prove a hard link's provenance, or replace tool read permission.
-// PNG validation is bounded integrity checking; JPEG is bounded structure/EOI,
-// not a claim that either format has undergone a complete image decode.
+// This reader admits framing/dimensions only. The transport validates complete
+// PNG integrity or JPEG structure/EOI on its private snapshot before OAuth/upload.

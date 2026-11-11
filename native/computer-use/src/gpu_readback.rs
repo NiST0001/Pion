@@ -38,8 +38,8 @@ impl fmt::Display for GpuError {
 }
 impl std::error::Error for GpuError {}
 
-/// Initialization failure retains the reader on its actual worker. In particular,
-/// context loss must not drop GPU ownership merely because open returned an error.
+/// Initialization failure returns the worker-local reader and its one-shot
+/// cleanup outcome; a clean receipt still requires actual handle teardown.
 pub struct GpuOpenError {
     pub cleanup_ok: bool,
     pub readback: GpuReadback,
@@ -75,8 +75,9 @@ impl GpuCleanup {
     }
     fn completion_lost(&self) -> bool { self.0.completion_lost.load(Ordering::Acquire) }
     fn observe(&self, result: ApiResult) -> bool {
-        if result == ApiResult::ContextLost {
-            // Sticky even if a later glGetError/eglGetError reports NO_ERROR.
+        if result == ApiResult::ContextLost && self.0.pending.load(Ordering::Acquire) {
+            // Only an outstanding borrow can lose its completion proof. Keep
+            // that loss sticky through later NO_ERROR or successful teardown.
             self.0.completion_lost.store(true, Ordering::Release);
         }
         result == ApiResult::Success
@@ -343,8 +344,8 @@ fn close_resources(resources: &mut Resources, prior_failure: bool, proof: &GpuCl
     ok &= release_frame(resources, proof, run);
     if !proof.completion_known() { return false; }
     if resources.current {
-        ok &= cleanup_action(proof, run, CleanupAction::Finish);
-        if !proof.completion_known() { return false; }
+        // release_frame already synchronized the borrowed image. Initialization
+        // has no borrowed work; neither path needs another unconditional Finish.
         ok &= cleanup_action(proof, run, CleanupAction::UnbindContext(resources.display));
         if !proof.completion_known() { return false; }
         resources.current = false;
@@ -824,7 +825,7 @@ mod tests {
         assert!(proof.completion_known() && proof.closed());
         use CleanupAction::*;
         assert_eq!(actions, vec![Finish, UnbindFramebuffer, DeleteFramebuffer(7), UnbindTexture,
-            DeleteTexture(6), Finish, DestroyImage(3usize as _, 5usize as _), Finish,
+            DeleteTexture(6), Finish, DestroyImage(3usize as _, 5usize as _),
             UnbindContext(3usize as _), DestroyContext(3usize as _, 4usize as _),
             Terminate(3usize as _), ReleaseThread, CloseLibrary(2usize as _), CloseLibrary(1usize as _)]);
         assert!(resources.egl_library.is_null() && resources.gl_library.is_null());
@@ -833,7 +834,7 @@ mod tests {
     fn fake_cleanup_failure_cannot_claim_closed_or_unload_unknown_graphics() {
         // Fail every individual scheduled operation in turn, including each
         // glFinish and each library close, without a real function pointer.
-        for failure in 0..14 {
+        for failure in 0..13 {
             let mut resources = fake_resources();
             let proof = fake_pending_proof();
             let mut actions = Vec::new();
@@ -849,7 +850,7 @@ mod tests {
                 assert!(!resources.image.is_null() && resources.current);
             } else {
                 assert!(proof.completion_known(), "ordinary handle error does not undo a successful synchronization");
-                if failure < 12 {
+                if failure < 11 {
                     assert!(!actions.iter().any(|a| matches!(a, CleanupAction::CloseLibrary(_))));
                     assert_eq!(actions.last(), Some(&CleanupAction::ReleaseThread));
                 }
@@ -896,28 +897,68 @@ mod tests {
         }
     }
     #[test]
-    fn cleanup_context_loss_stops_at_first_loss_without_retrying_or_dropping_gpu_owners() {
-        for failure in 0..12 {
-            let mut resources = fake_resources();
-            let proof = fake_pending_proof();
-            let mut actions = Vec::new();
-            let cleaned = close_resources(&mut resources, false, &proof, &mut |action| {
-                actions.push(action);
-                if actions.len() - 1 == failure { ApiResult::ContextLost } else { ApiResult::Success }
-            });
-            assert_eq!(actions.len(), failure + 1);
-            assert!(!proof.record_closed(cleaned));
-            assert!(!proof.completion_known() && !proof.closed());
-            assert!(!resources.egl_library.is_null() && !resources.gl_library.is_null());
-            let mut retried = false;
-            assert!(!close_resources(&mut resources, false, &proof, &mut |_| {
-                retried = true; ApiResult::Success
-            }));
-            assert!(!retried);
-        }
+    fn before_borrow_context_loss_still_tears_down_initialization_handles() {
+        let mut resources = fake_resources();
+        resources.image = ptr::null_mut();
+        resources.texture = 0;
+        resources.framebuffer = 0;
+        resources.frame_gl_touched = false;
+        let proof = GpuCleanup::default();
+        assert!(!proof.observe(ApiResult::gl(GL_CONTEXT_LOST)));
+        assert!(proof.completion_known());
+        let mut actions = Vec::new();
+        let cleaned = close_resources(&mut resources, false, &proof, &mut |action| {
+            actions.push(action); ApiResult::Success
+        });
+        assert!(proof.record_closed(cleaned));
+        use CleanupAction::*;
+        assert_eq!(actions, vec![UnbindContext(3usize as _), DestroyContext(3usize as _, 4usize as _),
+            Terminate(3usize as _), ReleaseThread, CloseLibrary(2usize as _), CloseLibrary(1usize as _)]);
     }
     #[test]
-    fn ordinary_unsupported_or_already_synchronized_error_can_close_cleanly() {
+    fn before_borrow_import_error_still_destroys_image_and_requires_positive_cleanup() {
+        let mut resources = fake_resources();
+        resources.texture = 0;
+        resources.framebuffer = 0;
+        resources.frame_gl_touched = false;
+        let proof = GpuCleanup::default();
+        // create_image may return an image before its error is consumed and
+        // before begin_borrow. Its imported FD reference still needs teardown.
+        assert!(!proof.observe(ApiResult::egl(0, EGL_CONTEXT_LOST)));
+        let mut actions = Vec::new();
+        let cleaned = close_resources(&mut resources, false, &proof, &mut |action| {
+            actions.push(action);
+            if matches!(action, CleanupAction::DestroyImage(_, _)) { ApiResult::ContextLost }
+            else { ApiResult::Success }
+        });
+        assert_eq!(actions.first(), Some(&CleanupAction::DestroyImage(3usize as _, 5usize as _)));
+        assert!(!proof.record_closed(cleaned));
+        assert!(proof.completion_known() && !proof.closed());
+        assert!(!actions.iter().any(|a| matches!(a, CleanupAction::Finish | CleanupAction::CloseLibrary(_))));
+    }
+    #[test]
+    fn pending_sync_loss_stays_unknown_after_success_without_cleanup_retry() {
+        let mut resources = fake_resources();
+        let proof = fake_pending_proof();
+        let mut actions = Vec::new();
+        let cleaned = close_resources(&mut resources, false, &proof, &mut |action| {
+            actions.push(action); ApiResult::ContextLost
+        });
+        assert_eq!(actions, vec![CleanupAction::Finish]);
+        assert!(!proof.record_closed(cleaned));
+        assert!(proof.finish(ApiResult::Success));
+        assert!(!proof.completion_known() && !proof.record_closed(true));
+        let mut retried = false;
+        assert!(!close_resources(&mut resources, false, &proof, &mut |_| {
+            retried = true; ApiResult::Success
+        }));
+        assert!(!retried);
+        assert_eq!((resources.texture, resources.framebuffer), (6, 7));
+        assert!(!resources.image.is_null() && !resources.context.is_null());
+        assert!(!resources.egl_library.is_null() && !resources.gl_library.is_null());
+    }
+    #[test]
+    fn unsupported_or_already_synchronized_context_loss_can_close_cleanly() {
         let mut unopened = GpuReadback::empty();
         let receipt = unopened.cleanup_receipt();
         // Actual error/close plumbing, with no function pointers or resources.
@@ -932,6 +973,7 @@ mod tests {
             } else { Resources::default() };
             assert!(!proof.observe(ApiResult::egl(0, 0x3004))); // EGL_BAD_ATTRIBUTE
             assert!(!proof.observe(ApiResult::gl(0x0500))); // GL_INVALID_ENUM
+            assert!(!proof.observe(ApiResult::gl(GL_CONTEXT_LOST)));
             assert!(proof.completion_known());
             let cleaned = close_resources(&mut resources, false, &proof, &mut |_| ApiResult::Success);
             assert!(proof.record_closed(cleaned));

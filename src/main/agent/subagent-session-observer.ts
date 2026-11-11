@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { SUBAGENT_LIMITS } from '../../shared/subagents'
 import {
   SUBAGENT_SESSION_MAX_CHARS, SUBAGENT_SESSION_MAX_PACKET_CHARS, SUBAGENT_SESSION_MAX_ROWS,
-  SUBAGENT_SESSION_RETENTION_MS, SUBAGENT_SESSION_ADMISSION_TITLE, type SubagentSessionAdmission,
+  SUBAGENT_SESSION_RETENTION_MS,
   SUBAGENT_SESSION_WIDGET_KEY, type SubagentSessionNotice, type SubagentSessionRow, type SubagentSessionStatus
 } from '../../shared/subagent-sessions'
 
@@ -13,7 +12,6 @@ export interface SubagentSessionObserver {
   finish(status: 'completed' | 'failed' | 'aborted'): void
 }
 export interface SubagentSessionPublisher {
-  reserve(parentToolCallId: string, count: number, signal?: AbortSignal): Promise<boolean>
   begin(task: { name: string }, parentToolCallId: string): SubagentSessionObserver | undefined
   halt(): void
 }
@@ -21,18 +19,15 @@ interface DisplayContext {
   mode?: string
   cwd: string
   sessionManager: { getSessionId(): string; getSessionFile(): string | undefined }
-  ui: {
-    setWidget(key: string, lines: string[]): void
-    input?(title: string, placeholder?: string, options?: { signal?: AbortSignal; timeout?: number }): Promise<string | undefined>
-  }
+  ui: { setWidget(key: string, lines: string[]): void }
 }
 const FIELD_LIMIT = 8192
 const MAX_RUNTIME_CHILDREN = 256
 const identity = (value: unknown, max = 256): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !value.includes('\0')
 const object = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' ? value as Record<string, unknown> : undefined
 
-/** A display-only side channel. RPC input reserves main's display capacity; it is
- * not user tool authorization and does not add tools, model calls or history.
+/** Best-effort display side channel; main admits snapshots by real parent receipt.
+ * It does not add tools, model calls, authorization or history.
  * Widget key/nonce are routing fences, not authentication against same-process plugins.
  * Local slots retain true terminal tracking for the same TTL as main. */
 export function createSubagentSessionPublisher(options: {
@@ -50,90 +45,43 @@ export function createSubagentSessionPublisher(options: {
     return clock
   }
   let halted = false
-  type Reservation = { ui: DisplayContext['ui']; manager: DisplayContext['sessionManager']; cwd: string; sessionId: string; path?: string; parentToolCallId: string; remaining: number; signal?: AbortSignal }
-  let reservation: Reservation | undefined
-  let pending: AbortController | undefined
-  const capture = (parentToolCallId: string, count: number): Reservation | undefined => {
+  type CapturedContext = { ui: DisplayContext['ui']; manager: DisplayContext['sessionManager']; cwd: string; sessionId: string; path?: string }
+  const capture = (parentToolCallId: string): CapturedContext | undefined => {
     if (halted || !identity(options.nonce) || !identity(runtimeId) || !identity(parentToolCallId)) return
     const ctx = options.createContext()
     if (!ctx || ctx.mode !== 'rpc') return
     // Real command contexts expose live getters: capture the actual UI/manager,
     // not getters that could silently resolve a replacement client at begin.
     const ui = ctx.ui, manager = ctx.sessionManager, cwd = ctx.cwd
-    if (typeof ui.input !== 'function') return
     const sessionId = manager.getSessionId(), path = manager.getSessionFile()
     if (!identity(cwd, 4096) || !identity(sessionId) || (path !== undefined && !identity(path, 4096))) return
-    return { ui, manager, cwd, sessionId, path, parentToolCallId, remaining: count }
+    return { ui, manager, cwd, sessionId, path }
   }
-  const sameContext = (a: Reservation, b: Reservation) => a.cwd === b.cwd && a.sessionId === b.sessionId && a.path === b.path
+  // The same real manager/session may learn its file after first publication.
+  // Keep the original absent producer path; main binds only the display path.
+  const sameContext = (a: CapturedContext, b: CapturedContext) => a.cwd === b.cwd && a.sessionId === b.sessionId && (a.path === undefined || a.path === b.path)
     && a.manager === b.manager && a.ui === b.ui
   const prune = () => {
     const now = time()
     for (const [slot, deadline] of slots) if (deadline !== undefined && now >= deadline) slots.delete(slot)
   }
   return {
-    async reserve(parentToolCallId, count, signal) {
-      if (pending) return false
-      reservation = undefined
-      let controller: AbortController | undefined
-      let timer: ReturnType<typeof setTimeout> | undefined
-      const abort = () => controller?.abort()
-      try {
-        if (signal?.aborted || !Number.isSafeInteger(count) || count < 1 || count > SUBAGENT_LIMITS.maxParallel.max) return false
-        prune()
-        if (slots.size + count > MAX_RUNTIME_CHILDREN) return false
-        const owner = capture(parentToolCallId, count)
-        if (!owner) return false
-        controller = new AbortController()
-        pending = controller
-        signal?.addEventListener('abort', abort, { once: true })
-        timer = setTimeout(abort, 5000)
-        const metadata: SubagentSessionAdmission = { version: 1, nonce: options.nonce!, runtimeId, parentToolCallId, count }
-        // SDK supports signal/timeout; the local race also fences mocks or a late
-        // response that ignores cancellation. Neither timeout nor undefined is consent.
-        const cancelled = new Promise<undefined>((resolve) => controller!.signal.addEventListener('abort', () => resolve(undefined), { once: true }))
-        const reply = await Promise.race([
-          owner.ui.input!(SUBAGENT_SESSION_ADMISSION_TITLE, JSON.stringify(metadata), { signal: controller.signal, timeout: 5000 }), cancelled
-        ])
-        if (reply !== 'reserved' || controller.signal.aborted || signal?.aborted || halted) return false
-        const current = capture(parentToolCallId, count)
-        if (!current || !sameContext(owner, current)) return false
-        prune()
-        if (slots.size + count > MAX_RUNTIME_CHILDREN) return false
-        reservation = { ...owner, signal }
-        return true
-      } catch { return false }
-      finally {
-        clearTimeout(timer)
-        signal?.removeEventListener('abort', abort)
-        controller?.abort()
-        if (pending === controller) pending = undefined
-      }
-    },
     begin(task, parentToolCallId) {
       try {
-        if (halted || !identity(options.nonce) || !identity(runtimeId)) return undefined
         prune()
-        const admitted = reservation
-        if (!admitted || admitted.remaining < 1 || admitted.parentToolCallId !== parentToolCallId) return undefined
-        if (admitted.signal?.aborted) { reservation = undefined; return undefined }
-        const current = capture(parentToolCallId, admitted.remaining)
-        if (!current || !sameContext(admitted, current)) { reservation = undefined; return undefined }
-        // Consume exactly once, even when starting publication fails. Never reuse
-        // a main reservation under another call/runtime/parent context.
-        admitted.remaining--
-        if (admitted.remaining === 0) reservation = undefined
-        if (slots.size >= MAX_RUNTIME_CHILDREN) return undefined
-        const parentSessionId = admitted.sessionId
-        const parentSessionPath = admitted.path
+        const captured = capture(parentToolCallId)
+        if (!captured || slots.size >= MAX_RUNTIME_CHILDREN) return undefined
+        const parentSessionId = captured.sessionId
+        const parentSessionPath = captured.path
         const notice: SubagentSessionNotice = {
-          version: 1, nonce: options.nonce, source: 'sdk:pion_subagents', runtimeId, id: randomUUID(),
+          version: 1, nonce: options.nonce!, source: 'sdk:pion_subagents', runtimeId, id: randomUUID(),
           parentToolCallId, parentSessionId, ...(parentSessionPath !== undefined ? { parentSessionPath } : {}),
-          cwd: admitted.cwd, name: identity(task.name, 80) ? task.name : '子代理',
+          cwd: captured.cwd, name: identity(task.name, 80) ? task.name : '子代理',
           revision: 0, status: 'starting', truncated: false, rows: []
         }
         let timer: ReturnType<typeof setTimeout> | undefined
         let closed = false
+        let finished = false
         let sequence = 0
         let assistantId = ''
         // Bounded by retained rows; never retain arbitrary SDK messages/results.
@@ -153,11 +101,14 @@ export function createSubagentSessionPublisher(options: {
           }
           for (const [key, id] of toolIds) if (!notice.rows.some((row) => row.id === id)) toolIds.delete(key)
         }
+        const close = () => { if (timer) clearTimeout(timer); timer = undefined; closed = true; notice.rows = []; toolIds.clear() }
         const flush = (): boolean => {
           try {
             if (timer) clearTimeout(timer)
             timer = undefined
             if (closed || halted) return false
+            const current = capture(parentToolCallId)
+            if (!current || !sameContext(captured, current)) { close(); return false }
             bound()
             notice.revision++
             let packet = JSON.stringify(notice)
@@ -166,10 +117,10 @@ export function createSubagentSessionPublisher(options: {
             while (packet.length > SUBAGENT_SESSION_MAX_PACKET_CHARS && notice.rows.length) {
               notice.rows.shift(); notice.truncated = true; packet = JSON.stringify(notice)
             }
-            if (packet.length > SUBAGENT_SESSION_MAX_PACKET_CHARS) return false
-            admitted.ui.setWidget(SUBAGENT_SESSION_WIDGET_KEY, [packet])
+            if (packet.length > SUBAGENT_SESSION_MAX_PACKET_CHARS) { close(); return false }
+            captured.ui.setWidget(SUBAGENT_SESSION_WIDGET_KEY, [packet])
             return true
-          } catch { return false }
+          } catch { close(); return false }
         }
         const schedule = () => { if (!closed && !halted && !timer) timer = setTimeout(flush, 100) }
         const row = (id: string, kind: SubagentSessionRow['kind'], text: string, extra: Partial<SubagentSessionRow> = {}) => {
@@ -202,10 +153,10 @@ export function createSubagentSessionPublisher(options: {
         }
         const owner = {
           cancel: () => safe(() => status('cancelling', true)),
-          halt: () => { if (timer) clearTimeout(timer); timer = undefined; closed = true; notice.rows = []; toolIds.clear() }
+          halt: close
         }
-        // Fail before any model work when even the starting snapshot cannot be
-        // published. Later observer failures remain display-only.
+        // An unavailable starting snapshot disables only this display observer;
+        // the caller can still execute once and return the ordinary batch summary.
         if (!flush()) { owner.halt(); return undefined }
         live.add(owner)
         slots.set(owner, undefined)
@@ -213,9 +164,12 @@ export function createSubagentSessionPublisher(options: {
           running: () => safe(() => status('running')),
           cancelling: owner.cancel,
           finish: (value) => safe(() => {
-            if (closed) return
+            if (finished || halted) return
+            finished = true
             status(value, true)
-            slots.set(owner, time() + SUBAGENT_SESSION_RETENTION_MS)
+            // A failed display can close before actual execution settles. Only
+            // this real finish starts local retention; late finishes never add slots.
+            if (slots.has(owner)) slots.set(owner, time() + SUBAGENT_SESSION_RETENTION_MS)
             owner.halt(); live.delete(owner)
           }),
           event: (input) => safe(() => {
@@ -261,8 +215,6 @@ export function createSubagentSessionPublisher(options: {
       // these records after parent exit; shutdown is NOT child settlement.
       for (const child of live) child.cancel()
       halted = true
-      reservation = undefined
-      pending?.abort()
       for (const child of live) child.halt()
       live.clear()
       slots.clear()

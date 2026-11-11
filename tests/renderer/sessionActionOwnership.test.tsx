@@ -4,9 +4,12 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type { PionApi } from '../../src/shared/types'
 import type { HistoryCursor, TimelineCacheEntry } from '../../src/renderer/src/agent/timeline'
 import { useAgentSessionActions } from '../../src/renderer/src/hooks/agent/useAgentSessionActions'
+import { reducer } from '../../src/renderer/src/agent/reducer'
+import { initialState, type AgentState } from '../../src/renderer/src/agent/types'
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 const A = '/project/a.jsonl', B = '/project/b.jsonl', fork = '/project/fork.jsonl'
+const warning = `会话副本已创建，用量归档未完成；副本路径：${fork}`
 type Kind = 'copy' | 'fork'
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -51,7 +54,7 @@ function setup() {
     captureSelection,
     run: (kind: Kind) => kind === 'copy' ? hook.result.current.copySession(A) : hook.result.current.forkSession(A, 'entry-a'),
     resolve: (kind: Kind, cancelled = false) => kind === 'copy'
-      ? copy.resolve({ cancelled }) : branch.resolve({ cancelled, text: 'original user text' }),
+      ? copy.resolve({ cancelled, warning }) : branch.resolve({ cancelled, text: 'original user text', warning }),
     // Authoritative STATE and the owned reload publish a new session identity;
     // explicit UI navigation alone retires the mutation's intent receipt.
     publish: (path?: string) => { generation++; if (path) timelineOwnerPath.current = path },
@@ -79,6 +82,7 @@ it.each(['copy', 'fork'] as const)('isolates late %s receipts after A → B and 
     expect(h.timelineOwnerPath.current).toBe(returnToA ? A : B)
     expect(h.historyCursor.current).toBe(cursor)
     expect(h.timelineCache.current.get(A)).toBe(sourceCache)
+    expect(h.dispatch).not.toHaveBeenCalled()
     h.unmount()
   }
 })
@@ -98,20 +102,24 @@ it.each(['copy', 'fork'] as const)('retires %s receipts and callbacks across API
   expect(h.reloadTimeline).not.toHaveBeenCalled()
   expect(kind === 'copy' ? h.api.copySession : h.api.forkSession).toHaveBeenCalledTimes(1)
   expect(h.timelineOwnerPath.current).toBe(A)
+  expect(h.dispatch).not.toHaveBeenCalled()
 })
 
-it.each(['selection', 'api'] as const)('drops fork prefill when %s changes during the owned reload', async (change) => {
+it.each([
+  { kind: 'copy', change: 'api' }, { kind: 'fork', change: 'selection' }, { kind: 'fork', change: 'api' }
+] as const)('drops $kind warning and prefill when $change changes during the owned reload', async ({ kind, change }) => {
   const h = setup()
   let pending!: Promise<string | void>
-  act(() => { pending = h.run('fork') })
-  await act(async () => { h.resolve('fork') })
+  act(() => { pending = h.run(kind) })
+  await act(async () => { h.resolve(kind) })
   expect(h.reloadTimeline).toHaveBeenCalledTimes(1)
   if (change === 'selection') act(() => { h.select(B) })
   else h.rerender({ currentApi: { ...h.api } })
   let text!: string | void
   await act(async () => { h.finishReload(); text = await pending })
-  expect(text).toBe('')
+  expect(text).toBe(kind === 'copy' ? undefined : '')
   expect(h.clearTimeline).toHaveBeenCalledTimes(1)
+  expect(h.dispatch).not.toHaveBeenCalled()
 })
 
 it.each(['copy', 'fork'] as const)('accepts normal %s completion including its own STATE and history selection', async (kind) => {
@@ -127,11 +135,28 @@ it.each(['copy', 'fork'] as const)('accepts normal %s completion including its o
   expect(h.timelineOwnerPath.current).toBeUndefined()
   expect(h.historyCursor.current).toBeNull()
   expect(settled).toBe(false)
+  expect(h.dispatch).not.toHaveBeenCalled()
   let text!: string | void
   await act(async () => { h.publish(fork); h.finishReload(); text = await pending })
   expect(text).toBe(kind === 'fork' ? 'original user text' : undefined)
   expect(h.timelineOwnerPath.current).toBe(fork)
   expect(settled).toBe(true)
+  expect(h.dispatch).toHaveBeenCalledExactlyOnceWith({ type: 'statusError', error: warning })
+})
+
+it('applies an owned warning without resetting a busy backend or accepting stale ready errors', () => {
+  const state: AgentState = { ...initialState, status: { phase: 'running', cwd: '/project' },
+    busy: true, compacting: true, compactionEventState: true, liveSessionBackendId: 'backend-a',
+    session: { sessionId: 'a', sessionFile: A, isStreaming: true, messageCount: 1 },
+    timeline: [{ kind: 'assistant', id: 1, text: 'streaming', thinking: '', streaming: true }] }
+  const retained = reducer(state, { type: 'status', status: { phase: 'ready', cwd: '/project', error: 'stale ready error' } })
+  expect(retained.status).toBe(state.status)
+  const next = reducer(retained, { type: 'statusError', error: warning })
+  expect(next).toEqual({ ...retained, status: { ...state.status, error: warning } })
+  expect(next.status.phase).toBe('running')
+  expect(next.busy).toBe(true)
+  expect(next.timeline).toBe(state.timeline)
+  expect(next.session).toBe(state.session)
 })
 
 it.each(['copy', 'fork'] as const)('retires %s receipts and callbacks when the hook unmounts', async (kind) => {

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { Type } from 'typebox'
 import {
-  createAgentSessionFromServices, DefaultResourceLoader, SessionManager, SettingsManager,
+  createAgentSessionFromServices, DefaultResourceLoader, ExtensionRunner, SessionManager, SettingsManager,
   type AgentSession, type ExtensionAPI, type ExtensionCommandContext, type InlineExtension,
   type McpExtensionOptions, type ModelRuntime, type ToolDefinition
 } from '@earendil-works/pi-coding-agent'
@@ -55,7 +55,7 @@ async function fixture(prefs: CapabilityPreferences, options: {
   const loader = new DefaultResourceLoader({ cwd: root, agentDir: join(root, 'agent'),
     settingsManager: capabilityResourceSettings(settings), noExtensions: true, noSkills: true,
     noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    extensionFactories: [...(options.extensions ?? []), loadout.capture, loadout.declarations, policy.extension],
+    extensionFactories: [...(options.extensions ?? []), policy.extension],
     extensionsOverride: policy.extensionsOverride, skillsOverride: policy.skillsOverride })
   await loader.reload()
   const customTools = options.customTools ?? []
@@ -205,13 +205,35 @@ it.each([
   expect(host.provider).not.toHaveBeenCalled()
 })
 
-it('expands SDK-resolved patterns over registered names only, with literal dots and no guessed glob syntax', () => {
+it('shares SDK star matching with the execution ceiling, treating other metacharacters literally', () => {
   const resolved = SettingsManager.inMemory({ defaultTools: ['audit.*', 'mcp__docs__*', 'read'] }).getDefaultTools()
   expect([...expandCapabilityDefaultTools(resolved, ['read', 'audit.read', 'auditXread', 'mcp__docs__get', 'mcp__other__get'])])
     .toEqual(['read', 'audit.read', 'mcp__docs__get'])
-  for (const entry of ['r?ad', 'r[ea]*', '{read,write}', '!write', '+grep']) {
-    expect(() => expandCapabilityDefaultTools(['*', entry], ['read', 'write'])).toThrow('仅支持精确名称和 *')
+  for (const entry of ['r?ad', 'r[ea]*', '{read,write}', '!write', '+grep', '']) {
+    const names = ['read', 'write', entry, `${entry}suffix`]
+    expect([...expandCapabilityDefaultTools([entry], names)])
+      .toEqual(entry.includes('*') ? [entry, `${entry}suffix`] : [entry])
+    expect([...expandCapabilityDefaultTools(['*', entry], names)]).toEqual(names)
   }
+})
+
+it('keeps complete registrations in the execution ceiling beyond display capacity', () => {
+  const loadout = createPionNativeLoadoutBoundary(['*'])
+  const policy = createCapabilityPolicy({ preferences: preferences(), cwd: '/fixture', runtimeId: 'large-fixture',
+    loadout, defaultTools: ['*'], items: [], notices: [], getSessionPath: () => undefined,
+    getSubagentsEnabled: () => false, getMcpItems: () => [] })
+  const entries = new Map(Array.from({ length: 4100 }, (_, index) => {
+    const name = `optional_${index}`
+    return [name, { definition: tool(name, { defaultActive: false }), sourceInfo: {
+      path: '<inline:large-fixture>', source: 'inline', scope: 'temporary', origin: 'top-level'
+    } }] as const
+  }))
+  policy.extensionsOverride({ extensions: [{ tools: entries }] } as unknown as Parameters<typeof policy.extensionsOverride>[0])
+  const selection = policy.initialize([], ['*'], () => [])
+  expect(entries.size).toBe(4100)
+  expect(selection.tools).toContain('optional_4099')
+  expect(loadout.allowed('optional_4099')).toBe(true)
+  expect(loadout.allowed('unregistered_late')).toBe(false)
 })
 
 it('inherit expands * before capturing the native ceiling, without hidden or unknown late tools', async () => {
@@ -270,7 +292,19 @@ it('standard intersects the ORIGINAL explicit defaultTools ceiling, including la
   expect(host.provider).not.toHaveBeenCalled()
 })
 
-it('keeps inherit activation and hidden exposures, and reapplies plan declarations after late registration', async () => {
+it('enforces the SDK ceiling through one capability tool-call gate, including nested calls', async () => {
+  const host = await fixture(preferences({ tool: true }), { defaultTools: ['read'] })
+  const handlers = host.loader.getExtensions().extensions.flatMap((extension) => extension.handlers.get('tool_call') ?? [])
+  expect(handlers).toHaveLength(1)
+  for (const parentToolCallId of [undefined, 'outer']) {
+    const event = { type: 'tool_call' as const, toolCallId: 'fixture', input: {}, parentToolCallId }
+    expect(await host.session.extensionRunner!.emitToolCall({ ...event, toolName: 'read' })).toBeUndefined()
+    expect(await host.session.extensionRunner!.emitToolCall({ ...event, toolName: 'write' })).toMatchObject({ block: true })
+  }
+  expect(host.provider).not.toHaveBeenCalled()
+})
+
+it('keeps inherit activation and reapplies selected-branch plan state independent of prompt markers', async () => {
   const inherited = await fixture(preferences())
   expect(inherited.selection).not.toHaveProperty('tools')
   expect(inherited.session.getActiveToolNames()).toEqual(['read', 'bash', 'edit', 'write'])
@@ -282,7 +316,12 @@ it('keeps inherit activation and hidden exposures, and reapplies plan declaratio
   pi.registerTool(tool('late'))
   const context = standard.session.extensionRunner!.createCommandContext().getSystemPromptOptions()
   await standard.session.extensionRunner!.emitBeforeAgentStart({ messageType: 'user', prompt: 'fixture' }, {
-    ...context, forceSystemPrompt: '[PION PLAN MODE]'
+    ...context, forceSystemPrompt: 'Documentation: [PION PLAN MODE]'
+  })
+  expect(standard.session.getActiveToolNames()).toContain('write')
+  standard.session.sessionManager.appendCustomEntry('plan-mode-state', { version: 1, enabled: true })
+  await standard.session.extensionRunner!.emitBeforeAgentStart({ messageType: 'user', prompt: 'fixture' }, {
+    ...context, forceSystemPrompt: 'Plan state is independent of prompt text'
   })
   expect(standard.session.getActiveToolNames().sort()).toEqual(['find', 'grep', 'ls', 'read'])
   expect(standard.provider).not.toHaveBeenCalled()
@@ -378,14 +417,20 @@ it('publishes a bounded exact-source read-only command receipt without schemas o
   expect(host.provider).not.toHaveBeenCalled()
 })
 
-it('keeps real SDK MCP active through replacement/RPC duplicate binds without rereading config or registrations', async () => {
+it('keeps real SDK MCP active through genuine command-context getters and duplicate binds without rereading config', async () => {
   const handlers = new Map<string, ((...args: unknown[]) => unknown)[]>()
   const registrations = vi.fn(() => [{ name: 'blocked', extensionPath: '/private/extension', config: { command: 'must-not-spawn', enabled: false } }])
   const loadConfig = vi.fn(() => ({ servers: [{ name: 'blocked', source: '/private/mcp.json',
     config: { command: 'must-not-spawn', enabled: false } }], errors: [] }))
   const setWidget = vi.fn((_key: string, _lines?: string[]) => {})
-  const ctx = { cwd: '/fixture', mode: 'rpc', modelRegistry: {},
-    sessionManager: { getSessionFile: () => undefined }, ui: { notify: vi.fn(), setWidget } } as unknown as ExtensionCommandContext
+  // Genuine guarded SDK getters, with inert registries and memory-only history.
+  // Empty/disabled MCP configuration keeps startup transport/auth free.
+  const runner = new ExtensionRunner([], {} as ConstructorParameters<typeof ExtensionRunner>[1], '/fixture',
+    SessionManager.inMemory('/fixture'), {} as ConstructorParameters<typeof ExtensionRunner>[4])
+  runner.setUIContext({ notify: vi.fn(), setWidget } as unknown as ExtensionCommandContext['ui'], 'rpc')
+  const ctx = runner.createCommandContext()
+  expect(Object.getOwnPropertyDescriptor(ctx, 'mode')?.get).toEqual(expect.any(Function))
+  expect(Object.getOwnPropertyDescriptor(ctx, 'ui')?.get).toEqual(expect.any(Function))
   const observer = createMcpStatusObserver({ createContext: () => ctx, slot: { busy: false } })
   const barrier = createPionNativeMcpCloseBarrier()
   const entry = createPionNativeExtensions(observer, { loadConfig, registrations, closeBarrier: barrier })[2]

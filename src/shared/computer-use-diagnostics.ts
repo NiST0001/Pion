@@ -28,15 +28,13 @@ export const NATIVE_COMPUTER_USE_DIAGNOSTICS_BY_REQUEST = Object.freeze({
 })
 export function copyComputerUseDiagnostics(value: unknown): ComputerUseDiagnostics | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const prototype = Object.getPrototypeOf(value)
-  if (prototype !== Object.prototype && prototype !== null) return undefined
+  const entries = Object.entries(value)
+  if (entries.length > 4) return undefined
   const result: ComputerUseDiagnostics = {}
-  for (const key of Reflect.ownKeys(value)) {
+  for (const [key, code] of entries) {
     if (key !== 'open' && key !== 'capture' && key !== 'act' && key !== 'close') return undefined
-    const property = Object.getOwnPropertyDescriptor(value, key)
-    if (!property || !property.enumerable || !('value' in property) || typeof property.value !== 'string'
-      || !(COMPUTER_USE_DIAGNOSTIC_CODES as readonly string[]).includes(property.value)) return undefined
-    result[key] = property.value as ComputerUseDiagnosticCode
+    if (typeof code !== 'string' || !(COMPUTER_USE_DIAGNOSTIC_CODES as readonly string[]).includes(code)) return undefined
+    result[key] = code as ComputerUseDiagnosticCode
   }
   return result
 }

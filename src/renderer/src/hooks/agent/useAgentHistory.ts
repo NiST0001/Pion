@@ -816,9 +816,11 @@ export function useAgentHistory({ api, state, dispatch }: UseAgentHistoryOptions
       timelineOwnerPath.current = undefined
       historyCursor.current = null
       await reloadTimeline()
-      return isSelected() ? result.text : ''
+      if (!isSelected()) return ''
+      if (result.warning) dispatch({ type: 'statusError', error: result.warning })
+      return result.text
     },
-    [api, captureSelectionIntent, clearTimeline, invalidateSelection, reloadTimeline]
+    [api, captureSelectionIntent, clearTimeline, dispatch, invalidateSelection, reloadTimeline]
   )
 
   const switchSession = useCallback(

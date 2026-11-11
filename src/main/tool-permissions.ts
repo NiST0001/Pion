@@ -1,8 +1,8 @@
 import { app } from 'electron'
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve, sep } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { writeAtomicJson } from './atomic-json-file'
 import {
   CODEX_IMAGE_MODEL_OPTIONS, CODEX_IMAGE_QUALITIES, CODEX_IMAGE_REQUEST_ALIAS, IMAGE_GENERATION_TOOL_NAME,
   MAX_IMAGE_REFERENCES, MAX_IMAGE_REFERENCE_PATH_LENGTH, MAX_IMAGE_REFERENCE_PATHS_LENGTH,
@@ -190,33 +190,35 @@ export class ToolPermissionStore {
   }
 
   load(): Promise<void> {
-    return this.loadPromise ??= this.loadFile()
+    if (this.loadPromise) return this.loadPromise
+    if (this.loaded && !this.loadError) return Promise.resolve()
+    // Only an actual read holds the slot; a later explicit call may retry failure.
+    return this.loadPromise = this.loadFile().finally(() => { this.loadPromise = undefined })
   }
 
   private async loadFile(): Promise<void> {
-    try {
-      const parsed = parsePermissionFile(JSON.parse(await readFile(this.filePath, 'utf8')))
-      const normalized: Record<string, ToolPermissionRules> = {}
-      for (const [cwd, rules] of Object.entries(parsed.projects)) normalized[canonicalCwd(cwd)] = rules
-      this.data = { version: 1, projects: normalized }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') this.recordLoadError()
-    } finally {
-      this.loaded = true
-    }
+    let next: ToolPermissionFile
+    try { next = await this.readSource() } catch { return }
+    this.data = next
+    this.loaded = true
+    const recovered = !!this.loadError
+    this.loadError = undefined
+    if (recovered) this.notifyChanged()
   }
 
   private recordLoadError(): void {
-    this.loadError = new Error('工具权限配置读取失败或格式无效；原文件已保留，请修复配置后重启')
+    this.loadError = new Error('工具权限配置读取失败或格式无效；原文件已保留，请修复配置后重新读取权限设置')
     this.notifyChanged()
   }
 
-  private async checkWritableSource(): Promise<void> {
-    if (this.loadError) throw this.loadError
+  private async readSource(): Promise<ToolPermissionFile> {
     try {
-      parsePermissionFile(JSON.parse(await readFile(this.filePath, 'utf8')))
+      const parsed = parsePermissionFile(JSON.parse(await readFile(this.filePath, 'utf8')))
+      const projects: Record<string, ToolPermissionRules> = {}
+      for (const [cwd, rules] of Object.entries(parsed.projects)) projects[canonicalCwd(cwd)] = rules
+      return { version: 1, projects }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { version: 1, projects: {} }
       this.recordLoadError()
       throw this.loadError
     }
@@ -246,10 +248,10 @@ export class ToolPermissionStore {
     return this.currentPolicy(cwd)
   }
 
-  private currentPolicy(cwd: string): ProjectToolPermissionPolicy {
+  private currentPolicy(cwd: string, projects = this.data.projects): ProjectToolPermissionPolicy {
     const normalizedCwd = canonicalCwd(cwd)
     const policyRoot = projectRootOf(cwd)
-    const saved = policyRulesFor(this.data.projects, policyRoot, sep)
+    const saved = policyRulesFor(projects, policyRoot, sep)
     return {
       cwd: normalizedCwd,
       source: saved ? 'saved' : 'default',
@@ -258,71 +260,56 @@ export class ToolPermissionStore {
     }
   }
 
-  async setPolicy(
-    cwd: string,
-    updates: Partial<ToolPermissionRules> | null
-  ): Promise<ProjectToolPermissionPolicy> {
-    await this.load()
-    await this.checkWritableSource()
-    const policyOwner = projectRootOf(cwd)
-    if (updates === null) {
-      const { [policyOwner]: _removed, ...projects } = this.data.projects
-      this.data = { version: 1, projects }
-    } else {
+  setPolicy(cwd: string, updates: Partial<ToolPermissionRules> | null): Promise<ProjectToolPermissionPolicy> {
+    return this.updatePolicy(cwd, (rules) => {
+      if (updates === null) return null
       for (const [category, decision] of Object.entries(updates)) {
         if (!CATEGORIES.includes(category as ToolPermissionCategory) || !isDecision(decision)) {
           throw new Error('无效的工具权限设置')
         }
       }
-      const current = this.currentPolicy(cwd).rules
-      this.data = {
-        version: 1,
-        projects: {
-          ...this.data.projects,
-          [policyOwner]: { ...current, ...updates }
-        }
-      }
-    }
-    this.notifyChanged()
-    await this.persist()
-    return this.getPolicy(cwd)
-  }
-
-  async allowProjectCategories(
-    cwd: string,
-    categories: ToolPermissionCategory[]
-  ): Promise<ProjectToolPermissionPolicy> {
-    await this.load()
-    for (const category of categories) {
-      if (!CATEGORIES.includes(category)) throw new Error('无效的工具权限设置')
-    }
-    await this.checkWritableSource()
-    const policyOwner = projectRootOf(cwd)
-    const policy = this.currentPolicy(cwd)
-    // A stale dialog is not an explicit settings change: do not replace a
-    // newly denied category (including inherited project/worktree policy).
-    if (categories.some((category) => policy.rules[category] === 'deny')) return policy
-    const rules = { ...policy.rules }
-    for (const category of categories) rules[category] = 'allow'
-    // Check and apply synchronously, before the first persistence await.
-    this.data = { version: 1, projects: { ...this.data.projects, [policyOwner]: rules } }
-    this.notifyChanged()
-    await this.persist()
-    return this.getPolicy(policy.cwd)
-  }
-
-  private persist(): Promise<void> {
-    const snapshot = `${JSON.stringify(this.data, null, 2)}\n`
-    const target = this.filePath
-    const temp = `${target}.${randomUUID()}.tmp`
-    const write = this.writeQueue.then(async () => {
-      // A later external failure/corruption also preserves the source file.
-      await this.checkWritableSource()
-      await mkdir(dirname(target), { recursive: true })
-      await writeFile(temp, snapshot, 'utf8')
-      await rename(temp, target)
+      return { ...rules, ...updates }
     })
-    this.writeQueue = write.catch(() => undefined)
+  }
+
+  allowProjectCategories(cwd: string, categories: ToolPermissionCategory[]): Promise<ProjectToolPermissionPolicy> {
+    return this.updatePolicy(cwd, (rules) => {
+      for (const category of categories) {
+        if (!CATEGORIES.includes(category)) throw new Error('无效的工具权限设置')
+      }
+      // A stale approval preserves newly denied categories, including inherited rules.
+      if (categories.some((category) => rules[category] === 'deny')) return undefined
+      const next = { ...rules }
+      for (const category of categories) next[category] = 'allow'
+      return next
+    })
+  }
+
+  private updatePolicy(
+    cwd: string,
+    update: (rules: ToolPermissionRules) => ToolPermissionRules | null | undefined
+  ): Promise<ProjectToolPermissionPolicy> {
+    const write = this.writeQueue.then(async () => {
+      const loading = this.loadPromise ?? (!this.loaded ? this.load() : undefined)
+      await loading
+      if (this.loadError) throw this.loadError
+      const source = loading ? this.data : await this.readSource()
+      const rules = update(this.currentPolicy(cwd, source.projects).rules)
+      if (rules === undefined) {
+        this.data = source
+        return this.currentPolicy(cwd)
+      }
+      const projects = { ...source.projects }
+      const owner = projectRootOf(cwd)
+      if (rules === null) delete projects[owner]
+      else projects[owner] = rules
+      const next: ToolPermissionFile = { version: 1, projects }
+      await writeAtomicJson(this.filePath, next)
+      this.data = next
+      this.notifyChanged()
+      return this.currentPolicy(cwd)
+    })
+    this.writeQueue = write.then(() => undefined, () => undefined)
     return write
   }
 }
@@ -586,8 +573,6 @@ function classify(event, ctx) {
       && !risks.includes("outside-workspace")) risks.push("outside-workspace");
     if (isSensitivePath(canonicalPath) && !risks.includes("sensitive-path")) risks.push("sensitive-path");
   }
-  if (command && DESTRUCTIVE_COMMAND.test(command)) risks.push("destructive-command");
-
   const category = categories.includes("network") ? "network" : categories[0];
   let summary;
   let detail;
@@ -634,6 +619,7 @@ function classify(event, ctx) {
   } else if (command) {
     summary = clip(command.replace(/\s+/g, " ").trim(), 180);
     detail = clip(command);
+    if (DESTRUCTIVE_COMMAND.test(command)) detail += "\n提示：命令含高风险关键词，请确认操作范围与影响。";
   } else if (path) {
     summary = (category === "write" ? "修改 " : "访问 ") + path;
     detail = path;
@@ -683,6 +669,15 @@ async function gate(event, ctx) {
   const decisions = request.policyCategories.map((category) => policy[category] ?? "ask");
   if (decisions.includes("deny")) {
     return { block: true, reason: "Pion 项目权限策略已拒绝此工具调用" };
+  }
+
+  // The factory's model-only SDK roots use Main's explicit capture/control,
+  // exact-model upload and retention approval. Unknown/extension tools retain
+  // this confirmation; Main independently verifies the actual factory/root.
+  if (computerUse) {
+    const tool = getToolInfo(event.toolName);
+    if (tool?.sourceInfo?.source === "sdk" && tool.sourceInfo.path === "<sdk:" + event.toolName + ">"
+      && tool.exposure === "model-only") return undefined;
   }
 
   // models.* has no inner tool_call event. Disclose billing on every outer

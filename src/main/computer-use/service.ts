@@ -1,5 +1,5 @@
 import {
-  COMPUTER_USE_LIMITS as L, createDisabledComputerUseStatus, sameComputerUseOwner,
+  COMPUTER_USE_LIMITS as L, createDisabledComputerUseStatus, isComputerUseCaptureBudgetExhausted, sameComputerUseOwner,
   validateComputerUseCapability, validateComputerUseConsent, validateComputerUseFrame,
   validateComputerUseOwner, validateComputerUseStatus,
   type ComputerUseActRequest, type ComputerUseConsent, type ComputerUseOwner, type ComputerUseStatus
@@ -12,7 +12,7 @@ import type { ComputerUseCoordination, ComputerUseCoordinationReceipt } from './
 import { ComputerUseInputPolicy } from './input-policy'
 
 export interface ComputerUseServiceOptions {
-  /** Required actual durable ownership ledger; never a no-op production default. */
+  /** Required durable control-lease ledger; observation never calls it. */
   coordination: ComputerUseCoordination
   driverFactory: () => ComputerUseDriver
   /** Host monotonic milliseconds. Invalid/backwards clocks fail closed. */
@@ -118,38 +118,42 @@ export class ComputerUseService {
     this.state = { ...createDisabledComputerUseStatus(), revision: this.state.revision, scopeRevision: this.state.scopeRevision + 1, state: 'preparing', actualPending: true, owner: identity, consent: approval }
     const work = Promise.resolve().then(async () => {
       this.check(lease, 'start', 'before')
-      lease.claim = 'pending'
-      try {
-        const claim = await this.options.coordination.claim()
-        // A stop during claim must still retain its durable receipt before any
-        // epoch/document/policy check can throw. No chooser was dispatched yet.
-        switch (claim.kind) {
-          case 'claimed':
-            if (!claim.receipt || claim.receipt.kind !== 'computer-use-coordination-receipt') throw new Error('ComputerUse receipt unavailable')
-            lease.receipt = claim.receipt
-            lease.claim = 'held'
-            this.state.coordination = 'held'
-            break
-          case 'occupied':
-            lease.claim = 'blocked'
-            this.state.coordination = 'blocked'
-            throw new Error('ComputerUse foreign coordination occupied')
-          case 'failed-clean':
-            lease.claim = 'clean'
-            throw new Error('ComputerUse coordination failed cleanly')
-          default:
+      // Freeze this decision to the validated approval. Stop clears public
+      // consent, while an admitted control claim must still retain its receipt.
+      // Read-only observation keeps its local lease without any coordination IO.
+      if (approval.control) {
+        lease.claim = 'pending'
+        try {
+          const claim = await this.options.coordination.claim()
+          // Retain a late receipt before epoch/document/policy checks can throw.
+          switch (claim.kind) {
+            case 'claimed':
+              if (!claim.receipt || claim.receipt.kind !== 'computer-use-coordination-receipt') throw new Error('ComputerUse receipt unavailable')
+              lease.receipt = claim.receipt
+              lease.claim = 'held'
+              this.state.coordination = 'held'
+              break
+            case 'occupied':
+              lease.claim = 'blocked'
+              this.state.coordination = 'blocked'
+              throw new Error('ComputerUse foreign coordination occupied')
+            case 'failed-clean':
+              lease.claim = 'clean'
+              throw new Error('ComputerUse coordination failed cleanly')
+            default:
+              lease.claim = 'unknown'
+              this.state.coordination = 'unknown'
+              throw new Error('ComputerUse coordination unknown')
+          }
+        } catch (error) {
+          if (lease.claim === 'pending') {
             lease.claim = 'unknown'
             this.state.coordination = 'unknown'
-            throw new Error('ComputerUse coordination unknown')
+          }
+          throw error
         }
-      } catch (error) {
-        if (lease.claim === 'pending') {
-          lease.claim = 'unknown'
-          this.state.coordination = 'unknown'
-        }
-        throw error
+        this.publish()
       }
-      this.publish()
       this.check(lease, 'start', 'after')
       lease.driver = this.options.driverFactory()
       this.check(lease, 'start', 'before')
@@ -196,7 +200,7 @@ export class ComputerUseService {
     this.check(lease, 'capture', 'before')
     if (lease.pending || lease.closing || this.state.state !== 'ready' || !lease.driver) throw new Error('ComputerUse capture unavailable')
     const budget = this.state.budget
-    if (budget.captures >= L.maxCaptures || budget.frameBytes >= L.maxTotalFrameBytes || budget.framePixels >= L.maxTotalFramePixels) throw new Error('ComputerUse capture budget exhausted')
+    if (isComputerUseCaptureBudgetExhausted(budget)) throw new Error('ComputerUse capture budget exhausted')
     budget.captures++ // Failed, expired and interrupted attempts never roll back.
     delete this.state.frame
     this.state.state = 'observing'
@@ -249,10 +253,12 @@ export class ComputerUseService {
       // A subscriber may have revoked during publication. Never return old pixels.
       this.check(lease, 'capture', 'after')
       return { state: this.getState(), png: result.png, ...(result.previewPng ? { previewPng: result.previewPng } : {}) }
-    } catch {
+    } catch (error) {
       this.collectDiagnostics(lease)
       if (lease.pending === work) lease.pending = undefined
       if (this.lease === lease) void this.stop(lease.owner)
+      if (error instanceof Error && error.message === 'computer-use-capture-unknown') throw new Error('computer-use-capture-unknown')
+      if (error instanceof Error && error.message === 'ComputerUse image budget exhausted') throw new Error('ComputerUse capture budget exhausted')
       throw new Error('ComputerUse capture failed or revoked')
     }
   }

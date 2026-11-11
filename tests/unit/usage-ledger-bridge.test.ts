@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import type { BackendRecord } from '../../src/main/agent/types'
 import { QUESTION_WAIT_WIDGET_KEY } from '../../src/shared/question-settings'
-import { SUBAGENT_SESSION_ADMISSION_TITLE, SUBAGENT_SESSION_WIDGET_KEY } from '../../src/shared/subagent-sessions'
+import { SUBAGENT_SESSION_WIDGET_KEY } from '../../src/shared/subagent-sessions'
 
 const roots: string[] = []
 const transcript = 'isolated ledger bridge fixture\n'
@@ -51,11 +51,15 @@ async function fixture() {
     resolveListedSession: vi.fn(async (requested: string) => requested),
     stopBackend: vi.fn(async () => undefined),
     openSessionManager: vi.fn(() => manager),
+    activateLogicalSession: vi.fn((_path: string, _cwd: string) => undefined),
     pushSessionInfo: vi.fn(async () => undefined),
     refreshSidebarSessions: vi.fn(async () => undefined)
   }
   // Bypass constructor services: no real SDK/client, user configuration or credentials.
   const bridge = Object.assign(Object.create(AgentBridge.prototype), fields) as AgentBridge
+  fields.activateLogicalSession.mockImplementation(selected => {
+    (bridge as unknown as typeof fields).activeSessionPath = selected
+  })
   const captureSession = vi.fn((_path: string): Promise<void> => Promise.resolve())
   const scheduleSession = vi.fn((_path: string) => undefined)
   bridge.configureUsageLedger({ captureSession, scheduleSession })
@@ -112,19 +116,19 @@ describe('AgentBridge usage ledger integration', () => {
     expect(() => guarded.assertSessionLoadAllowed(h.path)).not.toThrow()
   })
 
-  it('rejects a waiting clone if its source becomes reserved for deletion', async () => {
+  it('rechecks the deletion slot before SDK clone creation', async () => {
     const h = await fixture()
-    const archive = deferred()
+    const archive = deferred(), listed = deferred()
     h.captureSession.mockReturnValue(archive.promise)
+    h.fields.resolveListedSession.mockImplementationOnce(async requested => { await listed.promise; return requested })
     const copying = h.bridge.copySession(h.path).catch((error: unknown) => error)
-    await vi.waitFor(() => expect(h.captureSession).toHaveBeenCalledTimes(1))
     const deleting = h.bridge.deleteSession(h.path).catch((error: unknown) => error)
-    await vi.waitFor(() => expect(h.captureSession).toHaveBeenCalledTimes(2))
-    archive.resolve()
-    const [copyResult, deleteResult] = await Promise.all([copying, deleting])
-    expect(copyResult).toEqual(expect.objectContaining({ message: '正在归档并删除会话，请稍后重试' }))
-    expect(deleteResult).toEqual({ activeSessionChanged: false })
+    await vi.waitFor(() => expect(h.captureSession).toHaveBeenCalledExactlyOnceWith(h.path))
+    listed.resolve()
+    expect(await copying).toEqual(expect.objectContaining({ message: '正在归档并删除会话，请稍后重试' }))
     expect(h.manager.createBranchedSession).not.toHaveBeenCalled()
+    archive.resolve()
+    expect(await deleting).toEqual({ activeSessionChanged: false })
   })
 
   it('does not clear a newly selected session after a delayed delete capture', async () => {
@@ -155,24 +159,50 @@ describe('AgentBridge usage ledger integration', () => {
     expect(stopBackends).toHaveBeenCalledTimes(1)
     expect(h.fields.sessionSelectionGeneration).toBe(generation + 1)
     archive.resolve()
-    expect(await copy).toEqual(expect.objectContaining({ message: '会话已切换，未继续复制或分叉' }))
-    expect(h.manager.createBranchedSession).not.toHaveBeenCalled()
+    expect(await copy).toEqual(expect.objectContaining({ message: expect.stringContaining('未自动切换') }))
+    expect(h.manager.createBranchedSession).toHaveBeenCalledTimes(1)
+    expect(h.fields.activateLogicalSession).not.toHaveBeenCalled()
     stopped.resolve()
     await stopping
   })
 
-  it.each(['copy', 'fork', 'fork-selected'] as const)('does not create a %s when source archival rejects', async (operation) => {
+  it.each(['copy', 'fork', 'fork-selected'] as const)('keeps SDK %s success and reports source archival failure', async operation => {
     const h = await fixture()
-    const failure = new Error('source not archived')
-    h.captureSession.mockRejectedValue(failure)
+    const child = join(h.root, 'child.jsonl')
+    await writeFile(child, transcript)
+    h.captureSession.mockImplementation(async () => {
+      expect(h.manager.createBranchedSession).toHaveBeenCalledTimes(1)
+      throw new Error('source not archived')
+    })
     if (operation === 'fork-selected') h.fields.activeSessionPath = h.path
+    const status = h.fields.status
     const pending = operation === 'copy' ? h.bridge.copySession(h.path)
       : operation === 'fork' ? h.bridge.forkSession(h.path, 'user') : h.bridge.forkAt('user')
-    await expect(pending).rejects.toBe(failure)
+    await expect(pending).resolves.toMatchObject({ cancelled: false, warning: expect.stringContaining(child),
+      ...(operation === 'copy' ? {} : { text: 'fork here' }) })
     expect(h.captureSession).toHaveBeenCalledExactlyOnceWith(h.path)
-    expect(h.manager.createBranchedSession).not.toHaveBeenCalled()
+    expect(h.fields.activeSessionPath).toBe(child)
+    expect(h.fields.status).toBe(status)
     await expect(readFile(h.path, 'utf8')).resolves.toBe(transcript)
-    expect(h.fields.pushSessionInfo).not.toHaveBeenCalled()
+    await expect(readFile(child, 'utf8')).resolves.toBe(transcript)
+    expect(h.fields.pushSessionInfo).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([false, true])('captures source and child once, retaining the copy if child archival fails (%s)', async failChild => {
+    const h = await fixture()
+    const child = join(h.root, 'child.jsonl')
+    await writeFile(child, transcript)
+    h.captureSession.mockImplementation(async path => {
+      if (failChild && path === child) throw new Error('child not archived')
+    })
+    const status = h.fields.status
+    await expect(h.bridge.copySession(h.path)).resolves.toEqual({ cancelled: false,
+      ...(failChild ? { warning: expect.stringContaining(child) } : {}) })
+    expect(h.captureSession.mock.calls).toEqual([[h.path], [child]])
+    expect(h.fields.activeSessionPath).toBe(child)
+    expect(h.fields.status).toBe(status)
+    await expect(readFile(h.path, 'utf8')).resolves.toBe(transcript)
+    await expect(readFile(child, 'utf8')).resolves.toBe(transcript)
   })
 
   it('collects root background persistence notices, never nested or private packets', async () => {
@@ -209,7 +239,6 @@ describe('AgentBridge usage ledger integration', () => {
     // Reserved malformed packets are consumed before even message/usage-shaped payloads.
     emit({ ...persistence[0], widgetKey: QUESTION_WAIT_WIDGET_KEY })
     emit({ ...persistence[0], widgetKey: SUBAGENT_SESSION_WIDGET_KEY })
-    emit({ type: 'entry_appended', entry: { type: 'usage' }, title: SUBAGENT_SESSION_ADMISSION_TITLE })
     emit({ type: 'entry_appended', entry: { type: 'message' } })
     expect(h.scheduleSession).not.toHaveBeenCalled()
     expect(trackBackendEvent).toHaveBeenCalledWith(backend,

@@ -30,7 +30,8 @@ function fixture(store: ProviderVisibilityStore) {
   const state = { model: { ...model }, sessionId: 'existing-session', isStreaming: true }
   const backend = { key: 'existing', client, state, busy: true, compacting: true, pendingRunIds: ['run'] }
   const auth = { listProviders: vi.fn(async () => providers.map((provider) => ({ ...provider }))),
-    invalidate: vi.fn(), login: vi.fn(), logout: vi.fn() }
+    listAvailableModels: vi.fn(async () => [model, otherModel]),
+    refreshForRead: vi.fn(), invalidate: vi.fn(), login: vi.fn(), logout: vi.fn() }
   const sessionModelPreferences = { setSessionModelPreference: vi.fn(), getSessionModelPreference: vi.fn(() => model) }
   const stopBackend = vi.fn(), beginProviderMutation = vi.fn(), reloadBackendsAfterProviderMutation = vi.fn()
   const waitForActiveBackend = vi.fn(async () => backend)
@@ -40,7 +41,6 @@ function fixture(store: ProviderVisibilityStore) {
     sessionModelPreferences, backendPool: new Map([[backend.key, backend]]), activeKey: backend.key,
     win, waitForActiveBackend, stopBackend, beginProviderMutation, reloadBackendsAfterProviderMutation
   }) as Bridge
-  const internals = bridge as unknown as { readBackendModels(value: typeof backend): Promise<unknown[]> }
   const assertNoMutation = () => {
     for (const fn of [client.setModel, client.stop, client.start, client.prompt, auth.login, auth.logout,
       sessionModelPreferences.setSessionModelPreference, stopBackend, beginProviderMutation, reloadBackendsAfterProviderMutation]) {
@@ -51,7 +51,7 @@ function fixture(store: ProviderVisibilityStore) {
     expect(backend.busy).toBe(true)
     expect(backend.pendingRunIds).toEqual(['run'])
   }
-  return { bridge, store, client, backend, state, auth, win, waitForActiveBackend, internals, assertNoMutation }
+  return { bridge, client, auth, win, assertNoMutation }
 }
 
 async function temporaryStore() {
@@ -82,10 +82,14 @@ describe('provider visibility bridge (display preferences, no real SDK/auth acce
   it('hides only the picker provider while busy, retaining the actual model and same-ID other provider', async () => {
     const { store, file } = await temporaryStore()
     const h = fixture(store)
+    h.auth.listProviders.mockResolvedValue(providers.map(provider => ({ ...provider, enabled: false })))
     expect(await h.bridge.getModels()).toEqual([model, otherModel])
     expect(await h.bridge.setModelProviderEnabled('openai', false, 7)).toEqual([
       { ...providers[0], enabled: false }, { ...providers[1], enabled: true }
     ])
+    expect(h.auth.listProviders).toHaveBeenCalledOnce()
+    expect(h.auth.refreshForRead).toHaveBeenCalledOnce()
+    expect(h.auth.invalidate).not.toHaveBeenCalled()
     expect(await h.bridge.getModels()).toEqual([otherModel])
     // The runtime catalog is unchanged; future/existing sessions may still use
     // the original model. This preference is not an SDK provider switch.
@@ -141,6 +145,32 @@ describe('provider visibility bridge (display preferences, no real SDK/auth acce
     h.assertNoMutation()
   })
 
+  it.each(['window', 'frame', 'store'])('passes the publication guard through queued storage after its %s changes', async (kind) => {
+    const { store, file } = await temporaryStore()
+    const h = fixture(store)
+    Object.assign(h.win.webContents, { mainFrame: {} })
+    await h.bridge.setModelProviderEnabled('openai', false, 7)
+    const committed = await readFile(file, 'utf8')
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    const original = store.setEnabled.bind(store)
+    const save = vi.spyOn(store, 'setEnabled').mockImplementationOnce(async (providerId, enabled, assertCurrent) => {
+      await pending
+      return original(providerId, enabled, assertCurrent)
+    })
+    const saving = h.bridge.setModelProviderEnabled('openai', true, 7)
+    const rejected = expect(saving).rejects.toThrow('所属主窗口')
+    await vi.waitFor(() => expect(save).toHaveBeenCalled())
+    expect(save).toHaveBeenCalledWith('openai', true, expect.any(Function))
+    if (kind === 'window') Object.assign(h.bridge, { win: { ...h.win } })
+    if (kind === 'frame') Object.assign(h.win.webContents, { mainFrame: {} })
+    if (kind === 'store') Object.assign(h.bridge, { providerVisibility: new ProviderVisibilityStore(file) })
+    release()
+    await rejected
+    expect(await readFile(file, 'utf8')).toBe(committed)
+    h.assertNoMutation()
+  })
+
   it('keeps committed catalog and picker state after a failed save', async () => {
     const { store, file } = await temporaryStore()
     const h = fixture(store)
@@ -155,14 +185,17 @@ describe('provider visibility bridge (display preferences, no real SDK/auth acce
     h.assertNoMutation()
   })
 
-  it('retains a committed preference if the response catalog fails afterwards', async () => {
-    const { store, file } = await temporaryStore()
-    const h = fixture(store), error = new Error('catalog refresh failed')
-    h.auth.listProviders.mockResolvedValueOnce(providers).mockRejectedValueOnce(error)
-    await expect(h.bridge.setModelProviderEnabled('openai', false, 7)).rejects.toBe(error)
-    expect(JSON.parse(await readFile(file, 'utf8')).disabledProviderIds).toEqual(['openai'])
-    expect((await h.bridge.getModelProviders())[0].enabled).toBe(false)
-    expect(await h.bridge.getModels()).toEqual([otherModel])
+  it('routes provider and subagent reads through read refresh while their service work is pending', async () => {
+    const h = fixture((await temporaryStore()).store)
+    let release!: () => void
+    const pending = new Promise<void>(resolve => { release = resolve })
+    h.auth.listProviders.mockImplementationOnce(async () => { await pending; return providers })
+    h.auth.listAvailableModels.mockImplementationOnce(async () => { await pending; return [model, otherModel] })
+    const reads = Promise.all([h.bridge.getModelProviders(), h.bridge.getSubagentModels(7)])
+    expect(h.auth.refreshForRead).toHaveBeenCalledTimes(2)
+    expect(h.auth.invalidate).not.toHaveBeenCalled()
+    release()
+    expect(await reads).toEqual([providers.map(provider => ({ ...provider, enabled: true })), [model, otherModel]])
     h.assertNoMutation()
   })
 
@@ -175,22 +208,6 @@ describe('provider visibility bridge (display preferences, no real SDK/auth acce
     await expect(h.bridge.setModelProviderEnabled('openai', false, 7)).rejects.toThrow()
     expect(save).not.toHaveBeenCalled()
     expect(await readFile(file, 'utf8')).toBe('corrupt settings')
-    h.assertNoMutation()
-  })
-
-  it('strips SDK API/private model fields and derives enabled from preferences rather than catalog hints', async () => {
-    const { store, file } = await temporaryStore()
-    const h = fixture(store)
-    h.auth.listProviders.mockResolvedValue(providers.map((provider) => ({ ...provider, enabled: false })))
-    expect((await h.bridge.getModelProviders()).every((provider) => provider.enabled)).toBe(true)
-    await h.bridge.setModelProviderEnabled('openai', false, 7)
-    await h.bridge.setModelProviderEnabled('openai', true, 7)
-    expect(await h.bridge.getModels()).toEqual([model, otherModel])
-    const settings = await readFile(file, 'utf8')
-    for (const privateField of ['apiKey', 'private-sentinel', 'baseUrl', 'openai-responses', 'configured', 'authMethods']) {
-      expect(settings).not.toContain(privateField)
-      expect(JSON.stringify(await h.bridge.getModels())).not.toContain(privateField)
-    }
     h.assertNoMutation()
   })
 

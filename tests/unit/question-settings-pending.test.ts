@@ -31,10 +31,16 @@ it('main read deadline retains one actual operation until late open/read/close s
   await rejected
   const second = store.get()
   expect(io.open).toHaveBeenCalledTimes(1)
+  let drained = false
+  const shutdown = store.shutdown().then(() => { drained = true })
+  await expect(store.get()).rejects.toThrow('closed')
+  expect(drained).toBe(false)
   const handle = file()
   finish(handle)
   expect(await second).toEqual({ timeoutMinutes: 10 })
+  await shutdown
   expect(handle.close).toHaveBeenCalledTimes(1)
+  expect(drained).toBe(true)
 })
 
 it('runtime read deadline preserves its process-wide slot until the actual late operation settles', async () => {
@@ -61,16 +67,25 @@ it('expired main save does not publish a late temporary write or release its slo
   io.mkdir.mockResolvedValue(undefined)
   io.unlink.mockResolvedValue(undefined)
   io.writeFile.mockImplementation(() => new Promise<void>((done) => { finish = done }))
+  const staged = { writeFile: io.writeFile, sync: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined) }
+  io.open.mockImplementation(async (_path, flags) => flags === 'r' ? file() : staged)
   const store = new QuestionSettingsStore(() => '/settings')
   const rejected = expect(store.set({ timeoutMinutes: null })).rejects.toThrow('超时')
   await vi.advanceTimersByTimeAsync(5000)
   await rejected
   await expect(store.set({ timeoutMinutes: 10 })).rejects.toThrow('仍在保存')
+  let drained = false
+  const shutdown = store.shutdown().then(() => { drained = true })
+  expect(drained).toBe(false)
   finish()
   await vi.advanceTimersByTimeAsync(0)
+  await shutdown
+  expect(drained).toBe(true)
+  expect(staged.sync).toHaveBeenCalledTimes(1)
+  expect(staged.close).toHaveBeenCalledTimes(1)
   expect(io.rename).not.toHaveBeenCalled()
   expect(io.unlink).toHaveBeenCalledTimes(1)
   io.writeFile.mockResolvedValue(undefined)
   io.rename.mockResolvedValue(undefined)
-  expect(await store.set({ timeoutMinutes: 10 })).toEqual({ timeoutMinutes: 10 })
+  expect(await new QuestionSettingsStore(() => '/settings').set({ timeoutMinutes: 10 })).toEqual({ timeoutMinutes: 10 })
 })

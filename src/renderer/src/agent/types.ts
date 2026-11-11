@@ -99,6 +99,8 @@ export type TimelineItem = (
       messageTimestamp?: number
       text: string
       thinking: string
+      /** Actual projection loss; deltas and provisional streaming caches retain it until a complete source replaces it. */
+      partialFields?: ('text' | 'thinking')[]
       streaming: boolean
       /** Set by message_start; absent on history replay and paged entries. */
       live?: boolean
@@ -248,6 +250,7 @@ export interface ToolStateScope {
 
 export type Action =
   | { type: 'status'; status: AgentStatus }
+  | { type: 'statusError'; error: string }
   | { type: 'session'; session: SessionInfo | null }
   | { type: 'runCheckpoint'; checkpoint: RunCheckpointStatus | null }
   | { type: 'sessions'; sessions: SessionMeta[] }

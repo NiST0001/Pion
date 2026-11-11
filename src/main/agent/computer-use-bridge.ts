@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto'
 import {
   COMPUTER_USE_AGENT_LIMITS as A, COMPUTER_USE_OBSERVE_TOOL, isComputerUseAgentTitle, parseComputerUseAgentTitle,
-  validateComputerUseAgentResponse, type ComputerUseAgentError,
+  type ComputerUseAgentError,
   type ComputerUseAgentRequest, type ComputerUseAgentResponse
 } from '../../shared/computer-use-agent'
 import {
@@ -10,7 +10,7 @@ import {
   validateComputerUseFrame, validateComputerUseOwner,
   type ComputerUseAction, type ComputerUseFrame, type ComputerUseOwner, type ComputerUseStatus
 } from '../../shared/computer-use'
-import { assertGeneratedPngData } from './png-validation'
+import { assertGeneratedPngData, GENERATED_PNG_VALIDATION_LIMITS } from './png-validation'
 import type { ComputerUseService } from '../computer-use/service'
 
 export interface ComputerUseAgentAdmission {
@@ -33,15 +33,24 @@ export interface ComputerUseAgentAdmission {
   /** Cleanup only: captured actual client/runtime/session, without requiring a
    * still-running provider, root tool, permission or desktop lease. */
   assertCleanupCurrent(): void
+  /** Cleanup only: Main confirms the exact original admission rejected before
+   * any watcher could be installed; never inferred from request IDs alone. */
+  assertWatchNotInstalled?(): void
+  /** Mark this watch's host correlation as reclaimable after a terminal negative
+   * response or explicit cleanup ACK. Keep recent exact cleanup tombstones. */
+  releaseWatch?(): void
 }
 export interface ComputerUseAgentModelProjection { png: Uint8Array; width: number; height: number }
 
-/** Encoder output only. Validate before traversing, keep original CRC bytes and
- * the complete IDAT/IEND, then validate the stripped result independently. A
- * palette/tRNS cannot be removed without changing essential pixel information. */
+/** Validate external encoder bytes once before traversing. Copy the complete
+ * validated IHDR/IDAT/IEND and their CRCs unchanged; removing only ancillary
+ * chunks needs no second inflate. Palette/tRNS affect pixels and are rejected. */
 export function normalizeComputerUseModelPng(png: Uint8Array, dimensions: { width: number; height: number }): Uint8Array {
-  assertGeneratedPngData(png, dimensions)
-  const data = Buffer.from(png.buffer, png.byteOffset, png.byteLength)
+  if (!(png instanceof Uint8Array) || png.byteLength > GENERATED_PNG_VALIDATION_LIMITS.maxBytes) reject('capture-failed')
+  // Freeze bytes by ownership before validation/copying, including views over
+  // shared buffers. The stripped output is derived only from this snapshot.
+  const data = Buffer.from(png)
+  assertGeneratedPngData(data, dimensions)
   const keep = (type: string): boolean => type === 'IHDR' || type === 'IDAT' || type === 'IEND'
   let byteLength = 8
   for (let offset = 8; offset < data.length;) {
@@ -63,7 +72,6 @@ export function normalizeComputerUseModelPng(png: Uint8Array, dimensions: { widt
     }
     offset += length + 12
   }
-  assertGeneratedPngData(result, dimensions)
   return result
 }
 export interface ComputerUseAgentTrustedTargetGuard {
@@ -118,11 +126,16 @@ interface RetainedScope {
 interface WatchRegistration {
   request: ComputerUseAgentRequest
   admission: ComputerUseAgentAdmission
-  scope: Scope
   settled: boolean
+  cleanupAcknowledged: boolean
   finish(): void
   delivered: Promise<boolean>
   deliveryFinished(delivered: boolean): void
+}
+interface RequestRegistration {
+  request: ComputerUseAgentRequest
+  admission: ComputerUseAgentAdmission
+  active: boolean
 }
 interface Scope {
   admission: ComputerUseAgentAdmission
@@ -142,18 +155,22 @@ function reject(code: ComputerUseAgentError): never { throw new ComputerUseAgent
  * start a backend, authorize, read credentials, or send a provider request. */
 export class ComputerUseAgentBridge {
   private scope?: Scope
-  private readonly seen = new Set<string>()
+  /** Keys are real host-minted client/factory/session identities, never payload
+   * runtime IDs. Retired runtimes and their correlations can be collected. */
+  private readonly requests = new WeakMap<object, Map<string, RequestRegistration>>()
   /** Actual delivered screenshot provenance, not a reusable upload grant. */
-  private readonly retainedScopes = new Map<object, RetainedScope>()
-  /** Settled tombstones are bounded by maxRequests; IDs alone grant nothing. */
-  private readonly watches = new Map<string, WatchRegistration>()
+  private readonly retainedScopes = new WeakMap<object, RetainedScope>()
+  /** Actual watches survive run withdrawal until their explicit cleanup. Only
+   * acknowledged cleanup tombstones are eligible for bounded reclamation. */
+  private readonly watches = new WeakMap<object, Map<string, WatchRegistration>>()
   private lastClock = 0
 
   constructor(private readonly options: ComputerUseAgentBridgeOptions) {}
 
   /** Always consume a reserved title, including malformed/non-input/nested ones,
    * before normal questions, chat/live snapshots and billing. */
-  handle(event: unknown, admit: (request: ComputerUseAgentRequest) => Promise<ComputerUseAgentAdmission>, respond: (id: string, value: string) => void): boolean {
+  handle(event: unknown, admit: (request: ComputerUseAgentRequest) => Promise<ComputerUseAgentAdmission>, respond: (id: string, value: string) => void,
+    onRejectedWatchDelivered?: (request: ComputerUseAgentRequest) => void): boolean {
     if (!event || typeof event !== 'object') return false
     const input = event as { title?: unknown; id?: unknown; type?: unknown; method?: unknown; parentToolCallId?: unknown }
     if (!isComputerUseAgentTitle(input.title)) return false
@@ -188,16 +205,45 @@ export class ComputerUseAgentBridge {
           } catch (error) { result = this.failure(captured, error) }
         }
         const delivered = !!id && this.reply(respond, id, result)
+        if (delivered && !result.ok && captured.operation === 'watch' && !admission) {
+          // A rejected Main admission never reached execute's watch install.
+          // Main alone can prove and reclaim its captured cleanup correlation.
+          try { onRejectedWatchDelivered?.(captured) }
+          catch { /* Changed/unknown host identity keeps its cleanup slot. */ }
+        }
         if (delivered && result.ok && captured.operation === 'observe' && admission) this.deliverScreenshot(captured, admission, result)
-        const registration = this.watches.get(`${captured.runtimeId}:${captured.requestId}`)
+        const watches = admission && this.watches.get(admission.sessionIdentity)
+        const registration = watches?.get(captured.requestId)
         // A replayed watch cannot finish the original watch's delivery receipt.
         if (registration?.request === captured) registration.deliveryFinished(delivered)
+        if (admission) {
+          if (captured.operation === 'watch') {
+            if (!registration) {
+              if (delivered && !result.ok) admission.releaseWatch?.()
+            } else if (registration.request === captured && delivered && !result.ok) this.retireWatch(admission, captured.requestId)
+          }
+          if (delivered && result.ok && captured.operation === 'unwatch') {
+            if (watches?.has(captured.watchRequestId!)) this.retireWatch(admission, captured.watchRequestId!)
+            else if (admission.assertWatchNotInstalled) {
+              try {
+                admission.assertWatchNotInstalled()
+                admission.releaseWatch?.()
+              } catch { /* A changed host identity keeps its cleanup slot. */ }
+            }
+          }
+          if (delivered && result.ok && captured.operation === 'retained') {
+            this.retainedScopes.get(admission.sessionIdentity)?.deliveries.delete(captured.toolCallId!)
+          }
+          this.finishRequest(captured, admission)
+        }
       })
     return true
   }
 
   private reply(respond: (id: string, value: string) => void, id: string, response: ComputerUseAgentResponse): boolean {
-    try { respond(id, JSON.stringify(validateComputerUseAgentResponse(response))); return true }
+    // This bridge constructs the typed DTO; the receiving process validates
+    // its external JSON independently, including image/base64 bounds.
+    try { respond(id, JSON.stringify(response)); return true }
     catch { return false } // Old transports are never replaced/retried here.
   }
 
@@ -282,11 +328,10 @@ export class ComputerUseAgentBridge {
     return value
   }
 
-  private check(scope: Scope, operation: 'observe' | 'act' | 'egress', request = false): void {
+  private check(scope: Scope, operation: 'observe' | 'act' | 'egress'): void {
     if (!this.options.enabled || this.scope !== scope || scope.revoked) reject('scope-revoked')
     scope.admission.assertCurrent()
     this.options.assertPolicy(scope.admission, operation)
-    if (request) scope.admission.assertRequestCurrent()
     if (this.scope !== scope || scope.revoked) reject('scope-revoked')
   }
 
@@ -337,32 +382,78 @@ export class ComputerUseAgentBridge {
     try { this.check(scope, 'egress') } catch { this.revoke(scope.admission.owner) }
   }
 
+  private retireWatch(admission: ComputerUseAgentAdmission, requestId: string): void {
+    const watches = this.watches.get(admission.sessionIdentity)
+    const registration = watches?.get(requestId)
+    if (!registration || registration.admission !== admission) return
+    if (!registration.cleanupAcknowledged) {
+      registration.cleanupAcknowledged = true
+      registration.admission.releaseWatch?.()
+      this.requests.get(admission.sessionIdentity)?.delete(requestId)
+    }
+    // Recent exact cleanup is idempotent. Live/unknown polls are never evicted.
+    for (const [key, watcher] of watches!) {
+      if (watches!.size <= A.maxRequests) break
+      if (watcher.cleanupAcknowledged) watches!.delete(key)
+    }
+  }
+
+  private registerRequest(request: ComputerUseAgentRequest, admission: ComputerUseAgentAdmission): void {
+    let requests = this.requests.get(admission.sessionIdentity)
+    if (!requests) { requests = new Map(); this.requests.set(admission.sessionIdentity, requests) }
+    for (const [key, entry] of requests) {
+      if (entry.active || entry.request.operation === 'watch') continue
+      // Policy, selection or explicit-tool checks can fail transiently while
+      // the same root still exists. Keep its action tombstone for the immutable
+      // run/generation; only a different host owner retires that run's IDs.
+      if (!sameComputerUseOwner(entry.admission.owner, admission.owner)) requests.delete(key)
+    }
+    if (requests.has(request.requestId)) reject('invalid-request')
+    if (requests.size >= A.maxRequests) reject('busy')
+    requests.set(request.requestId, { request, admission, active: true })
+  }
+
+  private finishRequest(request: ComputerUseAgentRequest, admission: ComputerUseAgentAdmission): void {
+    const requests = this.requests.get(admission.sessionIdentity)
+    const registration = requests?.get(request.requestId)
+    if (registration?.request !== request) return
+    registration.active = false
+    // Egress/retained are checks/evidence, not desktop actions. Only actual
+    // registered watches and still-executable root actions need tombstones.
+    if (request.operation === 'observe' || request.operation === 'act') return
+    const watcher = request.operation === 'watch' && this.watches.get(admission.sessionIdentity)?.get(request.requestId)
+    if (!watcher || watcher.cleanupAcknowledged) requests!.delete(request.requestId)
+  }
+
   private async execute(request: ComputerUseAgentRequest, admit: (request: ComputerUseAgentRequest) => Promise<ComputerUseAgentAdmission>): Promise<ComputerUseAgentResponse> {
     if (!this.options.enabled) reject('unavailable')
-    const key = `${request.runtimeId}:${request.requestId}`
-    const watchKey = request.watchRequestId && `${request.runtimeId}:${request.watchRequestId}`
-    if (this.seen.has(key) || (request.operation !== 'unwatch' && this.seen.size >= A.maxRequests)) reject('invalid-request')
-    // Cleanup grants nothing and must remain available even at request capacity.
-    // Idempotence comes from the bounded exact watch tombstone, not more IDs.
-    if (request.operation !== 'unwatch') this.seen.add(key)
+    // Failed/untrusted admission consumes no application-wide request budget.
     const admission = await admit(request)
     if (request.operation === 'unwatch') {
       admission.assertCleanupCurrent()
-      const registration = watchKey && this.watches.get(watchKey)
-      if (!registration || registration.admission !== admission || registration.request.runtimeId !== request.runtimeId
-        || registration.request.provider !== request.provider || registration.request.modelId !== request.modelId
-        || registration.request.runtimeNonce !== request.runtimeNonce) reject('source-unverified')
-      // Remove this exact registration and settle its original response before
-      // acknowledging cleanup. Never touch this.scope or another/new run.
-      registration.finish()
-      if (!await registration.delivered) reject('protocol-error')
-      admission.assertCleanupCurrent()
+      const registration = request.watchRequestId && this.watches.get(admission.sessionIdentity)?.get(request.watchRequestId)
+      if (registration) {
+        if (registration.admission !== admission || registration.request.runtimeId !== request.runtimeId
+          || registration.request.provider !== request.provider || registration.request.modelId !== request.modelId
+          || registration.request.runtimeNonce !== request.runtimeNonce) reject('source-unverified')
+        // Settle this exact watch's original response before acknowledging its
+        // cleanup. Never touch this.scope or another/new run.
+        registration.finish()
+        if (!await registration.delivered) reject('protocol-error')
+        admission.assertCleanupCurrent()
+      } else {
+        // Only Main's captured failed admission proves zero installed watchers.
+        // Main supplies this proof only after the original Promise rejects.
+        if (!admission.assertWatchNotInstalled) reject('source-unverified')
+        admission.assertWatchNotInstalled()
+      }
       return { version: 1, ok: true, operation: 'unwatch', requestId: request.requestId }
     }
     admission.assertCurrent()
     admission.assertRequestCurrent()
     const owner = Object.freeze(validateComputerUseOwner(admission.owner))
     if (request.provider !== admission.provider || request.modelId !== admission.modelId || !admission.imageSupported) reject('model-unavailable')
+    this.registerRequest(request, admission)
     if (request.operation === 'retained') {
       // Evidence only: no scope creation, capture, upload approval or lease.
       this.options.assertPolicy(admission, 'egress')
@@ -375,6 +466,14 @@ export class ComputerUseAgentBridge {
       if (scope && !scope.revoked) this.revoke(scope.admission.owner)
       scope = { admission: { ...admission, owner }, permit: false, captureApproved: false, revoked: false, watchers: new Set() }
       this.scope = scope
+      const previous = this.retainedScopes.get(admission.sessionIdentity)
+      if (previous) {
+        for (const [toolId, delivery] of previous.deliveries) {
+          // Host retention admission requires the original run/root. A new
+          // owner cannot promote old unconfirmed deliveries into provenance.
+          if (!sameComputerUseOwner(delivery.owner, owner)) previous.deliveries.delete(toolId)
+        }
+      }
     }
     // Use this request's source receipt rather than the first observe's now-ended
     // tool receipt. Broad service checks remain the exact same host incarnation.
@@ -392,12 +491,15 @@ export class ComputerUseAgentBridge {
     if (request.operation === 'watch') {
       check('egress')
       if (!local.permit || retained()?.scopeRevision === undefined) reject('egress-revoked')
-      if (local.watchers.size >= 4) reject('busy')
+      let watches = this.watches.get(admission.sessionIdentity)
+      if (!watches) { watches = new Map(); this.watches.set(admission.sessionIdentity, watches) }
+      if (watches.has(request.requestId)) reject('invalid-request')
+      if (local.watchers.size >= 4 || [...watches.values()].filter(watcher => !watcher.cleanupAcknowledged).length >= A.maxRequests) reject('busy')
       return new Promise<ComputerUseAgentResponse>(resolve => {
         let timer: ReturnType<typeof setTimeout> | undefined
         let deliveryFinished!: (delivered: boolean) => void
         const delivered = new Promise<boolean>(accept => { deliveryFinished = accept })
-        const registration: WatchRegistration = { request, admission, scope: local, settled: false, delivered, deliveryFinished,
+        const registration: WatchRegistration = { request, admission, settled: false, cleanupAcknowledged: false, delivered, deliveryFinished,
           finish: () => {
             if (registration.settled) return
             registration.settled = true
@@ -407,7 +509,7 @@ export class ComputerUseAgentBridge {
             catch { resolve({ ...result(), ok: false, error: 'egress-revoked' }) }
           }
         }
-        this.watches.set(key, registration)
+        watches!.set(request.requestId, registration)
         local.watchers.add(registration)
         timer = setTimeout(registration.finish, A.watchMs)
         timer.unref?.()
@@ -447,9 +549,11 @@ export class ComputerUseAgentBridge {
         if (original.scopeRevision !== captured.state.scopeRevision || !captured.state.owner
           || !sameComputerUseOwner(captured.state.owner, owner) || !captured.state.consent?.capture || !captured.state.consent.upload) reject('capture-failed')
         if (!(captured.png instanceof Uint8Array) || captured.png.byteLength > L.maxFrameBytes) reject('capture-failed')
-        assertGeneratedPngData(captured.png, original)
         let projected: ComputerUseAgentModelProjection
         if (this.options.projectFrame) {
+          // External full-frame bytes must be checked before any injected
+          // decoder/projector. Without one, normalization below checks them.
+          assertGeneratedPngData(captured.png, original)
           projected = await this.options.projectFrame(captured.png, original)
           check('observe')
         } else {
@@ -462,13 +566,14 @@ export class ComputerUseAgentBridge {
           || projected.width > original.width || projected.height > original.height
           || Math.abs(projected.width / projected.height - original.width / original.height) > 1 / Math.min(projected.width, projected.height)) reject('capture-failed')
         projected = { ...projected, png: normalizeComputerUseModelPng(projected.png, projected) }
-        if (Buffer.byteLength(Buffer.from(projected.png).toString('base64')) >= A.maxModelBase64) reject('capture-failed')
+        const imageData = Buffer.from(projected.png).toString('base64')
+        if (imageData.length >= A.maxModelBase64) reject('capture-failed')
         check('observe')
         const current = this.options.service.getState()
         if (current.scopeRevision !== original.scopeRevision || current.frame?.id !== original.id || current.state !== 'ready') reject('frame-stale')
         const id = this.options.randomId()
         local.frame = { id, original, width: projected.width, height: projected.height, consumed: false }
-        return { ...result(), scopeRevision: original.scopeRevision, frameId: id, width: projected.width, height: projected.height, image: { mimeType: 'image/png', data: Buffer.from(projected.png).toString('base64') } }
+        return { ...result(), scopeRevision: original.scopeRevision, frameId: id, width: projected.width, height: projected.height, image: { mimeType: 'image/png', data: imageData } }
       }
       check('act')
       const frame = local.frame

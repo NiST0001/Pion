@@ -18,7 +18,7 @@ npm run test:e2e       # 构建后运行隔离 profile 的 Playwright Electron �
 node scripts/rpc-smoke.mjs       # RPC 基础链路（不经 GUI）
 node scripts/rpc-smoke-full.mjs [cwd]  # 会话/条目/树/模型/分叉全链路
 node scripts/gui-cdp-test.mjs node_modules/electron/dist/electron .  # GUI + 真实对话诊断
-npm run test:legacy-ui           # 现有完整 CDP UI 回归，逐步迁移至 Playwright
+npm run test:legacy-ui           # 手动 legacy CDP 交互/布局探针；源码字符串断言已移除
 ```
 
 > 注：pi RPC 子进程启动后会把进程标题改写为 `pi`（`process.title`），
@@ -31,9 +31,13 @@ Pi Durable 的渐进替换提案见 [迁移方案](pi-durable-migration.md)；�
 
 ## 优化与共享基础设施
 
-后续优化拆分与验收边界见 [优化路线](optimization-roadmap.md)。已有基础设施优先复用：`ipc/owner.ts` 校验活主窗口/主帧；`atomic-json-file.ts` 发布轻量配置，调用 Store 成功后提交内存并在退出等待；`process-exit.ts` 为工作流、初始化失败及历史撤销统一核真实 exit/stdio，历史调用方保原独占准入，重叠退出共享其实际停止 Promise；`shared/capability-item.ts` 统一纯条目解析；`features/session/session-folder-projection.ts` 统一目录与同级索引。
+后续优化拆分与验收边界见 [优化路线](optimization-roadmap.md)。已有基础设施优先复用：`ipc/owner.ts` 校验活主窗口/主帧；`atomic-json-file.ts` 供应用、项目、主题、提问、子代理、能力、提供商显示及会话组织配置复用，调用 Store 成功后提交内存并在退出等待；`process-exit.ts` 为工作流、初始化失败及历史撤销统一核真实 stop/exit/stdio，无期限真实屏障与有界 UI 等待分开，迟到成功仅回收所属实例，已启动且缺捕获屏障的 null writer 继续拒绝；`shared/capability-item.ts` 统一纯条目解析；`features/session/session-folder-projection.ts` 统一目录与同级索引。
 
-`SessionDiscovery` 流式投影只读列表，成功元数据按文件快照复用，坏读拒新列表；`SessionTokenCache` 在重新打开并验证文件回执后跳过未变正文。两者只服务侧栏，完整账本仍独立采集。Markdown 按实例最新正文/管线缓存纯解析与高亮树，逐次克隆后执行渐显及安全转换；工具组按真实调用 ID 线性匹配原组身份。默认生图的私有单次 PNG 回执绑定独立字节及全部预算，注入输出仍完整校验。调用计数改善保持与实机耗时/帧率分开。
+`SessionDiscovery` 流式投影只读列表，元数据缓存用一次路径 stamp 命中；单文件故障保其已核身份旧值，健康文件继续更新，目录故障保旧列表。`SessionTokenCache` 已核成功快照以一次路径 stamp 命中，变化后经 no-follow FD/header 完整重读并核 FD 前后/最终路径快照。普通 close 已收口拒绝仅本次读取失败，后续可显式重读；真实 pending 继续持读槽。两者只服务侧栏，账本独立完整解析。Token owner 在准入时捕获普通字段快照；侧栏省略与用量无关的显示元数据 schema，继续校验 entry 身份、已知类型和 usage，账本保完整来源校验。Markdown 按实例最新正文/管线缓存纯解析与高亮树，逐次克隆后执行渐显及安全转换；工具组按真实调用 ID 线性匹配原组身份。内建生图由 transport 私有完整验证后直接交工具，注入输出先复制快照再完整验证。调用计数与实机耗时/帧率分别记录。
+
+完成工具 ID 使用 `DatabaseSync('')` 的当前进程私有临时索引；批量提交后才回收对象，rollback/close 未知继续隔离。旧 completed.sqlite 保原样，详见[回执生命周期](native-tool-receipt-lifecycle.md)。普通 JSON/structured-clone DTO 复用字段 schema，来源/owner 在真实边界核验，省去 prototype/descriptor 防御及重复验证。计划只读工具名共用 `shared/capabilities.ts` 并核实际 builtin/SDK 提问来源，能力过滤与普通运行时共用单一 loadout owner/ceiling。
+
+固定安装包的 Pi changelog 使用 readFile 后检查字节预算与 UTF-8。设置 HTML 导出和 `/export` 共用点击时捕获的真实 `SessionCommandTarget`、`exportSessionForCommand` 和 no-replace 发布链，旧 `exportSessionHtml` IPC 已移除，迟到显示回执按 API/选择/卸载退休。发布前仅核私有暂存 metadata、sync/close，无全文读取；非 Windows 保严格 no-follow/nonblock，Windows 用 `O_RDWR` 供 FlushFileBuffers、沿暂存目录继承访问控制，省去 Unix mode 强制检查/chmod，文件/目录身份与无覆盖链保持。Windows 实机导出尚未验证；参考图严格 flags 独立保持。HTML 已核验的明确 RPC 否定允许后续显式导出，丢 ACK/未知 writer 保私有恢复文件并隔离；详见[原生斜杠命令](feature-contracts.md#原生斜杠命令)。
 
 ## 渲染性能采样
 
@@ -45,7 +49,8 @@ Pi Durable 的渐进替换提案见 [迁移方案](pi-durable-migration.md)；�
 - 覆盖率配置通过 `globSync` 为每个测试文件创建唯一命名、只包含该文件的 inline project；不继承包含 project 列表的配置自身，也不把 suites 导入同一共享模块作用域，以免跨文件 mocks/root hooks 污染收集与执行。依赖 mock 仍须局部注册并清理，不能用运行隔离替代测试自身的清理责任。
 - 每个单文件 project 保持独立的原始 V8 合并组，由 Vitest 转换为 Istanbul 后再合并最终报告，避免跨测试文件直接合并 V8 range tree；这不是对所有 V8 覆盖率问题的通用修复保证。使用 threads 池、最多 2 个 worker，测试与 hook 超时均为 30 秒。
 - 源码覆盖范围仍为 `src/shared/**/*.ts`、`src/main/**/*.ts`、`src/renderer/src/**/*.{ts,tsx}`；继续排除主进程入口、preload、renderer 入口及声明文件。覆盖率门槛保留 statements 15%、branches 12%、functions 10%、lines 17%，不以降低门槛规避 quality 失败。
-- `tests/coverage/all.test.tsx` 作为 legacy 文件保留，但新配置不执行、不维护它；文件仍存在不表示恢复了共享 suite 聚合。`tests/unit/test-files.test.ts` 回归保护自动发现、单文件唯一 project、E2E/旧入口/helper 排除与阈值不降低。
+- Linux quality 由 `test:coverage` 一次执行完整单元/组件集合及覆盖率门，随后复用一次构建运行 Electron E2E；Windows 保留独立完整 types/tests。legacy `tests/coverage/all.test.tsx` 手工聚合入口已移除。`tests/unit/test-files.test.ts` 保护共同发现集合、单文件隔离与覆盖率阈值。
+- legacy UI 脚本已移除源码字符串断言，保留真实 CDP 交互/布局及产物体积探针；本轮未执行该脚本。
 - 覆盖率或模拟测试结果仅证明对应检查范围，不替代类型检查、构建、GUI、跨平台或真实模型/收费服务验证；执行这些检查仍须遵守各自授权要求。
 
 ## 环境要求与坑位说明
@@ -68,7 +73,7 @@ Pi Durable 的渐进替换提案见 [迁移方案](pi-durable-migration.md)；�
 
 会话列表在各工作树下支持嵌套虚拟文件夹；会话右键提供“移到文件夹”和“归档会话”。“技能与工具”下方的“归档”打开统一面板，支持搜索、打开与恢复。删除文件夹时，直属会话和子文件夹提升到父级；恢复归档保留原文件夹归属和收藏状态，后台任务继续运行。
 
-组织元数据保存在 `userData/pion-session-organization.json`。`SessionOrganizationStore` 在单实例中串行读改写，以暂存文件同步后 rename 发布递增 revision；renderer 经 typed IPC 读取与局部更新，主进程核验所属活主帧，目录/会话归属使用 exact cwd 与真实 session path。查询与分类仅访问组织元数据，SDK 历史、后端、队列和权限继续使用既有生命周期。错误保留原数据和快照，初读失败提供重试；API owner 与 revision 拒绝迟到结果，真实保存持槽到 Promise 收口，退出关闭新准入并等待在途读写。名称缓存只供列表展示，显式打开仍走正常会话选择流程。
+组织元数据保存在 `userData/pion-session-organization.json`。`SessionOrganizationStore` 在单实例中串行读改写，复用 `atomic-json-file.ts` 完整写入、sync/close 后 rename 发布递增 revision；renderer 经 typed IPC 读取与局部更新，主进程核验所属活主帧，目录/会话归属使用 exact cwd 与真实 session path。查询与分类仅访问组织元数据，SDK 历史、后端、队列和权限继续使用既有生命周期。错误保留原数据和快照，初读失败提供重试；API owner 与 revision 拒绝迟到结果，真实保存持槽到 Promise 收口，退出关闭新准入并等待在途读写。名称缓存只供列表展示，显式打开仍走正常会话选择流程。
 
 ## 历史跳转动画
 
@@ -84,7 +89,9 @@ ChatTimeline 把直接相邻工具调用默认收为一行：读取/编辑文件
 
 AI提问等待设置独立保存到 userData/pion-questions.json，默认10分钟，可选1–300分钟或不自动超时，只影响下一题。每题捕获配置，选择后进入自定义输入仍沿原 monotonic deadline；不改变120秒工具授权或普通扩展/提供商认证交互的旧期限。backend捕获随机nonce及设置文件路径；私有 question-wait widget 在计费/正文/通用UI前消费，仅凭同 backend/client/当前run 的真实 pion_ask_user running receipt 关联下一次 select/input，未知来源不扩展期限。nonce不是OS/同进程恶意插件认证边界。无自动期限仍可手动取消/中止。
 
-排队不再把idle、handled、toolUse、length或未知收口当完成：最新用户输入之后的正常assistant stop及所属settled为必要证据；工具执行报错、权限/提问等超时、模型失败、用户中止/未知收口锁存并持久化cwd/会话/真实run暂停，空队列也保留状态。普通权限拒绝、问答取消/空答/否定回答本身不建立长期暂停，不清除旧暂停；只有之后实际正常收口才能发下一条，若SDK返回工具isError仍暂停，deny独立阻止执行，绝不把取消当回答/授权。未完成任务快照不参与队列门控；真实派发RPC、检查点和完成监听器的两种收口顺序均再次检查队列。旧交互回调核对backend/client/run/token/generation；显式恢复，或空闲时手动新输入绑定暂停revision，只有所属新run正常stop/settled及实际RPC/检查点/监听器全部收口才解除；期间的新错误/超时/revision保暂停，Tab/自动/单项发送不算恢复。所有prompt入口共享真实RPC槽，失败完成处理结束须释放其Promise槽，但不自动放开失败队列；含工具调用的助手尾部不是正常final。排队面板不再提供“继续当前任务”按钮，原中断任务保留在运行/恢复记录中，不作为未发送项重发。dispatchedAt 是主进程实际调用RPC前记录的派发尝试，不是SDK接收证明；网络拒绝后未知状态保忙槽，只有明确尚未调用RPC的本地项能退回队列。恢复时已有派发/启动/工具证据的旧queued记录隔离为interrupted；真正未发送项按run ID保附件和同文不同消息。直接发送某一条仍可用，但不解除其余队列暂停或批量连发。这个证据判断仅指正常运行收口，不等同于语义验收所有任务或真实进程/远端请求已结束。
+本地队列按最新输入所属 `agent_settled` 正面凭证及全部 prompt/steer/abort 实际 RPC、检查点、完成监听器收口逐项 FIFO。正常回复、工具错误、权限/提问超时、模型失败或中止均可在真实收口后继续；旧持久 `queuePauses` 忽略，原生任务 pending 与计划完成度独立。单项发送后须等所属本轮实际结束才发下一项；idle、handled、逻辑 stop 和等待超时仅作状态信息，真实 pending 未知继续持槽。
+
+回调核 backend/client/cwd/session/run/token/generation，deny 独立检查，问答取消/空答保原授权边界。已调用 RPC 的队列项保派发尝试，拒绝回包后继续拒绝排队重发；仅调用前本地准备失败保未发项并显示错误，可靠后续收口或手动新输入可重新准入，无忙循环。旧 queued 若有派发/启动/工具证据则隔离为 interrupted，保真实运行恢复、附件与同文不同 ID。异常助手尾部保原 final 分类，FIFO 仅依所属实际收口；SDK 回执与底层 provider 请求/收费状态分别记录。
 
 会话提问与工具权限复用默认展开、可手动收起的卡片，只在所属exact cwd/会话路径显示；切换/隐藏保请求、草稿、展开状态及原期限，不自动回答或授权。面板按任务/队列浮层真实顶部向上避让并留14px，不把浮层高度加入聊天余量；短区域输入/任务浮层各自限高滚动。原生选择题的自定义回答在本地切换，可“返回选项”且保草稿，只有明确提交才发送typed答案。侧栏设置左侧请求快跳点击入口展开/收起缓存列表，悬浮不展开，点击会话复用普通选择，待处理蓝点到请求结束才清；全局认证仍居中且不混入快跳。
 
@@ -114,10 +121,10 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 参考输入读取与上传边界（`src/main/agent/image-inputs.ts`）：
 
-- 输入是完整原文件，PNG/JPEG 中 metadata 随字节一起上传，不剥除或承诺清除 EXIF、ICC、文本等隐私信息，调用前须说明。全部输入安全读取并校验后才进入 transport/OAuth/网络；读取失败时没有上传参考图。transport 再复制私有字节快照并校验，以免等待 OAuth 时调用方修改设置或内容。
-- 原生读取器无 mkdir、写入或不安全 open 回退，使用 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`；O_NOFOLLOW 或 O_NONBLOCK 缺失/零值，或文件系统拒绝这些 flags 时失败，不重试为 `r` 或更弱选项。只读取普通非符号链接文件；绑定输出预检捕获的 cwd、真实项目/worktree root 及身份，复查 cwd 的真实映射、root/每层父目录的真实路径与 BigInt dev/ino，路径和已打开 FD 的 dev/ino、size、mtimeNs/ctimeNs 快照在打开及读取后再次核对，拒绝已知符号链接、目录/文件替换或快照变化。
-- 每张输入非空且最多 8 MiB，合计最多 16 MiB；每边最多 4096，累计最多 1600 万像素。先检查剩余字节预算，再以最多 64 KiB 分块读取私有快照并做一字节 EOF 探测，拒绝异常读取、成长或截断，不靠 stat 大小单独判定。PNG inflate 前按剩余累计像素预算做结构准入；PNG 复用完整有界 CRC/IDAT zlib/scanline/调色板/元数据检查，JPEG 只检查有界帧/扫描结构及完整最终 EOI，不进行 entropy、色彩或 ICC 完整解码，不宣称 full decoder 验证。
-- 同运行时进程跨工具实例/同进程 backend 替换仅允许一个真实读取操作，无排队；槽保持到真实 Promise 收口，而非外层 abort race 返回。取消/超时只是停止等待，late stat/open/read/close 仍需收尾，迟到 open 返回的 FD 在 finally 中关闭；底层永久挂起则持续阻止新读取，不能称为已取消底层操作。close reject 即使发生在消费者已返回后也锁存进程级参考图读取隔离：不重试不确定 FD 的 close，不继续下一张或启动新读取，不持有 FD/缓冲到隔离状态，仅重建 backend 进程才恢复。省略/空引用不占槽、不读文件，亦不受参考读取隔离影响。
+- 输入是完整原文件，PNG/JPEG 中 metadata 随字节一起上传，不剥除或承诺清除 EXIF、ICC、文本等隐私信息，调用前须说明。读取器完成文件快照与结构/尺寸预算后进入 transport；transport 对私有字节快照做一次完整 PNG/JPEG 验证、复核剩余累计预算并序列化，全部在 OAuth/网络前完成。读取或验证失败时无参考图上传，认证等待后仅使用私有快照。
+- 原生读取器无 mkdir、写入或不安全 open 回退，使用 `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`；O_NOFOLLOW 或 O_NONBLOCK 缺失/零值，或文件系统拒绝这些 flags 时失败，不重试为 `r` 或更弱选项。只读取普通非符号链接文件；绑定输出预检捕获的 cwd、真实项目/worktree root 及身份，复查 cwd 的真实映射、root/每层父目录的真实路径与 BigInt dev/ino，读前/读后各做一轮完整路径身份核验，已打开 FD 的 dev/ino、size、mtimeNs/ctimeNs 快照在打开后/读取后各核一次，拒绝已知符号链接、目录/文件替换或快照变化。
+- 每张输入非空且最多 8 MiB，合计最多 16 MiB；每边最多 4096，累计最多 1600 万像素。先检查剩余字节预算，再以最多 64 KiB 分块读取私有快照并做一字节 EOF 探测，拒绝异常读取、成长或截断，不靠 stat 大小单独判定。读取器按剩余累计像素预算做结构准入；transport 在其私有上传快照上、inflate 前再次核剩余预算，完成 PNG CRC/IDAT zlib/scanline/调色板/元数据检查，JPEG 则检查有界帧/扫描结构及完整最终 EOI；entropy、色彩及 ICC 完整解码另行验证。
+- 同运行时进程跨工具实例/同进程 backend 替换仅允许一个真实读取操作，无排队；槽保持到真实 Promise 收口，而非外层 abort race 返回。取消/超时只是停止等待，late stat/open/read/close 仍需收尾，迟到 open 返回的 FD 在 finally 中关闭；底层永久挂起则持续阻止新读取，不能称为已取消底层操作。close 已收口拒绝仅使本次读取失败，无进程级隔离锁存；该 FD 无 close 重试，后续显式读取使用新 FD，真实 pending 仍持槽。省略/空引用不占槽、不读文件。
 - 这些检查不是 openat 目录遍历或 OS 沙箱，严格 final no-follow open 仍不能排除所有检查/系统调用之间的并发目录替换，也不能证明项目内硬链接内容的来源；不替代 read 权限。编辑服务错误只保留固定 HTTP 提示及精确白名单公开错误码，不把可能回显输入片段、metadata、文件名或 prompt 的任意诊断放入结果。
 
 保存与恢复边界：
@@ -129,6 +136,8 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 请求 JSON 和响应正文均最多 24 MiB，输出原图最多 16 MiB、每边最多 4096 像素且最多 1600 万像素；工具取消作用域和 OAuth/网络请求均有最多 5 分钟期限。已开始的文件事务仍等待收尾，不能把发出取消信号误当作底层文件操作已经停止。`png-validation.ts` 在保存和缩略图解码前检查静态 PNG：chunk CRC、IHDR/顺序、完整 IDAT zlib、精确 scanline 字节数/过滤器、调色板索引及有界元数据。支持标准色彩/位深组合与 Adam7；栅格 inflate 不超过 128 MiB，文本/ICC 解压流每个最多 1 MiB、总计 4 MiB，文本/ICC 类元数据块最多 64 个。这是有界完整性校验，不是全部色彩/ICC 配置语义或真实图片解码/渲染验证。
 
+内建 transport 仅将私有新字节的完整 PNG 验证结果直接交给工具，移除旧 PNG receipt/逐字节复验协议；发布前原图只在该执行与本地文件事务内流转，进度仅文字。注入生成器输出通过 typed-array 原生槽复制独立快照，再完整验证，保存/等待均只用该快照。内建 generator 的认证、fetch、正文及取消仍持真实在途门至收口。
+
 原图发布是保存提交点：缩略图失败、超时或提交后的中止都不会回滚保存成功。SDK 解码没有取消契约，缩略图超时仅停止等待；同一运行时进程最多一个实际未结束的解码任务，槽占用时后续调用跳过缩略图而继续保留原图。只有真实解码 Promise 收口才释放槽，换工具实例不绕过限制；永久挂起时该进程继续跳过预览。工具返回项目相对输出路径与非敏感输出元数据，以及可用时的一张小型 PNG/JPEG 预览，不把输出原图、输入原图、输入 metadata 或引用路径数组塞进工具结果/历史预览；可用 `read` 读取已保存路径，不应再次生成。此限制不等于清除会话输入：SDK 工具参数历史仍保留用户 prompt 和引用路径，不能宣称从未记录。`shared/tool-images.ts` 对通用工具结果仅扫描前 128 个内容项、最多保留 4 张静态 PNG/JPEG，每张最多 512 像素/边、96 KiB 解码字节（128 KiB base64）；这是 base64/结构/尺寸检查，不额外宣称预览 CRC 或真实栅格解码成功。PNG 预览拒绝 `iCCP` / `zTXt` 和压缩 `iTXt`，避免把未受解压预算约束的压缩元数据交给浏览器；原图仅在随后执行完整的有界 PNG inflate 校验时允许这些块。实时进度只投影文字，最终结果与历史回放共用校验投影；最终消息/持久结果优先于低层执行通知，预览等价与终态字段等价分开：型号、请求设置、保存尺寸、文字、状态或 diff 变化仍更新最终结果；无拒绝提示且图片内容及位置相同时，保留预览数组和组件身份而不重解码。带拒绝提示的结果（包括混合有效/被拒图片）仍保守重新投影，不能宣称这类重复结果不会再次进行 base64 解码。同会话 reload/jump 在 reducer 事件边界保留匹配工具的终态和 key，旧分页及只有结果的页面可补完已有调用而不创建孤立结果行；真实切换和分支重置不复活旧工具状态。`ToolResultImages.tsx` 按详情开关挂载/释放图片，用固定框显示加载或失败状态，图片加载事件不调用滚动或恢复跟随。
 
 使用前需要 Codex OAuth 登录、账号图片生成权益与额度，不承诺免费或服务可用。发出请求后的失败、超时或中止可能已经消耗图片额度，工具不自动重试；服务返回的图片用量不作为 chat token/费用转发或估算。相关回归源码使用模拟认证、网络和文件系统及内存 PNG/JPEG fixture；验证报告必须区分类型检查、相关模拟回归、全量测试、coverage、构建、安装、GUI 和真实 API 的实际执行范围，不能以源码或模拟测试通过宣称已发布或正在运行的安装版已更新。真实服务协议（含编辑及请求设置的接受情况）、账号权益/额度尚未验证，mock 测试不能替代真实生图或跨平台发布/GUI 验证。真实调用涉及用户凭据、参考图上传和额度，须单独获得用户授权；不以本次文档同步新增正式版本发布日志或测试数量结论。
@@ -137,7 +146,7 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 ## 使用总览与账期筛选
 
-工具栏“使用总览”与`/stats`共用全局长期本地账本，不绑定当前项目或有限运行统计。面板打开/刷新完整采集固定SDK会话根，后台默认低频串行补录，可在设置→会话关闭；采集无文件/行/记录数人为上限。账本仅元信息/哈希，按真实session/entry及已核验lineage去重，删除/复制分叉/迁移前capture，失败保源；关闭UI不解除真实FS pending。
+工具栏“使用总览”与`/stats`共用全局长期本地账本，不绑定当前项目或有限运行统计。面板打开/刷新完整采集固定SDK会话根，后台默认低频串行补录，可在设置→会话关闭；采集无文件/行/记录数人为上限。账本仅元信息/哈希，按真实session/entry及已核验lineage去重，删除/迁移前强制 capture，失败保源；复制/分叉保源，SDK 创建成功后采集源与副本，统计失败仅 warning 并保成功路径与所属选择接管；关闭UI不解除真实FS pending。普通 sync/unlink/采集及已收口 FD close 错误仅本次失败，后续可显式重读，该 FD 无 close 重试，真实 pending 继续等待；自有锁在事务实际结束（含失败）后核身份清理，他者/未知 wx 锁与坏源保持原样。目录身份只核账本直接目录及固定 SDK 根/会话桶，省去文件系统根祖先巡检；JSON 必需字段/回执继续校验，未知字段与旧 checksum 原样保留，无 checksum 强校验或新写入；alias 恢复原身份及回执一致性后可清冲突标记。未变后台采集跳过正文及重复 overview 聚合，dirty 提交前仍验证聚合，显式总览沿请求投影。
 
 年、账期月、日期筛选互斥。年/日用UTC自然年/日，月起始日1–31本地记住，短月截月末，区间为UTC半开边界；先全历史去重再筛，不从近30日倒推。费用/Token/项目/模型/每日明细同步，候选和coverage保全局，旧成功金额只配其返回period标签。详见[使用总览与长期本地账本](feature-contracts.md#使用总览与长期本地账本)，费用仅SDK估算，不是账单。
 
@@ -165,7 +174,7 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 较旧和较新历史页共用严格身份归并，在 reducer 当前状态上应用，避免跨页恢复、最终错误与分页返回竞态导致重复。已知持久化/私有 live 身份优先且不得冲突；未知终态仅以双方唯一的实际 SDK 消息时钟和完整终态内容桥接，未结束的助手仅允许无歧义的实际消息时钟匹配。真实 entry 已证明属于另一行时先排除它，不按循环中剩余候选猜测。同文甚至同毫秒的真实重复发送仍需保留。
 
-缓存与 live 快照互并不等于已对齐磁盘：没有真实 entry ID 时不登记历史对齐，也兼容旧缓存的错误标记；否则后续分页会追加同一轮副本。当前快照先到、缓存后到时保留已知助手 entry ID，仅从完整缓存补齐快照明确标记截断的字段；全局 truncated 不是任意字段缩短的证明，真正空 final 仍权威。带身份的 start/delta/end 只认领唯一对应消息；用户新 start 不凭时钟/文字接管旧撤销 ID。完整 STATE 更新草稿后，按上述严格规则收敛已分裂的助手副本。归并保留消息和工具详情的 React key。完整 live 轮次可能长于最新历史页：先完成严格身份归并，再以顺序一致的唯一共同锚点安置未定位开场和早期工具，不将它们一律放在最新页尾部；中段 older 页仍保留完整 live 顺序。历史页先于 STATE 时使用完整 replay 顺序（不只新增行），后续 STATE 新增行不能重排既有显示；完成态也须验证最终回复仍完整存在，且在没有后继可显内容时保持显示末位，不能仅凭 DOM 中还能找到正文便忽略它被移到早期工具上方的错位；无可靠锚点或顺序冲突时保守回退，不解释私有 ID 序号、时钟或正文为顺序证据。冲突的已知身份不能当唯一锚点，也不因重复裸磁盘页再追加副本。older 的新增计数只计真正新增行，回填 entry/result-only 不冒充新行；仅迁移已有行仍按保留 DOM 行的实际布局位移补偿阅读位置，并保留请求期间的主动上滚，不恢复跟随或由补偿连锁请求分页。成功压缩按 SDK 摘要、保留边界和压缩前 token 数匹配；历史 wire 保留这些元数据，兼容 retain-none 的自指边界，不新增 IPC 频道或改变调用校验。
+缓存与 live 快照互并不等于已对齐磁盘：没有真实 entry ID 时不登记历史对齐，也兼容旧缓存的错误标记；否则后续分页会追加同一轮副本。当前快照先到、缓存后到时保留已知助手 entry ID，仅从完整缓存补齐快照明确标记截断的字段；Main 的 text/thinking 裁剪标记仅取同消息真实投影损失，继承旧 partial 标记还须核对应字段值相同；字段已变沿本次投影判定。实时 final 复用快照字段保护，真正空 final 仍权威。带身份的 start/delta/end 只认领唯一对应消息；用户新 start 不凭时钟/文字接管旧撤销 ID。完整 STATE 更新草稿后，按上述严格规则收敛已分裂的助手副本。归并保留消息和工具详情的 React key。完整 live 轮次可能长于最新历史页：先完成严格身份归并，再以顺序一致的唯一共同锚点安置未定位开场和早期工具，不将它们一律放在最新页尾部；中段 older 页仍保留完整 live 顺序。历史页先于 STATE 时使用完整 replay 顺序（不只新增行），后续 STATE 新增行不能重排既有显示；完成态也须验证最终回复仍完整存在，且在没有后继可显内容时保持显示末位，不能仅凭 DOM 中还能找到正文便忽略它被移到早期工具上方的错位；无可靠锚点或顺序冲突时保守回退，不解释私有 ID 序号、时钟或正文为顺序证据。冲突的已知身份不能当唯一锚点，也不因重复裸磁盘页再追加副本。older 的新增计数只计真正新增行，回填 entry/result-only 不冒充新行；仅迁移已有行仍按保留 DOM 行的实际布局位移补偿阅读位置，并保留请求期间的主动上滚，不恢复跟随或由补偿连锁请求分页。成功压缩按 SDK 摘要、保留边界和压缩前 token 数匹配；历史 wire 保留这些元数据，兼容 retain-none 的自指边界，不新增 IPC 频道或改变调用校验。
 
 ## pi SDK 兼容与缓存预热
 
@@ -175,13 +184,13 @@ Pion 当前将 pi 精确锁定为 1.4.0，依赖与解析以 `package.json` / `p
 
 设置 → 工具与能力提供工具、MCP、Skill、子代理和扩展入口的独立开关。极简只开启 Pi 核心八工具，标准将全部 desired 开启，无 Skill 只关闭技能；它们只是一次性批量写入，之后单项修改不受模式约束。配置独立保存到 `userData/pion-capabilities.json`，不改写用户 Pi/MCP/认证文件；旧配置缺文件时 inherit 原行为，坏文件拒绝默认覆盖。
 
-`capability-catalogue.ts` 通过只读 SettingsManager storage 和已安装包元数据枚举，跳过未安装/不匹配资源、禁止包管理器全局位置探测命令，不构造 ResourceLoader/ModelRuntime 或执行工厂。目录不启动会话、认证或 MCP；动态能力仅由已有可信运行时补充，unknown 不推测。资源使用来源绑定 ID，目录 revision 与 desired revision 分开。
+`capability-catalogue.ts` 通过只读 SettingsManager storage 和已安装包元数据枚举，跳过未安装/不匹配资源、禁止包管理器全局位置探测命令，不构造 ResourceLoader/ModelRuntime 或执行工厂。目录不启动会话、认证或 MCP；动态能力仅由已有可信运行时补充，unknown 不推测。资源使用来源绑定 ID，目录 revision 与 desired revision 分开；4096 项只约束显示，完整资源集合继续参与 SDK 加载/执行过滤，包 manifest 与 convention fallback 沿锁定 SDK 解析结果。
 
-`runtime-host.ts` 在加载前过滤可选扩展入口，`agent/capability-policy.ts` 再过滤最终 Skill、工具声明/发现/嵌套和晚注册；`defaultTools` 正负规则及计划/权限/实验门继续作为执行 ceiling。`agent/capability-mcp.ts` 对锁定 SDK 1.4.0 适配纯 `config.js` 读取器，在 native MCP 启动前覆盖真实 enabled，不执行配置命令/凭据解析；该读取器并非公开 root export，版本/布局不符时 fail closed。disabled 定义仍保留，不能让同名注册补位。旧插件自行管理的连接不受原生服务器开关接管，需关闭相应扩展入口。
+`runtime-host.ts` 在加载前过滤可选扩展入口，`agent/capability-policy.ts` 再过滤最终 Skill、工具声明/发现/嵌套和晚注册；模式从所选真实分支状态读取，`defaultTools` 正负规则及计划/权限/实验门共用单一执行 ceiling/loadout owner，计划只读集合统一引用 `shared/capabilities.ts` 并核真实工具来源；计划退出仅恢复进入前真实 active 集合及既有内置提问例外，再按当前 ceiling 删禁用项，保隐藏选择。prompt 文本仅作提示；pattern 共用锁定 SDK 的 matcher 语义（仅 `*` 特殊，其余字符字面匹配）。`agent/capability-mcp.ts` 对锁定 SDK 1.4.0 适配纯 `config.js` 读取器，在 native MCP 启动前覆盖真实 enabled，不执行配置命令/凭据解析；该读取器并非公开 root export，版本/布局不符时 fail closed。disabled 定义仍保留，不能让同名注册补位。旧插件自行管理的连接不受原生服务器开关接管，需关闭相应扩展入口。
 
-Bridge 显式保存后将全部 retained 后端标待应用，仅在所属轮次及实际调用/检查点/完成监听器收口后，优先于下一本地 FIFO 用公开同路径 `switchSession` 替换 runtime；未落盘空会话以 `newSession` 恢复精确模型、思考、名称和模式/子代理偏好并映射新路径。旧分支/队列与 Composer/草稿不重建，SDK cancelled 保旧来源；替换未知失败及 MCP 真实 close 失败隔离，不自动重启/重试连接。`native-extensions.ts` 保留真实 close Promise；SDK replacement 与 RPC 外层可能重复 bind，同 factory 共享 start/close Promise，不重复启动。状态回执只读真正命名来源的 getCommands 描述、绝不发成 prompt，应用 epoch 拒旧查询和中间默认模型。
+Bridge 显式保存后将全部 retained 后端标待应用，仅在所属轮次及实际调用/检查点/完成监听器收口后，优先于下一本地 FIFO 用公开同路径 `switchSession` 替换 runtime；未落盘空会话以 `newSession` 恢复精确模型、思考、名称和模式/子代理偏好并映射新路径。旧分支/队列与 Composer/草稿不重建，SDK cancelled 保旧来源；替换未知失败及 MCP 真实 close 失败隔离，不自动重启/重试连接。SDK 最终核验后的本地会话模型偏好保存错误单列，保已确认应用状态。`native-extensions.ts` 保留真实 close Promise；SDK replacement 与 RPC 外层可能重复 bind，同 factory 共享 start/close Promise，不重复启动。状态回执只读真正命名来源的 getCommands 描述，保持与 prompt 分离；应用 epoch 拒旧查询和中间默认模型，已确认替换后退休旧来源，无累计替换次数寿命门，真实 pending/未知 close 继续持槽。
 
-SDK 1.4.0 RpcClient 会将业务负响应抹成普通 Error。`agent/capability-state.ts` 的窄版本适配仅观察所属实际 client 的原始 getData 解码结果，以 WeakMap 关联 `set_model`/`compact` 的有限明确无副作用否定；未知 transport/timeout 或同文普通 Error 均不视为安全收口。升级 SDK 时应复核或替换该内部适配，不能仅靠错误字符串放宽隔离。
+SDK 1.4.0 RpcClient 会将业务负响应抹成普通 Error。`agent/capability-state.ts` 的窄版本适配仅观察所属实际 client 的原始 getData 解码结果，以 WeakMap 关联 `set_model`/`compact` 的有限明确无副作用否定及 `export_html` 的明确失败响应；后者确认 writer RPC 已结束，允许后续显式导出。未知 transport/timeout、丢 ACK 或同文普通 Error 继续守原隔离。升级 SDK 时应复核或替换该内部适配，不能仅靠错误字符串放宽隔离。
 
 设置页保跨卸载实际保存槽、API/cwd/scope/generation 隔离与可见 pending 轮询，分开展示保存/应用状态及 desired/available；IPC 复查所属窗口/活主帧。完整协议见[功能约束](feature-contracts.md#工具与能力开关)。相关回归源码位于 `tests/unit/capability-{settings,catalogue,mcp,policy,bridge,ipc}.test.ts` 与 `tests/renderer/CapabilitySettingsPage.test.tsx`；本次仅静态检查，未执行测试、类型检查、构建、GUI、真实模型或 MCP。源码修改不更新正在运行的安装版，不能据此宣称已发布或远端资源已停止。
 
@@ -199,13 +208,13 @@ Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP�
 
 “技能与工具 → MCP”查看所选现有后端的状态、登记工具数和曝光方式。刷新只读主进程缓存，不创建后端或 manager，不发 prompt、调用模型、启动/重连服务器或认证；服务器原有的启动副作用仍按上一节处理。旧插件接管 `/mcp`、原生未启用、没有后端、等待/超时及格式不支持均单独显示，不从工具目录、注册或历史推断连接。工具数来自 `connection.tools.length`，不是当前模式可见或获准数量；`starting` / `disabled` 是原生格式的派生显示，不是额外的连接状态。
 
-SDK 没有公开结构化状态 getter。`agent/mcp-status-observer.ts` 仅适配已核对的 SDK 1.4.0：捕获真正 builtin 的空参数 handler，检查成功的原生启动和 `getCommands()` 的 builtin 来源，并使用所属 SDK `extensionRunner.createCommandContext()` 的真实 RPC 上下文。局部采集只允许一次 info notify，未知访问或被吞掉的禁止访问均 fail-closed，不执行旧插件同名 handler。每 3 秒更新，2 秒 deadline 只关闭采集；实际 pending 未收口前，同 RPC owner 跨 SDK 替换保持一个槽，不排队。关闭/替换使迟到结果失效，不声称取消了原生连接等待。
+SDK 没有公开结构化状态 getter。`agent/mcp-status-observer.ts` 仅适配已核对的 SDK 1.4.0：捕获真正 builtin 的空参数 handler，检查成功的原生启动和 `getCommands()` 的 builtin 来源，并使用所属 SDK `extensionRunner.createCommandContext()` 的真实 RPC 上下文。传入的固定窄上下文仅有 RPC mode 与一次 info notify，活 session/model/control 接口保持私有，不执行旧插件同名 handler。每 3 秒更新，2 秒 deadline 只关闭采集；实际 pending 未收口前，同 RPC owner 跨 SDK 替换保持一个槽，不排队。关闭/替换使迟到结果失效，不声称取消了原生连接等待。
 
-`shared/mcp.ts` 按 SDK 文字格式作白名单投影：最多 128 台服务器、64 KiB 单行私有通知；只保留名称、状态、曝光和 connected 的工具数。原始错误、配置尾部及其中的路径、URL、headers、命令参数不进入状态列表；未知格式整份转为未知。限制只覆盖 Pion 投影，不限制 SDK 构造原始状态字符串的开销。`__pion_mcp_status_v1` 是私有传输标记，不是插件身份或认证边界。
+`shared/mcp.ts` 按 SDK 文字格式作白名单投影：最多 128 台服务器、64 KiB 单行私有通知；只保留名称、状态、曝光和 connected 的工具数。私有通知接收时规范化一次，缓存读取复制 typed 快照，页面省去重复 schema 投影。原始错误、配置尾部及其中的路径、URL、headers、命令参数不进入状态列表；未知格式整份转为未知。限制只覆盖 Pion 投影，不限制 SDK 构造原始状态字符串的开销。`__pion_mcp_status_v1` 是私有传输标记，不是插件身份或认证边界。
 
 私有 widget 在 `AgentBridge` 的 live/正文/任务/计费及普通扩展 UI 之前消费。`mcp-status-bridge.ts` 绑定捕获的 client、后端池身份、cwd/path 和主窗口 owner；typed IPC 另校验主帧，读取不登记会话变更。Main 维护独立单调 revision、有限 retired-runtime fence、私有单调收件时间和过期锁存，12 秒没有新观察就隐藏旧列表，墙上时钟回拨不能复活缓存。公开 `receivedAt` 只是收件时间，不是连接探测。
 
-`McpStatusPage.tsx` 仅在页面打开且可见时订阅并每 3 秒读缓存，推送优先于旧读取；scope/后端及同步 selection generation 拒绝迟到结果。实际 IPC 槽跨卸载保留至 Promise 真正收口；页面另外以单调 deadline 隐藏过期列表，因此挂起读取不会永久保留 connected，相同 revision/receivedAt 的缓存也不能续期。关闭、隐藏、切 tab 清理页面计时器/订阅，不关闭服务器。模拟回归不证明真实服务器兼容或可卸载全部旧插件。
+`McpStatusPage.tsx` 仅在页面打开且可见时订阅并每 3 秒读缓存，推送优先于旧读取；scope/后端及同步 selection generation 拒绝迟到结果。页面用局部在途状态防重复读主进程内存缓存；隐藏/卸载/换代退休回调，新页面可独立读取，SDK 采集实际 pending 仍持原槽。页面单调 deadline 隐藏过期列表，相同 revision/receivedAt 的缓存不续期。关闭、隐藏、切 tab 清理计时器/订阅，服务器生命周期独立。模拟回归不证明真实服务器兼容或可卸载全部旧插件。
 
 #### 原生脚本、费用与结果投影
 
@@ -213,15 +222,15 @@ codemode 明确启用 `models: true`，允许脚本调用模型（包括分类�
 
 每个脚本最多发起 8 次模型调用，5 分钟期限及父级中止信号阻止新派发、屏蔽进度；宿主继续等待原 SDK execute，挂起继续占槽。取消结果只保一次 SDK 已返回 usage 并丢弃迟到正文；SDK sandbox 仍可能先于模型/认证 Promise 返回，未回报的用量及底层请求/收费停止状态保持未知。模型调用的原 SDK usage 只沿既有累计计费链路汇总，不充当父会话上下文占用，不额外重复上报。嵌套工具事件保留 `parentToolCallId` 供过滤，不另建独立的根 transcript 或重复统计。
 
-codemode、MCP 工具及 MCP resource 的图片结果在输出边界做 fail-closed 投影，最多保留 4 张静态 PNG/JPEG，每张不超过 512 像素/边、96 KiB 原始字节；超限或无效载荷返回安全提示，不解码原图。保守清除 `structuredContent` 防止无界副本进入历史，因此可能影响依赖结构化 MCP 结果的程序化脚本。任意文字/base64、脚本/store/参数仍可能进入记录，不保证全面识别或清除。SDK 可能把原图保存在 OS 临时目录而非项目中，metadata 未保证清除；这不是 Pion 内置生图的项目保存契约。
+codemode、MCP 工具及 MCP resource 的图片结果在输出边界做 fail-closed 投影，最多保留 4 张静态 PNG/JPEG，每张不超过 512 像素/边、96 KiB 原始字节；超限或无效载荷返回安全提示，不解码原图。`structuredContent` 保留给 SDK 的程序化调用，renderer 在 `projectAgentDisplay` 白名单及节点/深度/字节预算内接收显示副本并省略该字段；预算耗尽时整项省略受影响的 `content` 项，保留其余结构。codemode 包装进度与 final，final 只投影一次；MCP 动态/resource 工具沿结果 hook。任意文字/base64、脚本/store/参数仍可能进入记录，识别/净化范围有限。SDK 可能把原图保存在 OS 临时目录而非项目中，metadata 未保证清除；这不是 Pion 内置生图的项目保存契约。
 
 计划模式重新应用白名单，并在执行时阻止 codemode、tool search 与动态 MCP，不能借嵌套执行绕过；子代理继续限定为父级可见的 SDK 内置编码工具并使用 `noExtensions`，不扩大原生扩展或模型脚本范围。
 
 RPC `prompt` / `steer` / `followUp` 的返回值表示输入接受、排队或被扩展消费，不表示模型运行完成。`handled` 不保证有 `agent_settled`：`AgentBridge` 按 backend、运行、派发 token 与事件 generation 只释放没有新事件的自身预留；扩展启动的新运行不能被迟到回复收尾。队列更新按本次派发的精确账本归属，不用相同文本清除其他消息。
 
-独立工作流 runner 在权限扩展准备与启动前注册取消闸门和总期限，在发送 prompt 前注册监听；每个副作用前及等待后检查终态，阻止取消后的构造/启动/派发。既保留快速终态，也处理无运行的 `handled`；已观察到扩展运行时仍等待 `agent_settled`。`agent_end` 不是最终完成证明，`message_end` 的文字和错误终态优先，空终态也不能回退到旧输出。取消、超时及失败清理监听、计时器和 worker，并请求停止子进程；这不替代消息撤销要求的真实退出屏障。renderer 同样以最终助手内容为准，空 text / thinking 会移除旧 streaming 草稿。
+独立工作流 runner 在权限扩展准备与启动前注册取消闸门和总期限，在发送 prompt 前注册监听；每个副作用前及等待后检查终态，阻止取消后的构造/启动/派发。既保留快速终态，也处理无运行的 `handled`；已观察到扩展运行时仍等待 `agent_settled`。`agent_end` 不是最终完成证明，`message_end` 的文字和错误终态优先，空终态也不能回退到旧输出。取消、超时及失败退休本次显示等待并请求停止子进程；原准备/RPC、SDK stop、真实 exit/stdio 屏障继续持 worker 容量与所属 cwd，迟到真收口再回收。工作流 `exitConfirmed` 单列资源收尾，任务 interrupted/cancelled 与进程结束分别持久化；旧未知记录保留，只有原 runner 可补本实例迟到凭证。工作流 shutdown 共享实际 pending/成功结果，失败收口后可显式重核原 runner，准入持续关闭。验证/工作流按相关 cwd 检查在途，互不牵连项目继续可用，角色登记目录继续归工作流管理。renderer 同样以最终助手内容为准，真正空 final 会移除旧 streaming 草稿。
 
-会话可从首条用户消息开始持久化，不应等待助手回复才承认会话文件。分支回退仍保留独立 `usage`、`context_edit`、retain-none 压缩边界、真实退出屏障与路径隔离；`stop-for-history.ts` 对私有 `RpcClient.process` 的适配须随锁定 SDK 复核，不能把 `stop()` 返回视为实际退出。
+会话可从首条用户消息开始持久化，不应等待助手回复才承认会话文件。分支回退仍保留独立 `usage`、`context_edit`、retain-none 压缩边界、真实退出屏障与路径隔离；`process-exit.ts` 对私有 `RpcClient.process` 的适配须随锁定 SDK 复核，`stop-for-history.ts` 只保有界等待入口；写入许可仍取真实 stop/exit/stdio 屏障。
 
 ### 提供商升级注意事项
 
@@ -241,7 +250,7 @@ Azure 的提供商 ID 从 `azure-openai-responses` 改为 `azure`。使用 Azure
 
 用户消息的“撤销”回到该消息之前，将文字和图片恢复到空输入框；所选消息及之后的条目仍在同一 JSONL 的旧分支中，不回滚项目文件。已有草稿（含纯空白）、附件或异步读取时不覆盖；确认后冻结输入直到恢复完成。撤销与现有 Git 检查点“撤销本轮修改”是不同操作。
 
-typed IPC 校验主窗口、主帧、会话 ID/路径及预期叶节点。`AgentBridge` 从 IPC 进入时预留异步变更，空闲门控包含运行、压缩、队列、派发/收尾 Promise、检查点及完整运行账本。先停止对应空闲 SDK 子进程，并由 `stop-for-history.ts` 确认真实退出；上游 `RpcClient.stop()` 提前返回不能视为写入许可。无法确认退出时拒绝修改并隔离路径，逻辑 stop/start、池清理或迁移不解除隔离。此私有进程适配须在 SDK 升级时复核。
+typed IPC 校验主窗口、主帧、会话 ID/路径及预期叶节点。`AgentBridge` 从 IPC 进入时预留异步变更，空闲门控包含运行、压缩、队列、派发/收尾 Promise、检查点及完整运行账本。先停止对应空闲 SDK 子进程，通过共享 `process-exit.ts` 核真实 stop/exit/stdio；有界 UI 等待到期保原监听/屏障，所属 RPC/检查点也须实际收口后才授写入许可。等待中隔离路径；UI 超时后，迟到原屏障成功仅回收对应实例，仅当前所属 client/cwd/path/选择代际且仍为原退出错误时恢复 ready 并清除此错误；恢复只更新状态，不重试撤销或自动启动后端。逻辑 stop/start、池清理或迁移保原隔离；已启动且缺捕获屏障的 null writer 继续拒绝。此私有进程适配须在 SDK 升级时复核。
 
 `message-revert.ts` 只在旧写入者退出后重新校验完整文件、当前分支及内容，用 SDK `branch(parentId)` / `resetLeaf()` 和普通 custom 标记持久化新叶节点，不直接修剪 JSONL、不生成摘要或调用导航扩展。内置计划扩展关闭时不重复保存未变化状态，避免无意义地移动叶节点；真实的退出期间历史变化仍拒绝旧请求。随后只重新加载会话后端，不重建窗口或终端；子代理按既有后端重建规则恢复默认开启。
 
@@ -253,7 +262,7 @@ typed IPC 校验主窗口、主帧、会话 ID/路径及预期叶节点。`Agent
 
 设置 → 模型与提供商提供“模型显示”开关，默认全部显示；关闭只过滤 Pion 提供的模型候选列表，提供商目录仍保留该项以便恢复。已有会话、SDK 注册/直接模型选择、子代理及生图的认证路径不被禁用，不删除配置或凭据、不登出、不自动选择替代模型、不停止或重建后端，所以运行中也可以调整显示。
 
-主进程通过所属主窗口/主帧校验的 typed IPC 保存到 userData 的独立 `pion-provider-visibility.json`，开关的持久化与过滤不改写 SDK models.json/auth.json；提供商目录仍沿既有流程读取 SDK 配置/认证元数据，不把隐藏当作停用或退出登录。缺失文件默认显示，坏格式、读取失败或超过 64 KiB 不覆盖；至多 256 个隐藏 ID，单槽加载和串行私有原子保存，提交成功后才更新内存。模型和提供商目录读取应用最新偏好，不把显示设置失败伪装为无模型；保存失败保持原状态。目录请求按 revision/owner 隔离，挂起操作真实收口后才释放交互门，显式新目录状态不被旧乐观缓存覆盖；与正常 SDK 模型可用性/认证状态分别展示。
+主进程通过所属主窗口/主帧校验的 typed IPC 保存到 userData 的独立 `pion-provider-visibility.json`，开关的持久化与过滤不改写 SDK models.json/auth.json；提供商目录仍沿既有流程读取 SDK 配置/认证元数据，不把隐藏当作停用或退出登录。缺失文件默认显示，坏格式、读取失败或超过 64 KiB 不覆盖；至多 256 个隐藏 ID，读写串行并复用 `atomic-json-file.ts`，提交成功后才更新内存；显式读取可重试已收口失败，坏源继续禁写，退出等待真实读写。每次显示切换只读取一次提供商 snapshot，保存后在同一快照投影 enabled，省去二次 catalogue/runtime 创建。只读提供商/可用模型刷新共享尚未完成的本地 runtime 初始化，仅失效已完成缓存；真实认证/配置 mutation 的强制失效独立保留。模型目录读取先等待既有 mutation 槽实际收口，再读取其最终 snapshot；应用最新偏好，显示设置失败直接报错；保存失败保持原状态。目录请求按 revision/owner 隔离，挂起操作真实收口后才释放交互门，显式新目录状态不被旧乐观缓存覆盖；与正常 SDK 模型可用性/认证状态分别展示。
 
 ## 用户消息发送动效
 
@@ -265,13 +274,13 @@ typed IPC 校验主窗口、主帧、会话 ID/路径及预期叶节点。`Agent
 
 开启后，在工具可用且参数可读时，系统提示要求主 AI 先评估复杂任务的独立工作流，有安全拆分时主动调用 `pion_subagents`，不必等用户再次要求；简单任务、强依赖工作及冲突修改仍直接处理。当至少两个独立任务已就绪且上限允许时，应在一次调用的 `tasks` 数组中组成 2 至当前上限的有效任务批次，避免连续发起多个单任务调用；各主要阶段重新评估并行机会，依赖任务等前置完成再派发，不为填满上限虚构工作。上限为 1 或只有一个有效子任务时仍允许单任务。运行时 `executionMode: sequential` 串行化的是批次，批次内通过 `Promise.all` 并发执行，不能误改为允许重叠批次以绕过限制。开关本身不启动模型任务，实际委派以工具调用为准；提示策略不保证每次回复都会使用子代理，也不替代工具授权。若其他模式隐藏了工具或参数读取失败，提示不委派，不能为满足协作偏好重新激活受限工具。
 
-`src/main/agent/subagents.ts` 使用 SDK customTools 和编译内联控制命令，不安装第三方插件。设置 → 会话提供全局默认参数：每批最大子代理数 1–100（默认 3）、超时 1–300 分钟（默认 10）、每个子代理最多 1–1000 轮（默认 24）、结果正文 1000–32000 字符（默认 16000）。每批任务数量不能超过配置的并行上限，超出会明确拒绝。模型选择按逐任务 `model: { provider, id }` > 全局 `defaultModel` > 父模型生效；逐任务 `model: null` 明确继承父模型，省略则用批次默认。设置 → 会话的“默认子代理模型”通过独立 `getSubagentModels` typed IPC 沿所属 `ProviderAuthService` 读取 SDK 本地 `getAvailableSnapshot()`（现有 `allowModelNetwork:false` factory），不依赖主会话候选刷新或 Pion 提供商显示过滤，不发起登录或模型请求、不启动后端或切换主模型。目录至多 4096 项，页面等待期限 10 秒，保留 owner/generation 与主帧/窗口身份隔离；超时只停止页面等待，不宣称中止 SDK 初始化；bridge 将实际目录读取共享为单槽至 Promise 真正收口，重开页面或替换窗口不会绕过挂起读取而新增初始化。空目录或失败明确提示，保留原选择，不冒充只有继承候选。旧设置缺 `defaultModel` 规范化为 null，恢复默认值也回到继承。用户未指定子代理模型时主 AI 必须省略 `task.model`，使用设置默认，未设置才继承父模型；仅用户明确指定时才逐任务覆盖，不自主选择或使用 null 绕过默认，SDK 提供商 ID 与模型 ID 精确匹配，不按 API 类型或展示名猜测，未知/当前不可用只使对应子任务失败，不静默回退或自行登录/修改凭据。运行时只读所属已有 `ModelRuntime.getModel/getAvailableSnapshot`，提示候选至多 64 项/8 KiB UTF-8，扫描有界且标记部分目录；可用快照不保证远程请求成功，不同模型可能产生不同费用。子会话使用选定模型及经 SDK 按模型能力限制的思考等级（设置默认优先，null/旧缺字段继承父会话）、父级系统规则、最近用户约束和相同项目目录，独立内存上下文，并在父会话下显示一个只读临时子会话；最终摘要与模型回复用量仍随父级工具结果保存。结果正文按该批配置限制，超出另附明确截断标记。子模型回复用量计入累计计费统计，不改写父会话上下文占用。
+`src/main/agent/subagents.ts` 使用 SDK customTools 和编译内联控制命令，不安装第三方插件。设置 → 会话提供全局默认参数：每批最大子代理数 1–100（默认 3）、超时 1–300 分钟（默认 10）、每个子代理最多 1–1000 轮（默认 24）、结果正文 1000–32000 字符（默认 16000）。每批任务数量不能超过配置的并行上限，超出会明确拒绝。模型选择按逐任务 `model: { provider, id }` > 全局 `defaultModel` > 父模型生效；逐任务 `model: null` 明确继承父模型，省略则用批次默认。设置 → 会话的“默认子代理模型”通过独立 `getSubagentModels` typed IPC 沿所属 `ProviderAuthService` 读取 SDK 本地 `getAvailableSnapshot()`（现有 `allowModelNetwork:false` factory），不依赖主会话候选刷新或 Pion 提供商显示过滤，不发起登录或模型请求、不启动后端或切换主模型。目录至多 4096 项，页面等待期限 10 秒，保留 owner/generation 与主帧/窗口身份隔离；超时只停止页面等待，不宣称中止 SDK 初始化；bridge 将普通目录读取共享为单槽至 Promise 真正收口，重开页面或替换窗口沿用 pending；遇既有提供商 mutation 先等其真实收口，避免发布中间目录。提供商配置强失效退休外层旧槽，旧 Promise 继续观察，旧结果拒绝发布且仅清理所属槽。空目录或失败明确提示，保留原选择，不冒充只有继承候选。旧设置缺 `defaultModel` 规范化为 null，恢复默认值也回到继承。用户未指定子代理模型时主 AI 必须省略 `task.model`，使用设置默认，未设置才继承父模型；仅用户明确指定时才逐任务覆盖，不自主选择或使用 null 绕过默认，SDK 提供商 ID 与模型 ID 精确匹配，不按 API 类型或展示名猜测，未知/当前不可用只使对应子任务失败，不静默回退或自行登录/修改凭据。运行时只读所属已有 `ModelRuntime.getModel/getAvailableSnapshot`，提示候选至多 64 项/8 KiB UTF-8，扫描有界且标记部分目录；可用快照不保证远程请求成功，不同模型可能产生不同费用。子会话使用选定模型及经 SDK 按模型能力限制的思考等级（设置默认优先，null/旧缺字段继承父会话）、父级系统规则、最近用户约束和相同项目目录，独立内存上下文，并在父会话下显示一个只读临时子会话；最终摘要与模型回复用量仍随父级工具结果保存。结果正文按该批配置限制，超出另附明确截断标记。子模型回复用量计入累计计费统计，不改写父会话上下文占用。
 
 主会话中的 `pion_subagents` 工具卡展示整批任务数，并直接列出每项名称/状态，有结果时点击整条名称/状态行独立展开或折叠摘要，左侧箭头指示；不再提供单独摘要按钮，无摘要行保持静态，原生整行按钮保Enter/Space与键盘焦点，不切换父工具展开；无底色任务行整项（名称、状态及整行入口）用普通行渐显的共享时钟，历史恢复等待 DOM 顺序扫描后按工具头→各任务从上往下显现，noReveal 不注册，状态/展开更新不重排延迟。透明度改为可感知的连续线性淡入：历史字符/行 220/280ms、实时字符/行 440/560ms；排队间隔仍为历史字符1.2ms（上限180ms）/行20ms、实时字符2.4ms（上限360ms）/行40ms，不继续延长串行等待来冒充渐变。快速 token 更新及正常流式收口不提前取消尚未完成的字符动画，保留原延迟和位置节点，只为新增内容启动；Markdown 采用 layout-committed 的有界活跃窗口（至多128批/4096活跃字符），单timer回收，超出直接显示，不延迟或丢弃正文；解析格式树变化仍可能重建节点，不宣称所有Markdown编辑保持同一DOM。思考、工具与子摘要共享字符时长，工具/审查文字分组回收等待该组末字符结束或对应更新后的安全期限，保留 reduced-motion 和静态旧行回退。这是同一真实批次内的显示行，不是额外 SDK 工具调用，也不证明请求数等于已启动模型数。进度与终态通过 `details.subagentBatch` v1 携带原输入索引，重名不作为身份；旧 `details.results` 只在完整有序 final 时兼容，旧完成顺序 partial 不猜各项状态。显示投影至多 100 项/名称 80 字符/摘要 2048 字符每项、整批摘要最多 16 KiB UTF-8，按剩余项公平分配并提示裁剪，不带临时正文、原始任务参数或用量。后台快照只保留名字及该白名单元数据，显式 `subagentBatch` 字段裁剪保护同身份已接纳摘要，真实新状态仍优先，未标裁剪的空/缺失终态不补旧值；保持原工具 ID、终态优先及不变引用，不重复计费。
 
 父会话下的子列表可独立展开/收起，默认展开并显示子会话数量；原生 disclosure 在同一父行刷新/重排时保留收起状态，收起不停止子任务或关闭已选查看，最后一个子会话消失时移除空分组。临时子会话通过会话列表直接选择，复用普通 `ChatTimeline`、`ChatMessage`、`ToolCallItem`，而不是另做查看面板或“返回父会话”按钮；点击父行或其他普通会话行切回。显示投影依据 observer 真实 `message-N-text/thinking` 共同身份合并消息，数字 key 只作显示定位，原行顺序不按数字重排；明确 `running/completed` 行状态控制流式呈现，旧无状态包保守显示，不猜 SDK entry ID、任务提示词或错误。父时间线、输入框及草稿保持挂载与阅读位置，查看时父统计/历史导航/任务/队列/输入控制隐藏且 inert；子滚动使用独立普通导航，`viewportActive` 在实际条件挂载后绑定 wheel/touch/键盘/尺寸观察，关闭清理；主动阅读后增量不回底部，无磁盘分页。同一可信子身份的 revision 更新只触发新正文读取，等待期间保留旧有界正文、DOM、展开状态和正文原 revision；新终态摘要立即停止旧流式呈现，旧/迟到读取仍由 generation、binding、revision 与期限门拒绝。首次父路径补绑可保留数据，真正身份/已知路径变化或过期仍清空。只读消息保留普通 Markdown 格式、思考折叠与工具卡片，但不挂载 URL 图片/HTML/可导航链接或解码工具预览，不提供发送、分叉、撤销或项目回滚。选择当前父行只结束查看，不调用 SDK switch/start/reload；选择其他普通会话才沿原切换流程，不改变父权限、队列或计费。完成、失败或取消真正收口后保留 30 分钟，主进程及页面按单调时钟清理，重复读取/终态不续期；挂起的取消、逻辑 stop、未知退出不能冒充已结束。查看记录只存应用内存，退出 Pion 即清理，不生成或删除正常 SDK 会话文件；父级摘要和委派参数仍留在正常历史，不承诺所有子代理文字都从历史删除。
 
-展示采用单独的宿主私有 RPC 通道，不将快照加入父工具 details/history。每批在启动子模型前等待主进程同步显示配额准入 ACK；超时、取消、来源不符或容量不足均拒绝启动该批子代理，这不是用户工具授权。创建同时核对捕获的 backend/client、nonce、运行中的 native SDK custom-tool receipt；私有标题/key/nonce 不是恶意同进程插件或 OS 安全边界。每条最多 200 行、64 KiB 字符、每包最多 128 KiB 字符，全局最多 256 条，100 项批次仍须完整配额 ACK，容量不足不启动、不提前驱逐未到期记录；backend/退役/tombstone 来源闸门也有界，饱和需重启而不是删除 fence。图片、任意结构内容、签名和 usage 不传入查看层；普通工具文字不解码 base64。高频快照合并，列表只推摘要，正文按需读取；隐藏窗口或关闭查看后停止采集，实际在途 IPC 收口前仍持单槽。撤销后隐藏所有旧父分支的已有后端 incarnation，新分支的子任务可正常显示。
+展示采用单独的宿主私有 RPC 通道，不将快照加入父工具 details/history。首个 starting widget 按真实 root source 与当前容量最佳努力接纳，无预留配额/同步 ACK；来源失效、容量不足或发布失败仅降级为普通批次摘要。显示通道独立于执行授权；每项模型派发继续核取消、可见工具/模式、权限、并发与预算，真实中止仍阻止新派发。创建同时核对捕获的 backend/client、nonce、运行中的 native SDK custom-tool root receipt；私有标题/key/nonce 不是恶意同进程插件或 OS 安全边界。每条最多 200 行、64 KiB 字符、每包最多 128 KiB 字符，全局最多 256 条，配额不足仅省略临时显示，保留未到期记录；backend/退休来源随真实父工具结束、已确认 runtime 退休与记录到期回收。批次/tombstone 与退休 runtime 无累计数量寿命阈值，旧包仍凭捕获 backend/client 及真实活父工具 receipt 拒绝复活。图片、任意结构内容、签名和 usage 不传入查看层；普通工具文字不解码 base64。高频快照合并，列表只推摘要，正文按需读取；隐藏窗口或关闭查看后停止采集，实际在途 IPC 收口前仍持单槽。撤销后隐藏所有旧父分支的已有后端 incarnation，新分支的子任务可正常显示。
 
 子代理仅取得父会话当前启用的内置编码工具，不加载插件、提问或任务管理工具，不递归委派。每次调用转发父级实时 `beforeToolCall`/`afterToolCall`，保留计划模式门控、项目权限、YOLO 和首次写入检查点；委派工具本身不提前创建检查点。子工具 ID 带独立前缀，通过非序列化的 `pion.subagent.abort` Symbol 将取消信号传到内置权限交互；关闭、超时、父级中止均不代表批准，批次结束清理所属子工具的待确认请求。
 
@@ -279,11 +288,19 @@ typed IPC 校验主窗口、主帧、会话 ID/路径及预期叶节点。`Agent
 
 配置由主进程 `SubagentSettingsStore` 保存到 userData 下的 `pion-subagents.json`，所属主窗口通过 typed IPC 读取/保存，参数在 UI、主进程与运行时校验。默认模型与思考等级选择后自动保存，数值修改仍需保存按钮；自动保存沿用已确认数值并保留当前数值草稿。`defaultThinkingLevel` 接受锁定 SDK 的 `off/minimal/low/medium/high/xhigh/max`，null/旧缺字段继承父会话，实际等级由 SDK 按子模型支持处理。初读失败禁写并允许只读重试；回执须匹配提交配置，失败保留选择供显式重试。页面关闭保留实际保存单槽，重开等待收口再读取，owner/generation 拒迟到。主进程串行读写并复用 `atomic-json-file.ts`，仅 ENOENT 初始化，其他失读/坏配置保源并拒绝普通覆盖，退出关闭准入并等待真实读写；已有后端通过 `PION_SUBAGENT_SETTINGS_FILE` 在每批开始时读取并深拷贝/冻结含默认模型身份与思考等级的快照，逐任务模型及思考等级在首次等待前捕获；设置/UI/IPC 不共享可变嵌套模型对象，下一批使用新值，不中断当前批次，也不改变当前子代理开关；新建或重建后端默认开启子代理。未创建配置时采用默认值，配置损坏/不可读时明确报错，不绕过限制。按钮与相邻输入控件统一为胶囊形，关闭时悬浮使用中性底色，开启时为实心主题色并显示勾号和「已开启」，不只依赖颜色区分状态。
 
+## 独立设置与插件目录
+
+独立设置复用串行读写与 `atomic-json-file.ts`，保各自 schema/预算及 owner 发布门。已收口读取失败可显式重读，坏源拒普通覆盖；保存失败保草稿供显式重试，页面关闭/超时仅退休显示回调，真实操作继续在退出 drain 内。普通已收口保存或 FD close 失败仅本次失败，可显式重读/重试；进程等资源 owner 显式报告的 `closeUnknown` 仍保留隔离，实际 pending 继续等待。
+
+shell 高风险关键词仅在详情提示，审批依 shell 策略及既有命令 network 识别；目录外/敏感路径等真实风险继续单次确认并由后端拒绝长期记住。权限局部修改/reset与批准的读源、继承合并、owner 定位及发布全程共用单一队列，原子发布成功才提交内存并通知。Store 的实际读取持槽至收口，失败后可显式重读修复源；校验成功才解除该故障，坏源继续 deny/禁覆盖。工作流/验证保坏读写隔离；启动恢复的普通已收口保存失败只 warn，保已读状态并继续打开工作台，后续显式保存可重试，实际 pending 继续等待且显式 closeUnknown 保留隔离；验证策略合并、快照计算与 runs 保存共队列，原子发布成功才提交策略，失败保原 autoRun/autoRepair；普通已收口保存错误保原错误，后续显式操作可重试，避免失败路径补写掩盖首次错误；实际 pending/显式 closeUnknown 继续保留。
+
+官方插件目录共享同一实际 pending；20 秒期限请求 abort，待 fetch/正文/cancel 实际收口再释放，成功后开始缓存期限。响应最多 4 MiB、2000 项，字段、链接与安装源有界校验；错误保旧成功缓存，安装仍须显式用户操作。
+
 ## 主题持久化
 
 “信号橙”战术风格使用中性炭灰、鲜明红橙与中性灰白文字；侧栏各级选中区域使用中性灰底，避免低透明橙铺底混成暗棕；普通界面统一隐藏边框及阴影式描边，输入框悬浮深度阴影保留；不移除边框宽度，保留原有尺寸、名称文字对比和键盘焦点提示，textarea 焦点画在已有圆角外容器上而非直角内层，主题样式沿 `pion-keyboard-focus` 门控，仅 Tab/Shift+Tab 导航显示，鼠标聚焦后单独按 Shift 不出现框，系统 forced-colors 不应用该隐藏规则，样式位于 `styles/themes/division.css`；刻度仅放在标题栏，不覆盖阅读区域或添加持续扫描动效，面板圆角沿共享尺度及各组件的父子契约，不用统一小圆角覆盖卡片/弹窗，也不添加全局继承或裁切；不改变尺寸或重挂载组件。会话运行使用强调色整周圆角光环及独立柔和外光晕同步缓慢呼吸，作为普通无边框样式的状态提示例外；只遮罩线环，透明光晕层不遮罩，也不对文字应用滤镜；只动画装饰透明度，不逐帧改变阴影几何，不裁切会话内容或菜单，名称保持静态清晰，不旋转、不用小圆点；减少动态效果时固定显示，系统强制色关闭光晕、去掉线环遮罩并使用 Highlight 静态轮廓。错误/成功仍用红/绿语义色，未选中名称保持与选中相同的前景色，终端沿用根主题变量更新。原生毛玻璃与强制色回退不被主题装饰覆盖，不自动开启透明效果；实底色值的对比度检查不等于透明桌面背景或真机 GUI 已验证。
 
-主题由 `ThemeSettingsStore` 经所属主窗口/主帧限定的 typed IPC 保存到 userData 下的 `pion-theme.json`，内置主题 ID 在共享层校验；保留原四套主题及默认陶土深色，另提供“信号橙”战术风格主题，内部 `division-dark` ID 保持不变，兼容已有保存选择。文件串行原子替换，不与浏览器缓存、安装程序目录或其他设置混写。启动先恢复文件，再挂载 UI；localStorage 的 `pion:theme` 只作即时缓存，文件尚不存在时迁移有效旧值，不自动持久化缺省主题。读取失败保留本地外观且不覆盖文件，迟到读取不覆盖用户新选择，保存失败在外观页提示重试。不同 `PION_USER_DATA_DIR` 仍保持独立；旧缓存已经丢失时无法推断原主题，需要重新选择。
+主题由 `ThemeSettingsStore` 经所属主窗口/主帧限定的 typed IPC 保存到 userData 下的 `pion-theme.json`，内置主题 ID 在共享层校验；保留原四套主题及默认陶土深色，另提供“信号橙”战术风格主题，内部 `division-dark` ID 保持不变，兼容已有保存选择。文件串行复用 `atomic-json-file.ts` 原子替换，与浏览器缓存、安装程序目录或其他设置分开；保存前校验已有源，坏读禁写，退出等待已准入读写。启动先恢复文件，再挂载 UI；localStorage 的 `pion:theme` 只作即时缓存，文件尚不存在时迁移有效旧值，不自动持久化缺省主题。读取失败保留本地外观且不覆盖文件，迟到读取不覆盖用户新选择，保存失败在外观页提示重试。不同 `PION_USER_DATA_DIR` 仍保持独立；旧缓存已经丢失时无法推断原主题，需要重新选择。
 
 安装脚本的 `--delete` 只作用于目标 `out/` 和依赖目录，单独复制 `package.json`，不镜像安装根目录或清理用户配置。此次是持久化加固，并不代表已经复现或确认主题丢失由脚本直接写入造成。
 
@@ -320,7 +337,7 @@ typed IPC 校验主窗口、主帧、会话 ID/路径及预期叶节点。`Agent
 
 分支操作菜单保留重命名，并提供“删除分支与工作树”的路径确认；会话历史不删除。当前选中工作树须先切走，主工作树不可删除。主进程验证主帧/所属窗口，持全程生命周期门：Git 无副作用预检确认规范真实路径、登记及分支、无修改/未跟踪/忽略文件、目标提交已合入主工作树 HEAD；目标空闲后端通过实际进程退出屏障收口后，仍使用预检捕获的身份与提交再次校验，再执行非 force `git worktree remove` 和 `git branch -d`。
 
-运行、排队、权限等待、压缩/收尾、活跃终端、验证及工作流均阻断；终端按初始绑定目录检查，不追踪 shell 后续 cd。工作流登记目录不因 completed/cancelled 自动释放；这些目录不能通过分支菜单删除。旧 Agent/终端/命令退出无法确认时保守隔离，提示重启或等待；目录别名、映射未知同样拒绝。后端停止只为安全收口，不删除或迁移会话记录。
+运行、排队、权限等待、压缩/收尾、活跃终端、验证及工作流均阻断；终端按初始绑定目录检查，不追踪 shell 后续 cd。工作流登记目录不因 completed/cancelled 自动释放；这些目录不能通过分支菜单删除。旧 Agent/终端/命令退出尚未确认时保留所属 cwd 占用，迟到原真实收尾后回收；真正未知继续隔离，目录别名、映射未知同样拒绝。后端停止只为安全收口，不删除或迁移会话记录。
 
 两个 Git 操作不是原子事务：工作树移除后分支删除失败返回部分成功及提示；列表刷新失败不改写已完成的删除，不自动重新执行。Git 命令报错/超时亦不证明磁盘没有部分变化，需用户检查。所有检查是应用策略，不能阻止外部 Git/进程并发修改，不是 OS 沙箱。列表 bootstrap 与 create/rename/delete 共用按 API/cwd 隔离的有界 revision fence，迟到读取不能复活已移除投影。
 
@@ -332,9 +349,9 @@ typed IPC 校验主窗口、主帧、会话 ID/路径及预期叶节点。`Agent
 - `pion:dock-layout-v2` 保存布局树及比例，首次读取时迁移旧版 `pion:dock-layout-v1` 及缺少新面板的 v2 缓存；GitCommitTree 默认位于会话下方，隐藏时旧布局几何与分隔路径不变。非法/重复面板或损坏缓存回退默认布局，工具栏提供重置。
 - 终端按钮按打开时所选项目/worktree 启动 shell；切换项目不会对已有 shell 注入 cd。
   在另一个项目点击终端可打开或复用该项目的终端。
-- 每个窗口最多保留 8 个项目终端，回放输出有界缓存为 256 Ki 字符，xterm 回滚缓冲为 3000 行。
+- 每个窗口最多运行 8 个活 PTY（含 closing），另有独立 8 个退出快照 LRU；真实 onExit 后回收活槽/cwd，完成或回放更新快照次序。回放输出有界缓存为 256 Ki 字符，xterm 回滚缓冲为 3000 行。
   这不是完整持久化终端日志；关闭应用不会在下次启动时自动恢复 shell 或重放命令。
-- 隐藏终端面板不会杀掉 shell；点击“结束终端”或关闭窗口会清理。Ctrl+C 中断命令，Ctrl+Shift+C 复制选中文本。
+- 隐藏终端面板保留 shell；点击“结束终端”或关闭窗口请求 kill 后，继续保 exit 监听、活配额及 cwd 直到真实退出。Ctrl+C 中断命令，Ctrl+Shift+C 复制选中文本。
 - 终端使用当前用户权限，不是项目沙箱，也不经过 Agent 工具权限确认。
 - 左上角“项目 / 审查 / 终端”旁的“浏览器”按钮同样开关工作区面板。首次打开才挂载 webview，初始 `about:blank` 不访问网站；地址栏支持 HTTP(S)，无协议默认 HTTPS，localhost/127.0.0.1 默认 HTTP。提供前进/后退/刷新/停止，隐藏与会话切换不重载页面；布局缓存继续沿用 v2 key，旧四面板树在 chat 旁加入浏览器，隐藏时旧比例与几何不变。
 - 普通会话 Markdown 中的 HTTP(S) 链接保留可复制地址，但点击/键盘/中键阻止默认开窗，经 `BrowserNavigationContext` 让 App 打开已有浏览器面板并下发递增请求 ID；guest 未 ready 时只保留最新请求，消费后不因重渲染/隐藏重开重放，重复显式点击同 URL 会生成新请求。非法/带凭据/非 HTTP(S) 链接只显示文字，无 owner 不自动调用外部浏览器；只读子会话仍无可导航链接，提供商认证入口不改。Context 只在宿主 renderer，不新增 IPC，也不注入 guest，现有导航/请求安全门保持。

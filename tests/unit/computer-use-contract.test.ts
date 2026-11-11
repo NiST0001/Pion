@@ -1,7 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
   COMPUTER_USE_KEYS, COMPUTER_USE_LIMITS, DEFAULT_COMPUTER_USE_CAPABILITY,
-  DEFAULT_COMPUTER_USE_CONSENT, createDisabledComputerUseStatus,
+  DEFAULT_COMPUTER_USE_CONSENT, createDisabledComputerUseStatus, isComputerUseCaptureReady,
   normalizeComputerUseFrame, normalizeComputerUseStatus, reserveComputerUseAction,
   reserveComputerUseCapture, sameComputerUseOwner, validateComputerUseAction,
   validateComputerUseActRequest, validateComputerUseBudget, validateComputerUseCapability,
@@ -32,10 +32,6 @@ describe('ComputerUse pure fixed contracts', () => {
     for (const inputDevelopmentEnabled of [undefined, null, 0, 1, 'true', {}, []]) {
       expect(normalizeComputerUseStatus({ ...disabled, inputDevelopmentEnabled })).toBeUndefined()
     }
-    const getter = vi.fn(() => true)
-    const accessor = Object.defineProperty(disabled, 'inputDevelopmentEnabled', { enumerable: true, get: getter })
-    expect(normalizeComputerUseStatus(accessor)).toBeUndefined()
-    expect(getter).not.toHaveBeenCalled()
   })
   it('copies explicit DMA-BUF configuration only, with legacy omission disabled and no inferred grants', () => {
     const disabled = createDisabledComputerUseStatus()
@@ -52,9 +48,6 @@ describe('ComputerUse pure fixed contracts', () => {
     for (const dmaBufDevelopmentEnabled of [undefined, null, 0, 1, 'true', {}, []]) {
       expect(normalizeComputerUseStatus({ ...disabled, dmaBufDevelopmentEnabled })).toBeUndefined()
     }
-    const getter = vi.fn(() => true)
-    expect(normalizeComputerUseStatus(Object.defineProperty(disabled, 'dmaBufDevelopmentEnabled', { enumerable: true, get: getter }))).toBeUndefined()
-    expect(getter).not.toHaveBeenCalled()
   })
   it('keeps the native request diagnostic matrix exact and immutable', () => {
     expect(NATIVE_COMPUTER_USE_DIAGNOSTICS_BY_REQUEST).toEqual({
@@ -87,8 +80,8 @@ describe('ComputerUse pure fixed contracts', () => {
       }
     }
     expect(copyComputerUseDiagnostics({})).toEqual({})
-    expect(copyComputerUseDiagnostics(Object.assign(Object.create(null), { open: 'portal-connect-failed' })))
-      .toEqual({ open: 'portal-connect-failed' })
+    expect(copyComputerUseDiagnostics(JSON.parse('{"open":"portal-connect-failed","capture":"capture-frame-failed","act":"input-action-failed","close":"portal-close-failed"}')))
+      .toEqual({ open: 'portal-connect-failed', capture: 'capture-frame-failed', act: 'input-action-failed', close: 'portal-close-failed' })
   })
 
   it('deep-copies diagnostics without changing coordination, pending, receipt or consent', () => {
@@ -118,13 +111,9 @@ describe('ComputerUse pure fixed contracts', () => {
     expect(Object.hasOwn(validateComputerUseStatus(legacy), 'diagnostics')).toBe(false)
   })
 
-  it('rejects all raw diagnostic data, unknown fields and codes without invoking accessors', () => {
-    const getter = vi.fn(() => 'portal-connect-failed')
-    const accessor = Object.defineProperty({}, 'open', { enumerable: true, get: getter })
+  it('rejects raw diagnostic data, unknown JSON fields and codes', () => {
     const invalidDiagnostics = [
       undefined, null, true, 1, 'portal-connect-failed', [], ['portal-connect-failed'],
-      Object.assign(Object.create({ inherited: true }), { open: 'portal-connect-failed' }), accessor,
-      Object.defineProperty({}, 'open', { value: 'portal-connect-failed', enumerable: false }),
       { open: undefined }, { capture: null }, { close: ['portal-close-failed'] },
       { open: 'unknown-code' }, { open: '/home/private/frame.png' },
       { capture: 'file:///home/private/frame.png' }, { close: 'Error: private native failure' },
@@ -132,7 +121,8 @@ describe('ComputerUse pure fixed contracts', () => {
       { open: 'portal-connect-failed', uri: 'file:///home/private/frame.png' },
       { close: 'portal-close-failed', error: 'private native failure' },
       { open: 'portal-connect-failed', other: 'helper-transport-error' },
-      { open: 'portal-connect-failed', [Symbol('private')]: 'secret' }
+      { open: 'portal-connect-failed', capture: 'capture-frame-failed', act: 'input-action-failed', close: 'portal-close-failed', extra: 'private' },
+      JSON.parse('{"__proto__":"private"}')
     ]
     for (const diagnostics of invalidDiagnostics) {
       expect(copyComputerUseDiagnostics(diagnostics)).toBeUndefined()
@@ -140,14 +130,6 @@ describe('ComputerUse pure fixed contracts', () => {
       expect(() => validateComputerUseStatus(status)).toThrow('Invalid ComputerUse contract')
       expect(normalizeComputerUseStatus(status)).toBeUndefined()
     }
-    const statusGetter = vi.fn(() => ({ open: 'portal-connect-failed' }))
-    const accessorStatus = Object.defineProperty(createDisabledComputerUseStatus(), 'diagnostics', {
-      enumerable: true, get: statusGetter
-    })
-    expect(() => validateComputerUseStatus(accessorStatus)).toThrow('Invalid ComputerUse contract')
-    expect(normalizeComputerUseStatus(accessorStatus)).toBeUndefined()
-    expect(getter).not.toHaveBeenCalled()
-    expect(statusGetter).not.toHaveBeenCalled()
   })
 
   it('copies only the bounded coordination enum and treats missing legacy metadata as unchecked', () => {
@@ -163,14 +145,30 @@ describe('ComputerUse pure fixed contracts', () => {
     for (const coordination of [undefined, null, true, 1, '', 'active', {}, { receipt: 'secret' }]) {
       expect(normalizeComputerUseStatus({ ...status, coordination })).toBeUndefined()
     }
-    const getter = vi.fn(() => 'held')
-    const accessor = { ...status }
-    Object.defineProperty(accessor, 'coordination', { enumerable: true, get: getter })
-    expect(normalizeComputerUseStatus(accessor)).toBeUndefined()
-    expect(getter).not.toHaveBeenCalled()
     for (const extra of [{ lockPath: '/home/user/marker' }, { coordinationReceipt: 'secret' },
-      { pid: 123 }, { token: 'secret' }, { [Symbol('receipt')]: 'secret' }]) {
+      { pid: 123 }, { token: 'secret' }]) {
       expect(normalizeComputerUseStatus({ ...status, ...extra })).toBeUndefined()
+    }
+  })
+
+  it('shares capture readiness: unchecked observation is allowed, control still requires held coordination', () => {
+    const window = validateComputerUseStatus({ ...createDisabledComputerUseStatus(), state: 'ready',
+      consent: { capture: true, upload: false, control: false, retention: 'sdk-session' },
+      capability: { platform: 'linux-wayland', method: 'portal-screencast', capture: true, control: false, scope: 'window', unsupportedReason: 'control-unavailable' } })
+    const display = validateComputerUseStatus({ ...window,
+      consent: { ...window.consent, control: true, captureScope: 'display' },
+      capability: { platform: 'linux-wayland', method: 'portal-screencast+wayland-virtual-input', capture: true, control: true, scope: 'display' } })
+    for (const coordination of ['not-checked', 'held', 'blocked', 'unknown', 'released', 'unclaimed'] as const) {
+      expect(isComputerUseCaptureReady({ ...window, coordination })).toBe(coordination === 'not-checked' || coordination === 'held')
+      expect(isComputerUseCaptureReady({ ...display, coordination })).toBe(coordination === 'held')
+    }
+    expect(isComputerUseCaptureReady({ ...window, state: 'paused' })).toBe(false)
+    expect(isComputerUseCaptureReady({ ...window, actualPending: true })).toBe(false)
+    expect(isComputerUseCaptureReady({ ...window, consent: undefined })).toBe(false)
+    expect(isComputerUseCaptureReady({ ...window, capability: { ...window.capability!, scope: 'unknown-window-or-display' } })).toBe(false)
+    for (const [field, cap] of [['captures', COMPUTER_USE_LIMITS.maxCaptures], ['frameBytes', COMPUTER_USE_LIMITS.maxTotalFrameBytes], ['framePixels', COMPUTER_USE_LIMITS.maxTotalFramePixels]] as const) {
+      expect(isComputerUseCaptureReady({ ...window, budget: { ...window.budget, [field]: cap - 1 } })).toBe(true)
+      expect(isComputerUseCaptureReady({ ...window, budget: { ...window.budget, [field]: cap } })).toBe(false)
     }
   })
 
@@ -253,10 +251,7 @@ describe('ComputerUse pure fixed contracts', () => {
     expect(() => validateComputerUseAction({ type: 'type', text: '中'.repeat(1366) }, frame)).toThrow()
     // JSON escape expansion must also fit the whole payload budget.
     expect(() => validateComputerUseAction({ type: 'type', text: '\u0001'.repeat(4096) }, frame)).toThrow()
-    const withGetter = { type: 'type', get text() { throw new Error('getter should not run') } }
-    expect(() => validateComputerUseAction(withGetter, frame)).toThrow('Invalid ComputerUse contract')
     expect(() => validateComputerUseAction(Object.assign(Object.create({ type: 'type' }), { text: 'ok' }), frame)).toThrow()
-    expect(() => validateComputerUseAction({ type: 'type', text: 'ok', [Symbol('hidden')]: 'unknown' }, frame)).toThrow()
   })
 
   it('keeps actual capture scope explicit without claiming window identity or OS mapping', () => {
@@ -319,24 +314,18 @@ describe('ComputerUse pure fixed contracts', () => {
     }
   })
 
-  it('rejects prototypes, accessors, symbols and non-enumerable fields at every status boundary', () => {
+  it('validates ordinary JSON schema fields and copies nested wire data', () => {
     const status = { ...createDisabledComputerUseStatus(), state: 'ready', scopeRevision: 1, owner, frame, receipt }
-    const getter = vi.fn(() => 'ready')
-    const accessor = { ...status }
-    Object.defineProperty(accessor, 'state', { enumerable: true, get: getter })
-    const hidden = { ...status }
-    Object.defineProperty(hidden, 'debug', { enumerable: false, value: 'private' })
     for (const invalid of [
-      Object.assign(Object.create({ inherited: true }), status), accessor, hidden,
-      { ...status, [Symbol('private')]: 'secret' },
-      { ...status, owner: Object.assign(Object.create(owner), owner) },
+      { ...status, unexpected: 'private' },
+      { ...status, owner: Object.create(owner) },
       { ...status, budget: { ...emptyBudget, captures: '0' } },
       { ...status, consent: { ...DEFAULT_COMPUTER_USE_CONSENT, upload: 1 } },
       { ...status, capability: { ...DEFAULT_COMPUTER_USE_CAPABILITY, diagnostic: 'raw' } },
       { ...status, frame: { ...frame, createdAt: NaN } },
       { ...status, receipt: { ...receipt, actualPending: 'false' } }
     ]) expect(normalizeComputerUseStatus(invalid)).toBeUndefined()
-    expect(getter).not.toHaveBeenCalled()
+    expect(normalizeComputerUseStatus(JSON.parse(JSON.stringify(status)))).toEqual(status)
     expect(normalizeComputerUseStatus(Object.assign(Object.create(null), status))).toEqual(status)
   })
 

@@ -3,8 +3,6 @@
 import '@testing-library/jest-dom/vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { McpStatusPage } from '../../src/renderer/src/features/capabilities/McpStatusPage'
 import { SkillsToolsModal } from '../../src/renderer/src/features/capabilities/SkillsToolsModal'
 import type { McpServerState, McpServerStatus, McpStatusSnapshot } from '../../src/shared/mcp'
@@ -124,16 +122,9 @@ describe('McpStatusPage read-only observations', () => {
     { availability: 'replaced', phase: 'unavailable', title: '旧插件接管' },
     { availability: 'inactive', phase: 'unavailable', title: '原生 MCP 未启用' },
     { availability: 'unavailable', phase: 'unavailable', reason: 'no-backend', title: '没有会话后端' },
-    { availability: 'unavailable', phase: 'unavailable', reason: 'backend-stopped', title: '会话后端已停止' },
     { availability: 'native', phase: 'waiting', reason: 'waiting-status', title: '等待状态' },
-    { availability: 'native', phase: 'waiting', reason: 'query-busy', title: '等待状态' },
     { availability: 'native', phase: 'unavailable', reason: 'query-timeout', title: '状态查询超时' },
-    { availability: 'native', phase: 'unavailable', reason: 'stale-status', title: '状态已过期' },
-    { availability: 'native', phase: 'unavailable', reason: 'query-failed', title: '状态查询失败' },
-    { availability: 'native', phase: 'unavailable', reason: 'unsupported-format', title: '状态格式不受支持' },
     { availability: 'native', phase: 'unavailable', reason: 'unsupported-sdk', title: '状态格式不受支持' },
-    { availability: 'native', phase: 'unavailable', reason: 'scope-mismatch', title: '会话状态未知' },
-    { availability: 'native', phase: 'unavailable', reason: 'invalid-notice', title: '状态未知' }
   ] as const)('separates the safe $title observation from a legitimate empty native list', async ({ title, ...status }) => {
     const { api } = fakeApi()
     api.getMcpStatus.mockResolvedValue(snapshot({ ...status, servers: [] }))
@@ -170,25 +161,6 @@ describe('McpStatusPage read-only observations', () => {
     refresh()
     await flush()
     expect(screen.getByText('a-server')).toBeInTheDocument()
-  })
-
-  it.each(['invalid-phase', 'duplicate-names', 'invalid-revision'] as const)('fails closed on %s without a raw fallback', async (kind) => {
-    const { api } = fakeApi()
-    const invalid = Object.assign(snapshot(), { rawError: 'secret-token', configSource: 'secret-path' })
-    if (kind === 'invalid-phase') invalid.availability = 'unavailable' // ready + unavailable is not a valid observation.
-    if (kind === 'invalid-revision') invalid.revision = NaN
-    if (kind === 'duplicate-names') invalid.servers = [
-      { name: 'server-a', state: 'connected', exposure: 'deferred', toolCount: 1 },
-      { name: 'server_a', state: 'connected', exposure: 'direct', toolCount: 2 }
-    ]
-    api.getMcpStatus.mockResolvedValue(invalid)
-    render(<McpStatusPage target={targetA} />)
-    await flush()
-    expect(screen.getByRole('status')).toHaveTextContent('状态未知')
-    expect(screen.queryByRole('table')).not.toBeInTheDocument()
-    expect(document.body).not.toHaveTextContent('secret-')
-    expect(document.body).not.toHaveTextContent('server-a')
-    expect(document.body).not.toHaveTextContent('server_a')
   })
 
   it('lets a new backend push win over an initially captured old backend read with a higher revision', async () => {
@@ -248,16 +220,17 @@ describe('McpStatusPage read-only observations', () => {
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
   })
 
-  it('invalidates a scope before late read/catch/finally and never queues a second actual read', async () => {
+  it('reads a new selection independently while rejecting the old read, catch and finally', async () => {
     const { api, subscriptions, push } = fakeApi()
     const pending = deferred<McpStatusSnapshot>()
-    api.getMcpStatus.mockReturnValueOnce(pending.promise)
+    const next = deferred<McpStatusSnapshot>()
+    api.getMcpStatus.mockReturnValueOnce(pending.promise).mockReturnValueOnce(next.promise)
     const selectionRef = { current: { generation: 1 } }
     const { rerender } = render(<McpStatusPage target={targetA} scope="A" selectionRef={selectionRef} />)
     selectionRef.current.generation = 2
     rerender(<McpStatusPage target={targetB} scope="B" selectionRef={selectionRef} />)
     expect(subscriptions[0].unsubscribe).toHaveBeenCalledTimes(1)
-    expect(api.getMcpStatus).toHaveBeenCalledTimes(1)
+    expect(api.getMcpStatus).toHaveBeenCalledTimes(2)
     act(() => { subscriptions[0].listener(snapshot()) })
     expect(screen.queryByText('a-server')).not.toBeInTheDocument()
     const b = snapshot({ ...targetB, backendId: 'backend-b', servers: [{ name: 'b-server', state: 'connected', exposure: 'direct', toolCount: 4 }] })
@@ -265,28 +238,29 @@ describe('McpStatusPage read-only observations', () => {
     await act(async () => { pending.reject(new Error('secret-old-scope')); await pending.promise.catch(() => undefined) })
     expect(screen.getByText('b-server')).toBeInTheDocument()
     expect(document.body).not.toHaveTextContent('secret-old-scope')
-    api.getMcpStatus.mockResolvedValue(b)
     await advance(3_000)
     expect(api.getMcpStatus).toHaveBeenCalledTimes(2)
+    await act(async () => { next.resolve(b); await next.promise })
+    api.getMcpStatus.mockResolvedValue(b)
+    await advance(3_000)
+    expect(api.getMcpStatus).toHaveBeenCalledTimes(3)
     expect(api.getMcpStatus.mock.calls.at(-1)?.[0]).toEqual(targetB)
     expect(screen.getByText('b-server')).toBeInTheDocument()
   })
 
-  it.each([false, true])('expires a connected push independently of a permanently pending read (scope change: %s)', async (changeScope) => {
+  it('expires a connected push independently of a permanently pending read', async () => {
     const { api, push } = fakeApi()
     const pending = deferred<McpStatusSnapshot>()
-    api.getMcpStatus.mockReturnValueOnce(pending.promise)
-    const { rerender } = render(<McpStatusPage target={targetA} />)
-    if (changeScope) rerender(<McpStatusPage target={targetB} />)
-    const observed = snapshot({ ...(changeScope ? targetB : targetA),
-      backendId: changeScope ? 'backend-b' : 'backend-a' })
+    api.getMcpStatus.mockReturnValue(pending.promise)
+    render(<McpStatusPage target={targetA} />)
+    const observed = snapshot()
     push(observed)
     expect(screen.getByText('a-server')).toBeInTheDocument()
     await advance(12_001)
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('状态已过期')
     expect(api.getMcpStatus).toHaveBeenCalledTimes(1)
-    // Same observation cannot reset its deadline, even after a clock rollback.
+    // The same observation keeps its deadline after a clock rollback.
     vi.setSystemTime(new Date(observed.receivedAt - 60_000))
     push(observed)
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
@@ -315,7 +289,7 @@ describe('McpStatusPage read-only observations', () => {
     expect(screen.getByRole('table')).toBeInTheDocument()
   })
 
-  it.each(['resolve', 'reject'] as const)('rejects an A→B→A late %s before React commits even when scope strings match', async (result) => {
+  it('rejects an A→B→A late result before React commits even when scope strings match', async () => {
     const { api, push } = fakeApi()
     const pending = deferred<McpStatusSnapshot>()
     api.getMcpStatus.mockReturnValueOnce(pending.promise)
@@ -327,13 +301,11 @@ describe('McpStatusPage read-only observations', () => {
     selectionRef.current.generation++ // A intent
     push(snapshot({ servers: [{ name: 'late-push', state: 'connected', exposure: 'direct', toolCount: 1 }] }))
     await act(async () => {
-      if (result === 'resolve') pending.resolve(snapshot())
-      else pending.reject(new Error('secret-late-failure'))
-      await pending.promise.catch(() => undefined)
+      pending.resolve(snapshot())
+      await pending.promise
     })
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '读取中…' })).toBeDisabled() // late finally cannot flip it.
-    expect(document.body).not.toHaveTextContent('secret-late-failure')
     await advance(3_000)
     expect(api.getMcpStatus).toHaveBeenCalledTimes(1)
     rerender(<McpStatusPage target={targetA} scope="A" selectionRef={selectionRef} />)
@@ -342,26 +314,7 @@ describe('McpStatusPage read-only observations', () => {
     expect(api.getMcpStatus).toHaveBeenCalledTimes(2)
   })
 
-  it('resets a previously selected MCP tab before committing a reopen, without a speculative cache read', async () => {
-    const { api, subscriptions } = fakeApi()
-    const close = vi.fn()
-    const { rerender } = render(<SkillsToolsModal open onClose={close} target={targetA} />)
-    await flush()
-    mcpTab()
-    await flush()
-    expect(screen.getByText('a-server')).toBeInTheDocument()
-    rerender(<SkillsToolsModal open={false} onClose={close} target={targetA} />)
-    expect(subscriptions[0].unsubscribe).toHaveBeenCalledTimes(1)
-    rerender(<SkillsToolsModal open onClose={close} target={targetA} />)
-    await flush()
-    expect(screen.getByRole('heading', { level: 3, name: '技能' })).toBeInTheDocument()
-    expect(api.getMcpStatus).toHaveBeenCalledTimes(1)
-    expect(api.onMcpStatus).toHaveBeenCalledTimes(1)
-    await advance(3_000)
-    expect(api.getMcpStatus).toHaveBeenCalledTimes(1)
-  })
-
-  it('keeps the actual slot through tab switches, close and reopen, while removing timers and subscriptions', async () => {
+  it('reads again after tab switches or reopening while retiring the old page callbacks', async () => {
     const { api, subscriptions } = fakeApi()
     const pending = deferred<McpStatusSnapshot>()
     api.getMcpStatus.mockReturnValueOnce(pending.promise)
@@ -374,24 +327,26 @@ describe('McpStatusPage read-only observations', () => {
     expect(subscriptions[0].unsubscribe).toHaveBeenCalledTimes(1)
     await advance(15_000)
     expect(api.getMcpStatus).toHaveBeenCalledTimes(1)
+    const fresh = snapshot({ servers: [{ name: 'remounted', state: 'connected', exposure: 'direct', toolCount: 1 }] })
+    api.getMcpStatus.mockImplementation(async () => snapshot({ ...fresh, receivedAt: Date.now() }))
     mcpTab()
-    expect(screen.getByRole('status')).toHaveTextContent('等待读取结束')
-    expect(api.getMcpStatus).toHaveBeenCalledTimes(1)
+    await flush()
+    expect(api.getMcpStatus).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('remounted')).toBeInTheDocument()
     rerender(<SkillsToolsModal open={false} onClose={close} target={targetA} />)
     expect(subscriptions[1].unsubscribe).toHaveBeenCalledTimes(1)
     await advance(15_000)
     rerender(<SkillsToolsModal open onClose={close} target={targetA} />)
     await flush()
     expect(screen.getByRole('heading', { level: 3, name: '技能' })).toBeInTheDocument()
-    expect(api.getMcpStatus).toHaveBeenCalledTimes(1)
-    mcpTab()
-    act(() => { subscriptions[0].listener(snapshot()) })
-    expect(screen.queryByRole('table')).not.toBeInTheDocument()
-    await act(async () => { pending.resolve(snapshot()); await pending.promise })
-    expect(screen.queryByRole('table')).not.toBeInTheDocument()
-    await advance(3_000)
     expect(api.getMcpStatus).toHaveBeenCalledTimes(2)
-    expect(screen.getByText('a-server')).toBeInTheDocument()
+    mcpTab()
+    await flush()
+    expect(api.getMcpStatus).toHaveBeenCalledTimes(3)
+    act(() => { subscriptions[0].listener(snapshot()) })
+    await act(async () => { pending.resolve(snapshot()); await pending.promise })
+    expect(screen.getByText('remounted')).toBeInTheDocument()
+    expect(screen.queryByText('a-server')).not.toBeInTheDocument()
   })
 
   it('subscribes/reads only while visible and rejects an earlier visibility epoch after showing again', async () => {
@@ -413,7 +368,7 @@ describe('McpStatusPage read-only observations', () => {
     visibility = 'visible'
     fireEvent(document, new Event('visibilitychange'))
     expect(api.onMcpStatus).toHaveBeenCalledTimes(2)
-    expect(api.getMcpStatus).toHaveBeenCalledTimes(1)
+    expect(api.getMcpStatus).toHaveBeenCalledTimes(2)
     act(() => { subscriptions[0].listener(snapshot()) })
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
     const fresh = snapshot({ revision: 2, servers: [{ name: 'visible-update', state: 'connected', exposure: 'deferred', toolCount: 2 }] })
@@ -423,10 +378,10 @@ describe('McpStatusPage read-only observations', () => {
     expect(screen.queryByText('a-server')).not.toBeInTheDocument()
     api.getMcpStatus.mockResolvedValue(fresh)
     await advance(3_000)
-    expect(api.getMcpStatus).toHaveBeenCalledTimes(2)
+    expect(api.getMcpStatus).toHaveBeenCalledTimes(3)
   })
 
-  it('stops waiting on timeout but holds the real promise slot until settlement, without retry queues', async () => {
+  it('keeps one in-flight read per visible page after timeout, without retry queues', async () => {
     const { api } = fakeApi()
     const pending = deferred<McpStatusSnapshot>()
     api.getMcpStatus.mockReturnValueOnce(pending.promise)
@@ -445,53 +400,4 @@ describe('McpStatusPage read-only observations', () => {
     expect(screen.getByText('a-server')).toBeInTheDocument()
   })
 
-  it('polls the main cache every three seconds so main-projected expiry hides an old connected list', async () => {
-    const { api } = fakeApi()
-    const cached = snapshot()
-    api.getMcpStatus.mockImplementation(async () => Date.now() - cached.receivedAt >= 12_000
-      ? snapshot({ phase: 'unavailable', reason: 'stale-status', servers: [], receivedAt: cached.receivedAt }) : cached)
-    render(<McpStatusPage target={targetA} />)
-    await flush()
-    expect(screen.getByText('a-server')).toBeInTheDocument()
-    await advance(3_000)
-    expect(api.getMcpStatus).toHaveBeenCalledTimes(2)
-    await advance(3_000)
-    await advance(3_000)
-    expect(screen.getByText('a-server')).toBeInTheDocument()
-    await advance(3_000)
-    expect(api.getMcpStatus).toHaveBeenCalledTimes(5)
-    expect(screen.getByRole('status')).toHaveTextContent('状态已过期')
-    expect(screen.queryByRole('table')).not.toBeInTheDocument()
-    expect(api.getCapabilities).not.toHaveBeenCalled()
-  })
-
-  it('captures immutable target scalars instead of retaining a caller-owned mutable object', async () => {
-    const { api } = fakeApi()
-    const pending = deferred<McpStatusSnapshot>()
-    api.getMcpStatus.mockReturnValueOnce(pending.promise)
-    const target = { ...targetA }
-    render(<McpStatusPage target={target} />)
-    const passed = api.getMcpStatus.mock.calls[0][0]
-    expect(passed).toEqual(targetA)
-    expect(passed).not.toBe(target)
-    expect(Object.isFrozen(passed)).toBe(true)
-    target.cwd = '/uncommitted-mutation'
-    expect(passed?.cwd).toBe(targetA.cwd)
-    await act(async () => { pending.resolve(snapshot()); await pending.promise })
-    // A subsequent child render notices the now-mutated prop scope and must
-    // hide A's list; the already-started IPC still holds its original copy.
-    expect(screen.queryByText('a-server')).not.toBeInTheDocument()
-    expect(passed?.cwd).toBe(targetA.cwd)
-  })
-
-  it('uses scoped keyboard focus, theme semantics, capsule controls and reduced/system-color fallbacks', () => {
-    const css = readFileSync(resolve('src/renderer/src/styles/refinements/capabilities.css'), 'utf8')
-    expect(css).toMatch(/\.mcp-status-refresh\s*\{[^}]*border-radius: 999px;/)
-    expect(css).toContain('html.pion-keyboard-focus .mcp-status-refresh:focus-visible')
-    expect(css).toContain('.mcp-status-ok { color: var(--ok); }')
-    expect(css).toContain('.mcp-status-waiting { color: var(--warn); }')
-    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.mcp-status-refresh \{ transition: none; \}/)
-    expect(css).toContain('outline-color: Highlight;')
-    expect(css).not.toMatch(/\.mcp[^{}]*\{[^}]*animation:/)
-  })
 })

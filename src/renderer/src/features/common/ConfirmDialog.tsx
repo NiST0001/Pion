@@ -1,8 +1,8 @@
-import { useEffect, useRef } from 'react'
+import { useId, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactElement, ReactNode } from 'react'
 import { AlertTriangle, Loader2 } from 'lucide-react'
-import { containModalTab, isTopmostModalDialog } from '../../utils/dialogFocus'
+import { useModalLifecycle } from '../../hooks/useModalLifecycle'
 
 export function ConfirmDialog({
   open,
@@ -29,39 +29,9 @@ export function ConfirmDialog({
 }): ReactElement | null {
   const dialogRef = useRef<HTMLElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
-  const busyRef = useRef(busy)
-  const composingRef = useRef(false)
-  const onCancelRef = useRef(onCancel)
-
-  useEffect(() => {
-    busyRef.current = busy
-    onCancelRef.current = onCancel
-  }, [busy, onCancel])
-
-  useEffect(() => {
-    if (!open) return
-    composingRef.current = false
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const frame = requestAnimationFrame(() => cancelRef.current?.focus())
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      const dialog = dialogRef.current
-      if (!dialog || !isTopmostModalDialog(dialog)) return
-      if (event.key === 'Tab') {
-        containModalTab(event, dialog)
-        return
-      }
-      if (event.key !== 'Escape' || busyRef.current || event.isComposing || event.keyCode === 229 || composingRef.current) return
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      onCancelRef.current()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => {
-      cancelAnimationFrame(frame)
-      window.removeEventListener('keydown', handleKeyDown)
-      previousFocus?.focus()
-    }
-  }, [open])
+  const titleId = useId()
+  const messageId = useId()
+  const { close, dialogEvents } = useModalLifecycle({ open, dialogRef, initialFocusRef: cancelRef, busy, onClose: onCancel })
 
   if (!open) return null
 
@@ -69,7 +39,7 @@ export function ConfirmDialog({
     <div
       className="confirm-dialog-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) onCancel()
+        if (event.target === event.currentTarget) close()
       }}
     >
       <section
@@ -79,18 +49,14 @@ export function ConfirmDialog({
         tabIndex={-1}
         data-modal-layer="340"
         aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
-        aria-describedby="confirm-dialog-message"
-        onCompositionStartCapture={() => { composingRef.current = true }}
-        onCompositionEndCapture={() => { composingRef.current = false }}
-        onKeyDownCapture={(event) => {
-          if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229 || composingRef.current)) event.preventDefault()
-        }}
+        aria-labelledby={titleId}
+        aria-describedby={messageId}
+        {...dialogEvents}
       >
         <div className="confirm-dialog-icon" aria-hidden="true"><AlertTriangle size={17} /></div>
         <div className="confirm-dialog-copy">
-          <h2 id="confirm-dialog-title">{title}</h2>
-          <div id="confirm-dialog-message" className="confirm-dialog-message">{message}</div>
+          <h2 id={titleId}>{title}</h2>
+          <div id={messageId} className="confirm-dialog-message">{message}</div>
           {detail && <div className="confirm-dialog-detail">{detail}</div>}
         </div>
         <div className="confirm-dialog-actions">
@@ -99,7 +65,7 @@ export function ConfirmDialog({
             type="button"
             className="confirm-dialog-cancel"
             disabled={busy}
-            onClick={onCancel}
+            onClick={close}
           >
             {cancelLabel}
           </button>

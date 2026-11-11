@@ -2,7 +2,7 @@ import type { BrowserWindow } from 'electron'
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import * as fs from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CommandChunk, CommandResult, CommandSpec } from '../../src/main/command-runner'
 import { CommandRunner } from '../../src/main/command-runner'
@@ -11,7 +11,7 @@ import type { RunOperation, VerificationLogUpdate, VerificationPlan, Verificatio
 
 vi.mock('node:fs/promises', async original => {
   const actual = await original<typeof import('node:fs/promises')>()
-  return { ...actual, readFile: vi.fn(actual.readFile) }
+  return { ...actual, readFile: vi.fn(actual.readFile), rename: vi.fn(actual.rename) }
 })
 
 const roots: string[] = []
@@ -67,8 +67,9 @@ async function fixture(): Promise<{ root: string; stateFile: string; npmName: st
 
 function deferred<T>() {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((done) => { resolve = done })
-  return { promise, resolve }
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail })
+  return { promise, resolve, reject }
 }
 
 describe('VerificationService', () => {
@@ -130,18 +131,138 @@ describe('VerificationService', () => {
     expect(await readFile(stateFile, 'utf8')).toBe('{broken')
   })
 
-  it('checks the full private run map beyond thirty displayed records', () => {
-    const service = new VerificationService(join(tmpdir(), 'unused-verification.json'), new FakeRunner([]))
-    const internal = service as unknown as { runs: Map<string, VerificationRun> }
-    const record: VerificationRun = { id: 'old', cwd: '/project', state: 'running', createdAt: 1,
-      steps: [], selectedKinds: [], repairAttempt: 0, revision: 0 }
-    internal.runs.set(record.id, record)
-    for (let index = 0; index < 35; index += 1) {
-      const id = `new-${index}`
-      internal.runs.set(id, { ...record, id, state: 'passed', createdAt: index + 2 })
-    }
-    expect(service.listRuns().some((run) => run.id === record.id)).toBe(false)
-    expect(() => service.assertWorktreeDeletionIdle('/other')).toThrow(/验证/)
+  it('retains accepted recovery state and the original source after ENOSPC, then allows an explicit flush retry', async () => {
+    const { root, stateFile } = await fixture()
+    const source = JSON.stringify({ version: 1,
+      policies: { [root]: { autoRun: false, autoRepair: false, selectedKinds: ['test'] } },
+      runs: [{ id: 'recovered', cwd: root, state: 'queued', createdAt: 1, steps: [], selectedKinds: ['test'], revision: 0 }]
+    })
+    await writeFile(stateFile, source)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const writing = deferred<void>()
+    vi.mocked(fs.rename).mockImplementationOnce(() => writing.promise)
+    const service = new VerificationService(stateFile, new FakeRunner([]))
+    const loading = service.load()
+    let settled = false
+    const rejected = loading.catch(error => error).finally(() => { settled = true })
+    await vi.waitFor(() => expect(fs.rename).toHaveBeenCalledOnce())
+    expect(service.load()).toBe(loading)
+    expect(settled).toBe(false)
+    expect(service.listRuns(root)[0]).toMatchObject({ id: 'recovered', state: 'interrupted', revision: 1 })
+    expect(await readFile(stateFile, 'utf8')).toBe(source)
+
+    const failure = Object.assign(new Error('disk full during recovery'), { code: 'ENOSPC' })
+    writing.reject(failure)
+    const error = await rejected
+    expect(error).toMatchObject({ cause: failure })
+    expect(service.getPolicy(root)).toMatchObject({ autoRun: false, autoRepair: false, selectedKinds: ['test'] })
+    expect(await readFile(stateFile, 'utf8')).toBe(source)
+    await service.load()
+    expect(fs.rename).toHaveBeenCalledOnce()
+    await service.flush()
+    const saved = JSON.parse(await readFile(stateFile, 'utf8')) as { runs: VerificationRun[] }
+    expect(saved.runs[0]).toMatchObject({ id: 'recovered', state: 'interrupted', revision: 1 })
+    expect(fs.rename).toHaveBeenCalledTimes(2)
+  })
+
+  it('retains the real filesystem queue and execution slot until a failed save settles without hiding its error', async () => {
+    const { root, stateFile } = await fixture()
+    const service = new VerificationService(stateFile, new FakeRunner([]))
+    await service.load()
+    const writing = deferred<void>()
+    const rename = vi.mocked(fs.rename).mockImplementationOnce(() => writing.promise)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const run = await service.start(root, { kinds: ['test'] })
+    await vi.waitFor(() => expect(rename).toHaveBeenCalledOnce())
+    const completion = expect(service.waitForRun(run.id)).rejects.toThrow(/存储保存失败/)
+    let finished = false
+    const saving = service.setPolicy(root, { autoRun: true }).then(() => { finished = true })
+    await Promise.resolve()
+    expect(finished).toBe(false)
+    expect(rename).toHaveBeenCalledOnce()
+    expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    expect(() => service.assertWorktreeDeletionIdle('/unrelated')).not.toThrow()
+    writing.reject(Object.assign(new Error('disk full'), { code: 'ENOSPC' }))
+    await Promise.all([completion, saving])
+    expect(rename).toHaveBeenCalledTimes(2)
+    expect(service.listRuns(root)[0].state).toBe('passed')
+    expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow()
+    await expect(service.waitForRun(run.id)).rejects.toThrow(/存储保存失败/)
+    const saved = JSON.parse(await readFile(stateFile, 'utf8')) as { policies: Record<string, { autoRun: boolean }>; runs: VerificationRun[] }
+    expect(saved.policies[resolve(root)].autoRun).toBe(true)
+    expect(saved.runs[0]).toMatchObject({ id: run.id, state: 'passed' })
+  })
+
+  it('keeps failed policy changes out of memory, later run saves and automatic actions until an explicit retry', async () => {
+    const { root, stateFile } = await fixture()
+    const service = new VerificationService(stateFile, new FakeRunner([1]))
+    const original = await service.setPolicy(root, { selectedKinds: ['test'] })
+    const source = await readFile(stateFile, 'utf8')
+    const send = vi.fn()
+    service.bind({ webContents: { send } } as unknown as BrowserWindow)
+    const start = vi.spyOn(service, 'start')
+    const repair = vi.fn(async () => null)
+    service.setAutoRepairHandler(repair)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.mocked(fs.rename).mockRejectedValueOnce(new Error('disk full'))
+
+    await expect(service.setPolicy(root, { autoRun: true, autoRepair: true })).rejects.toThrow(/存储保存失败/)
+    expect(service.getPolicy(root)).toEqual(original)
+    expect(await readFile(stateFile, 'utf8')).toBe(source)
+    expect(send).not.toHaveBeenCalled()
+    await service.handleAgentRunCompleted({ id: 'completed-agent', cwd: root, state: 'completed' } as RunOperation)
+    expect(start).not.toHaveBeenCalled()
+
+    const run = await service.start(root)
+    await service.waitForRun(run.id)
+    expect(service.listRuns(root)[0].state).toBe('failed')
+    expect(repair).not.toHaveBeenCalled()
+    const saved = JSON.parse(await readFile(stateFile, 'utf8')) as { policies: Record<string, unknown> }
+    expect(saved.policies[resolve(root)]).toEqual(original)
+    await expect(service.setPolicy(root, { autoRun: true, autoRepair: true }))
+      .resolves.toMatchObject({ autoRun: true, autoRepair: true })
+  })
+
+  it('merges queued policy patches after publication and snapshots subsequent run saves inside the same queue', async () => {
+    const { root, stateFile } = await fixture()
+    const service = new VerificationService(stateFile, new FakeRunner([]))
+    const original = await service.setPolicy(root, { selectedKinds: ['test'] })
+    const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
+    const writing = deferred<void>()
+    const rename = vi.mocked(fs.rename).mockImplementationOnce(async (...args) => {
+      await writing.promise
+      await actual.rename(...args)
+    })
+    const first = service.setPolicy(root, { autoRun: true })
+    await vi.waitFor(() => expect(rename).toHaveBeenCalledTimes(2))
+    expect(service.getPolicy(root)).toEqual(original)
+    const second = service.setPolicy(root, { autoRepair: true, maxRepairAttempts: 3 })
+    const run = await service.start(root)
+    const runSave = service.flush()
+    expect(rename).toHaveBeenCalledTimes(2)
+
+    writing.resolve(undefined)
+    const [firstPolicy, secondPolicy] = await Promise.all([first, second, runSave, service.waitForRun(run.id)])
+    expect(firstPolicy).toMatchObject({ autoRun: true, autoRepair: false })
+    expect(secondPolicy).toMatchObject({ autoRun: true, autoRepair: true, maxRepairAttempts: 3 })
+    const saved = JSON.parse(await readFile(stateFile, 'utf8')) as { policies: Record<string, unknown>; runs: VerificationRun[] }
+    expect(saved.policies[resolve(root)]).toEqual(secondPolicy)
+    expect(service.getPolicy(root)).toEqual(secondPolicy)
+    expect(saved.runs).toEqual([expect.objectContaining({ id: run.id, state: 'passed' })])
+  })
+
+  it('retains storage isolation when its owner reports an unknown close', async () => {
+    const { root, stateFile } = await fixture()
+    const service = new VerificationService(stateFile, new FakeRunner([]))
+    await service.load()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const failure = Object.assign(new Error('filesystem close unknown'), { closeUnknown: true })
+    vi.mocked(fs.rename).mockRejectedValueOnce(failure)
+    await expect(service.setPolicy(root, { autoRun: true })).rejects.toMatchObject({ closeUnknown: true, cause: failure })
+    await expect(service.flush()).rejects.toMatchObject({ closeUnknown: true, cause: failure })
+    await expect(service.start(root)).rejects.toMatchObject({ closeUnknown: true, cause: failure })
+    await expect(service.shutdown()).rejects.toMatchObject({ closeUnknown: true, cause: failure })
+    expect(fs.rename).toHaveBeenCalledOnce()
   })
 
   it('does not treat a command error result as proof of process close', async () => {
@@ -154,7 +275,63 @@ describe('VerificationService', () => {
     await vi.waitFor(() => expect(service.listRuns(root)[0].state).toBe('infrastructure-error'))
     await service.flush()
     expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    expect(() => service.assertWorktreeDeletionIdle('/unrelated')).not.toThrow()
     await expect(service.start(root)).rejects.toThrow(/收尾尚未确认/)
+    await expect(service.waitForRun('unrelated-run')).resolves.toBeUndefined()
+  })
+
+  it.each([{ closeConfirmed: true }, { spawnNotExecuted: true }] as const)('accepts a spawn error with an explicit runner receipt: %j', async (receipt) => {
+    const { root, stateFile } = await fixture()
+    const runner = new FakeRunner([])
+    vi.spyOn(runner, 'run').mockResolvedValue({ spawnError: 'ENOENT', ...receipt,
+      durationMs: 1, cancelled: false, timedOut: false })
+    const service = new VerificationService(stateFile, runner)
+    const run = await service.start(root)
+    await service.waitForRun(run.id)
+    expect(service.listRuns(root)[0].state).toBe('infrastructure-error')
+    expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow()
+  })
+
+  it('joins the real command result after a failed stop request', async () => {
+    const { root, stateFile } = await fixture()
+    const runner = new FakeRunner([])
+    const command = deferred<CommandResult>()
+    const execute = vi.spyOn(runner, 'run').mockReturnValue(command.promise)
+    const cancel = vi.spyOn(runner, 'cancel').mockRejectedValue(Object.assign(new Error('stop request failed'), { closeUnknown: true }))
+    const service = new VerificationService(stateFile, runner)
+    await service.start(root)
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce())
+    let settled = false
+    const shutdown = service.shutdown().finally(() => { settled = true })
+    const completed = expect(shutdown).rejects.not.toHaveProperty('closeUnknown')
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce())
+    expect(settled).toBe(false)
+    expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    await expect(service.setPolicy(root, { autoRun: true })).rejects.toThrow(/已关闭/)
+    command.resolve({ exitCode: 0, durationMs: 1, cancelled: true, timedOut: false, closeConfirmed: true })
+    await completed
+    expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow()
+  })
+
+  it('closes start admission while a discovery remains physically pending', async () => {
+    const { root, stateFile } = await fixture()
+    const runner = new FakeRunner([])
+    const execute = vi.spyOn(runner, 'run')
+    const service = new VerificationService(stateFile, runner)
+    const discovery = deferred<VerificationPlan>()
+    vi.spyOn(service, 'discover').mockReturnValueOnce(discovery.promise)
+    const starting = expect(service.start(root)).rejects.toThrow(/已关闭/)
+    let settled = false
+    const shutdown = service.shutdown().then(() => { settled = true })
+    expect(service.shutdown()).toBe(service.shutdown())
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    discovery.resolve({ cwd: root, discoveredAt: 1, steps: [], warnings: [] })
+    await Promise.all([starting, shutdown])
+    expect(execute).not.toHaveBeenCalled()
+    expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow()
+    await expect(service.start(root)).rejects.toThrow(/已关闭/)
   })
 
   it('guards starts before discovery and after pending discovery', async () => {
@@ -166,8 +343,10 @@ describe('VerificationService', () => {
     })
     let blocked = false
     service.setMutationGuard(() => { if (blocked) throw new Error('deletion active') })
-    const pending = service.start(join(tmpdir(), 'project'))
-    expect(() => service.assertWorktreeDeletionIdle('/other')).toThrow(/验证/)
+    const root = join(tmpdir(), 'project')
+    const pending = service.start(root)
+    expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    expect(() => service.assertWorktreeDeletionIdle('/other')).not.toThrow()
     blocked = true
     finish()
     await expect(pending).rejects.toThrow('deletion active')
@@ -264,7 +443,8 @@ describe('VerificationService', () => {
     const started = await service.start(root)
     await service.cancel(started.id)
     expect(service.listRuns(root)[0].state).toBe('cancelled')
-    expect(() => service.assertWorktreeDeletionIdle('/unrelated')).toThrow(/验证/)
+    expect(() => service.assertWorktreeDeletionIdle(root)).toThrow(/验证/)
+    expect(() => service.assertWorktreeDeletionIdle('/unrelated')).not.toThrow()
     await expect(service.start(root)).rejects.toThrow(/实际结束/)
     finish({ exitCode: 0, durationMs: 1, cancelled: true, timedOut: false })
     await vi.waitFor(() => expect(() => service.assertWorktreeDeletionIdle(root)).not.toThrow())

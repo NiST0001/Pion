@@ -125,7 +125,7 @@ function fixture(nativeProbe = false) {
 async function prepared() {
   const f = fixture()
   await prepareRecovery(f.io)
-  const saved = JSON.parse(f.nodes.get(`${DIR}/${RECOVERY_FILES.prepared}`)!.data.toString())
+  const saved = await f.io.load()
   return { ...f, saved }
 }
 
@@ -196,6 +196,67 @@ describe('boot-bound maintenance IO (synthetic storage and process only)', () =>
     await expect(prepareRecovery(f.io)).rejects.toThrow('prepare failed')
     expect(f.nodes.get(`${DIR}/${RECOVERY_FILES.prepared}`)).toBe(guard)
     expect(f.nodes.get(MARKER)?.data.toString()).toBe(payload)
+  })
+  it('validates persisted JSON fields with the same witness schema used by maintenance writes', async () => {
+    const f = await prepared(); f.reboot()
+    const stored = f.nodes.get(`${DIR}/${RECOVERY_FILES.prepared}`)!
+    const s = f.saved.snapshot
+    const invalidSnapshots = [null, [], { ...s, extra: true },
+      ...Object.keys(s).map(key => Object.fromEntries(Object.entries(s).filter(([field]) => field !== key))), ...Object.entries({
+      version: [2], uid: [null, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '42'],
+      bootId: ['not-a-uuid', oldBoot + '\n'],
+      machineHash: ['A'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), 'a'.repeat(64) + '\n'],
+      homeHash: ['g'.repeat(64)], fsType: ['EF53', '0xef53', '1234', null],
+      fsId: ['', '0x1', 'A', 'g', 'a'.repeat(33), 'a\n'],
+      homeIdentity: ['1', '1:2:3', '-1:2', '01:2', '1:2\n', '1:' + '2'.repeat(33)],
+      directoryIdentity: ['1:NaN'],
+      markerIdentity: ['1:2:3', '1:2:3:4:5', '1:2:3:-1', '1:2:3:1.2', '1:2:3:' + '9'.repeat(33), '1:2:3:4\n']
+    }).flatMap(([key, values]) => values.map(value => ({ ...s, [key]: value })))]
+    const invalidWitnesses = [null, [], { ...f.saved, extra: true }, { ...f.saved, version: 2 },
+      { ...f.saved, kind: 'stopped' }, { ...f.saved, id: 'private path' }, { ...f.saved, id: f.saved.id + '\n' },
+      { ...f.saved, snapshot: undefined }, ...invalidSnapshots.map(snapshot => ({ ...f.saved, snapshot }))]
+    for (const value of invalidWitnesses) {
+      stored.data = Buffer.from(JSON.stringify(value) + '\n')
+      await expect(f.io.load()).rejects.toThrow('maintenance IO')
+      await expect(finishRecovery(f.io)).rejects.toThrow('finish failed')
+      expect(f.live.size).toBe(0)
+    }
+    stored.data = Buffer.from('{broken}\n')
+    await expect(finishRecovery(f.io)).rejects.toThrow('finish failed')
+    expect(f.nodes.has(MARKER)).toBe(true)
+    expect(f.nodes.has(`${DIR}/${RECOVERY_FILES.consumed}`)).toBe(false)
+    expect(f.events).not.toContain('archive:link')
+  })
+  it('loads valid JSON at the schema bounds without granting marker retirement', async () => {
+    const f = await prepared(); f.reboot()
+    const stored = f.nodes.get(`${DIR}/${RECOVERY_FILES.prepared}`)!
+    const maximum = '9'.repeat(32)
+    for (const snapshot of [f.saved.snapshot,
+      { ...f.saved.snapshot, uid: 0, fsId: 'f', homeIdentity: '0:0', directoryIdentity: '0:0', markerIdentity: '0:0:0:0' },
+      { ...f.saved.snapshot, uid: Number.MAX_SAFE_INTEGER, fsId: 'f'.repeat(32),
+        homeIdentity: `${maximum}:${maximum}`, directoryIdentity: `${maximum}:${maximum}`,
+        markerIdentity: Array(4).fill(maximum).join(':') }
+    ]) {
+      const witness = { ...f.saved, snapshot }
+      stored.data = Buffer.from(JSON.stringify(witness) + '\n')
+      expect(await f.io.load()).toEqual(witness)
+    }
+    await expect(finishRecovery(f.io)).rejects.toThrow('finish failed')
+    expect(f.nodes.has(MARKER)).toBe(true)
+    expect(f.nodes.has(`${DIR}/${RECOVERY_FILES.consumed}`)).toBe(false)
+    expect(f.live.size).toBe(0)
+  })
+  it.each(['negative-mtime', 'oversized-inode', 'oversized-birthtime'] as const)('validates native snapshot schema before returning %s metadata', async kind => {
+    const f = fixture()
+    const marker = f.nodes.get(MARKER)!
+    if (kind === 'negative-mtime') marker.mtimeNs = -1n
+    if (kind === 'oversized-inode') marker.ino = 10n ** 32n
+    if (kind === 'oversized-birthtime') marker.birthtimeNs = 10n ** 32n
+    await expect(f.io.inspect()).rejects.toThrow('maintenance IO')
+    await expect(prepareRecovery(f.io)).rejects.toThrow('prepare failed')
+    expect(f.nodes.has(MARKER)).toBe(true)
+    expect(f.nodes.has(`${DIR}/${RECOVERY_FILES.prepared}`)).toBe(false)
+    expect(f.live.size).toBe(0)
   })
   it('consumes before mutation and never retries a failed retirement', async () => {
     const f = await prepared(); f.reboot()

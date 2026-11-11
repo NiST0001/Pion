@@ -246,6 +246,9 @@ function fixture() {
   const internals = bridge as unknown as typeof fields & {
     sessionDirFor(cwd: string): string
     ensureActiveBackend(): Promise<BackendRecord>
+    stopBackend(key: string): Promise<void>
+    stopHistoryWriter(backend: BackendRecord): Promise<void>
+    unconfirmedStoppedWorktreeCwds?: Set<string>
   }
   const handlers = new Map<string, IpcListener>()
   registerAgentIpc({
@@ -594,6 +597,132 @@ describe('AgentBridge conversation-only message revert', () => {
     await finishRestart(h)
   })
 
+  it('keeps normal backend eviction reserved through actual RPC cleanup and leaves no permanent cwd tombstone', async () => {
+    const h = fixture()
+    const rpc = deferred<void>(undefined)
+    h.backend.controlDispatchPromises = new Set([rpc.promise])
+    let finished = false
+    const stopping = observe(h.internals.stopBackend(h.backend.key)).then(result => { finished = true; return result })
+    await h.stopStarted.promise
+    await Promise.resolve()
+    expect(finished).toBe(false)
+    expect(h.backendPool.get(h.backend.key)).toBe(h.backend)
+    rpc.resolve()
+    expect(await stopping).toMatchObject({ ok: true })
+    expect(h.client.stop).toHaveBeenCalledTimes(1)
+    expect(h.backendPool.get(h.backend.key)).toBeUndefined()
+    expect(h.internals.unconfirmedStoppedWorktreeCwds?.has(h.cwd)).not.toBe(true)
+  })
+
+  it('bounds history UI waiting for actual RPC cleanup after the process closes, then releases the original barrier', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const h = fixture()
+    const rpc = deferred<void>(undefined)
+    h.backend.controlDispatchPromises = new Set([rpc.promise])
+    const waiting = observe(h.internals.stopHistoryWriter(h.backend))
+    await h.stopStarted.promise
+    expect(h.child.exitCode).toBe(0)
+    await vi.advanceTimersByTimeAsync(5_001)
+    expect(await waiting).toMatchObject({ ok: false, error: expect.objectContaining({ closeUnknown: true }) })
+    expect(h.backend.historyStopFailed).toBe(true)
+    expect(h.backendPool.get(h.backend.key)).toBe(h.backend)
+    const shutdown = observe(h.bridge.stop())
+    rpc.resolve()
+    await h.backend.historyStop!.promise
+    expect(await shutdown).toMatchObject({ ok: true })
+    expect(h.backend.historyStopFailed).toBe(false)
+    expect(h.backendPool.get(h.backend.key)).toBeUndefined()
+    expect(h.internals.quarantinedSessionPaths?.has(h.request.sessionPath)).not.toBe(true)
+    expect(h.client.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('shares a stable captured-startup adapter across repeated UI waits and application shutdown', async () => {
+    const h = fixture()
+    h.backend.startupProcess = h.child
+    h.client.process = null
+    const stopped = holdStop(h)
+    const first = observe(h.internals.stopHistoryWriter(h.backend))
+    const second = observe(h.internals.stopHistoryWriter(h.backend))
+    await h.stopStarted.promise
+    const shutdown = observe(h.bridge.stop())
+    stopped.resolve()
+    h.child.exit()
+    expect(await first).toMatchObject({ ok: true })
+    expect(await second).toMatchObject({ ok: true })
+    expect(await shutdown).toMatchObject({ ok: true })
+    expect(h.client.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports a true process-stop rejection with closeUnknown and retains the backend reservation', async () => {
+    const h = fixture()
+    h.client.stop.mockRejectedValue(new Error('actual stop failure'))
+    const stopping = h.bridge.stop()
+    await expect(stopping).rejects.toMatchObject({ closeUnknown: true })
+    expect(h.bridge.stop()).toBe(stopping)
+    await expect(h.bridge.stop()).rejects.toMatchObject({ closeUnknown: true })
+    expect(h.backend.historyStopFailed).toBe(true)
+    expect(h.backendPool.get(h.backend.key)).toBe(h.backend)
+    expect(h.internals.unconfirmedStoppedWorktreeCwds?.has(h.cwd)).toBe(true)
+    expect(h.client.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('aggregates shutdown cleanup/storage failures while preserving the real closeUnknown cause', async () => {
+    const h = fixture()
+    const application = Object.assign(new Error('unknown runtime replacement'), { closeUnknown: true })
+    h.backend.capability = { applyPromise: Promise.reject(application) } as NonNullable<BackendRecord['capability']>
+    const interruption = Object.assign(new Error('unknown interruption RPC'), { closeUnknown: true })
+    const stop = new Error('actual process stop failed')
+    const storage = new Error('run storage failed')
+    vi.spyOn(h.bridge as unknown as { interruptBackendRuns(backend: BackendRecord, reason: string): Promise<void> },
+      'interruptBackendRuns').mockRejectedValueOnce(interruption)
+    h.client.stop.mockRejectedValueOnce(stop)
+    vi.spyOn(h.internals.runStore, 'flush').mockRejectedValueOnce(storage)
+    const result = await observe(h.bridge.stop())
+    expect(result).toMatchObject({ ok: false, error: expect.objectContaining({ closeUnknown: true, errors: expect.arrayContaining([application, interruption, storage]) }) })
+    if (!result.ok) {
+      const errors = (result.error as AggregateError).errors as Error[]
+      expect(errors.some(error => error.message === stop.message)).toBe(true)
+    }
+    expect(h.backendPool.get(h.backend.key)).toBe(h.backend)
+    expect(h.backend.historyStopFailed).toBe(true)
+    expect(h.client.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['replacement', 'initialization', 'interruption persistence'] as const)(
+    'stops backend B while backend A still owns pending %s', async (phase) => {
+      const h = fixture()
+      const other = transcript(h.root, 'other-project')
+      const second = runtime('other-backend', other.cwd, other.request.sessionPath)
+      h.backendPool.add(second.backend)
+      h.internals.backendKeysBySessionPath.set(other.request.sessionPath, second.backend.key)
+      const pending = deferred<void>(undefined)
+      if (phase === 'replacement') h.backend.capability = { applyPromise: pending.promise } as NonNullable<BackendRecord['capability']>
+      else if (phase === 'initialization') h.backend.startPromise = pending.promise
+      else {
+        const target = h.bridge as unknown as { interruptBackendRuns(backend: BackendRecord, reason: string): Promise<void> }
+        const interrupt = target.interruptBackendRuns.bind(h.bridge)
+        vi.spyOn(target, 'interruptBackendRuns').mockImplementation((backend, reason) =>
+          backend === h.backend ? pending.promise : interrupt(backend, reason))
+      }
+      let finished = false
+      const shutdown = observe(h.bridge.stop()).then(result => { finished = true; return result })
+      try {
+        await vi.waitFor(() => expect(second.client.stop).toHaveBeenCalledTimes(1))
+        await vi.waitFor(() => expect(h.backendPool.get(second.backend.key)).toBeUndefined())
+        expect(finished).toBe(false)
+        if (phase !== 'interruption persistence') {
+          expect(h.client.stop).not.toHaveBeenCalled()
+          expect(h.backendPool.get(h.backend.key)).toBe(h.backend)
+        } else expect(h.client.stop).toHaveBeenCalledTimes(1)
+      } finally {
+        pending.resolve()
+        expect(await shutdown).toMatchObject({ ok: true })
+      }
+      expect(h.client.stop).toHaveBeenCalledTimes(1)
+      expect(h.backendPool.size).toBe(0)
+    }
+  )
+
   it('shares the history stop barrier when application shutdown overlaps a pending SDK stop', async () => {
     const h = fixture()
     const before = readFileSync(h.request.sessionPath)
@@ -629,14 +758,14 @@ describe('AgentBridge conversation-only message revert', () => {
     unchanged(h, before)
   })
 
-  it('quarantines a timed-out null-handle writer instead of retrying, deleting, or restarting it', async () => {
+  it('quarantines a timed-out writer, then restores sending after late close without replaying undo or starting automatically', async () => {
     const h = fixture()
     const before = readFileSync(h.request.sessionPath)
     const open = vi.spyOn(SessionManager, 'open')
     await timeoutWriter(h)
     expect(open).not.toHaveBeenCalled()
     expect(h.backend).toMatchObject({ historyStopFailed: true, phase: 'error', historyMutation: false, busy: false })
-    expect(h.bridge.getStatus()).toMatchObject({ phase: 'error', error: expect.stringContaining('重启 Pion') })
+    expect(h.bridge.getStatus()).toMatchObject({ phase: 'error', error: expect.stringContaining('等待退出收尾') })
     expect(h.internals.messageRevertInFlight).toBe(false)
     expect(h.backendPool.get(h.backend.key)).toBe(h.backend)
     expect(h.internals.backendKeysBySessionPath.get(h.request.sessionPath)).toBe(h.backend.key)
@@ -644,18 +773,43 @@ describe('AgentBridge conversation-only message revert', () => {
     await expect(h.invoke(IPC.AgentSend, 'must not reuse writer')).rejects.toThrow('重启 Pion')
     await expect(h.invoke(IPC.AgentQueue, 'must not enqueue')).rejects.toThrow('重启 Pion')
     await expect(h.invoke(IPC.AgentDeleteSession, h.request.sessionPath)).rejects.toThrow('重启 Pion')
-    await expect(h.invoke(IPC.AgentSwitchSession, h.request.sessionPath)).rejects.toThrow('重启 Pion')
     expect(h.client.stop).toHaveBeenCalledTimes(1)
     expect(h.createBackend).not.toHaveBeenCalled()
-    expect(h.child.listenerCount('exit')).toBe(0)
-    expect(h.child.listenerCount('close')).toBe(0)
-    expect(h.child.listenerCount('error')).toBe(0)
-    // A late exit cannot retrospectively authorize the failed undo or clear quarantine.
+    expect(h.child.listenerCount('exit')).toBeGreaterThan(0)
+    expect(h.child.listenerCount('close')).toBeGreaterThan(0)
+    // Late real closure releases this writer's isolation; the failed undo stays failed.
     h.child.exit()
-    await Promise.resolve()
-    expect(h.backend.historyStopFailed).toBe(true)
+    await h.backend.historyStop!.promise
+    expect(h.backend.historyStopFailed).toBe(false)
+    expect(h.backendPool.get(h.backend.key)).toBeUndefined()
+    expect(h.internals.quarantinedSessionPaths?.has(h.request.sessionPath)).toBe(false)
+    expect(h.internals.unconfirmedStoppedWorktreeCwds?.has(h.cwd)).toBe(false)
+    expect(h.bridge.getStatus()).toMatchObject({ phase: 'ready', cwd: h.cwd, error: undefined })
+    expect(h.createBackend).not.toHaveBeenCalled()
     unchanged(h, before)
+    await expect(h.invoke(IPC.AgentSend, 'explicit input after late close')).resolves.toBeUndefined()
+    expect(h.createBackend).toHaveBeenCalledTimes(1)
+    expect(h.recreated[0].client.prompt).toHaveBeenCalledExactlyOnceWith('explicit input after late close', [])
+    expect(readFileSync(h.request.sessionPath)).toEqual(before)
   })
+
+  it.each(['another error', 'selection round trip', 'replacement backend'] as const)(
+    'preserves current status after late history close with %s', async (phase) => {
+      const h = fixture()
+      await timeoutWriter(h)
+      if (phase === 'another error') h.internals.status = { phase: 'error', cwd: h.cwd, error: 'independent current error' }
+      else if (phase === 'selection round trip') {
+        await expect(h.invoke(IPC.AgentSwitchSession, h.request.sessionPath)).rejects.toThrow('重启 Pion')
+        h.internals.sessionSelectionGeneration += 1
+      }
+      else h.backendPool.add(runtime(h.backend.key, h.cwd, h.request.sessionPath).backend)
+      const status = h.bridge.getStatus()
+      h.child.exit()
+      await h.backend.historyStop!.promise
+      expect(h.bridge.getStatus()).toEqual(status)
+      expect(h.createBackend).not.toHaveBeenCalled()
+    }
+  )
 
   it.each([
     [IPC.AgentRenameSession, ['renamed after uncertain exit']],
@@ -671,45 +825,36 @@ describe('AgentBridge conversation-only message revert', () => {
     unchanged(h, before)
   })
 
-  it('keeps path tombstones across logical stop/start and refuses a cold switch or writer', async () => {
+  it('keeps the actual shutdown pending after a UI timeout and releases only after late real exit/stdio', async () => {
     const h = fixture()
     const before = readFileSync(h.request.sessionPath)
     await timeoutWriter(h)
-    await h.bridge.stop()
+    let finished = false
+    const shutdown = observe(h.bridge.stop()).then(result => { finished = true; return result })
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(finished).toBe(false)
+    expect(h.backendPool.get(h.backend.key)).toBe(h.backend)
+    expect(h.internals.quarantinedSessionPaths).toEqual(new Set([h.request.sessionPath]))
+    expect(h.client.stop).toHaveBeenCalledTimes(1)
+    await expect(h.bridge.switchSession(h.request.sessionPath)).rejects.toThrow('重启 Pion')
+    h.child.exit(false)
+    await Promise.resolve()
+    expect(finished).toBe(false)
+    h.child.close()
+    expect(await shutdown).toMatchObject({ ok: true })
     expect(h.backendPool.size).toBe(0)
     expect(h.internals.backendKeysBySessionPath.size).toBe(0)
-    expect(h.internals.quarantinedSessionPaths).toEqual(new Set([h.request.sessionPath]))
-    expect(h.client.stop).toHaveBeenCalledTimes(1) // never retry using the SDK's null handle
-    const open = vi.spyOn(SessionManager, 'open')
-    await h.bridge.start(h.cwd)
-    const alias = `${h.internals.sessionDirFor(h.cwd)}/./${basename(h.request.sessionPath)}`
-    await expect(h.bridge.switchSession(alias)).rejects.toThrow('重启 Pion')
-    await expect(h.bridge.startVerificationRepair(alias, h.cwd, 'must not reload writer')).rejects.toThrow('重启 Pion')
-    await expect(h.bridge.renameSession('must not append a name', alias)).rejects.toThrow('重启 Pion')
-    await expect(h.bridge.deleteSession(alias)).rejects.toThrow('重启 Pion')
-    await expect(h.bridge.copySession(alias)).rejects.toThrow('重启 Pion')
-    await expect(h.bridge.forkSession(alias, h.selected)).rejects.toThrow('重启 Pion')
-    expect(open).not.toHaveBeenCalled() // SDK open itself can repair/rewrite JSONL
+    expect(h.internals.quarantinedSessionPaths?.has(h.request.sessionPath)).toBe(false)
+    expect(h.internals.unconfirmedStoppedWorktreeCwds?.has(h.cwd)).toBe(false)
     expect(h.createBackend).not.toHaveBeenCalled()
-    // Even a stale logical selection with no retained backend cannot authorize
-    // ensureActiveBackend to create a new writer or the client getter to reuse it.
-    h.internals.activeKey = alias
-    h.internals.activeSessionPath = alias
-    await expect(h.bridge.send('must not reload selected writer')).rejects.toThrow('重启 Pion')
-    await expect(h.bridge.compactNow()).rejects.toThrow('重启 Pion')
-    expect(h.createBackend).not.toHaveBeenCalled()
-    h.child.exit()
-    await h.bridge.stop()
-    expect(h.internals.quarantinedSessionPaths).toEqual(new Set([h.request.sessionPath]))
     unchanged(h, before)
   })
 
-  it('allows an unrelated session after stop without releasing the quarantined path', async () => {
+  it('allows an unrelated session while the timed-out writer and its path stay retained', async () => {
     const h = fixture()
     const other = transcript(h.root, 'unrelated-project')
     const before = readFileSync(h.request.sessionPath)
     await timeoutWriter(h)
-    await h.bridge.stop()
     await h.bridge.start(other.cwd)
     await expect(h.bridge.switchSession(other.request.sessionPath)).resolves.toEqual({ cancelled: false })
     await finishRestart(h)
@@ -720,20 +865,12 @@ describe('AgentBridge conversation-only message revert', () => {
     unchanged(h, before)
   })
 
-  it.each(['retained backend', 'logical stop'] as const)('rejects migration of a quarantined source before filesystem changes after %s', async (phase) => {
+  it('rejects migration of a quarantined source before filesystem changes', async () => {
     const h = fixture()
     const before = readFileSync(h.request.sessionPath)
     const targetCwd = join(h.root, 'migration-target')
     const targetDir = h.internals.sessionDirFor(targetCwd)
     await timeoutWriter(h)
-    if (phase === 'logical stop') {
-      await h.bridge.stop()
-      await h.bridge.start(h.cwd)
-      // Model a restored/cached logical selection without a backend record.
-      h.internals.activeKey = h.request.sessionPath
-      h.internals.activeSessionPath = h.request.sessionPath
-      expect(h.backendPool.size).toBe(0)
-    }
     h.client.getState.mockClear()
     const open = vi.spyOn(SessionManager, 'open')
     await expect(h.bridge.migrateSessionToProject(targetCwd)).rejects.toThrow('重启 Pion')
@@ -744,11 +881,10 @@ describe('AgentBridge conversation-only message revert', () => {
     unchanged(h, before)
   })
 
-  it('rejects migration onto a quarantined destination after its backend record is cleared', async () => {
+  it('rejects migration onto a quarantined destination while its writer remains retained', async () => {
     const h = fixture()
     const before = readFileSync(h.request.sessionPath)
     await timeoutWriter(h)
-    await h.bridge.stop()
     const sourceCwd = join(h.root, 'migration-source')
     mkdirSync(sourceCwd)
     const source = join(sourceCwd, basename(h.request.sessionPath))

@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { VERSION, type ExtensionAPI, type ExtensionCommandContext, type ExtensionFactory } from '@earendil-works/pi-coding-agent'
 import {
-  MCP_STATUS_INTERVAL_MS, MCP_STATUS_QUERY_DEADLINE_MS, MCP_STATUS_PROTOCOL_VERSION,
-  MCP_STATUS_SDK_VERSION, MCP_STATUS_WIDGET_KEY, parseNativeMcpStatus, readMcpStatusNotice, unavailableMcpStatus
+  MCP_STATUS_INTERVAL_MS, MCP_STATUS_MAX_BYTES, MCP_STATUS_QUERY_DEADLINE_MS, MCP_STATUS_PROTOCOL_VERSION,
+  MCP_STATUS_SDK_VERSION, MCP_STATUS_WIDGET_KEY, mcpScopeString, parseNativeMcpStatus, unavailableMcpStatus
 } from '../../shared/mcp'
-import type { McpObservedStatus } from '../../shared/mcp'
+import type { McpObservedStatus, McpStatusNotice } from '../../shared/mcp'
 
 type NativeHandler = Parameters<ExtensionAPI['registerCommand']>[1]['handler']
 /** Shared by this RPC owner across SDK session replacements. No queue. */
@@ -24,12 +24,12 @@ export function createMcpStatusObserver({ createContext, slot, sdkVersion = VERS
   const runtimeId = randomUUID()
   let revision = 0
   let generation = 0
+  let nativeGeneration = 0
   let running = false
   let nativeActive = false
   let nativeHandler: NativeHandler | undefined
   let timer: ReturnType<typeof setInterval> | undefined
   let deadline: ReturnType<typeof setTimeout> | undefined
-  let closeCollector: (() => void) | undefined
   let timedOut = false
 
   const halt = (): void => {
@@ -39,8 +39,6 @@ export function createMcpStatusObserver({ createContext, slot, sdkVersion = VERS
     if (deadline) clearTimeout(deadline)
     timer = undefined
     deadline = undefined
-    closeCollector?.()
-    closeCollector = undefined
     // Do not clear slot.busy: an unresolved SDK pending still owns the slot.
   }
   const commandSource = (pi: ExtensionAPI): 'native' | 'replaced' | 'inactive' => {
@@ -52,14 +50,17 @@ export function createMcpStatusObserver({ createContext, slot, sdkVersion = VERS
   const publish = (ctx: ExtensionCommandContext, status: McpObservedStatus, captured: number): void => {
     if (!running || generation !== captured) return
     try {
+      const cwd = ctx.cwd
       const sessionPath = ctx.sessionManager.getSessionFile()
-      const value = { ...status, version: MCP_STATUS_PROTOCOL_VERSION, runtimeId, revision: revision + 1,
-        cwd: ctx.cwd, ...(sessionPath !== undefined ? { sessionPath } : {}) }
-      const lines = [JSON.stringify(value)]
-      // Fail closed before sending, including unusual/oversized scope strings.
-      if (!readMcpStatusNotice(lines)) return
-      revision++
-      ctx.ui.setWidget(MCP_STATUS_WIDGET_KEY, lines)
+      const nextRevision = revision + 1
+      if (!Number.isSafeInteger(nextRevision) || !mcpScopeString(cwd)
+        || (sessionPath !== undefined && !mcpScopeString(sessionPath))) return
+      const value: McpStatusNotice = { ...status, version: MCP_STATUS_PROTOCOL_VERSION, runtimeId, revision: nextRevision,
+        cwd, ...(sessionPath !== undefined ? { sessionPath } : {}) }
+      const line = JSON.stringify(value)
+      if (line.length > MCP_STATUS_MAX_BYTES || new TextEncoder().encode(line).length > MCP_STATUS_MAX_BYTES) return
+      revision = nextRevision
+      ctx.ui.setWidget(MCP_STATUS_WIDGET_KEY, [line])
     } catch { /* No raw errors or stale context callbacks are sent or logged. */ }
   }
   const tick = async (pi: ExtensionAPI): Promise<void> => {
@@ -94,63 +95,29 @@ export function createMcpStatusObserver({ createContext, slot, sdkVersion = VERS
     timedOut = false
     let collecting = true
     let notifications = 0
-    let protocolViolated = false
-    const refuse = (message: string): never => { protocolViolated = true; throw new Error(message) }
     let result: McpObservedStatus | undefined
-    const close = (): void => { collecting = false }
-    closeCollector = close
     const valid = (): boolean => collecting && running && captured === generation && nativeActive
-    const assertCollector = (): void => { if (!valid()) throw new Error('MCP status observation is no longer active') }
-    const immutable = {
-      set: (): never => refuse('MCP status context is read-only'),
-      defineProperty: (): never => refuse('MCP status context is read-only'),
-      deleteProperty: (): never => refuse('MCP status context is read-only'),
-      setPrototypeOf: (): never => refuse('MCP status context is read-only')
-    }
-    // A read-only facade backed by the genuine SDK command context. Unknown
-    // methods fail closed; no waitForIdle/newSession/etc. interfaces are invented.
-    const ui = new Proxy(Object.create(null) as ExtensionCommandContext['ui'], {
-      ...immutable,
-      get: (_target, property) => {
-        assertCollector()
-        if (property !== 'notify') refuse('MCP status UI is read-only')
-        return (text: string, level?: string): void => {
-          assertCollector()
-          notifications++
-          if (notifications !== 1 || level !== 'info') refuse('Unexpected MCP status notification')
-          result = parseNativeMcpStatus(text)
-        }
-      }
-    })
-    const isolated = new Proxy(Object.create(null) as ExtensionCommandContext, {
-      ...immutable,
-      get: (_target, property) => {
-        assertCollector()
-        if (property === 'mode') return context.mode
-        if (property === 'ui') return ui
-        return refuse('MCP status context is read-only')
-      }
-    })
     deadline = setTimeout(() => {
       if (!valid()) return
       timedOut = true
-      close()
+      collecting = false
       publish(context, unavailableMcpStatus('query-timeout', 'native'), captured)
     }, MCP_STATUS_QUERY_DEADLINE_MS)
     try {
-      // Empty arguments ONLY; never a user command or unknown plugin handler.
-      await nativeHandler!('', isolated)
+      // Audited builtin:mcp only reads mode, awaits pending, then notifies once.
+      await nativeHandler!('', { mode: context.mode, ui: { notify: (text, level) => {
+        if (valid() && ++notifications === 1 && level === 'info') result = parseNativeMcpStatus(text)
+      } } } as ExtensionCommandContext)
       if (!valid()) return
       if (commandSource(pi) !== 'native') {
         publish(context, unavailableMcpStatus('query-failed'), captured)
         return
       }
-      publish(context, !protocolViolated && notifications === 1 && result ? result : unavailableMcpStatus('unsupported-format', 'native'), captured)
+      publish(context, notifications === 1 && result ? result : unavailableMcpStatus('unsupported-format', 'native'), captured)
     } catch {
       if (valid()) publish(context, unavailableMcpStatus('query-failed', 'native'), captured)
     } finally {
-      close()
-      if (closeCollector === close) closeCollector = undefined
+      collecting = false
       // A new generation may already have a different timer; clear this read's
       // deadline only while it still belongs to the captured generation.
       if (generation === captured && deadline) { clearTimeout(deadline); deadline = undefined }
@@ -161,13 +128,15 @@ export function createMcpStatusObserver({ createContext, slot, sdkVersion = VERS
     wrapNative: (factory) => (pi) => {
       const on = ((event: string, handler: (...args: unknown[]) => unknown) => {
         if (event === 'session_start') return pi.on('session_start', async (event, ctx) => {
+          const captured = ++nativeGeneration
           halt()
           nativeActive = false
           await handler(event, ctx)
-          nativeActive = true
+          if (captured === nativeGeneration) nativeActive = true
         })
         if (event === 'session_shutdown') return pi.on('session_shutdown', async (event, ctx) => {
           // Invalidate before native close(), which can itself remain pending.
+          ++nativeGeneration
           nativeActive = false
           halt()
           await handler(event, ctx)
@@ -197,7 +166,7 @@ export function createMcpStatusObserver({ createContext, slot, sdkVersion = VERS
         timer = setInterval(() => { void tick(pi) }, MCP_STATUS_INTERVAL_MS)
         timer.unref?.()
       })
-      pi.on('session_shutdown', () => { nativeActive = false; halt() })
+      pi.on('session_shutdown', () => { ++nativeGeneration; nativeActive = false; halt() })
     }
   }
 }

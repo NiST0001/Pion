@@ -12,7 +12,7 @@ import {
 import { COMPUTER_USE_KEYS, validateComputerUseAction } from '../../shared/computer-use'
 import { decodeImageBase64, inspectRasterImage } from '../../shared/tool-images'
 import { assertGeneratedPngData } from './png-validation'
-import { COMPUTER_USE_MODEL_MAX_BASE64, COMPUTER_USE_MODEL_MAX_EDGE, COMPUTER_USE_UNWATCH_TIMEOUT_MS, type ComputerUseModelGate } from './computer-use-model-gate'
+import { COMPUTER_USE_MODEL_MAX_BASE64, COMPUTER_USE_MODEL_MAX_EDGE, type ComputerUseModelGate } from './computer-use-model-gate'
 
 type ChatModel = Model<Api>
 export interface ComputerUseAgentChannelOptions {
@@ -29,6 +29,7 @@ export function createComputerUseAgentChannel(options: ComputerUseAgentChannelOp
   const observations = new WeakMap<ComputerUseAgentResponse, { provider: string; modelId: string; requestId: string; scopeRevision: number; toolCallId: string }>()
   type Fields = { toolCallId?: string; frameId?: string; action?: unknown; watchRequestId?: string; retained?: ComputerUseAgentRetainedEntry }
   const start = (operation: ComputerUseAgentOperation, model: ChatModel, fields: Fields = {}, signal?: AbortSignal) => {
+    if (operation === 'unwatch') signal = new AbortController().signal
     if (!options.isCurrent() || !options.nonce || signal?.aborted) fail('unavailable')
     const context = options.createContext()
     if (!context?.hasUI || context.mode !== 'rpc') fail('unavailable')
@@ -37,10 +38,10 @@ export function createComputerUseAgentChannel(options: ComputerUseAgentChannelOp
     let acknowledged = false
     const result = (async (): Promise<ComputerUseAgentResponse> => {
       const title = COMPUTER_USE_AGENT_TITLE_PREFIX + JSON.stringify(request)
-      // SDK input abort only removes its LOCAL dialog. Unwatch is a separate
-      // Main-private request, with a fresh bounded wait and no aborted signal.
-      const timeout = operation === 'watch' ? COMPUTER_USE_AGENT_LIMITS.watchMs + 2_000
-        : operation === 'unwatch' ? COMPUTER_USE_UNWATCH_TIMEOUT_MS : 120_000
+      // SDK input cancellation removes its response receiver. Cleanup owns an
+      // independent signal and keeps that receiver until the real Main ACK.
+      const timeout = operation === 'unwatch' ? undefined
+        : operation === 'watch' ? COMPUTER_USE_AGENT_LIMITS.watchMs + 2_000 : 120_000
       const raw = await context.ui.input(title, undefined, { signal, timeout })
       if (!options.isCurrent() || signal?.aborted || typeof raw !== 'string'
         || raw.length > Math.ceil(COMPUTER_USE_AGENT_LIMITS.maxImageBytes / 3) * 4 + 4096) fail('scope-revoked')
@@ -88,6 +89,10 @@ export interface ComputerUseToolsOptions {
   runtimeId: string
   nonce?: string
   enabled: boolean
+  /** Exposure only. The host must separately install trusted focus/target and
+   * physical-takeover guards; Main independently denies unsupported input.
+   * Omission keeps current observe-only development runtimes usable. */
+  actEnabled?: boolean
   sessionManager: SessionManager
   getSession: () => AgentSession | undefined
   getModels: () => ModelRuntime
@@ -188,7 +193,8 @@ export function createComputerUseTools(options: ComputerUseToolsOptions) {
           { type: 'image', mimeType: 'image/png', data: image.data }
         ], details: { version: 1, frameId, width, height, scopeRevision, retention: 'sdk-session' } }
       }
-    }), defineTool({
+    }))
+    if (options.actEnabled) tools.push(defineTool({
       name: COMPUTER_USE_ACT_TOOL, label: 'Act on desktop', exposure: 'model-only', executionMode: 'sequential',
       description: 'Perform exactly one bounded action using a fresh observe frameId and image-pixel coordinates. Separate control approval plus verified protected-target and physical-takeover safeguards are required. Fails closed when target/focus cannot be verified. No arbitrary code, clipboard, raw key-down/up, Unicode typing or automatic retry.',
       parameters: Type.Object({ frameId: Type.String({ minLength: 1, maxLength: 256, pattern: '^[A-Za-z0-9_.:-]+$' }), action: actionSchema }, { additionalProperties: false }),
@@ -287,7 +293,7 @@ export function createComputerUseTools(options: ComputerUseToolsOptions) {
         }
       }
       const original = session.subscribe.bind(session)
-      const source = (name: string) => session.getAllTools().some(tool => tool.name === name
+      const source = (name: string) => session.getActiveToolNames().includes(name) && session.getAllTools().some(tool => tool.name === name
         && tool.sourceInfo.source === 'sdk' && tool.sourceInfo.path === `<sdk:${name}>`)
       // SDK customTools win the registry after extension tools in pinned 1.4.0.
       // The real factory owns these definitions; names/arguments alone are not

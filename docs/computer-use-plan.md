@@ -1,21 +1,21 @@
 # Pion ComputerUse 自研规划
 
 > 状态：总体控制闭环未交付，用户已另行明确批准 EGL/DMA-BUF route，默认仍 CPU。**两轮旧 unknown marker 各自独立维护退役，不补旧 stopped/released；#10 核心真实观察、owner 文档/来源 Closed 撤权、多实例与 normal release 已完成。** 同 capture-only Input0/Agent0/DMA1：scope5 一次原 PNG/独立预览/同帧四色及正常 Stop 至 scope6，scope7 同账户第二进程 before-open 拒绝且不干扰 A，主文档真实 reload 至 scope8，scope9 关闭自建 target 触发真实 SessionClosed 先于自有 client 断连并自动收尾至 scope10。两种撤权后均 released/pendingfalse，直接 IPC capture 被拒绝且状态/预算不变；Portal 独立按钮未单独点击，不混成手动 Stop/伪造事件。图片外发、SDK 图留存、模型调用与键鼠仍零，不是全功能可用/已安装发布。
-> 当前实现及证据见 [实施说明](computer-use-implementation.md)。总体授权与单独 GPU 路线批准不代替用户选择真实 Portal 来源、独立风险许可和执行 gate；不走 VM、不复制凭据、不安装/发布。#22 GPU 源码/fake/定向 types/build 已完成，完整项目 types 最近一次被用户并行 capability 等范围外错误阻塞，不计通过；#10 核心实机验收完成；#8 真实模型接线验收进行中，认证方案待用户选择、尚未登录/请求/交图；#21 未完成；#23 无 heartbeat 静态来源 fresh frame pending/尚未执行。带 3 px CSS heartbeat 的单帧不外推静态无 damage、所有缩放/GPU/应用；source/fake/mock/定向 types/build 与实机/网络证据分层，本次仅文档/静态 diff，未重跑检查。
+> 上述 scope5→10 均为旧全账户排他与旧 GPU 行为的历史证据。新只读跨实例并发、accounting 必需握手、统计/关闭分离及 GPU 初始化失败分支尚无新实机验收。当前实现及证据见 [实施说明](computer-use-implementation.md)。总体授权与单独 GPU 路线批准不代替用户选择真实 Portal 来源、独立风险许可和执行 gate；不走 VM、不复制凭据、不安装/发布。#22 GPU 源码/fake/定向 types/build 已完成，完整项目 types 最近一次被用户并行 capability 等范围外错误阻塞，不计通过；#10 核心实机验收完成；#8 真实模型接线验收进行中，认证方案待用户选择、尚未登录/请求/交图；#21 未完成；#23 无 heartbeat 静态来源 fresh frame pending/尚未执行。带 3 px CSS heartbeat 的单帧不外推静态无 damage、所有缩放/GPU/应用；source/fake/mock/定向 types/build 与实机/网络证据分层，本次仅文档/静态 diff，未重跑检查。
 > 原始规划源码核对基线为 `488af9d`；以下总体架构与候选 API 不能当当前功能清单。实际模块与限制以实施说明/源码为准。
 
 ## 已确认的阶段决定
 
 - 首个平台为 **Linux Wayland**；保持 ScreenCast + PipeWire 持续用户选定窗口观察，不以单次 Screenshot/整屏捕获替代。
-- 截图采用用户已选择的 SDK 会话留存路线；每次 observe 独立审批捕获/精确模型外发/留存，后续 root run 只可独立审批已有历史图 egress，不包含新 capture/control。恢复/fork/import 来源未知仍拒绝，撤权不删除 SDK 历史或追回已发内容；源码与合成回归不等于真实上传已验收。
-- 手动本地观察仍为默认入口；Agent 工具另需非打包开发开关 `PION_COMPUTER_USE_AGENT_DEVELOPMENT=1`，observe 当前仅窗口，act 无可信 focus/禁止目标/物理接管 guard 必须 fail-closed。执行层守真实 factory/client/root/run/session/document 来源、deny/plan/YOLO/显式工具子集与嵌套/子代理隔离，不注册即代表关闭而非已实现控制闭环。
+- 截图采用用户已选择的 SDK 会话留存路线；每次 observe 独立审批捕获/精确模型外发/留存，后续 root run 只可独立审批已有历史图 egress，不包含新 capture/control。无 taint 且可识别为纯文本的摘要/分叉沿普通会话，真实截图/taint 或图像来源未知继续守外发门；撤权保留 SDK 历史，已发内容无法追回；源码与合成回归不等于真实上传已验收。
+- 手动本地观察仍为默认入口；Agent 工具另需非打包开发开关 `PION_COMPUTER_USE_AGENT_DEVELOPMENT=1`，默认仅注册窗口 observe；act 另需显式 `actEnabled` 及可信 focus/禁止目标/物理接管 guard，缺失即拒绝。通用 gate 对 SDK 已核来源的 model-only root 只守 deny/checkpoint，Main 再核真实 factory/root 并作唯一桌面确认；未知同名来源保普通确认。执行层守真实 factory/client/root/run/session/document 来源、deny/plan/YOLO/显式工具子集与嵌套/子代理隔离，不注册即代表关闭而非已实现控制闭环。
 - 模型图只准实际 physical `openai-codex / openai-codex-responses` 且显式 SSE，PNG ≤2000/边、base64 严格 <4.5 MiB、去 metadata 并保私有坐标；UI 保持 512/96 KiB。交图前持久 taint，真 appendMessage 后核实际条目再 retained ACK；普通 toolResult 无 entry_appended、message_end 不算落盘。taint 后 SDK modelRuntime facade 内实际 provider 请求/重试及自动模型/getAuth（含摘要/压缩）先 gate，显式 login 不挡；真 stream/auth 收口 finally 等相关 unwatch ACK，不把 extension 抛错/TTL/取消当终止。
 - 用户同意以所属 Portal API 确认加全部 Pion 本地实际收尾为本实例停止边界，不要求独立服务内部全资源销毁。独占 Unix D-Bus 双向断连、关联 closeReceipt 和 PipeWire/watcher/进程/stdio/请求/解码/FS 全收口已让后续普通失败真实 released，不把整机重启作常规失败恢复。两轮旧 unknown 各自经 prepare→完整重启→verify→单独批准 finish 独立归档退役，不再 held/prepared、也不补造旧 stopped/released；普通状态/Stop 无 clear 路由，跨进程崩溃恢复仍未完成，见 [受控维护](computer-use-maintenance.md)。
-- 此前用户亲选 SAFE TARGET 后实际 Portal CreateSession、SelectSources、Start/source_type=2 与 OpenPipeWireRemote 成功，后续 CPU 流 no input formats/EPIPE，正常 helper/FD/FS 收尾、actualPending=false。对应公开 niri `8ed0da4` 的 `pw_utils::make_video_params` 强制 VideoModifier MANDATORY、缺 modifier 停止且无 MemFd 路线，与实测吻合；VARIABLE_FPS 仅 timing 放行，非解决该阻断。早期 niri focus-window 只辅助用户看见另一 workspace 的 chooser，不改配置/替选源/成为依赖。有限 stage trace 默认关闭、不改 PCU1/UI 四槽码或透传 raw stderr/标题/URI；120 秒仅 Start chooser Response，connect/Create/Select 仍 30 秒。
+- 此前用户亲选 SAFE TARGET 后实际 Portal CreateSession、SelectSources、Start/source_type=2 与 OpenPipeWireRemote 成功，后续 CPU 流 no input formats/EPIPE，正常 helper/FD/FS 收尾、actualPending=false。对应公开 niri `8ed0da4` 的 `pw_utils::make_video_params` 强制 VideoModifier MANDATORY、缺 modifier 停止且无 MemFd 路线，与实测吻合；VARIABLE_FPS 仅 timing 放行，非解决该阻断。早期 niri focus-window 只辅助用户看见另一 workspace 的 chooser，不改配置/替选源/成为依赖。有限 stage trace 默认关闭、不改 PCU1/UI 四槽码或透传 raw stderr/标题/URI；120 秒仅 Start chooser Response，connect/Create/Select 仍 30 秒。Portal 请求等待采用 watch 撤权通知替代 50ms 循环，保派发/响应/交付 owner fence、Response 优先与原 RPC/join/drain 真收口。
 - 最新隔离 profile `app-gpu2` 的 inputDevelopmentEnabled=false、dmaBufDevelopmentEnabled=true、Agent 开关为 0，未启动模型。用户再次亲选 SAFE TARGET 后，官方 SPA filter/fixate 的 EnumFormat body ID/ChoiceNone 备用尾部兼容修复已实际到达 GpuFormatAccepted→MemoryParamsAccepted→Streaming→StreamReady；仅一次 capture 取得原尺寸 PNG 与独立有界 UI 预览，原图未进 renderer/工具日志/文件。renderer 对同一预览做已知四色白名单布尔检测，确认四色、左右/上下顺序及非垂直倒置；首次比例采样落错点不改 GPU 像素/不裁剪/不重拍，目标 CSS heartbeat 只保障本轮新帧。随后明确 Stop，GPU/PW/native/进程/stdio/请求/解码/FS 实际门全过，stopped/released、actualPending=false、许可全撤、diagnostics 为空；这是本机一轮观察成功，非全桌面停止或独立 driver 硬件内部全毁。数值与同帧采样限制见实施记录。
 - 同 capture-only Input0/Agent0/DMA1 后续已完成：scope7 app-cross1 同账户第二进程 before-open 拒绝，B Stop 不触及仍 ready/consented 的 A；A 主文档真实 reload 至 scope8 released/pendingfalse；scope9 用户重选 SAFE TARGET 后关闭自建 target，真实 SessionClosed 先于自有 client 断连，自动收尾至 scope10 released/pendingfalse/captures0。两次撤权后直接 IPC capture 均被后端拒绝且状态/预算不变，不新增 PNG；Portal 独立按钮未另点，真实来源 Closed 不混成手动 Stop 或伪造事件。详见实施记录。
-- 用户已**另行明确批准 EGL/DMA-BUF route**。默认 CPU 不放开 Modifier/DMA；仅非 packaged 精确 `PION_COMPUTER_USE_DMABUF_DEVELOPMENT=1` 开启，status 可选 dmaBufDevelopmentEnabled 仅纯配置/缺失 false，不代替硬件能力或许可。固定 soname lazy dlopen，构造/getState/hello 不初始化 GPU；获准来源后 PW worker 单线程实际 formats/modifiers EGL readback。只报实际 modifier、等 DONT_FIXATE 具体化，限定 packed/≤4 planes/尺寸/stride/offset/预算，仍只选中窗口/独立选择显示器的 remote buffer，不缩放裁剪原图、不改 niri、不走 X11/VM、不自动外发。native close→optional input→optional accounting→optional DMA 八组合、DMA flag 严格最后，按需 hello dmaBufReadbackVersion:1，旧组合不增字段，缺 feature 在 open/Portal/GPU 前失败，无 fallback/restart。
-- 独立审阅 P1 已源码修复：GL/EGL context loss/同步未知粘性，不被后来 NO_ERROR/成功 destroy 清除；完成证明与句柄清理分开，同步真完成才返 PW buffer，GPU close 先于 PW teardown。未知时实际 worker park 并持 buffer、Stream/Core/FD、GPU/readback 内存，不正常退出/clean ACK/release/自动重试；普通 unsupported 且资源正面收口可正常失败释放，现有 join/process/stdio/account/FS 门全保。成功 API 仅本实例受信驱动的软件边界，不证明独立 driver/compositor 硬件内部全毁。niri 精确 opaque 1/1/0 长度非 CPU mmap 长度，bounded raster/EGL 验证不放宽；实际 n_datas==num_planes，不猜四槽 unused 或丢 slot。最新单帧 buffer 导入/读回、完整 PNG 及本地预览已经实机执行；source fence/合成四色或该单帧结果均不等于全局坐标、所有 driver、静态无 damage、普遍兼容/性能/失效验收。
+- 用户已**另行明确批准 EGL/DMA-BUF route**。默认 CPU 不放开 Modifier/DMA；仅非 packaged 精确 `PION_COMPUTER_USE_DMABUF_DEVELOPMENT=1` 开启，status 可选 dmaBufDevelopmentEnabled 仅纯配置/缺失 false，不代替硬件能力或许可。固定 soname lazy dlopen，构造/getState/hello 不初始化 GPU；获准来源后 PW worker 单线程实际 formats/modifiers EGL readback。只报实际 modifier、等 DONT_FIXATE 具体化，限定 packed/≤4 planes/尺寸/stride/offset/预算，仍只选中窗口/独立选择显示器的 remote buffer；原始布局/像素/内存预算独立，PNG 按 `BoundedOutput` 实际编码字节限制，超限失败一次，不缩放裁剪原图、不改 niri、不走 X11/VM、不自动外发。native close→optional input→required accounting→optional DMA 四组合、DMA flag 严格最后，按需 hello dmaBufReadbackVersion:1，未请求 DMA 不增该字段，缺 feature 在 open/Portal/GPU 前失败，无 fallback/restart。
+- GPU 仅借用 pending 期间的 GL/EGL context loss/同步失败锁存完成未知，后续 NO_ERROR/成功 destroy 保留未知；初始化/借用前失败及已同步后的 context loss 继续实际 teardown，省去无借用工作时的无条件 Finish，清理失败仍拒 clean ACK；完成证明与句柄清理分开，同步真完成才返 PW buffer，GPU close 先于 PW teardown。未知时实际 worker park 并持 buffer、Stream/Core/FD、GPU/readback 内存，不正常退出/clean ACK/release/自动重试；普通 unsupported 且资源正面收口可正常失败释放，现有 join/process/stdio/account/FS 门全保。成功 API 仅本实例受信驱动的软件边界，不证明独立 driver/compositor 硬件内部全毁。niri 精确 opaque 1/1/0 长度非 CPU mmap 长度，bounded raster/EGL 验证不放宽；实际 n_datas==num_planes，不猜四槽 unused 或丢 slot。最新单帧 buffer 导入/读回、完整 PNG 及本地预览已经实机执行；source fence/合成四色或该单帧结果均不等于全局坐标、所有 driver、静态无 damage、普遍兼容/性能/失效验收。
 - 用户选择当前真实桌面、不走 VM；只读 registry 已确认通用 virtual keyboard v1 / virtual pointer v2，Portal RemoteDesktop 设备数 0 不等于没有输入接口。VM 未启动、下载停止、暂存保留。输入另需 `PION_COMPUTER_USE_INPUT_DEVELOPMENT=1`、独立 display/control、真实唯一几何/拓扑与私有单帧资格、成对释放/实际 join，不是 RemoteDesktop grant 或窗口沙箱；当前仅有上述一次本地捕获，模型/SDK 图留存/输入仍未实测。
 
 | 原生目标 | 当前证据与剩余门 |
@@ -109,7 +109,7 @@ ComputerUseService（主进程：授权、桌面租约、预算、frame、状态
 | --- | --- |
 | `src/shared/computer-use.ts` | 固定动作、frame/receipt、能力、状态和显示白名单契约 |
 | `src/main/computer-use/service.ts` | 全应用唯一服务，跨 backend 桌面租约、实际 pending、授权与停止 |
-| `src/main/computer-use/coordination.ts` | 同系统账户固定全桌面 marker，持久 claim/真实 release、未知拒绝；后续新租约失败/观察/撤权均实机释放，同账户第二进程 before-open 拒绝且不干扰 A 已通过，崩溃恢复未验收；旧两轮另经独立维护退役，无普通 clear 入口 |
+| `src/main/computer-use/coordination.ts` | control 沿同系统账户固定全桌面 marker、持久 claim/真实 release/维护 guard，未知拒绝；只读观察跳过协调。旧排他拒绝/正常释放记录保历史，新只读跨实例并发与崩溃恢复未验收；旧两轮另经独立维护退役，无普通 clear 入口 |
 | `src/main/computer-use/policy.ts`（候选） | 后续目标与动作准入拆分；可信 focus/禁止目标/接管 guard 仍缺失，当前 Agent act 必须拒绝 |
 | `src/main/computer-use/frames.ts`（候选） | 后续帧职责拆分；当前有界模型图/私有坐标映射在 Agent bridge，native 单用 fence 在 input-policy |
 | `src/main/computer-use/helper-client.ts` | 自写 helper 的握手、请求身份、进程生命周期和隔离 |
@@ -127,14 +127,14 @@ ComputerUseService（主进程：授权、桌面租约、预算、frame、状态
 - `src/main/agent/runtime-host.ts`：同一 runtime 的 `customTools` 工厂；SDK modelRuntime facade 继续保护自动模型/getAuth/摘要/压缩，所属 factory 仅为内置生图在 facade 前私有捕获原 ModelRuntime，工具自身检查通过后才延迟解析 Codex OAuth，不新建模型/认证服务或向扩展暴露原 runtime。
 - `src/main/agent/agent-bridge.ts`、`src/main/agent/types.ts`、`src/main/agent/backend-events.ts`：可信 backend/client/run 绑定、停止与替换、完成监听器；桌面 pending 不可被 SDK idle/stop 冒充收口。
 - `src/main/tool-permissions.ts`、`src/main/agent/tool-permission-request.ts`、`src/shared/types.ts`、权限 UI：现有类别只有 read/write/shell/network/external，需完整设计桌面特有的捕获、外发、控制授权，不能只增加名称就绕过旧 deny。
-- `src/main/agent/native-extensions.ts`、`src/main/agent/plan-mode.ts`、`src/main/agent/subagents.ts`、`src/main/agent/capabilities.ts`：展示与执行过滤一致；显式工具子集持续生效；计划模式不捕获或控制桌面；子代理默认不继承 ComputerUse。
+- `src/main/agent/native-extensions.ts`、`src/main/agent/plan-mode.ts`、`src/main/agent/subagents.ts`、`src/main/agent/capabilities.ts`：展示与执行过滤一致；显式工具子集持续生效；计划只读集合共用 `shared/capabilities.ts`，核真实 builtin/SDK 提问来源并与单一 loadout owner/ceiling 取交集；计划模式不捕获或控制桌面，子代理默认不继承 ComputerUse。
 - `src/shared/ipc.ts`、`src/shared/pion-api.ts`、`src/preload/index.ts`、`src/main/index.ts`、领域 IPC：逐路由复查主帧/owner，不假定已有全局校验。任何网页/插件商店 guest 均不得获得接口。
 - `src/main/agent/wire.ts`、live/history 投影、工具图片与 UI：当前历史会透传 message，必须处理截图留存与高分辨率图像的跨进程风险。
 - `src/main/pi-runtime.ts`、Electron 打包与安装脚本：系统 Node/asar 路径、平台 helper 资源、签名与架构；不随安装清理用户配置。
 
 ## 5. 工具与协议草案
 
-`pion_computer_observe / pion_computer_act` 已有开发 root 工具源码，不等于模型/控制实机通过。用户选择真实来源及授予控制租约不由工具参数决定；observe 只请求用户 Portal 选窗口、捕获及已批准模型留存，act 不自动重观察或扩展到 display。下列完整闭环/receipt 仍含后续设计；停止是主进程用户控制，不需要模型同意。
+开发 root 工具默认仅曝光 `pion_computer_observe`，`pion_computer_act` 需显式选择并继续守可信 guard；模型/控制实机验收独立。用户选择真实来源及授予控制租约不由工具参数决定；observe 只请求用户 Portal 选窗口、捕获及已批准模型留存，act 不自动重观察或扩展到 display。下列完整闭环/receipt 仍含后续设计；停止是主进程用户控制，不需要模型同意。
 
 - `observe`：无任意路径/URL/模型 ID；从当前已批准的 target lease 捕获，返回 frameId、图片尺寸、坐标约定与一张模型图像。
 - `act`：引用明确 frameId；动作判别联合只能是 click、key、type、scroll。坐标都是**模型实际收到图片中的像素**，不是 OS 像素或 0–1 比例；未知字段与动作拒绝。
@@ -161,11 +161,11 @@ frame 记录截图区域、捕获像素、模型图像像素、裁剪/缩放变�
 
 ### 5.2 整个闭环的桌面租约
 
-租约覆盖“观察→模型思考→审批→动作→验证”，不是只锁一次 click。一个 Pion 实例的所有项目/backend 竞争同一个登录桌面；MVP 忙时拒绝新 ComputerUse 请求，不自动排队交棒。普通聊天/编码工具可以继续，不能利用它们继承桌面权限。
+单主进程服务继续只持一个租约，覆盖观察/审批/动作及真实收尾。只读观察跨实例各自选源/许可并持独立 helper，不 claim/查询全账户 marker；control 继续现有全账户排他、未知隔离及维护 guard。忙时仍拒绝，不自动排队交棒。输入队列仅为后续方向：需先设计所属身份、撤权、真实收尾及显式交棒，再独立验收。普通聊天/编码工具保原权限，不继承桌面许可。
 
-当前 capture-only 已编写同系统账户协作 marker：获准 Start 才从系统账户 UID/home 取得固定 `<系统账户home>/.pion-computer-use-coordination-v1/capture.marker`，不按环境 HOME/XDG、userData/profile 或不同桌面分锁。私有 0700 目录、0600 exclusive/no-follow marker 的常量 payload、marker/目录/home sync 及全部 FD close 成功后才打开 driver；任何已有 marker 均拒绝，不按 PID/年龄/超时/重启强抢。实际 driver/Portal/PipeWire/进程/stdio、帧记账、解码和 FS 收口后，才以私有对象 receipt/inode 复查 unlink/sync/close；释放失败隔离且不补建 marker（unlink 后失败可能已无 pathname），普通状态/Stop 不提供 clear 路由；独立开发维护 CLI 已有源码与模拟回归，不补造旧 receipt，真实操作分步另行确认；prepare、重启后 verify 和另行获准 finish 已成功，不把维护退役当作旧普通停止成功。
+当前 control 沿既有同系统账户协作 marker：获准 control Start 才从系统账户 UID/home 取得固定 `<系统账户home>/.pion-computer-use-coordination-v1/capture.marker`，不按环境 HOME/XDG、userData/profile 或不同桌面分锁。私有 0700 目录、0600 exclusive/no-follow marker 的常量 payload、marker/目录/home sync 及全部 FD close 成功后才打开 driver；任何已有 marker 均拒绝，不按 PID/年龄/超时/重启强抢。实际 driver/Portal/PipeWire/进程/stdio、帧记账、解码和 FS 收口后，才以私有对象 receipt/inode 复查 unlink/sync/close；释放失败隔离且不补建 marker（unlink 后失败可能已无 pathname），普通状态/Stop 不提供 clear 路由；独立开发维护 CLI 已有源码与模拟回归，不补造旧 receipt，真实操作分步另行确认；prepare、重启后 verify 和另行获准 finish 已成功，不把维护退役当作旧普通停止成功。
 
-既有源码有类型/定向模拟/纯与匿名 socket 回归记录；此前 CPU 协商失败和 GPU Ready 超时均已正常释放；最新 GPU 已在兼容修复及用户再次选源后实际 Ready，并完成一次原尺寸 PNG/独立预览与明确 Stop，持所属独占客户端断连和全部本地结束凭证 stopped/released、actualPending=false、许可全撤。后续 scope7 同账户第二进程 before-open 拒绝，B Stop 不干扰 A；主文档真实 reload 至 scope8、关闭自建来源窗口触发实际 SessionClosed（先于自有 client 断连）至 scope10，均自动正常 release/pendingfalse，后端拒绝再 capture 且状态/预算不变。Portal 独立按钮未另点，不混成手动 Stop/伪造事件；这不是全桌面停止、独立 driver 内部硬件全毁、完整崩溃恢复或输入生命周期保证。两轮旧租约已分别独立维护退役，不能据新协议追溯补证。foreign blocked 只证明本实例无资源，不证明他者 alive/全桌面停止；not-checked/旧缺字段也非 held/释放证据。外部程序与用户仍可操作桌面，marker/receipt 不是认证、系统级独占或 OS 沙箱；恶意同 UID、账户 home 变化、坏 FS/TOCTOU、旧版本/helper 与非合作程序不在覆盖范围。宿主崩溃持久恢复、输入异常释放及真实验收仍待完成；未确认输入状态前不得重新控制，不以重建进程清问题。
+以下为旧全账户排他与旧 GPU 分支的历史记录，保当时事实；新只读并发与 GPU 初始化失败分支尚未实机验收。既有源码有类型/定向模拟/纯与匿名 socket 回归记录；此前 CPU 协商失败和 GPU Ready 超时均已正常释放；最新 GPU 已在兼容修复及用户再次选源后实际 Ready，并完成一次原尺寸 PNG/独立预览与明确 Stop，持所属独占客户端断连和全部本地结束凭证 stopped/released、actualPending=false、许可全撤。后续 scope7 同账户第二进程 before-open 拒绝，B Stop 不干扰 A；主文档真实 reload 至 scope8、关闭自建来源窗口触发实际 SessionClosed（先于自有 client 断连）至 scope10，均自动正常 release/pendingfalse，后端拒绝再 capture 且状态/预算不变。Portal 独立按钮未另点，不混成手动 Stop/伪造事件；这不是全桌面停止、独立 driver 内部硬件全毁、完整崩溃恢复或输入生命周期保证。两轮旧租约已分别独立维护退役，不能据新协议追溯补证。foreign blocked 只证明本实例无资源，不证明他者 alive/全桌面停止；not-checked/旧缺字段也非 held/释放证据。外部程序与用户仍可操作桌面，marker/receipt 不是认证、系统级独占或 OS 沙箱；恶意同 UID、账户 home 变化、坏 FS/TOCTOU、旧版本/helper 与非合作程序不在覆盖范围。宿主崩溃持久恢复、输入异常释放及真实验收仍待完成；未确认输入状态前不得重新控制，不以重建进程清问题。
 
 ## 6. 授权、安全与停止
 
@@ -201,7 +201,7 @@ helper 维护自己注入的按键/按钮状态，固定事务在 finally 释放
 
 ### 6.3 与现有会话的关系
 
-- 新桌面 UI 不重挂聊天、草稿、阅读位置；切换/关闭会话先撤销其桌面资格并处理真实收尾，旧结果不得更新新会话。
+- 新桌面 UI 不重挂聊天、草稿、阅读位置；切换/关闭会话先撤销其桌面资格并处理真实收尾，旧结果不得更新新会话。窗口 close 的终端清理只等待所属 PTY，保留共享 TerminalService 准入供后续窗口复用；全应用 quit 才关闭其准入并 drain。
 - 历史回放只显示已记录的 receipt/预览，不恢复工具、租约、权限、任务或 OS 操作。
 - 撤销仍只修改消息分支，不撤销 OS/应用动作；除了旧 writer 退出，还需确认其桌面请求不再发出输入，否则拒绝历史改写/提示未确认。
 - 工具错误如实记录，但不长期暂停消息队列；所属消息和全部实际请求、检查点及完成监听器收口后逐项 FIFO，拒绝仍独立阻止执行。桌面未知收口独立隔离，新的正常 assistant stop 不能解除它，也不能自动重放旧桌面动作。
@@ -215,11 +215,11 @@ helper 维护自己注入的按键/按钮状态，固定事务在 finally 释放
 
 **已选择 SDK 留存路线，不能宣称“仅内存”。** 工具交图前持久 taint；普通 SDK toolResult 无 entry_appended，message_end 又先于 appendMessage，故 factory 只在真 appendMessage 成功并核实际 session/分支/root/image hash 后发 retained 私有请求、等 Main ACK。截图预算不变，通用 live/wire/history 剥原图与私有 source，不造 entry ID、不删历史或改变模型记录。无留存附件路线未实现，若要求不留存须先另设计协议。
 
-撤权不追回已发数据或删除 SDK 历史。已有真实交图/留存 provenance 仅沿同一 live client/factory/session 跨 run；后续 root run 必须独立审批已有历史图 egress，不批准新 capture/control。恢复/fork/clone/import/未知 provenance 仍 fail-closed，暂不支持恢复后再授权；不得静默换图、新建/切换会话掩盖外发。
+撤权不追回已发数据或删除 SDK 历史。已有真实交图/留存 provenance 仅沿同一 live client/factory/session 跨 run；后续 root run 必须独立审批已有历史图 egress，不批准新 capture/control。无 taint 且可识别为纯文本的摘要/分叉保普通行为，识别覆盖 `context_edit.replacement`（null 无替换正文，非 null 检查其 content）；真实截图、taint 或图像 provenance 未知仍拒绝外发，截图恢复后再授权待实现；不得静默换图、新建/切换会话掩盖外发。
 
 默认不另外建截图目录/录像，不抓全屏再声称未捕获范围外内容；必须分清本地捕获、裁剪、向模型发送和实际持久化范围。若平台只能先整屏抓取，再裁剪，需明确说明并获得相应本地捕获同意，不能把裁剪当作 OS 捕获边界。生成图像尽量去除不必要 metadata，不承诺像素中自动抹除所有秘密。
 
-SDK extension runner 对 context / before_provider_request / before_provider_headers handler 异常会报告后继续，不能靠抛错作 fail-closed 出口。当前源码在 AgentSession/ModelRegistry/预热/压缩创建前装 SDK modelRuntime facade；taint 后其中每个真实 provider 请求、payload hook 后、每次 Codex fetch 重试及自动模型/getAuth（含摘要/压缩认证）先 gate，显式 login 不挡。经 facade 的未审计 provider-derived/deferred/image/classifier/虚拟路由拒绝；auth/stream 各有 watch，真 Promise/iterator/result 收口 finally 才等精确 unwatch ACK，未知/超时 poison，不把 TTL/本地 input abort/终态事件当请求结束。这是本地源码与合成边界，不证明网络效果或收费停止。
+SDK extension runner 对 context / before_provider_request / before_provider_headers handler 异常会报告后继续，不能靠抛错作 fail-closed 出口。当前源码在 AgentSession/ModelRegistry/预热/压缩创建前装 SDK modelRuntime facade；taint 后其中每个真实 provider 请求、payload hook 后、每次 Codex fetch 重试及自动模型/getAuth（含摘要/压缩认证）先 gate，显式 login 不挡。经 facade 的未审计 provider-derived/deferred/image/classifier/虚拟路由拒绝；auth/stream 各有 watch；Main 在状态 RPC 前登记 captured client/runtime/session/run 的 pending admission，早到 unwatch 复用并等待该原 Promise，cleanup 等实际 admission 收口及相关真实 ACK；真 Promise/iterator/result 收口 finally 才等精确 unwatch ACK，未知/超时 poison，TTL/本地 input abort/终态事件仅影响本地等待。成功 watch 响应须显式 unwatch ACK 后才续 watch，已确认 cleanup 记录可回收，活动/未知 watch 继续持槽；来源随真实 runtime/session 退休回收。这是本地源码与合成边界，不证明网络效果或收费停止。
 
 内置生图是独立 Images API 请求，不携 Cua 会话 history。所属 factory 在 facade 前私有捕获原 ModelRuntime，只向编译内置生图提供延迟 Codex OAuth 解析闭包；既有工具自身授权及参数/参考图/目标路径检查后才调用，不提前 auth、不迁移凭据、不走 API-key/付费 fallback，也不向任意 extension 暴露原 runtime。Cua taint 不以 blanket provider-only getAuth 永久禁用该工具；普通 SDK/扩展 getAuth 不获绕 gate 权限，显式 login 同原规则不拦。source/mock 回归已证明与 live taint 并存，不是实际网络兼容验收。
 
@@ -229,7 +229,7 @@ SDK extension runner 对 context / before_provider_request / before_provider_hea
 
 当前源码一次租约最多 40 个动作、10 分钟派发准入，单帧/捕获另有限额；这些不代表实际输入已验收。Portal 仅 Start chooser Response 给用户 120 秒，connect/CreateSession/SelectSources 等 RPC/Response 仍 30 秒；不扩大其他协议期限，不误用提问工具等待设置，超时不授权、不丢弃实际 pending。动作/模型往返的最终体验定值仍待真实验证。
 
-截图/frame 有独立有效期、捕获次数及累计字节/像素硬预算；40 个输入动作不是无限 observe 的许可。具体值在阶段 0 定案，有效期根据平台/模型往返测量确定，不能简单短 TTL 造成慢模型无限重拍；过期/失败重观察也计入总预算。期限或预算到达即禁止新派发，但真实 pending 仍持槽至确认收尾。
+截图/frame 有独立有效期、捕获次数及累计字节/像素硬预算；字节/像素仅累计实际确认帧，统计未知保本次已扣尝试次数、阻本 scope 新 capture/act 并进入收尾，实际 close 独立核验，全部收口可结束 scope 而缺失统计继续未知；40 个输入动作不是无限 observe 的许可。具体值在阶段 0 定案，有效期根据平台/模型往返测量确定，不能简单短 TTL 造成慢模型无限重拍；过期/失败重观察也计入总预算。期限或预算到达即禁止新派发，但真实 pending 仍持槽至确认收尾。
 
 这些限额约束宿主允许继续发起的工作，不保证底层模型请求/OS 事务在期限瞬间物理停止。用量沿 SDK 正常累计，不重复计费；没有可信价格/服务费用就显示未知，不声称硬费用上限或订阅免费。
 
@@ -254,10 +254,10 @@ SDK extension runner 对 context / before_provider_request / before_provider_hea
 
 - 准入：未知动作/超限文本/NaN 坐标/越界/无 grant/deny/YOLO/plan-mode/子代理/伪造或缺失 receipt → 在 OS 调用前拒绝。
 - 身份：owner window、backend/client/runtime、run、frame、target handle/进程实例、拓扑、stop epoch 任一替换 → 迟到动作与结果拒绝；同文动作不按文本去重。
-- 并发：A 的截图和模型等待仍占租约；B/backend 替换/第二进程不可抢；旧 close/late permission 不清新 owner；OS 状态未知持续隔离。
+- 并发：同主进程 A 的截图和模型等待仍占本地租约；跨实例只读各自选源/许可且无 marker IO，control 仍排他。B/backend 替换与旧 close/late permission 不接管 A；未知实际资源继续持所属槽。新只读并发与后续输入排队分别验收。
 - 停止：capture/input 挂起、helper crash、键入中 stop、按钮/快捷键、用户接管、权限撤回/锁屏、主窗口关闭；确认释放与未知路径，绝不把 timeout 当退出。
 - 图像：真实尺寸/裁剪/DPI/装饰、多屏负坐标、模型图与缩略图区别、历史分页与导出白名单、预算饱和、无视觉模型；不得把清晰度/能力快照当远端成功证明。
-- GPU：纯 fake 核实际 modifier/DONT_FIXATE、opaque DMA 长度、有界 raster、context loss 粘性及同步已证/句柄失败分支；完成未知必须持 buffer/PW/FD/GPU/readback 内存且无 clean ACK/release。另行真实四色/色序/行序、坐标、兼容/性能/撤权/失效验证，source fence、fake 或 build 不替代实机。
+- GPU：纯 fake 核实际 modifier/DONT_FIXATE、opaque DMA 长度、有界 raster、pending 借用 context loss 粘性、初始化失败真实 teardown 及同步已证/句柄失败分支；完成未知必须持 buffer/PW/FD/GPU/readback 内存且无 clean ACK/release。另行真实四色/色序/行序、坐标、兼容/性能/撤权/失效验证，source fence、fake 或 build 不替代实机。
 - 副作用：已执行键入/点击的响应丢失 → 不重发；终端/Pion/授权框/提权/秘密任务拒绝；没有敏感检测把握时人工接管。
 - 兼容：原队列/提问/子代理/生图、信任、既有主题/可访问性、聊天 DOM/草稿/滚动、浏览器 guest 安全均不回归。
 - 真机：用外部可观察的 fixture 应用记录实际收到的输入与状态；不只断言“helper 返回 success”。自写 helper 未过真实停止验收不得开放输入。
@@ -266,7 +266,7 @@ SDK extension runner 对 context / before_provider_request / before_provider_hea
 
 已确认 Linux Wayland 当前真实桌面（niri）、不走 VM、采用 SDK 留存、默认单窗口与显式独立 display/control；文本源码首版只接受可打印 ASCII，不冒称中文支持。禁止终端/生产 Pion/授权或凭据目标与高风险事务、默认本轮授权/子代理不继承仍是交付边界，不能用截图标题猜目标或普通确认覆盖。
 
-#10 核心实机验收与 #22 GPU 源码/fake/定向 types/build 已完成，数值、scope5→10 与历史限制见实施说明。最近完整项目 types 被并行 capability 等范围外错误阻塞，未擅改、不计通过，本次未重跑；目标 types/native/mock/build 与真实效果分层。
+#10 核心实机验收与 #22 GPU 源码/fake/定向 types/build 为既有阶段历史记录，数值、scope5→10 与当时限制见实施说明；新并发/握手/统计与 GPU 失败分支待独立实机验收。最近完整项目 types 被并行 capability 等范围外错误阻塞，未擅改、不计通过，本次未重跑；目标 types/native/mock/build 与真实效果分层。
 
 #8 正进行真实模型接线验收，尚未登录/请求/交图；**认证方案待用户选择**。SDK 公开 `ModelRuntime.create({authPath})` 支持独立认证源，但当前 RuntimeHost 未接。GUI userData 与 AgentDIR 隔离，实际 `SessionManager.create(root)` 仍在隔离 `AgentDIR/sessions/<encodedcwd>`；不声称 `SESSION_DIR` 环境变量已被宿主消费。隔离 GUI 正常 OAuth 登录仅为可选方案；原源复用需另行受控准入，refresh 会写回。不得 copy/symlink auth 或静默写原源，未获准新登录/复用，不提前认证/请求模型；选定方案后仍须真实执行 gate 才可验精确模型交图/SDK 留存及后续历史 egress。
 

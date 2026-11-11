@@ -19,7 +19,6 @@ import { QueuedMessagesCard } from '../../src/renderer/src/features/session/Queu
 interface BridgeInternals {
   createRun(backend: BackendRecord, state: null, message: string, images: ImageContent[], kind: 'follow-up', phase: 'queued'): RunOperation
   dispatchNextLocalFollowUp(backend: BackendRecord): void
-  prepareQueuedRunForDispatch(backend: BackendRecord, runId: string): Promise<void>
   getSessionInfo(): Promise<SessionInfo | null>
   editQueuedMessage(request: QueuedMessageEditRequest, ownerId: number): QueuedMessageEditResult
 }
@@ -32,7 +31,7 @@ afterEach(async () => {
 })
 
 describe('queue admission error UI integration', () => {
-  it.each(['state', 'preparation'] as const)('renders a real %s failure through push/STATE and retires it after edit without leaking diagnostics', async source => {
+  it('renders a real state failure through push/STATE and retires it after edit without leaking diagnostics', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pion-queue-ui-'))
     const path = join(root, 'session.jsonl')
     const runStore = new RunStore(join(root, 'runs.json'))
@@ -69,8 +68,7 @@ describe('queue admission error UI integration', () => {
     }
     const view = render(<Projection />)
     const diagnostic = 'Bearer private-token <script>secret()</script> ' + 'raw-diagnostic'.repeat(10_000)
-    if (source === 'state') getState.mockRejectedValueOnce(new Error(diagnostic))
-    else vi.spyOn(bridge, 'prepareQueuedRunForDispatch').mockRejectedValueOnce(new Error(diagnostic))
+    getState.mockRejectedValueOnce(new Error(diagnostic))
     await act(async () => {
       bridge.dispatchNextLocalFollowUp(backend)
       await backend.localQueueDispatchPromise

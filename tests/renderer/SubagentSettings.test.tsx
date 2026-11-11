@@ -25,10 +25,29 @@ it('loads defaults, saves global limits once and explicitly reports next-batch a
   fireEvent.change(count, { target: { value: '5' } })
   fireEvent.submit(container.querySelector('form')!)
   fireEvent.submit(container.querySelector('form')!)
-  expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 5 })
+  await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 5 }))
   expect(count).toBeDisabled()
   await act(async () => resolve({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 5 }))
   expect(screen.getByRole('status')).toHaveTextContent('下一批')
+  expect(count).toBeEnabled()
+})
+
+it('registers the save before a reentrant synchronous API call and retains its draft on a synchronous throw', async () => {
+  let form!: HTMLFormElement
+  const save = vi.fn(() => {
+    fireEvent.submit(form)
+    throw new Error('synchronous write failure')
+  })
+  window.pion = { getSubagentSettings: vi.fn().mockResolvedValue(DEFAULT_SUBAGENT_SETTINGS), setSubagentSettings: save } as unknown as PionApi
+  const { container } = render(<SubagentSettings />)
+  form = container.querySelector('form')!
+  const count = screen.getByRole('spinbutton', { name: '每批最大子代理数' })
+  await waitFor(() => expect(count).toBeEnabled())
+  fireEvent.change(count, { target: { value: '6' } })
+  fireEvent.submit(form)
+  expect(await screen.findByRole('alert')).toHaveTextContent('synchronous write failure')
+  expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 6 })
+  expect(count).toHaveValue(6)
   expect(count).toBeEnabled()
 })
 
@@ -167,7 +186,7 @@ it.each(['resolve', 'reject'] as const)('waits across repeated remounts for a re
   await waitFor(() => expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toBeEnabled())
   fireEvent.change(screen.getByRole('spinbutton', { name: '每批最大子代理数' }), { target: { value: '8' } })
   fireEvent.submit(first.container.querySelector('form')!)
-  expect(save).toHaveBeenCalledExactlyOnceWith(draft)
+  await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith(draft))
   first.unmount()
   const waiting = render(<SubagentSettings />)
   await act(async () => { await Promise.resolve() })
@@ -230,7 +249,7 @@ it.each(['resolve', 'reject'] as const)('isolates API replacement while an old o
   expect(count).toHaveValue(4)
   fireEvent.change(count, { target: { value: '5' } })
   fireEvent.submit(container.querySelector('form')!)
-  expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 5 })
+  await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_SUBAGENT_SETTINGS, maxParallel: 5 }))
   expect(count).toBeDisabled()
   window.pion = oldApi
   rerender(<SubagentSettings />)
@@ -279,6 +298,48 @@ it('uses the independent SDK directory with empty or stale parent candidates', a
   await waitFor(() => expect(save).toHaveBeenCalledWith({ ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'configured', id: 'child' } }))
   expect(getSubagentModels).toHaveBeenCalledOnce()
   expect(getAvailableModels).not.toHaveBeenCalled()
+})
+
+it('retires provider waiters on API replacement while preserving the legacy candidate fallback', async () => {
+  let release!: () => void
+  const providerActionSlot: { current: Promise<void> | null } = {
+    current: new Promise<void>((resolve) => { release = resolve })
+  }
+  const oldModels = vi.fn().mockResolvedValue([{ provider: 'old', id: 'stale' }])
+  const settingsApi = {
+    getSubagentSettings: vi.fn().mockResolvedValue(DEFAULT_SUBAGENT_SETTINGS), setSubagentSettings: vi.fn()
+  }
+  window.pion = { ...settingsApi, getSubagentModels: oldModels } as unknown as PionApi
+  const { rerender } = render(<SubagentSettings providerActionSlot={providerActionSlot} />)
+  await waitFor(() => expect(screen.getByRole('spinbutton', { name: '每批最大子代理数' })).toBeEnabled())
+  expect(oldModels).not.toHaveBeenCalled()
+
+  window.pion = { ...settingsApi } as unknown as PionApi
+  rerender(<SubagentSettings models={[{ provider: 'legacy', id: 'fallback' }]} providerActionSlot={providerActionSlot} />)
+  const select = screen.getByRole('combobox', { name: '默认子代理模型' })
+  await waitFor(() => expect(select).toBeEnabled())
+  fireEvent.click(select)
+  expect(screen.getByRole('option', { name: 'fallback' })).toBeInTheDocument()
+  fireEvent.click(select)
+
+  const newModels = vi.fn().mockResolvedValue([{ provider: 'new', id: 'fresh' }])
+  window.pion = { ...settingsApi, getSubagentModels: newModels } as unknown as PionApi
+  rerender(<SubagentSettings models={[{ provider: 'legacy', id: 'fallback' }]} providerActionSlot={providerActionSlot} />)
+  expect(select).toBeDisabled()
+  expect(newModels).not.toHaveBeenCalled()
+  await act(async () => {
+    const pending = providerActionSlot.current!
+    providerActionSlot.current = null
+    release()
+    await pending
+  })
+  await waitFor(() => expect(select).toBeEnabled())
+  fireEvent.click(select)
+  expect(screen.getByRole('option', { name: 'fresh' })).toBeInTheDocument()
+  expect(screen.queryByRole('option', { name: 'fallback' })).not.toBeInTheDocument()
+  expect(oldModels).not.toHaveBeenCalled()
+  expect(newModels).toHaveBeenCalledTimes(1)
+  expect(settingsApi.setSubagentSettings).not.toHaveBeenCalled()
 })
 
 it.each(['resolve', 'reject'] as const)('ignores old owner directory %s after the new owner loads', async (outcome) => {
@@ -506,7 +567,7 @@ it.each(['resolve', 'reject'] as const)('retains automatic drafts across closed 
   fireEvent.click(screen.getByRole('combobox', { name: '默认子代理模型' }))
   fireEvent.click(screen.getByRole('option', { name: 'child' }))
   const submitted = { ...DEFAULT_SUBAGENT_SETTINGS, defaultModel: { provider: 'one', id: 'child' } }
-  expect(save).toHaveBeenCalledExactlyOnceWith(submitted)
+  await waitFor(() => expect(save).toHaveBeenCalledExactlyOnceWith(submitted))
   // A repeated manual dispatch in the same pending slot has no effect.
   fireEvent.submit(first.container.querySelector('form')!)
   expect(save).toHaveBeenCalledTimes(1)

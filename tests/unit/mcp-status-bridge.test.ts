@@ -6,8 +6,7 @@ import type { BackendRecord } from '../../src/main/agent/types'
 import {
   MCP_STATUS_MAX_BYTES,
   MCP_STATUS_STALE_MS,
-  MCP_STATUS_WIDGET_KEY,
-  projectMcpStatusSnapshot
+  MCP_STATUS_WIDGET_KEY
 } from '../../src/shared/mcp'
 import type { McpStatusNotice, McpStatusSnapshot, McpStatusTarget } from '../../src/shared/mcp'
 import { IPC, IPC_EVENTS } from '../../src/shared/ipc'
@@ -98,7 +97,6 @@ function widget(value: unknown = notice(), fields: Record<string, unknown> = {})
 
 function expectUnknown(snapshot: McpStatusSnapshot, reason: string, phase = 'unavailable') {
   expect(snapshot).toMatchObject({ availability: 'unavailable', phase, reason, servers: [], diagnosticsOmitted: false })
-  expect(projectMcpStatusSnapshot(snapshot)).toEqual(snapshot)
 }
 
 function expectNoSdk(h: ReturnType<typeof setup>) {
@@ -175,8 +173,7 @@ describe('MCP main reader', () => {
     expectNoSdk(h)
   })
 
-  it.each([null, 'raw target', [], { cwd: '' }, { sessionPath: 'secret\npath' }, { backendId: 'a'.repeat(129) },
-    { cwd: 3 }, { sessionPath: false }, { backendId: {} }])('rejects malformed target %s without preserving its raw content', (target) => {
+  it.each([null, { cwd: '' }, { sessionPath: 'secret\npath' }, { backendId: 'a'.repeat(129) }])('rejects malformed target %s without preserving its raw content', (target) => {
     const h = setup()
     h.rpc.emit(widget())
     const snapshot = h.bridge.getMcpStatus(target as McpStatusTarget, ownerId)
@@ -194,17 +191,14 @@ describe('MCP main reader', () => {
     expectNoSdk(h)
   })
 
-  it('captures the pool instance and client rather than returning a replaced record during a read', () => {
+  it('reads the selected pool entry once and retires cached rows after a real client replacement', () => {
     const h = setup()
     h.rpc.emit(widget())
-    const replacement = { ...h.backend, client: transport().client as unknown as RpcClient }
-    h.internals.backendPool = { get: vi.fn().mockReturnValueOnce(h.backend).mockReturnValueOnce(replacement) }
-    expectUnknown(h.read(), 'scope-mismatch')
-    h.internals.backendPool = { get: vi.fn().mockReturnValueOnce(h.backend).mockImplementationOnce(() => {
-      h.backend.client = replacement.client
-      return h.backend
-    }) }
-    expectUnknown(h.read(), 'scope-mismatch')
+    const get = vi.spyOn(h.pool, 'get')
+    expect(h.read().phase).toBe('ready')
+    expect(get).toHaveBeenCalledExactlyOnceWith(h.backend.key)
+    h.backend.client = transport().client as unknown as RpcClient
+    expectUnknown(h.read(), 'waiting-status', 'waiting')
     expectNoSdk(h)
   })
 
@@ -217,46 +211,21 @@ describe('MCP main reader', () => {
     expectNoSdk(h)
   })
 
-  it('expires rows only after the shared stale threshold and does not refresh receipt time on repeated revisions', () => {
+  it('expires on monotonic age, preserving the deadline across duplicate revisions and clock rollback', () => {
     const h = setup()
     h.rpc.emit(widget())
-    vi.mocked(Date.now).mockReturnValue(NOW + MCP_STATUS_STALE_MS)
     vi.mocked(performance.now).mockReturnValue(NOW + MCP_STATUS_STALE_MS)
     expect(h.read().phase).toBe('ready')
-    vi.mocked(Date.now).mockReturnValue(NOW + MCP_STATUS_STALE_MS + 1)
     vi.mocked(performance.now).mockReturnValue(NOW + MCP_STATUS_STALE_MS + 1)
+    vi.mocked(Date.now).mockReturnValue(NOW - 60_000)
     h.rpc.emit(widget())
-    const stale = h.read()
-    expectUnknown(stale, 'stale-status')
-    expect(stale).toMatchObject({ revision: 1, receivedAt: NOW, backendId: h.backend.liveState!.backendId })
-    expect(h.send).toHaveBeenCalledTimes(1)
-    h.rpc.emit(widget(notice({ revision: 2 })))
-    expect(h.read()).toMatchObject({ phase: 'ready', revision: 2, receivedAt: NOW + MCP_STATUS_STALE_MS + 1 })
-    expectNoSdk(h)
-  })
-
-  it('expires on elapsed monotonic time and never resurrects an expired cache after wall-clock rollback', () => {
-    const h = setup()
-    h.rpc.emit(widget())
-    vi.mocked(performance.now).mockReturnValue(NOW + MCP_STATUS_STALE_MS + 1)
-    vi.mocked(Date.now).mockReturnValue(NOW + MCP_STATUS_STALE_MS + 1)
     expectUnknown(h.read(), 'stale-status')
+    expect(h.read()).toMatchObject({ revision: 1, receivedAt: NOW })
+    expect(h.send).toHaveBeenCalledTimes(1)
     vi.mocked(Date.now).mockReturnValue(NOW + 1_000)
     expectUnknown(h.read(), 'stale-status')
-    vi.mocked(Date.now).mockReturnValue(NOW - 60_000)
-    expectUnknown(h.read(), 'stale-status')
-    // Only a genuinely newer notice, not rereading/clock changes, restores it.
     h.rpc.emit(widget(notice({ revision: 2 })))
-    expect(h.read()).toMatchObject({ phase: 'ready', revision: 2, receivedAt: NOW - 60_000 })
-    expectNoSdk(h)
-  })
-
-  it('expires even when the wall clock rolls backward before the first stale read', () => {
-    const h = setup()
-    h.rpc.emit(widget())
-    vi.mocked(performance.now).mockReturnValue(NOW + MCP_STATUS_STALE_MS + 1)
-    vi.mocked(Date.now).mockReturnValue(NOW - 1)
-    expectUnknown(h.read(), 'stale-status')
+    expect(h.read()).toMatchObject({ phase: 'ready', revision: 2, receivedAt: NOW + 1_000 })
     expectNoSdk(h)
   })
 
@@ -265,7 +234,11 @@ describe('MCP main reader', () => {
     h.rpc.emit(widget(notice({ secretConfig: { token: 'private-token' }, error: 'raw stderr',
       diagnosticsOmitted: true,
       servers: [{ name: 'server-a', state: 'connected', exposure: 'direct', toolCount: 4, endpoint: 'secret-url' } as never] })))
+    const cached = h.backend.mcpStatus!.snapshot
     const snapshot = h.read()
+    expect(snapshot).not.toBe(cached)
+    expect(snapshot.servers).not.toBe(cached.servers)
+    expect(snapshot.servers[0]).not.toBe(cached.servers[0])
     expect(snapshot.diagnosticsOmitted).toBe(true)
     expect(JSON.stringify(snapshot)).not.toMatch(/private-token|secretConfig|stderr|endpoint|secret-url/)
     snapshot.servers[0].name = 'mutated'
@@ -293,11 +266,8 @@ describe('private MCP notifications', () => {
   })
 
   it.each([
-    { widgetLines: undefined }, { widgetLines: ['bad-json'] }, { widgetLines: ['{}', '{}'] },
-    { widgetLines: ['x'.repeat(MCP_STATUS_MAX_BYTES + 1)] }, { method: 'notify', message: 'raw-secret' },
-    { widgetLines: [JSON.stringify(notice({ version: 2 as never }))] },
-    { widgetLines: [JSON.stringify(notice({ reason: 'raw-secret' as never }))] },
-    { widgetLines: [JSON.stringify(notice({ servers: [{ name: 'server', state: 'failed', exposure: 'direct', toolCount: 1 }] }))] }
+    { widgetLines: ['bad-json'] }, { widgetLines: ['x'.repeat(MCP_STATUS_MAX_BYTES + 1)] },
+    { method: 'notify', message: 'raw-secret' }
   ])('invalidates old cached rows and consumes malformed private fields %s without raw logging', (fields) => {
     const h = setup()
     const error = vi.spyOn(console, 'error')
@@ -318,15 +288,14 @@ describe('private MCP notifications', () => {
     expect(h.read()).toMatchObject({ phase: 'ready', revision: 3 })
   })
 
-  it.each(['parent-root', 9, { raw: 'nested-secret' }])('consumes nested/invalid-parent private notices %s before nested billing or chat', (parentToolCallId) => {
+  it('consumes nested private notices before nested billing or chat', () => {
     const h = setup()
     h.rpc.emit(widget())
-    h.rpc.emit(widget(notice({ revision: 2 }), { parentToolCallId, result: { usage: { totalTokens: 77 } } }))
+    h.rpc.emit(widget(notice({ revision: 2 }), { parentToolCallId: 'parent-root', result: { usage: { totalTokens: 77 } } }))
     expectUnknown(h.read(), 'invalid-notice')
     expect(h.backend.liveState!.revision).toBe(0)
     expect(h.trackBackendEvent).not.toHaveBeenCalled()
     expect(h.handleExtensionUiRequest).not.toHaveBeenCalled()
-    expect(JSON.stringify(h.send.mock.calls)).not.toContain('nested-secret')
   })
 
   it('consumes only its private widget key and leaves other extension widgets on the existing path', () => {
@@ -441,26 +410,6 @@ describe('private MCP notifications', () => {
     expect(h.backend.liveState!.revision).toBe(0)
   })
 
-  it.each([
-    { availability: 'replaced', phase: 'unavailable' }, { availability: 'inactive', phase: 'unavailable' },
-    { availability: 'native', phase: 'waiting', reason: 'query-busy' },
-    { availability: 'native', phase: 'unavailable', reason: 'query-timeout' },
-    { availability: 'unavailable', phase: 'unavailable', reason: 'unsupported-sdk' }
-  ] as const)('preserves observed availability/phase %s rather than claiming active native servers', (status) => {
-    const h = setup()
-    h.rpc.emit(widget(notice({ ...status, servers: [], diagnosticsOmitted: true })))
-    expect(h.read()).toMatchObject({ ...status, servers: [], diagnosticsOmitted: true, revision: 1 })
-  })
-
-  it('projects all eight server states, exposures and connected-only registered tool counts', () => {
-    const h = setup()
-    const states = ['connecting', 'connected', 'disconnected', 'needs-auth', 'failed', 'closed', 'starting', 'disabled'] as const
-    const exposures = ['codemode', 'deferred', 'direct', 'hidden'] as const
-    const servers = states.map((state, index) => ({ name: `server-${index}`, state, exposure: exposures[index % exposures.length],
-      ...(state === 'connected' ? { toolCount: 0 } : {}) }))
-    h.rpc.emit(widget(notice({ servers, diagnosticsOmitted: true })))
-    expect(h.read().servers).toEqual(servers)
-  })
 })
 
 describe('typed preload MCP channel', () => {

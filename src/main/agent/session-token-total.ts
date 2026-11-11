@@ -15,7 +15,7 @@ type RecordValue = Record<string, unknown>
 const record = (value: unknown): value is RecordValue => !!value && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0
 const boundedText = (value: unknown, max: number): value is string => text(value) && value.length <= max && !value.includes('\0')
-const identity = (value: unknown): value is string => text(value) && value.length <= 256 && /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(value)
+const identity = (value: unknown): value is string => text(value) && value.length <= 256 && /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$(?![\s\S])/.test(value)
 const timestamp = (value: unknown): boolean => text(value) && Number.isFinite(Date.parse(value))
 const tokens = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -73,19 +73,16 @@ interface SidebarReadOptions {
   previous?: SessionTokenSnapshot
 }
 
-/** Readers must preserve an unconfirmed descriptor close as unknown. */
 export class SessionUsageReadError extends Error {
-  constructor(readonly closeUnknown = false) { super('Session usage unavailable') }
+  constructor() { super('Session usage unavailable') }
 }
 
-/** Capture caller-owned data before admission, without evaluating accessors. */
-export function snapshotSessionTokenOwner(expected: { id: string; cwd: string }): Readonly<{ id: string; cwd: string }> {
-  try {
-    const id = Object.getOwnPropertyDescriptor(expected, 'id')?.value as unknown
-    const cwd = Object.getOwnPropertyDescriptor(expected, 'cwd')?.value as unknown
-    if (identity(id) && text(cwd) && !cwd.includes('\0')) return Object.freeze({ id, cwd })
-  } catch { /* Malformed ownership remains unknown, before opening a file. */ }
-  throw new SessionUsageReadError()
+export type SessionTokenOwner = Readonly<{ id: string; cwd: string }>
+
+/** Capture the ordinary caller-owned fields once, before asynchronous admission. */
+export function snapshotSessionTokenOwner({ id, cwd }: SessionTokenOwner): SessionTokenOwner {
+  if (!identity(id) || !text(cwd) || cwd.includes('\0')) throw new SessionUsageReadError()
+  return Object.freeze({ id, cwd })
 }
 
 function usageTokens(value: unknown): number | undefined {
@@ -126,12 +123,15 @@ function usageTokens(value: unknown): number | undefined {
  * unknown, not a partial total or a fabricated zero.
  */
 export async function readSessionTokenTotal(path: string, expected?: { id: string; cwd: string }): Promise<number | undefined> {
-  try { return (await readSessionUsage(path, expected, false)).total } catch { return undefined }
+  try {
+    const owner = expected === undefined ? undefined : snapshotSessionTokenOwner(expected)
+    return (await readSessionUsage(path, owner, false)).total
+  } catch { return undefined }
 }
 
-/** Explicit sidebar adapter: every call reopens and validates the file, including cache hits. */
+/** Capture each caller before awaiting IO; unchanged sidebar receipts use one path stamp. */
 export async function readSessionTokenSnapshot(
-  path: string, expected: { id: string; cwd: string }, options?: SidebarReadOptions
+  path: string, expected: SessionTokenOwner, options?: SidebarReadOptions
 ): Promise<SessionTokenSnapshot> {
   const owner = snapshotSessionTokenOwner(expected)
   const filesystem = options?.filesystem ?? localFilesystem
@@ -145,23 +145,28 @@ export async function readSessionTokenSnapshot(
 export async function readSessionUsageSnapshot(
   path: string, expected?: { id: string; cwd: string }, options?: { yield?: () => Promise<void> }
 ): Promise<SessionUsageSnapshot> {
-  return readSessionUsage(path, expected, true, options)
+  const owner = expected === undefined ? undefined : snapshotSessionTokenOwner(expected)
+  return readSessionUsage(path, owner, true, options)
 }
 
 async function readSessionUsage(
-  path: string, expected: { id: string; cwd: string } | undefined, collectReceipts: boolean,
+  path: string, owner: SessionTokenOwner | undefined, collectReceipts: boolean,
   options?: { yield?: () => Promise<void> }, sidebar?: SidebarReadOptions
 ): Promise<SessionUsageSnapshot> {
-  const owner = expected === undefined ? undefined : snapshotSessionTokenOwner(expected)
   if (!text(path) || path.includes('\0')) throw new SessionUsageReadError()
+  const previous = sidebar?.previous && tokenSnapshots.get(sidebar.previous)
+  if (!collectReceipts && owner && previous && previous.path === path && previous.id === owner.id
+    && previous.cwd === owner.cwd && previous.filesystem === sidebar?.filesystem) {
+    try {
+      const named = await previous.filesystem.lstat(path, { bigint: true })
+      if (!named.isFile()) throw new SessionUsageReadError()
+      if (previous.snapshot.stamp === sessionUsageFileStamp(named)) return previous.snapshot
+    } catch { throw new SessionUsageReadError() }
+  }
   return readStableFile(path, collectReceipts, async (handle, before) => {
-    const previous = sidebar?.previous && tokenSnapshots.get(sidebar.previous)
-    if (!collectReceipts && owner && previous && previous.path === path && previous.id === owner.id
-      && previous.cwd === owner.cwd && previous.filesystem === sidebar?.filesystem
-      && previous.snapshot.stamp === sessionUsageFileStamp(before)) return previous.snapshot
     const fileHash = createHash('sha256')
     const receipts: SessionUsageReceipt[] = []
-    let header: Pick<SessionUsageSnapshot, 'id' | 'cwd' | 'createdAt' | 'parentSession'> | undefined
+    let header: SessionUsageHeader | undefined
     const entries = new Map<string, string>()
     const events = new Map<string, string>()
     const decoder = new TextDecoder('utf-8', { fatal: true })
@@ -173,12 +178,7 @@ async function readSessionUsage(
       const value: unknown = JSON.parse(decoder.decode(line))
       if (!record(value)) throw new Error('record')
       if (!hasHeader) {
-        if (value.type !== 'session' || (value.version !== 2 && value.version !== 3)
-          || !identity(value.id) || !timestamp(value.timestamp) || !boundedText(value.cwd, 4096)
-          || (value.parentSession !== undefined && (!boundedText(value.parentSession, 4096) || !isAbsolute(value.parentSession)))) throw new Error('header')
-        if (owner && (value.id !== owner.id || resolve(value.cwd as string) !== resolve(owner.cwd))) throw new Error('changed owner')
-        header = { id: value.id, cwd: value.cwd, createdAt: Date.parse(value.timestamp as string),
-          ...(value.parentSession !== undefined ? { parentSession: value.parentSession as string } : {}) }
+        header = parseSessionHeader(value, owner)
         hasHeader = true
         return
       }
@@ -251,7 +251,10 @@ async function readSessionUsage(
         }
       } else {
         if (value.usage !== undefined) throw new Error('unknown usage source')
-        switch (value.type) {
+        // Sidebar totals do not depend on display-only metadata payloads. Keep
+        // entry identity/deduplication and reject unknown types/usage sources;
+        // ledger coverage validation retains the complete existing schema.
+        if (collectReceipts) switch (value.type) {
           case 'thinking_level_change':
             if (!text(value.thinkingLevel)) throw new Error('thinking level')
             break
@@ -343,6 +346,17 @@ async function readSessionUsage(
   }, sidebar?.filesystem)
 }
 
+type SessionUsageHeader = Pick<SessionUsageSnapshot, 'id' | 'cwd' | 'createdAt' | 'parentSession'>
+
+function parseSessionHeader(value: RecordValue, owner?: SessionTokenOwner): SessionUsageHeader {
+  if (value.type !== 'session' || (value.version !== 2 && value.version !== 3)
+    || !identity(value.id) || !timestamp(value.timestamp) || !boundedText(value.cwd, 4096)
+    || (value.parentSession !== undefined && (!boundedText(value.parentSession, 4096) || !isAbsolute(value.parentSession)))) throw new Error('header')
+  if (owner && (value.id !== owner.id || resolve(value.cwd) !== resolve(owner.cwd))) throw new Error('changed owner')
+  return { id: value.id, cwd: value.cwd, createdAt: Date.parse(value.timestamp as string),
+    ...(value.parentSession !== undefined ? { parentSession: value.parentSession as string } : {}) }
+}
+
 async function readStableFile(
   path: string, collectReceipts: boolean,
   read: (handle: SessionTokenFileHandle, before: SessionTokenStat) => Promise<SessionUsageSnapshot>,
@@ -350,7 +364,6 @@ async function readStableFile(
 ): Promise<SessionUsageSnapshot> {
   let handle: SessionTokenFileHandle | undefined
   let result: SessionUsageSnapshot | undefined
-  let closeUnknown = false
   const check = (before: SessionTokenStat, after: SessionTokenStat): void => {
     if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
       || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) throw new Error('changed file')
@@ -359,7 +372,10 @@ async function readStableFile(
     handle = await filesystem.open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     const before = await handle.stat({ bigint: true })
     if (!before.isFile() || before.size === 0n || (!collectReceipts && before.size > BigInt(MAX_FILE_BYTES))) throw new Error('file budget')
-    check(before, await filesystem.lstat(path, { bigint: true }))
+    // Sidebar ownership comes from this actual no-follow FD/header. Its final
+    // path check detects replacement; a duplicate pre-read path lookup adds no
+    // further ownership evidence. Ledger snapshot checks remain unchanged.
+    if (collectReceipts) check(before, await filesystem.lstat(path, { bigint: true }))
     result = await read(handle, before)
     check(before, await handle.stat({ bigint: true }))
     check(before, await filesystem.lstat(path, { bigint: true }))
@@ -367,9 +383,9 @@ async function readStableFile(
     result = undefined
   } finally {
     if (handle) {
-      try { await handle.close() } catch { result = undefined; closeUnknown = true }
+      try { await handle.close() } catch { result = undefined }
     }
   }
-  if (!result) throw new SessionUsageReadError(closeUnknown)
+  if (!result) throw new SessionUsageReadError()
   return result
 }

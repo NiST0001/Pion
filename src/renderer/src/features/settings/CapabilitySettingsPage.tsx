@@ -55,7 +55,7 @@ const GROUPS: Array<{ kind: CapabilityKind; title: string; description: string }
 const ORIGINS: Record<CapabilityItem['origin'], string> = {
   pi: 'Pi 内置', pion: 'Pion 内置', user: '用户', project: '项目', extension: '扩展', mcp: 'MCP'
 }
-// Do not echo arbitrary backend messages, notices or unavailability diagnostics.
+// Only notices carry Main-projected display text; keep other diagnostics private.
 const APPLICATION: Record<CapabilityApplication['state'], { title: string; description: string }> = {
   applied: { title: '已应用', description: '已保存的开关已应用到当前后端。' },
   pending: { title: '已保存，等待应用', description: '运行中已保存，待本轮真实结束后应用；保留会话与草稿。' },
@@ -228,7 +228,7 @@ export function CapabilitySettingsPage({ cwd, actionSlot, scope }: CapabilitySet
       <strong>{application.title}</strong><p>{application.description}</p>
       {snapshot.application.pendingBackends > 0 && <small>{snapshot.application.pendingBackends} 个后端待应用</small>}
     </div>}
-    {Boolean(snapshot?.notices.length) && <p className="setting-desc capability-notice">部分能力目录或运行状态暂不可用；开关设置与实际可用状态分开显示。</p>}
+    {snapshot?.notices.map((notice, index) => <p key={index} className="setting-desc capability-notice">{notice}</p>)}
     {snapshot && GROUPS.map((group) => {
       const items = snapshot.items.filter((item) => item.kind === group.kind)
       return <section key={group.kind} className="settings-section setting-card capability-group" aria-label={group.title}>

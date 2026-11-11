@@ -3,13 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
-import { readFileSync } from 'node:fs'
 import { posix, win32 } from 'node:path'
 import { deflateSync } from 'node:zlib'
 import { ComputerUseHelperClient, HelperPacketReader, encodeHelperPacket, waitForHelper, decodeHelperPreview, HELPER_JSON_MAX } from '../../src/main/computer-use/helper-client'
 import { WaylandComputerUseDriver } from '../../src/main/computer-use/wayland-driver'
 import { ComputerUseService } from '../../src/main/computer-use/service'
-import { NATIVE_COMPUTER_USE_DIAGNOSTIC_CODES, NATIVE_COMPUTER_USE_DIAGNOSTICS_BY_REQUEST } from '../../src/shared/computer-use-diagnostics'
 
 const builtinSpawn = vi.hoisted(() => vi.fn<typeof import('node:child_process').spawn>())
 vi.mock('node:child_process', () => ({ spawn: builtinSpawn }))
@@ -37,13 +35,16 @@ function preview(width = 2, height = 1, raw = Buffer.alloc((width * 3 + 1) * hei
   const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), ...(extra ? [chunk('tEXt', Buffer.from('private'))] : []), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))])
 }
-// Git checkout may use CRLF on Windows; source contract assertions compare lines.
-function readNative(path: string): string { return readFileSync(path, 'utf8').replace(/\r\n/g, '\n') }
 const closeReceipts = [undefined, { version: 1, boundary: 'client-disconnected' }] as const
 function closedFields(receipt: typeof closeReceipts[number]) { return receipt ? { closeReceipt: receipt } : {} }
 function fake() {
   const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() })
   return { child: child as unknown as ChildProcessWithoutNullStreams, emit: child }
+}
+async function negotiate(client: ComputerUseHelperClient, child: ChildProcessWithoutNullStreams, generation = 1, control = false): Promise<void> {
+  const hello = client.request('hello')
+  child.stdout.emit('data', encodeHelperPacket({ id: 1, generation, kind: 'hello', captureAccountingVersion: 1, ...(control ? { inputProtocolVersion: 1 } : {}) }))
+  await hello
 }
 describe('private computer-use helper simulated protocol', () => {
   const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
@@ -54,7 +55,7 @@ describe('private computer-use helper simulated protocol', () => {
   const limits = { maxFrameBytes: 4096, maxFramePixels: 10, maxFrameEdge: 10 }
   const controlOptions = { control: true, captureScope: 'display' } as const
   const fence = { sequence: 1, topology: 2 }
-  function scripted(inputHello: Record<string, unknown> = { inputProtocolVersion: 1 }, sourceType = 1) {
+  function scripted(inputHello: Record<string, unknown> = { inputProtocolVersion: 1, captureAccountingVersion: 1 }, sourceType = 1) {
     const { child, emit } = fake()
     const requests: Record<string, unknown>[] = []
     child.stdin.on('data', (packet: Buffer) => {
@@ -85,16 +86,16 @@ describe('private computer-use helper simulated protocol', () => {
     await expect(driver.close()).resolves.toBeUndefined()
     expect(start).not.toHaveBeenCalled()
   })
-  it.each([[false, false], [true, false], [false, true], [true, true]])('DMA opt-in is the last flag, not an open field or cleanup proof: control=%s accounting=%s', async (control, accounting) => {
+  it.each([[false, false], [true, false], [false, true], [true, true]])('required accounting keeps four ordered modes: control=%s DMA=%s', async (control, dmaBuf) => {
     const { child, emit } = fake()
     builtinSpawn.mockReset().mockReturnValue(child)
     const requests: Record<string, unknown>[] = []
     child.stdin.on('data', (packet: Buffer) => { requests.push(JSON.parse(packet.subarray(12).toString())) })
-    const client = new ComputerUseHelperClient('/explicit/mock', 1, undefined, control, accounting, true)
+    const client = new ComputerUseHelperClient('/explicit/mock', 1, undefined, control, dmaBuf)
     expect(builtinSpawn).not.toHaveBeenCalled()
     const hello = client.request('hello')
-    expect(builtinSpawn).toHaveBeenCalledExactlyOnceWith('/explicit/mock', ['--client-close-receipt-v1', ...(control ? ['--wayland-virtual-input-v1'] : []), ...(accounting ? ['--capture-accounting-v1'] : []), '--dmabuf-readback-v1'], { stdio: ['pipe', 'pipe', 'pipe'], shell: false })
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'hello', dmaBufReadbackVersion: 1, ...(control ? { inputProtocolVersion: 1 } : {}), ...(accounting ? { captureAccountingVersion: 1 } : {}) }))
+    expect(builtinSpawn).toHaveBeenCalledExactlyOnceWith('/explicit/mock', ['--client-close-receipt-v1', ...(control ? ['--wayland-virtual-input-v1'] : []), '--capture-accounting-v1', ...(dmaBuf ? ['--dmabuf-readback-v1'] : [])], { stdio: ['pipe', 'pipe', 'pipe'], shell: false })
+    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'hello', captureAccountingVersion: 1, ...(control ? { inputProtocolVersion: 1 } : {}), ...(dmaBuf ? { dmaBufReadbackVersion: 1 } : {}) }))
     await hello
     expect(client.actualPending).toBe(true)
     const opening = client.request('open', limits)
@@ -122,9 +123,18 @@ describe('private computer-use helper simulated protocol', () => {
     expect(requests.map(r => r.kind)).toEqual(['hello', 'close'])
     expect(start).toHaveBeenCalledTimes(1)
   })
+  it('raw client requires the current accounting hello before any resource request or spawn', async () => {
+    const start = vi.fn(() => fake().child)
+    const client = new ComputerUseHelperClient('/explicit/mock', 1, start, true)
+    for (const kind of ['open', 'capture'] as const) await expect(client.request(kind, limits)).rejects.toThrow('accounting-unavailable')
+    await expect(client.act({ type: 'key', keys: 'Enter' }, fence)).rejects.toThrow('input-unavailable')
+    expect(client.actualPending).toBe(false)
+    expect(start).not.toHaveBeenCalled()
+    await client.close()
+  })
   it('raw client cannot dispatch capture/open/input before its requested DMA feature is negotiated', async () => {
     const { child, requests } = scripted({ inputProtocolVersion: 1, captureAccountingVersion: 1 })
-    const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child, true, true, true)
+    const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child, true, true)
     await client.request('hello')
     for (const kind of ['open', 'capture'] as const) await expect(client.request(kind, limits)).rejects.toThrow('dmabuf-unavailable')
     await expect(client.act({ type: 'key', keys: 'Enter' }, fence)).rejects.toThrow('input-unavailable')
@@ -132,15 +142,15 @@ describe('private computer-use helper simulated protocol', () => {
     await client.close()
   })
   it('DMA feature is hello-only, exact-version and forbidden in every non-opted-in reader combination', () => {
-    const hello = { id: 1, generation: 1, kind: 'hello', dmaBufReadbackVersion: 1 }
-    for (const control of [false, true]) for (const accounting of [false, true]) {
-      expect(() => new HelperPacketReader(control, accounting).push(encodeHelperPacket(hello), () => {})).toThrow('helper-protocol')
+    const hello = { id: 1, generation: 1, kind: 'hello', captureAccountingVersion: 1, dmaBufReadbackVersion: 1 }
+    for (const control of [false, true]) {
+      expect(() => new HelperPacketReader(control).push(encodeHelperPacket(hello), () => {})).toThrow('helper-protocol')
       const receive = vi.fn()
-      new HelperPacketReader(control, accounting, true).push(encodeHelperPacket(hello), receive)
+      new HelperPacketReader(control, true).push(encodeHelperPacket(hello), receive)
       expect(receive).toHaveBeenCalledWith(hello, Buffer.alloc(0))
     }
     for (const fields of [{ dmaBufReadbackVersion: 2 }, { dmaBufReadbackVersion: '1' }, { dmaBufReadbackVersion: null }, { kind: 'error' }, { kind: 'closed' }, { kind: 'opened', sourceType: 2, streamId: '3' }]) {
-      expect(() => new HelperPacketReader(false, false, true).push(encodeHelperPacket({ ...hello, ...fields }), () => {})).toThrow('helper-protocol')
+      expect(() => new HelperPacketReader(false, true).push(encodeHelperPacket({ ...hello, ...fields }), () => {})).toThrow('helper-protocol')
     }
   })
   it('accounted capture failure is an operation failure, not an unknown image', async () => {
@@ -157,8 +167,8 @@ describe('private computer-use helper simulated protocol', () => {
   })
   function preexec() {
     const f = fake()
-    Object.assign(f.child, { spawnfile: '/explicit/mock', spawnargs: ['/explicit/mock', '--client-close-receipt-v1'] })
-    const error = Object.assign(new Error('spawn /explicit/mock ENOENT'), { code: 'ENOENT', errno: -2, syscall: 'spawn /explicit/mock', path: '/explicit/mock', spawnargs: ['--client-close-receipt-v1'] })
+    Object.assign(f.child, { spawnfile: '/explicit/mock', spawnargs: ['/explicit/mock', '--client-close-receipt-v1', '--capture-accounting-v1'] })
+    const error = Object.assign(new Error('spawn /explicit/mock ENOENT'), { code: 'ENOENT', errno: -2, syscall: 'spawn /explicit/mock', path: '/explicit/mock', spawnargs: ['--client-close-receipt-v1', '--capture-accounting-v1'] })
     return { ...f, error }
   }
   it.each(['ENOENT', 'EACCES'])('trusted preexec %s holds until real close and all stdio close, without restart', async code => {
@@ -242,18 +252,19 @@ describe('private computer-use helper simulated protocol', () => {
     { noFrameReceipt, width: 1 }, { noFrameReceipt, height: 1 }, { noFrameReceipt, previewPng: '' },
     { noFrameReceipt, inputFrame: fence }, { noFrameReceipt, sourceType: 2 }, { noFrameReceipt, streamId: '3' }
   ])('strict negative receipt fields reject %j', fields => {
-    expect(() => new HelperPacketReader(true, true).push(encodeHelperPacket({ id: 1, generation: 1, kind: 'error', diagnosticCode: 'capture-frame-failed', ...fields }), () => {})).toThrow()
+    expect(() => new HelperPacketReader(true).push(encodeHelperPacket({ id: 1, generation: 1, kind: 'error', diagnosticCode: 'capture-frame-failed', ...fields }), () => {})).toThrow()
   })
-  it('negative receipt cannot accompany PNG bytes or cross legacy mode', () => {
+  it('negative receipt cannot accompany PNG bytes or a successful frame', () => {
     const reply = { id: 1, generation: 1, kind: 'error', diagnosticCode: 'capture-frame-failed', noFrameReceipt }
-    expect(() => new HelperPacketReader(false, true).push(encodeHelperPacket(reply, preview()), () => {})).toThrow()
-    expect(() => new HelperPacketReader().push(encodeHelperPacket(reply), () => {})).toThrow()
-    expect(() => new HelperPacketReader().push(encodeHelperPacket({ id: 1, generation: 1, kind: 'hello', captureAccountingVersion: 1 }), () => {})).toThrow()
-    expect(() => new HelperPacketReader(false, true).push(encodeHelperPacket({ ...reply, kind: 'frame', diagnosticCode: undefined, deliverable: true, width: 2, height: 1 }, preview()), () => {})).toThrow()
+    expect(() => new HelperPacketReader().push(encodeHelperPacket(reply, preview()), () => {})).toThrow()
+    const receive = vi.fn()
+    new HelperPacketReader().push(encodeHelperPacket(reply), receive)
+    expect(receive).toHaveBeenCalledWith(reply, Buffer.alloc(0))
+    expect(() => new HelperPacketReader().push(encodeHelperPacket({ ...reply, kind: 'frame', diagnosticCode: undefined, deliverable: true, width: 2, height: 1 }, preview()), () => {})).toThrow()
   })
   it.each(['no-hello', 'missing-feature', 'open', 'wrong-id', 'wrong-generation', 'poison'] as const)('negative receipt needs actual accounting capture identity: %s', async scenario => {
     const { child, emit } = fake()
-    const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child, false, true)
+    const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
     if (scenario !== 'no-hello') {
       const hello = client.request('hello')
       child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'hello', ...(scenario !== 'missing-feature' ? { captureAccountingVersion: 1 } : {}) }))
@@ -272,8 +283,6 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it('driver preexec failure can stop clean only for its accounting spawn, and never relaunches', async () => {
     const { child, emit, error } = preexec()
-    error.spawnargs.push('--capture-accounting-v1')
-    Object.assign(child, { spawnargs: ['/explicit/mock', ...error.spawnargs] })
     const start = vi.fn(() => child)
     const driver = new WaylandComputerUseDriver('/explicit/mock', false, start)
     const opening = expect(driver.open(owner, limits, new AbortController().signal)).rejects.toThrow('unavailable')
@@ -308,22 +317,11 @@ describe('private computer-use helper simulated protocol', () => {
     else if (scenario === 'transport') emit.emit('error', new Error('transport'))
     else child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 1, kind: 'error', diagnosticCode: scenario === 'revoked' ? 'selection-not-deliverable' : 'capture-frame-failed', ...(scenario === 'malformed' ? { noFrameReceipt: { ...noFrameReceipt, version: 2 } } : {}) }))
     await failed
-    await expect(driver.close()).rejects.toThrow(scenario === 'ordinary' || scenario === 'revoked' ? 'capture-unknown' : 'stop-unverified')
+    await expect(driver.capture(new AbortController().signal)).rejects.toThrow('unavailable')
+    if (scenario === 'ordinary' || scenario === 'revoked') await expect(driver.close()).resolves.toBeUndefined()
+    else await expect(driver.close()).rejects.toThrow('stop-unverified')
     if (scenario === 'revoked') expect(driver.getDiagnostics()).toEqual({ capture: 'selection-not-deliverable' })
     expect(requests.filter(r => r.kind === 'capture')).toHaveLength(1)
-  })
-  it.each([false, true])('explicit accounting spawn flags preserve ordered mode %s', async control => {
-    const { child, emit } = fake()
-    builtinSpawn.mockReset().mockReturnValue(child)
-    const client = new ComputerUseHelperClient('/explicit/mock', 1, undefined, control, true)
-    const hello = client.request('hello')
-    expect(builtinSpawn).toHaveBeenCalledExactlyOnceWith('/explicit/mock', ['--client-close-receipt-v1', ...(control ? ['--wayland-virtual-input-v1'] : []), '--capture-accounting-v1'], { stdio: ['pipe', 'pipe', 'pipe'], shell: false })
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'hello', captureAccountingVersion: 1, ...(control ? { inputProtocolVersion: 1 } : {}) }))
-    await hello
-    const closing = client.close()
-    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'closed' }))
-    emit.emit('close', 0, null)
-    await closing
   })
   it('close already pending during trusted preexec failure settles all actual requests', async () => {
     const { child, emit, error } = preexec()
@@ -416,8 +414,7 @@ describe('private computer-use helper simulated protocol', () => {
     child.stdin.removeAllListeners('data')
     child.stdin.on('data', (packet: Buffer) => { requests.push(JSON.parse(packet.subarray(12, 12 + packet.readUInt32BE(4)).toString())) })
     const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child, true)
-    const hello = client.request('hello')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'hello', inputProtocolVersion: 1 })); await hello
+    await negotiate(client, child, 1, true)
     const action = { type: 'key', keys: 'Enter' } as const
     const controller = new AbortController()
     const actual = client.act(action, fence)
@@ -437,8 +434,7 @@ describe('private computer-use helper simulated protocol', () => {
   it.each(['error', 'wrong-id', 'duplicate', 'bytes', 'early-close', 'zero-exit'] as const)('act %s never becomes success or resets poison on close', async failure => {
     const { child, emit } = fake()
     const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child, true)
-    const hello = client.request('hello')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'hello', inputProtocolVersion: 1 })); await hello
+    await negotiate(client, child, 1, true)
     const act = client.act({ type: 'key', keys: 'Enter' }, fence)
     const result = act.then(value => value.reply.kind, () => 'rejected')
     const closing = client.close().then(() => 'closed', () => 'unverified')
@@ -481,7 +477,7 @@ describe('private computer-use helper simulated protocol', () => {
     expect(requests.map(r => r.kind)).toEqual(['hello', 'open'])
     await driver.close()
   })
-  it('display frames keep capture budget poison and cannot become clean close', async () => {
+  it('display frame budget failure forbids recapture while actual resource close remains independent', async () => {
     const { child, requests } = scripted({ inputProtocolVersion: 1, captureAccountingVersion: 1 })
     const driver = new WaylandComputerUseDriver('/explicit/mock', false, () => child)
     await driver.open(owner, limits, new AbortController().signal, controlOptions)
@@ -490,7 +486,8 @@ describe('private computer-use helper simulated protocol', () => {
     child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 1, kind: 'frame', width: 2, height: 1, deliverable: true, inputFrame: fence }, preview()))
     await rejected
     expect(requests[2]).toEqual({ id: 3, generation: 1, kind: 'capture', limits: { ...limits, maxFrameBytes: 1 } })
-    await expect(driver.close()).rejects.toThrow('capture-unknown')
+    await expect(driver.capture(new AbortController().signal)).rejects.toThrow('unavailable')
+    await expect(driver.close()).resolves.toBeUndefined()
   })
   it('raw down/up, oversized text and invalid fences are rejected before dispatch', async () => {
     const { child, requests } = scripted()
@@ -501,15 +498,15 @@ describe('private computer-use helper simulated protocol', () => {
     expect(requests.map(r => r.kind)).toEqual(['hello'])
     await client.close()
   })
-  it('default launch opts into close receipts with exactly one flag and private pipes', async () => {
+  it('default launch requires close and accounting with private pipes', async () => {
     const { child, emit } = fake()
     builtinSpawn.mockReset().mockReturnValue(child)
     const client = new ComputerUseHelperClient('/explicit/mock', 7)
     expect(builtinSpawn).not.toHaveBeenCalled()
     const hello = client.request('hello')
     expect(builtinSpawn).toHaveBeenCalledTimes(1)
-    expect(builtinSpawn).toHaveBeenCalledWith('/explicit/mock', ['--client-close-receipt-v1'], { stdio: ['pipe', 'pipe', 'pipe'], shell: false })
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 7, kind: 'hello' })); await hello
+    expect(builtinSpawn).toHaveBeenCalledWith('/explicit/mock', ['--client-close-receipt-v1', '--capture-accounting-v1'], { stdio: ['pipe', 'pipe', 'pipe'], shell: false })
+    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 7, kind: 'hello', captureAccountingVersion: 1 })); await hello
     const closing = client.close()
     child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 7, kind: 'closed', closeReceipt: closeReceipts[1] }))
     emit.emit('close', 0, null); await closing
@@ -586,7 +583,7 @@ describe('private computer-use helper simulated protocol', () => {
       child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'closed', closeReceipt: closeReceipts[1] }))
       await rejected
     } else {
-      child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'hello' })); await hello
+      child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'hello', captureAccountingVersion: 1 })); await hello
     }
     if (failure === 'poison') emit.emit('error', new Error('private'))
     const closing = expect(client.close()).rejects.toThrow('stop-unverified')
@@ -604,8 +601,7 @@ describe('private computer-use helper simulated protocol', () => {
     const a = new ComputerUseHelperClient('/explicit/mock', 1, () => old.child)
     const b = new ComputerUseHelperClient('/explicit/mock', 2, () => next.child)
     for (const [client, child, generation] of [[a, old.child, 1], [b, next.child, 2]] as const) {
-      const hello = client.request('hello')
-      child.stdout.emit('data', encodeHelperPacket({ id: 1, generation, kind: 'hello' })); await hello
+      await negotiate(client, child, generation)
     }
     const oldClose = a.close()
     let settled = false; const nextClose = b.close().then(() => { settled = true })
@@ -638,11 +634,12 @@ describe('private computer-use helper simulated protocol', () => {
     expect(() => new HelperPacketReader().push(encodeHelperPacket({ id: 1, generation: 1, kind: 'error', ...fields }), () => {})).toThrow('helper-protocol')
   })
   it.each([
-    { id: 1, generation: 1, diagnosticCode: 'portal-connect-failed' },
+    { id: 2, generation: 1, diagnosticCode: 'portal-connect-failed' },
     { id: 9, generation: 1, diagnosticCode: 'capture-frame-failed' },
-    { id: 1, generation: 2, diagnosticCode: 'capture-frame-failed' }
+    { id: 2, generation: 2, diagnosticCode: 'capture-frame-failed' }
   ])('never records native diagnostics before pending operation and identity validation %j', async fields => {
     const { child } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const failed = expect(client.request('capture')).rejects.toThrow('unknown')
     child.stdout.emit('data', encodeHelperPacket({ kind: 'error', ...fields }))
     await failed
@@ -652,9 +649,7 @@ describe('private computer-use helper simulated protocol', () => {
   it.each(['act', 'close'] as const)('rejects request-state diagnostics absent from native %s replies', async operation => {
     const { child, emit } = fake()
     const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child, true)
-    const hello = client.request('hello')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'hello', inputProtocolVersion: 1 }))
-    await hello
+    await negotiate(client, child, 1, true)
     const actual = operation === 'act' ? client.act({ type: 'key', keys: 'Enter' }, fence) : client.close()
     const rejected = expect(actual).rejects.toThrow(operation === 'act' ? 'helper-unknown' : 'stop-unverified')
     child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'error', diagnosticCode: 'request-state-invalid' }))
@@ -666,48 +661,48 @@ describe('private computer-use helper simulated protocol', () => {
     expect(client.transportUnknown).toBe(true)
     expect(client.actualPending).toBe(true)
   })
-  it('keeps only three copied first-failure slots, maps hello to open and preserves native close code', async () => {
+  it('keeps copied first-failure slots across a rejected hello and preserves native close code', async () => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
     expect(client.getDiagnostics()).toEqual({})
     const hello = client.request('hello')
     child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'error', diagnosticCode: 'request-state-invalid' })); await hello
-    const opening = client.request('open')
-    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'error', diagnosticCode: 'portal-connect-failed' })); await opening
+    await expect(client.request('open')).rejects.toThrow('accounting-unavailable')
+    await expect(client.request('capture')).rejects.toThrow('accounting-unavailable')
     expect(client.transportUnknown).toBe(false)
-    const capture = client.request('capture')
-    child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 1, kind: 'error', diagnosticCode: 'capture-frame-failed' })); await capture
     const actualClose = client.close()
     const closing = expect(actualClose).rejects.toThrow('stop-unverified')
-    child.stdout.emit('data', encodeHelperPacket({ id: 4, generation: 1, kind: 'error', diagnosticCode: 'portal-close-failed' }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'error', diagnosticCode: 'portal-close-failed' }))
     emit.emit('close', 0, null); await closing
     expect(client.actualPending).toBe(true)
     expect(client.close()).toBe(actualClose)
     await expect(client.request('open')).rejects.toThrow('busy')
     const snapshot = client.getDiagnostics()
-    expect(snapshot).toEqual({ open: 'request-state-invalid', capture: 'capture-frame-failed', close: 'portal-close-failed' })
+    expect(snapshot).toEqual({ open: 'request-state-invalid', close: 'portal-close-failed' })
     snapshot.open = 'helper-transport-error'; delete snapshot.capture
-    expect(client.getDiagnostics()).toEqual({ open: 'request-state-invalid', capture: 'capture-frame-failed', close: 'portal-close-failed' })
+    expect(client.getDiagnostics()).toEqual({ open: 'request-state-invalid', close: 'portal-close-failed' })
   })
   it.each(closeReceipts.flatMap(receipt => [undefined, 'window-selection-failed'].map(diagnosticCode => ({ receipt, diagnosticCode }))))('open error retains diagnostic with close boundary %j', async ({ receipt, diagnosticCode }) => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const opening = client.request('open')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'error', ...(diagnosticCode ? { diagnosticCode } : {}) })); await opening
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'error', ...(diagnosticCode ? { diagnosticCode } : {}) })); await opening
     expect(client.transportUnknown).toBe(false)
     const closing = client.close()
-    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'closed', ...closedFields(receipt) }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 1, kind: 'closed', ...closedFields(receipt) }))
     emit.emit('close', 0, null); await closing
     expect(client.getDiagnostics()).toEqual(diagnosticCode ? { open: diagnosticCode } : {})
     expect(client.actualPending).toBe(false)
   })
   it.each([true, false])('revocation keeps close held until actual exit and requires ACK=%s', async ack => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const opening = client.request('open')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'opened', sourceType: 2, streamId: '1' })); await opening
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'opened', sourceType: 2, streamId: '1' })); await opening
     child.stdout.emit('data', encodeHelperPacket({ id: 0, generation: 1, kind: 'revoked' }))
     let done = false
     const closing = client.close(); const outcome = ack ? expect(closing).resolves.toBeUndefined() : expect(closing).rejects.toThrow('stop-unverified')
     void closing.then(() => { done = true }, () => { done = true })
-    if (ack) child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'closed' }))
+    if (ack) child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 1, kind: 'closed' }))
     await Promise.resolve(); expect(done).toBe(false); expect(client.actualPending).toBe(true)
     emit.emit('close', 0, null); await outcome
     expect(client.actualPending).toBe(!ack)
@@ -715,13 +710,14 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it.each(['capture-frame-failed', 'selection-not-deliverable'] as const)('native capture error %s remains diagnostic-only and requires actual resource close', async diagnosticCode => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const capture = client.request('capture')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'error', diagnosticCode }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'error', diagnosticCode }))
     await expect(capture).resolves.toMatchObject({ reply: { kind: 'error', diagnosticCode } })
     expect(client.transportUnknown).toBe(false)
     expect(client.actualPending).toBe(true)
     const closing = client.close()
-    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'closed' }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 1, kind: 'closed' }))
     await Promise.resolve(); expect(client.actualPending).toBe(true)
     emit.emit('close', 0, null); await closing
     expect(client.getDiagnostics()).toEqual({ capture: diagnosticCode })
@@ -744,6 +740,7 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it('transport failures use the actual current request, not private error text', async () => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const failed = expect(client.request('capture')).rejects.toThrow('helper-unknown')
     emit.emit('error', new Error('owner=open private-path-title-uri'))
     await failed
@@ -772,6 +769,7 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it('cancel stops waiting, retains spawn/pending and prohibits retries', async () => {
     const { child } = fake(); const client = new ComputerUseHelperClient('/explicit/helper', 3, () => child)
+    await negotiate(client, child, 3)
     const controller = new AbortController()
     const actual = client.request('open')
     const waiting = waitForHelper(actual, controller.signal)
@@ -779,18 +777,19 @@ describe('private computer-use helper simulated protocol', () => {
     await expect(waiting).rejects.toThrow('interrupted')
     expect(client.actualPending).toBe(true)
     await expect(client.request('capture')).rejects.toThrow('busy')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 3, kind: 'unavailable' }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 3, kind: 'unavailable' }))
     await actual
     expect(client.actualPending).toBe(true)
   })
   it.each(closeReceipts)('closed ACK %j needs process and stdio close, not exit', async receipt => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/helper', 4, () => child)
     const revoked = vi.fn(); client.onRevoked(revoked)
+    await negotiate(client, child, 4)
     const opening = client.request('open')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 4, kind: 'opened', sourceType: 2, streamId: '1' })); await opening
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 4, kind: 'opened', sourceType: 2, streamId: '1' })); await opening
     let done = false; const closing = client.close().then(() => { done = true })
     // Both native boundaries require actual zero process/stdio close.
-    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 4, kind: 'closed', ...closedFields(receipt) }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 4, kind: 'closed', ...closedFields(receipt) }))
     await Promise.resolve(); expect(done).toBe(false); expect(client.actualPending).toBe(true)
     emit.emit('exit', 0, null) // Process exited, but inherited stdio has not closed.
     child.stdout.emit('end')
@@ -805,19 +804,20 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it('unknown exit is not closure or restart authority', async () => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/helper', 1, () => child)
+    await negotiate(client, child)
     const opening = client.request('open'); emit.emit('close', 1, null)
     await expect(opening).rejects.toThrow('exited')
     expect(client.actualPending).toBe(true)
     await expect(client.request('open')).rejects.toThrow('busy')
     await expect(client.close()).rejects.toThrow('stop-unverified')
   })
-  it.each([true, false])('real service releases only a producer-confirmed no-complete-PNG failure: proof=%s', async proved => {
+  it('real service retains the producer-confirmed no-complete-PNG failure and consumed attempt', async () => {
     const { child, emit } = fake()
     child.stdin.on('data', (packet: Buffer) => {
       const request = JSON.parse(packet.subarray(12, 12 + packet.readUInt32BE(4)).toString())
       const body = request.kind === 'hello' ? { kind: 'hello', captureAccountingVersion: 1 }
         : request.kind === 'open' ? { kind: 'opened', sourceType: 2, streamId: '4' }
-          : request.kind === 'capture' ? { kind: 'error', diagnosticCode: 'capture-frame-failed', ...(proved ? { noFrameReceipt: { version: 1, outcome: 'no-complete-png' } } : {}) }
+          : request.kind === 'capture' ? { kind: 'error', diagnosticCode: 'capture-frame-failed', noFrameReceipt }
             : { kind: 'closed', closeReceipt: { version: 1, boundary: 'client-disconnected' } }
       emit.stdout.write(encodeHelperPacket({ id: request.id, generation: request.generation, ...body }))
       if (request.kind === 'close') queueMicrotask(() => emit.emit('close', 0, null))
@@ -832,81 +832,11 @@ describe('private computer-use helper simulated protocol', () => {
     await service.start(owner, { capture: true, control: false, upload: false, retention: 'sdk-session' })
     await expect(service.capture(owner)).rejects.toThrow('capture failed')
     const stopped = await service.stop(owner)
-    expect(stopped).toMatchObject({ state: proved ? 'stopped' : 'quarantined', coordination: proved ? 'released' : 'held',
+    expect(stopped).toMatchObject({ state: 'stopped', actualPending: false, coordination: 'unclaimed',
       budget: { captures: 1, frameBytes: 0, framePixels: 0 } })
-    expect(coordination.release).toHaveBeenCalledTimes(proved ? 1 : 0)
+    expect(coordination.claim).not.toHaveBeenCalled()
+    expect(coordination.release).not.toHaveBeenCalled()
     expect(stopped.frame).toBeUndefined()
-  })
-  it('native diagnostic vocabulary and unconditional act/close branches match the shared request matrix', () => {
-    const main = readNative('native/computer-use/src/main.rs')
-    const variants = main.match(/enum DiagnosticCode \{([\s\S]*?)\n\}/)?.[1] ?? ''
-    const codes = [...variants.matchAll(/^\s*([A-Z]\w*),$/gm)]
-      .map(([, name]) => name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`).slice(1))
-    expect(codes.sort()).toEqual([...NATIVE_COMPUTER_USE_DIAGNOSTIC_CODES].sort())
-    const requests = main.split('async fn run_requests(')[1]?.split('#[tokio::main')[0] ?? ''
-    expect(requests).toContain('if r.kind == "close" {')
-    expect(requests).toContain('output.send(input_stop_body(&r, had_client, pw_ok, portal_ok, input_ok), Vec::new()).await?;')
-    const closing = requests.indexOf('if r.kind == "close" {')
-    const dispatch = requests.indexOf('match r.kind.as_str() {')
-    expect(closing).toBeGreaterThanOrEqual(0)
-    expect(dispatch).toBeGreaterThan(closing)
-    const acting = requests.split('"act" => {')[1]?.split('_ => reply_error')[0] ?? ''
-    expect([...acting.matchAll(/DiagnosticCode::(\w+)/g)].map(([, code]) => code)).toEqual(['InputActionFailed'])
-    expect(NATIVE_COMPUTER_USE_DIAGNOSTICS_BY_REQUEST.act).toEqual(['input-action-failed'])
-    const stop = main.split('fn stop_diagnostic(')[1]?.split('fn error_body(')[0] ?? ''
-    const inputStop = main.split('fn input_stop_body(')[1]?.split('fn stop_body(')[0] ?? ''
-    const closeCodes = [...(stop + inputStop).matchAll(/DiagnosticCode::(\w+)/g)]
-      .map(([, name]) => name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`).slice(1))
-    expect(NATIVE_COMPUTER_USE_DIAGNOSTICS_BY_REQUEST.close).toEqual(closeCodes)
-  })
-  it('native negative accounting requires an actual worker error and keeps preview encoding ahead of the original', () => {
-    const main = readNative('native/computer-use/src/main.rs')
-    const capture = readNative('native/computer-use/src/capture.rs')
-    const pixels = readNative('native/computer-use/src/pixels.rs')
-    const receive = capture.split('async fn receive_frame(')[1]?.split('// Crop validation')[0] ?? ''
-    expect(receive).toContain('Ok(Err(_)) => Err(FrameError { no_complete_png: true })')
-    expect(receive).toContain('Err(_) => Err(FrameError::unknown())')
-    const receipt = main.split('fn capture_error_body(')[1]?.split('async fn reply_error(')[0] ?? ''
-    expect(receipt).toContain('if r.kind == "capture" && accounting_enabled && error.no_complete_png {')
-    expect(receipt).toContain('error_body(r, DiagnosticCode::CaptureFrameFailed)')
-    expect(receipt).toContain('body["noFrameReceipt"] = serde_json::json!({"version":1,"outcome":"no-complete-png"})')
-    const encoding = pixels.split('fn encode_frame_pngs(')[1]?.split('pub const PREVIEW_BYTES')[0] ?? ''
-    expect(encoding).toContain('let preview = preview()?;\n    let original = original()?;\n    Ok((original, preview))')
-  })
-  it('native source preserves window default and explicit display input with fresh bounded encoding', () => {
-    const main = readNative('native/computer-use/src/main.rs')
-    const portal = readNative('native/computer-use/src/portal.rs')
-    const pixels = readNative('native/computer-use/src/pixels.rs')
-    // The human chooser has its own 120s Response deadline, not a 30s
-    // aggregate wrapper that disconnects before a user can finish selection.
-    expect(main).not.toMatch(/client_connection::complete_operation\(\s*selecting,/)
-    expect(main).toContain('let selected = selecting.await;')
-    expect(portal).toContain('if method == "Start" { CHOOSER_DEADLINE }')
-    expect(main).toMatch(/s\.select_window\((?:&mut )?cancelled\)\.await/)
-    expect(main).toMatch(/s\.select_display\((?:&mut )?cancelled\)\.await/)
-    expect(main).toContain('client_connection::ClientConnection::connect(cancelled.clone())')
-    const connection = readNative('native/computer-use/src/client_connection.rs')
-    expect(connection).toContain('socket.shutdown(Shutdown::Both)')
-    expect(connection).toContain('connection.graceful_shutdown().await')
-    expect(main).toContain('capture::Capture::start')
-    const subscription = portal.indexOf('let mut responses = trace_result(self.rpc(signals(')
-    const dispatch = portal.indexOf('screen.call_method(method')
-    expect(subscription).toBeGreaterThanOrEqual(0)
-    expect(dispatch).toBeGreaterThanOrEqual(0)
-    expect(subscription).toBeLessThan(dispatch)
-    expect(portal).toContain('let source_type = if display { 1 } else { 2 }')
-    expect(portal).toContain('self.select_source(cancel, false).await?')
-    expect(portal).toContain('options.insert("types", Value::from(source_type))')
-    expect(portal).toContain('options.insert("persist_mode", Value::from(0u32))')
-    expect(portal).toContain('value == Some(2)')
-    expect(portal).toContain('"OpenPipeWireRemote"')
-    expect(pixels).toContain('pixels > limits.max_frame_pixels')
-    expect(pixels).toContain('png::Encoder::new')
-    expect(portal).toContain('"org.freedesktop.portal.Session", "Closed"')
-    const capture = readNative('native/computer-use/src/capture.rs')
-    expect(capture).toContain('context.connect_fd_rc(fd, None)')
-    expect(capture).toContain('Drop for Return<F>')
-    expect(portal + capture).not.toContain('org.freedesktop.portal.RemoteDesktop')
   })
   it('hello/open/capture/close uses only mocked private pipes and never enables control', async () => {
     const { child, emit } = fake()
@@ -959,7 +889,7 @@ describe('private computer-use helper simulated protocol', () => {
     await closing
     await expect(driver.capture(controller.signal)).rejects.toThrow('unavailable')
   })
-  it.each(closeReceipts)('unknown captured data quarantines even after resource close %j', async receipt => {
+  it.each(closeReceipts)('unknown capture accounting blocks recapture independently from resource close %j', async receipt => {
     const { child, emit } = fake()
     child.stdin.on('data', (packet: Buffer) => {
       const r = JSON.parse(packet.subarray(12, 12 + packet.readUInt32BE(4)).toString())
@@ -972,7 +902,7 @@ describe('private computer-use helper simulated protocol', () => {
     await driver.open({ ownerWindowId: 1, backendId: 'b', runtimeId: 'r', runId: 'run', generation: 1 }, { maxFrameBytes: 4096, maxFramePixels: 10, maxFrameEdge: 10 }, signal)
     await expect(driver.capture(signal)).rejects.toThrow('capture-unknown')
     await expect(driver.capture(signal)).rejects.toThrow('unavailable')
-    await expect(driver.close()).rejects.toThrow('capture-unknown')
+    await expect(driver.close()).resolves.toBeUndefined()
   })
   it('driver retains real raw bytes on preview failure and quarantines without a second spawn', async () => {
     const { child, emit } = fake(); let spawns = 0; let notified = 0
@@ -1024,10 +954,11 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it('cancelled preview validation retains slot and duplicate replies quarantine', async () => {
     const { child } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const actual = client.request('capture'); const controller = new AbortController()
     const waiting = waitForHelper(actual, controller.signal)
     const png = preview()
-    const packet = encodeHelperPacket({ id: 1, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, previewPng: png.toString('base64') }, png)
+    const packet = encodeHelperPacket({ id: 2, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, previewPng: png.toString('base64') }, png)
     child.stdout.emit('data', packet)
     controller.abort()
     await expect(waiting).rejects.toThrow('interrupted')
@@ -1039,8 +970,9 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it('invalid preview quarantines helper and never frees physical ownership', async () => {
     const { child } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const actual = client.request('capture')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, previewPng: preview(2, 1, Buffer.alloc(8)).toString('base64') }, preview()))
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, previewPng: preview(2, 1, Buffer.alloc(8)).toString('base64') }, preview()))
     await expect(actual).resolves.toMatchObject({ bytes: preview(), reply: { deliverable: false } })
     expect((await actual).previewPng).toBeUndefined()
     expect(client.getDiagnostics()).toEqual({ capture: 'helper-preview-invalid' })
@@ -1049,6 +981,7 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it.each(closeReceipts)('keeps capture and physical close pending through inflate after ACK %j and close', async receipt => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const png = preview()
     const capture = client.request('capture')
     let captured = false; let stopped = false
@@ -1057,8 +990,8 @@ describe('private computer-use helper simulated protocol', () => {
     inflateGate.held = true
     try {
       child.stdout.emit('data', Buffer.concat([
-        encodeHelperPacket({ id: 1, generation: 1, kind: 'frame', deliverable: false, width: 2, height: 1, previewPng: png.toString('base64') }, png),
-        encodeHelperPacket({ id: 2, generation: 1, kind: 'closed', ...closedFields(receipt) })
+        encodeHelperPacket({ id: 2, generation: 1, kind: 'frame', deliverable: false, width: 2, height: 1, previewPng: png.toString('base64') }, png),
+        encodeHelperPacket({ id: 3, generation: 1, kind: 'closed', ...closedFields(receipt) })
       ]))
       emit.emit('close', 0, null)
       await Promise.resolve(); await Promise.resolve()
@@ -1077,13 +1010,14 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it.each(closeReceipts)('invalid asynchronous inflate cannot become clean close after ACK %j and zero exit', async receipt => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const capture = client.request('capture')
     const failedCapture = expect(capture).resolves.toMatchObject({ bytes: preview(), reply: { deliverable: false } })
     const closing = client.close()
     const failedClose = expect(closing).rejects.toThrow('stop-unverified')
     let settled = false; void closing.then(() => { settled = true }, () => { settled = true })
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, previewPng: preview(2, 1, Buffer.alloc(8)).toString('base64') }, preview()))
-    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'closed', ...closedFields(receipt) }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, previewPng: preview(2, 1, Buffer.alloc(8)).toString('base64') }, preview()))
+    child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 1, kind: 'closed', ...closedFields(receipt) }))
     emit.emit('close', 0, null)
     await Promise.resolve(); expect(settled).toBe(false)
     await failedCapture; await failedClose
@@ -1093,18 +1027,19 @@ describe('private computer-use helper simulated protocol', () => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
     let notices = 0; client.onRevoked(() => { notices++ })
     client.onRevoked(() => { throw new Error('listener-metadata-error') })
+    await negotiate(client, child)
     const raw = preview(); const capture = client.request('capture')
     let captured = false; let closed = false
     void capture.then(() => { captured = true })
     inflateGate.held = true
     try {
-      child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, previewPng: raw.toString('base64') }, raw))
+      child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, previewPng: raw.toString('base64') }, raw))
       await Promise.resolve()
       expect(inflateGate.jobs).toHaveLength(1)
       const closing = client.close()
       const failedClose = expect(closing).rejects.toThrow('stop-unverified')
       void closing.then(() => { closed = true }, () => { closed = true })
-      if (failure === 'close-error') child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'error' }))
+      if (failure === 'close-error') child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 1, kind: 'error' }))
       if (failure === 'stdout-end') child.stdout.emit('end')
       if (failure === 'process-error') emit.emit('error', new Error('transport-private-details'))
       emit.emit('close', 0, null)
@@ -1126,11 +1061,12 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it('complete raw survives synchronous preview CRC failure and still prohibits clean closure', async () => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const raw = preview(); const bad = preview(); bad[bad.length - 1] ^= 1
     const capture = client.request('capture')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, previewPng: bad.toString('base64') }, raw))
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, previewPng: bad.toString('base64') }, raw))
     const closing = client.close(); const failedClose = expect(closing).rejects.toThrow('stop-unverified')
-    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'closed' }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 1, kind: 'closed' }))
     emit.emit('close', 0, null)
     const result = await capture
     expect(result).toMatchObject({ bytes: raw, reply: { deliverable: false } })
@@ -1139,17 +1075,19 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it('original PNG admission preserves real bytes with a known header for service CRC validation/accounting', async () => {
     const { child } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+    await negotiate(client, child)
     const raw = preview(1, 1); raw[29] ^= 1 // IHDR CRC corruption, not header geometry.
     const capture = client.request('capture')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'frame', deliverable: true, width: 1, height: 1 }, raw))
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'frame', deliverable: true, width: 1, height: 1 }, raw))
     expect(await capture).toMatchObject({ bytes: raw, reply: { width: 1, height: 1 } })
     expect(client.actualPending).toBe(true)
   })
   it('malformed frame transport syntax cannot invent a trustworthy physical result', async () => {
     for (const fields of [{ previewPng: '*' }, { width: 3 }, { generation: 2 }, { kind: 'opened' }]) {
       const { child } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
+      await negotiate(client, child)
       const capture = client.request('capture'); const rejected = expect(capture).rejects.toThrow('unknown')
-      child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, ...fields }, preview()))
+      child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'frame', deliverable: true, width: 2, height: 1, ...fields }, preview()))
       await rejected; expect(client.actualPending).toBe(true)
     }
   })
@@ -1163,10 +1101,11 @@ describe('private computer-use helper simulated protocol', () => {
   it.each(closeReceipts.flatMap(receipt => (['open', 'capture'] as const).map(operation => ({ receipt, operation }))))('ACK %j cannot replace absent response or authorize retry', async ({ receipt, operation }) => {
     const { child, emit } = fake(); const spawn = vi.fn(() => child)
     const client = new ComputerUseHelperClient('/explicit/mock', 1, spawn)
+    await negotiate(client, child)
     const pending = expect(client.request(operation)).rejects.toThrow('unknown')
     const actualClose = client.close()
     const closing = expect(actualClose).rejects.toThrow('stop-unverified')
-    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 1, kind: 'closed', ...closedFields(receipt) }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 1, kind: 'closed', ...closedFields(receipt) }))
     emit.emit('close', 0, null)
     await pending; await closing
     expect(client.actualPending).toBe(true)
@@ -1176,8 +1115,7 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it.each(closeReceipts)('incomplete stdout quarantines even after ACK %j', async receipt => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
-    const hello = client.request('hello')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 1, kind: 'hello' })); await hello
+    await negotiate(client, child)
     const closing = expect(client.close()).rejects.toThrow('stop-unverified')
     child.stdout.emit('data', Buffer.concat([encodeHelperPacket({ id: 2, generation: 1, kind: 'closed', ...closedFields(receipt) }), Buffer.from('PC')]))
     child.stdout.emit('end'); emit.emit('close', 0, null)
@@ -1199,6 +1137,7 @@ describe('private computer-use helper simulated protocol', () => {
     for (const stale of [false, true]) {
       const { child } = fake(); const client = new ComputerUseHelperClient('/explicit/mock', 1, () => child)
       let notices = 0; client.onRevoked(() => { notices++ })
+      await negotiate(client, child)
       const actual = expect(client.request('capture')).rejects.toThrow('unknown')
       if (!stale) child.stdout.emit('data', encodeHelperPacket({ id: 0, generation: 1, kind: 'revoked' }))
       child.stdout.emit('data', encodeHelperPacket({ id: 0, generation: stale ? 0 : 1, kind: 'revoked' }))
@@ -1239,19 +1178,21 @@ describe('private computer-use helper simulated protocol', () => {
   })
   it.each(closeReceipts)('failed process exit cannot turn ACK %j into clean stop', async receipt => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/helper', 4, () => child)
+    await negotiate(client, child, 4)
     const opening = client.request('open')
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 4, kind: 'opened', sourceType: 2, streamId: '1' })); await opening
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 4, kind: 'opened', sourceType: 2, streamId: '1' })); await opening
     const closing = client.close()
-    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 4, kind: 'closed', ...closedFields(receipt) }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 4, kind: 'closed', ...closedFields(receipt) }))
     await Promise.resolve(); emit.emit('close', 1, null)
     await expect(closing).rejects.toThrow('stop-unverified')
     expect(client.actualPending).toBe(true)
   })
   it('cancelled open holds ownership until pending reply and close settle', async () => {
     const { child, emit } = fake(); const client = new ComputerUseHelperClient('/explicit/helper', 4, () => child)
+    await negotiate(client, child, 4)
     const opening = client.request('open'); const closing = client.close()
-    child.stdout.emit('data', encodeHelperPacket({ id: 1, generation: 4, kind: 'error' })); await opening
-    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 4, kind: 'closed' }))
+    child.stdout.emit('data', encodeHelperPacket({ id: 2, generation: 4, kind: 'error' })); await opening
+    child.stdout.emit('data', encodeHelperPacket({ id: 3, generation: 4, kind: 'closed' }))
     emit.emit('close', 0, null); await closing
     expect(client.actualPending).toBe(false)
   })

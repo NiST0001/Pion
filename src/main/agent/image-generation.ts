@@ -11,12 +11,12 @@ import {
 } from '../../shared/image-generation'
 import { decodeImageBase64, inspectRasterImage, MAX_TOOL_IMAGE_BASE64_LENGTH, MAX_TOOL_IMAGE_BYTES, MAX_TOOL_IMAGE_DIMENSION } from '../../shared/tool-images'
 import {
-  checkedImageTimeout, checkImageAbort, CodexImageError, createCodexImageGeneratorWithValidation,
+  checkedImageTimeout, checkImageAbort, CodexImageError, createCodexImageGenerator,
   createImageAbortScope, inspectGeneratedPng, MAX_IMAGE_PROMPT_LENGTH, validateImagePrompt,
   waitForImageOperation, type CodexImageGenerator, type CodexImageTransportOptions, type GeneratedCodexImage
 } from './codex-image-transport'
 import { ImageInputError, readImageReferences } from './image-inputs'
-import { snapshotGeneratedPngBytes } from './generated-png-validation-receipt'
+import { GENERATED_PNG_VALIDATION_LIMITS } from './png-validation'
 
 interface ImageFileStat {
   dev: number | bigint
@@ -225,7 +225,6 @@ async function savePng(files: ImageGenerationFileSystem, destination: Destinatio
   let published = false
   try {
     await inspectDestination(files, destination, signal, true)
-    await inspectDestination(files, destination, signal, false)
     checkImageAbort(signal)
     // Stage in the same directory so hard-link publication is atomic and
     // no-replace on supported filesystems. Never write/delete the final name.
@@ -302,6 +301,17 @@ function waitForSaveAdmission<T>(operation: Promise<T>, signal: AbortSignal, sta
   })
 }
 
+/** Copy injected output via native slots, bypassing custom getters/iterators
+ * and Buffer.slice views. Validation and all later awaits use this copy. */
+function snapshotGeneratedPngBytes(value: Uint8Array): Uint8Array {
+  if (!ArrayBuffer.isView(value) || !(value instanceof Uint8Array)) throw new Error('Invalid generated PNG bytes')
+  const prototype = Object.getPrototypeOf(Uint8Array.prototype)
+  const view = new Uint8Array(Reflect.get(prototype, 'buffer', value),
+    Reflect.get(prototype, 'byteOffset', value), Reflect.get(prototype, 'byteLength', value))
+  if (view.byteLength < 57 || view.byteLength > GENERATED_PNG_VALIDATION_LIMITS.maxBytes) throw new Error('Invalid generated PNG byte size')
+  return new Uint8Array(view)
+}
+
 function checkedPreview(result: Awaited<ReturnType<typeof resizeImage>>): AgentToolResult<unknown>['content'][number] | undefined {
   if (!result || (result.mimeType !== 'image/png' && result.mimeType !== 'image/jpeg')
     || typeof result.data !== 'string' || result.data.length > MAX_TOOL_IMAGE_BASE64_LENGTH) return undefined
@@ -341,6 +351,7 @@ export function createImageGenerationTool(options: ImageGenerationToolOptions) {
   const injectedGenerate = options.generate
   const timeoutMs = checkedImageTimeout(options.timeoutMs)
   const transportOptions: CodexImageTransportOptions = { getAuth: options.getAuth, fetch: options.fetch, timeoutMs }
+  const generate = injectedGenerate ?? createCodexImageGenerator(transportOptions)
   const resize = options.resize ?? resizeImage
   const readReferences = options.readReferences ?? readImageReferences
   const files = options.files ?? localFiles
@@ -384,8 +395,6 @@ export function createImageGenerationTool(options: ImageGenerationToolOptions) {
       inFlight = true
       const scope = createImageAbortScope(parentSignal, timeoutMs)
       const signal = scope.signal
-      const builtin = injectedGenerate ? undefined : createCodexImageGeneratorWithValidation(transportOptions)
-      const generate = injectedGenerate ?? builtin!.generate
       const progress = (text: string) => {
         try { onUpdate?.({ content: [{ type: 'text', text }], details: undefined }) }
         catch { /* progress cannot change whether a file was saved */ }
@@ -423,14 +432,17 @@ export function createImageGenerationTool(options: ImageGenerationToolOptions) {
         let dimensions: { width: number; height: number }
         try {
           checkImageAbort(signal)
-          if (builtin) image = builtin.validate(image)
-          else {
+          // Until publication, built-in output stays within this execution and
+          // local FS writes. Progress is text-only; result projection exposes
+          // only a later bounded preview. Injected output needs a private copy.
+          if (injectedGenerate) {
             const bytes = snapshotGeneratedPngBytes(image.bytes)
             image = { bytes, ...inspectGeneratedPng(bytes) }
           }
           dimensions = { width: image.width, height: image.height }
         }
         catch { throw new Error('图片服务返回的原图不可用或请求已中止，未保存文件；可能已消耗图片额度，请勿自动再次生成。') }
+        const byteLength = image.bytes.byteLength
         progress('正在保存原图…')
         let saved: ImageSaveResult
         try {
@@ -453,6 +465,7 @@ export function createImageGenerationTool(options: ImageGenerationToolOptions) {
           const previewScope = createImageAbortScope(signal, previewTimeoutMs)
           try {
             checkImageAbort(previewScope.signal)
+            // The decoder first receives original bytes after publication.
             const operation = tryResizePreview(resize, image.bytes)
             if (operation) {
               const resized = await waitForImageOperation(operation, previewScope.signal)
@@ -465,7 +478,7 @@ export function createImageGenerationTool(options: ImageGenerationToolOptions) {
         if (signal.aborted) preview = undefined
         const details: GeneratedImageDetails = {
           version: 2, provider: 'openai-codex', requestedModel, resolvedModel: null,
-          path: destination.displayPath, mimeType: 'image/png', byteLength: image.bytes.byteLength,
+          path: destination.displayPath, mimeType: 'image/png', byteLength,
           ...dimensions, previewAvailable: !!preview,
           operation: referencePaths.length ? 'edit' : 'generate', requestedSize, requestedQuality,
           referenceCount: referencePaths.length
@@ -480,7 +493,7 @@ export function createImageGenerationTool(options: ImageGenerationToolOptions) {
         }]
         if (preview) content.push(preview)
         return { content, details: { imageGeneration: details } }
-      } finally { builtin?.dispose(); scope.dispose(); inFlight = false }
+      } finally { scope.dispose(); inFlight = false }
     }
   })
 }

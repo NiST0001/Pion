@@ -215,7 +215,6 @@ const api: PionApi = {
   setAutoCompaction: (enabled) => ipcRenderer.invoke(IPC.AgentSetAutoCompaction, enabled),
   setAutoRetry: (enabled) => ipcRenderer.invoke(IPC.AgentSetAutoRetry, enabled),
   compactNow: (customInstructions) => ipcRenderer.invoke(IPC.AgentCompact, customInstructions),
-  exportSessionHtml: () => ipcRenderer.invoke(IPC.AgentExportHtml),
   renameSession: (name, sessionPath) => ipcRenderer.invoke(IPC.AgentRenameSession, name, sessionPath),
   setSteeringMode: (mode) => ipcRenderer.invoke(IPC.AgentSetSteeringMode, mode),
   setFollowUpMode: (mode) => ipcRenderer.invoke(IPC.AgentSetFollowUpMode, mode),

@@ -30,7 +30,7 @@ export function selectWindowEffectBackend(env: WindowEffectEnvironment): WindowE
 
 interface Store {
   readonly windowEffectsEnabled: boolean
-  setWindowEffectsEnabled(enabled: boolean): Promise<void>
+  setWindowEffectsEnabled(enabled: boolean, assertCurrent?: () => void): Promise<void>
 }
 interface WindowRecord { win: BrowserWindow; alphaCreated: boolean; state: WindowEffectsState }
 type BlurHint = (win: BrowserWindow, enabled: boolean) => Promise<void>
@@ -70,7 +70,7 @@ export class WindowEffectsService {
         restartRequired: false, backend: this.backend, blur: 'none', message: '', revision: 0 } }
     const owner = win.webContents.id
     this.windows.set(owner, record)
-    win.once('closed', () => this.windows.delete(owner))
+    win.once('closed', () => { if (this.windows.get(owner) === record) this.windows.delete(owner) })
     // Apply after the native surface exists; the renderer getter below also
     // handles a reload that missed this one-time startup event.
     win.once('ready-to-show', () => { void this.refresh() })
@@ -78,15 +78,22 @@ export class WindowEffectsService {
 
   get(owner: number): WindowEffectsState { return { ...this.owned(owner).state } }
 
-  setEnabled(owner: number, enabled: boolean): Promise<WindowEffectsState> {
-    this.owned(owner)
+  setEnabled(owner: number, enabled: boolean, assertCurrent?: () => void): Promise<WindowEffectsState> {
+    const record = this.owned(owner)
+    const assertOwned = (): void => {
+      assertCurrent?.()
+      if (this.owned(owner) !== record) throw new Error('外观设置所属窗口已变更')
+    }
+    assertOwned()
     if (typeof enabled !== 'boolean') return Promise.reject(new Error('无效的半透明设置'))
     if (enabled && this.backend === 'unsupported') return Promise.reject(new Error('当前系统不支持原生窗口材质'))
     const result = this.queue.then(async () => {
-      this.owned(owner)
-      await this.store.setWindowEffectsEnabled(enabled)
+      assertOwned()
+      await this.store.setWindowEffectsEnabled(enabled, assertOwned)
+      assertOwned()
       await this.applyAll()
-      return this.get(owner)
+      assertOwned()
+      return { ...record.state }
     })
     this.queue = result.then(() => undefined, () => undefined)
     return result
@@ -161,7 +168,7 @@ export class WindowEffectsService {
       state.active = false; state.blur = 'none'
       state.message = '原生窗口效果未能启用，已回退不透明背景。'
     }
-    if (win.isDestroyed() || win.webContents.isDestroyed()) return
+    if (win.isDestroyed() || win.webContents.isDestroyed() || this.windows.get(win.webContents.id) !== record) return
     record.state = state
     win.webContents.send(IPC_EVENTS.WindowEffects, state)
   }

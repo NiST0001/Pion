@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { FormEvent, ReactElement, ReactNode } from 'react'
 import { Loader2, PencilLine } from 'lucide-react'
-import { containModalTab, isTopmostModalDialog } from '../../utils/dialogFocus'
+import { useModalLifecycle } from '../../hooks/useModalLifecycle'
 
 export function TextInputDialog({
   open,
@@ -36,53 +36,22 @@ export function TextInputDialog({
   const [value, setValue] = useState(initialValue)
   const dialogRef = useRef<HTMLFormElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  const busyRef = useRef(busy)
-  const composingRef = useRef(false)
-  const onCancelRef = useRef(onCancel)
   const titleId = useId()
   const messageId = useId()
   const inputId = useId()
 
-  useEffect(() => {
-    busyRef.current = busy
-    onCancelRef.current = onCancel
-  }, [busy, onCancel])
-
-  useEffect(() => {
-    if (!open) return
-    composingRef.current = false
-    setValue(initialValue)
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const frame = requestAnimationFrame(() => {
-      inputRef.current?.focus()
-      inputRef.current?.select()
-    })
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      const dialog = dialogRef.current
-      if (!dialog || !isTopmostModalDialog(dialog)) return
-      if (event.key === 'Tab') {
-        containModalTab(event, dialog)
-        return
-      }
-      if (event.key !== 'Escape' || busyRef.current || event.isComposing || event.keyCode === 229 || composingRef.current) return
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      onCancelRef.current()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => {
-      cancelAnimationFrame(frame)
-      window.removeEventListener('keydown', handleKeyDown)
-      previousFocus?.focus()
-    }
-  }, [initialValue, open])
+  const { close, isComposing, dialogEvents } = useModalLifecycle({
+    open, dialogRef, initialFocusRef: inputRef, busy, onClose: onCancel,
+    selectInitialText: true, focusKey: initialValue
+  })
+  useEffect(() => { if (open) setValue(initialValue) }, [initialValue, open])
 
   if (!open) return null
 
   const trimmed = value.replace(/[\r\n]+/g, ' ').trim()
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault()
-    if (!trimmed || busy || composingRef.current) return
+    if (!trimmed || busy || isComposing()) return
     onConfirm(trimmed)
   }
 
@@ -90,7 +59,7 @@ export function TextInputDialog({
     <div
       className="confirm-dialog-backdrop text-input-dialog-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) onCancel()
+        if (event.target === event.currentTarget) close()
       }}
     >
       <form
@@ -103,11 +72,7 @@ export function TextInputDialog({
         aria-labelledby={titleId}
         aria-describedby={message ? messageId : undefined}
         onSubmit={submit}
-        onCompositionStartCapture={() => { composingRef.current = true }}
-        onCompositionEndCapture={() => { composingRef.current = false }}
-        onKeyDownCapture={(event) => {
-          if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229 || composingRef.current)) event.preventDefault()
-        }}
+        {...dialogEvents}
       >
         <div className="confirm-dialog-icon" aria-hidden="true"><PencilLine size={17} /></div>
         <div className="confirm-dialog-copy">
@@ -137,7 +102,7 @@ export function TextInputDialog({
             type="button"
             className="confirm-dialog-cancel"
             disabled={busy}
-            onClick={onCancel}
+            onClick={close}
           >
             {cancelLabel}
           </button>

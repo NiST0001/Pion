@@ -1,5 +1,5 @@
 import { constants, type BigIntStats } from 'node:fs'
-import { lstat, link, mkdtemp, open, realpath, rmdir, unlink } from 'node:fs/promises'
+import { lstat, link, mkdtemp, open, readFile, realpath, rmdir, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -24,53 +24,44 @@ function sameSnapshot(a: BigIntStats, b: BigIntStats): boolean {
     && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs
 }
 
-/** Never follows a final symlink, reads a device, or allocates from an unchecked size. */
-async function readBoundedFile(path: string, maxBytes: number, assertOwned: AssertOwned, prepareExport = false) {
+/** Validate only our completed private scratch; publication needs no body read. */
+async function prepareExportFile(path: string, assertOwned: AssertOwned): Promise<BigIntStats> {
   assertOwned()
-  if (!Number.isSafeInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0 || constants.O_NOFOLLOW > 0x7fffffff
-    || !Number.isSafeInteger(constants.O_NONBLOCK) || constants.O_NONBLOCK <= 0 || constants.O_NONBLOCK > 0x7fffffff) {
+  const windows = process.platform === 'win32'
+  if (!windows && (!Number.isSafeInteger(constants.O_NOFOLLOW) || constants.O_NOFOLLOW <= 0 || constants.O_NOFOLLOW > 0x7fffffff
+    || !Number.isSafeInteger(constants.O_NONBLOCK) || constants.O_NONBLOCK <= 0 || constants.O_NONBLOCK > 0x7fffffff)) {
     throw new Error('当前系统不支持安全读取导出文件')
   }
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const named = await lstat(path, { bigint: true })
+  assertOwned()
+  if (!named.isFile() || named.size <= 0n || named.size > BigInt(SESSION_COMMAND_EXPORT_MAX_BYTES)) {
+    throw new Error('导出暂存文件为空、非普通文件或超过读取上限')
+  }
+  // Windows FlushFileBuffers needs write access. No body is read or written here.
+  const handle = await open(path, windows ? constants.O_RDWR : constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     assertOwned()
     const before = await handle.stat({ bigint: true })
     assertOwned()
-    if (!before.isFile() || before.size <= 0n || before.size > BigInt(maxBytes)) {
-      throw new Error('文件为空、不是普通文件或超过读取上限')
-    }
-    const named = await lstat(path, { bigint: true })
-    assertOwned()
-    if (!named.isFile() || !sameSnapshot(before, named)) throw new Error('读取文件身份已变化')
-    const data = Buffer.alloc(Number(before.size) + 1)
-    let position = 0
-    while (position < data.length) {
-      const result = await handle.read(data, position, Math.min(64 * 1024, data.length - position), position)
-      assertOwned()
-      if (result.bytesRead === 0) break
-      position += result.bytesRead
-    }
-    if (position !== Number(before.size)) throw new Error('读取期间文件大小已变化')
-    let after = await handle.stat({ bigint: true })
-    assertOwned()
-    if (!sameSnapshot(before, after)) throw new Error('读取期间文件已变化')
-    if (prepareExport) {
-      // The SDK writes HTML with its normal permissions; make our export private
-      // through the captured descriptor, never chmod a potentially replaced path.
+    if (!before.isFile() || !sameSnapshot(before, named)) throw new Error('读取文件身份已变化')
+    // Unix permissions apply through the captured descriptor; Windows retains
+    // the independent scratch directory's inherited access controls.
+    if (!windows) {
       await handle.chmod(0o600)
       assertOwned()
-      await handle.sync()
-      assertOwned()
-      after = await handle.stat({ bigint: true })
-      assertOwned()
-      // chmod legitimately changes ctime, not the checked bytes/size/mtime.
-      if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino
-        || after.size !== before.size || after.mtimeNs !== before.mtimeNs) throw new Error('导出暂存文件内容已变化')
     }
+    await handle.sync()
+    assertOwned()
+    const after = await handle.stat({ bigint: true })
+    assertOwned()
+    // Unix chmod legitimately changes ctime, not the checked bytes/size/mtime.
+    if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino
+      || after.size !== before.size || after.mtimeNs !== before.mtimeNs
+      || (windows && after.ctimeNs !== before.ctimeNs)) throw new Error('导出暂存文件内容已变化')
     const current = await lstat(path, { bigint: true })
     assertOwned()
     if (!current.isFile() || !sameSnapshot(after, current)) throw new Error('读取文件身份已变化')
-    return { data: data.subarray(0, position), snapshot: after }
+    return after
   } finally {
     try { await handle.close() } catch {
       throw new SessionCommandFileStateUnknownError('无法确认导出读取句柄已关闭，请重启 Pion 后再试')
@@ -79,10 +70,11 @@ async function readBoundedFile(path: string, maxBytes: number, assertOwned: Asse
 }
 
 export async function readPiChangelog(assertOwned: AssertOwned): Promise<PiChangelog> {
-  // Use the real unpacked package: Electron's virtual asar lstat identity need
-  // not match the descriptor. No discovery, user configuration or network.
-  const { data } = await readBoundedFile(join(piPackageDir(), 'CHANGELOG.md'), PI_CHANGELOG_MAX_BYTES, assertOwned)
+  // Fixed trusted installation file; only the displayed text needs a byte limit.
   assertOwned()
+  const data = await readFile(join(piPackageDir(), 'CHANGELOG.md'))
+  assertOwned()
+  if (!data.length || data.length > PI_CHANGELOG_MAX_BYTES) throw new Error('Pi 更新日志为空或超过读取上限')
   const markdown = new TextDecoder('utf-8', { fatal: true }).decode(data)
   return { version: VERSION, markdown }
 }
@@ -182,6 +174,7 @@ export async function publishSessionCommandExport(
   let published = false
   try {
     assertOwned()
+    const windows = process.platform === 'win32'
     const parent = dirname(destination)
     const canonicalParent = await realpath(parent)
     assertOwned()
@@ -209,7 +202,7 @@ export async function publishSessionCommandExport(
     await checkDirectory()
     const scratch = await lstat(scratchDir, { bigint: true })
     assertOwned()
-    if (!scratch.isDirectory() || (scratch.mode & 0o077n) !== 0n || scratch.dev !== directory.dev) {
+    if (!scratch.isDirectory() || (!windows && (scratch.mode & 0o077n) !== 0n) || scratch.dev !== directory.dev) {
       throw new Error('导出暂存目录不是同设备私有目录')
     }
     const privateDirectory = scratchDir
@@ -220,14 +213,14 @@ export async function publishSessionCommandExport(
       const current = await lstat(privateDirectory, { bigint: true })
       assertOwned()
       if (canonical !== privateDirectory || !current.isDirectory() || current.dev !== scratch.dev
-        || current.ino !== scratch.ino || (current.mode & 0o077n) !== 0n) throw new Error('导出暂存目录身份已变化')
+        || current.ino !== scratch.ino || (!windows && (current.mode & 0o077n) !== 0n)) throw new Error('导出暂存目录身份已变化')
     }
     await checkScratch()
     const scratchPath = join(scratchDir, basename(destination).toLowerCase().endsWith('.jsonl') ? 'session.jsonl' : 'session.html')
     await produce(scratchPath)
     assertOwned()
     await checkScratch()
-    const { snapshot } = await readBoundedFile(scratchPath, SESSION_COMMAND_EXPORT_MAX_BYTES, assertOwned, true)
+    const snapshot = await prepareExportFile(scratchPath, assertOwned)
     assertOwned()
     await checkScratch()
     const named = await lstat(scratchPath, { bigint: true })

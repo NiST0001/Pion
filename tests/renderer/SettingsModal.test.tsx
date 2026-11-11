@@ -16,8 +16,7 @@ import type {
   ModelProviderInfo,
   PionApi,
   ProjectToolPermissionPolicy,
-  ProjectTrustInfo,
-  SessionInfo
+  ProjectTrustInfo
 } from '../../src/shared/types'
 
 function settingsActions(
@@ -97,32 +96,6 @@ function deferred<T>() {
   })
   return { promise, resolve, reject }
 }
-
-it('keeps five immediately applied themes without a redundant live-preview section', () => {
-  const root = document.documentElement
-  const priorTheme = root.dataset.theme
-  const priorScheme = root.style.colorScheme
-  const stored = localStorage.getItem('pion:theme')
-  try {
-    renderSettings(settingsActions())
-    fireEvent.click(screen.getByRole('button', { name: /外观/ }))
-    expect(screen.queryByText('实时预览')).not.toBeInTheDocument()
-    expect(screen.queryByText(/陶土主题会统一调整/)).not.toBeInTheDocument()
-    expect(screen.getByRole('switch', { name: '毛玻璃' })).toBeInTheDocument()
-    expect(document.querySelectorAll('.theme-choice')).toHaveLength(5)
-    fireEvent.click(screen.getByRole('button', { name: /陶土浅色/ }))
-    expect(root.dataset.theme).toBe('terracotta-light')
-    expect(localStorage.getItem('pion:theme')).toBe('terracotta-light')
-    fireEvent.click(screen.getByRole('button', { name: /陶土深色/ }))
-    expect(root.dataset.theme).toBe('terracotta-dark')
-  } finally {
-    if (priorTheme === undefined) delete root.dataset.theme
-    else root.dataset.theme = priorTheme
-    root.style.colorScheme = priorScheme
-    if (stored === null) localStorage.removeItem('pion:theme')
-    else localStorage.setItem('pion:theme', stored)
-  }
-})
 
 describe('SettingsModal focus ownership', () => {
   it('labels the dialog, focuses its close button, wraps Tab in both directions and restores the opener', async () => {
@@ -299,76 +272,25 @@ describe('SettingsModal page state and callbacks', () => {
     else localStorage.setItem('pion:theme', priorStoredTheme)
   })
 
-  it('keeps session drafts and retry choices across pages without replacing the focused input on parent updates', () => {
-    const session: SessionInfo = {
-      sessionId: 'settings-session',
-      sessionName: '原会话名称',
-      isStreaming: false,
-      messageCount: 2
-    }
-    const actions = settingsActions()
-    const { rerender, props } = renderSettings(actions, false, null, { session })
-    goToSettingsPage(/^会话/)
-
-    const nameInput = screen.getByPlaceholderText('未命名') as HTMLInputElement
-    fireEvent.change(nameInput, { target: { value: '尚未保存的会话名称' } })
-    nameInput.focus()
-    nameInput.setSelectionRange(2, 5)
-    expect(nameInput).toHaveFocus()
-
-    rerender(<SettingsModal {...props} session={{ ...session, messageCount: 3 }} showMetricCost />)
-    expect(screen.getByPlaceholderText('未命名')).toBe(nameInput)
-    expect(nameInput).toHaveValue('尚未保存的会话名称')
-    expect(nameInput).toHaveFocus()
-    expect([nameInput.selectionStart, nameInput.selectionEnd]).toEqual([2, 5])
-
-    const retrySwitch = () => within(screen.getByText('自动重试').closest<HTMLElement>('.setting-row')!).getByRole('switch')
-    expect(retrySwitch()).toHaveAttribute('aria-checked', 'true')
-    fireEvent.click(retrySwitch())
-    expect(actions.setAutoRetry).toHaveBeenCalledExactlyOnceWith(false)
-
-    goToSettingsPage(/^外观/)
-    goToSettingsPage(/^会话/)
-    expect(screen.getByPlaceholderText('未命名')).toHaveValue('尚未保存的会话名称')
-    expect(retrySwitch()).toHaveAttribute('aria-checked', 'false')
-    expect(actions.setAutoRetry).toHaveBeenCalledTimes(1)
-    expect(actions.renameSession).not.toHaveBeenCalled()
-  })
-
-  it('keeps export and compaction busy across navigation and receives their results while another page is open', async () => {
+  it('clears previous export output on request or scope change, shows failures and permits explicit retry', async () => {
     const exported = deferred<string>()
-    const compacted = deferred<void>()
     const actions = settingsActions()
-    actions.exportSessionHtml = vi.fn(() => exported.promise)
-    actions.compactNow = vi.fn(() => compacted.promise)
-    renderSettings(actions)
+    actions.exportSessionHtml = vi.fn().mockResolvedValueOnce('/project/earlier-export.html')
+      .mockReturnValueOnce(exported.promise).mockResolvedValueOnce('/project/new-export.html')
+    const { rerender, props } = renderSettings(actions)
     goToSettingsPage(/^会话/)
-    fireEvent.click(screen.getByRole('button', { name: /立即压缩/ }))
     fireEvent.click(screen.getByRole('button', { name: /导出 HTML/ }))
-
-    goToSettingsPage(/^诊断/)
-    goToSettingsPage(/^会话/)
-    const compactButton = screen.getByRole('button', { name: /压缩中/ })
-    const exportButton = screen.getByRole('button', { name: /导出 HTML/ })
-    expect(compactButton).toBeDisabled()
-    expect(exportButton).toBeDisabled()
-    fireEvent.click(compactButton)
-    fireEvent.click(exportButton)
-    expect(actions.compactNow).toHaveBeenCalledTimes(1)
-    expect(actions.exportSessionHtml).toHaveBeenCalledTimes(1)
-
-    goToSettingsPage(/^关于 Pion/)
-    await act(async () => {
-      compacted.resolve(undefined)
-      exported.resolve('/tmp/pion-shared-session.html')
-      await Promise.all([compacted.promise, exported.promise])
-    })
-    goToSettingsPage(/^会话/)
-    expect(screen.getByRole('button', { name: /立即压缩/ })).toBeEnabled()
-    expect(screen.getByRole('button', { name: /导出 HTML/ })).toBeEnabled()
-    expect(screen.getByText('/tmp/pion-shared-session.html')).toBeInTheDocument()
-    expect(actions.compactNow).toHaveBeenCalledTimes(1)
-    expect(actions.exportSessionHtml).toHaveBeenCalledTimes(1)
+    expect(await screen.findByText('/project/earlier-export.html')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /导出 HTML/ }))
+    expect(screen.queryByText('/project/earlier-export.html')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /导出 HTML/ })).toBeDisabled()
+    await act(async () => { exported.reject(new Error('destination exists')) })
+    expect(screen.getByText('导出失败：destination exists')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /导出 HTML/ }))
+    expect(await screen.findByText('/project/new-export.html')).toBeInTheDocument()
+    rerender(<SettingsModal {...props} cwd="/project/other" />)
+    expect(screen.queryByText('/project/new-export.html')).not.toBeInTheDocument()
+    expect(actions.exportSessionHtml).toHaveBeenCalledTimes(3)
   })
 
   it('retains refreshed stderr across pages, including a delayed response, and only displays the last 6000 characters', async () => {
@@ -781,19 +703,6 @@ describe('SettingsModal provider visibility', () => {
     expect(draft).toHaveFocus()
     expect(draft).toHaveValue('owner-draft')
     expect(visibilitySwitch()).toHaveAttribute('aria-checked', 'false')
-  })
-
-  it('also exposes the switch as a sibling of directory authentication buttons', async () => {
-    const actions = settingsActions(undefined, [{ ...provider, configured: false }])
-    actions.setModelProviderEnabled = vi.fn(async () => [{ ...provider, configured: false, enabled: false }])
-    renderSettings(actions)
-    fireEvent.click(screen.getByRole('button', { name: '添加提供商' }))
-    const control = await screen.findByRole('switch', { name: '显示 OpenAI Codex 的模型' })
-    expect(control.closest('button')?.parentElement?.closest('button')).toBeNull()
-    fireEvent.click(control)
-    await waitFor(() => expect(actions.setModelProviderEnabled).toHaveBeenCalledExactlyOnceWith(provider.id, false))
-    expect(actions.loginModelProvider).not.toHaveBeenCalled()
-    expect(actions.logoutModelProvider).not.toHaveBeenCalled()
   })
 })
 

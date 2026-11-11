@@ -60,33 +60,42 @@ const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBL
 const CREATE_FLAGS = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\s\S])/
 const SNAPSHOT_KEYS = ['version', 'uid', 'bootId', 'machineHash', 'homeHash', 'fsType', 'fsId', 'homeIdentity', 'directoryIdentity', 'markerIdentity'] as const
+const HASH = /^[0-9a-f]{64}$(?![\s\S])/
+const DECIMAL = '(?:0|[1-9][0-9]{0,31})'
+const DIRECTORY_IDENTITY = new RegExp(`^${DECIMAL}:${DECIMAL}$(?![\\s\\S])`)
+const MARKER_IDENTITY = new RegExp(`^${DECIMAL}:${DECIMAL}:${DECIMAL}:${DECIMAL}$(?![\\s\\S])`)
 function refuse(): never { throw new Error(SAFE_ERROR) }
 function digest(value: string): string { return createHash('sha256').update(value).digest('hex') }
 function identity(s: RecoveryStat): string { return `${s.ino}:${s.birthtimeNs}` }
 function markerIdentity(s: RecoveryStat): string { return `${identity(s)}:${s.mtimeNs}:${s.size}` }
 function same(a: RecoveryStat, b: RecoveryStat): boolean { return a.dev === b.dev && identity(a) === identity(b) }
 function absent(error: unknown): boolean { return !!error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT' }
+/** Ordinary JSON fields; the same schema guards persisted and supplied witnesses. */
 function exactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return false
-  const descriptors = Object.getOwnPropertyDescriptors(value)
-  return Reflect.ownKeys(descriptors).length === keys.length && keys.every((k) => Object.hasOwn(descriptors, k) && Object.hasOwn(descriptors[k], 'value'))
+  return !!value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
 }
 function snapshotEqual(a: RecoverySnapshot, b: RecoverySnapshot): boolean {
-  return exactKeys(a, SNAPSHOT_KEYS) && exactKeys(b, SNAPSHOT_KEYS) && SNAPSHOT_KEYS.every((key) => a[key] === b[key])
+  return SNAPSHOT_KEYS.every((key) => a[key] === b[key])
+}
+function snapshotValid(value: unknown): value is RecoverySnapshot {
+  return exactKeys(value, SNAPSHOT_KEYS) && value.version === 1 &&
+    typeof value.uid === 'number' && Number.isSafeInteger(value.uid) && value.uid >= 0 &&
+    typeof value.bootId === 'string' && UUID.test(value.bootId) &&
+    typeof value.machineHash === 'string' && HASH.test(value.machineHash) &&
+    typeof value.homeHash === 'string' && HASH.test(value.homeHash) &&
+    typeof value.fsType === 'string' && ['ef53', '58465342', '9123683e'].includes(value.fsType) &&
+    typeof value.fsId === 'string' && /^[0-9a-f]{1,32}$(?![\s\S])/.test(value.fsId) &&
+    typeof value.homeIdentity === 'string' && DIRECTORY_IDENTITY.test(value.homeIdentity) &&
+    typeof value.directoryIdentity === 'string' && DIRECTORY_IDENTITY.test(value.directoryIdentity) &&
+    typeof value.markerIdentity === 'string' && MARKER_IDENTITY.test(value.markerIdentity)
 }
 function witnessValid(value: unknown): value is Witness {
-  if (!exactKeys(value, ['version', 'kind', 'id', 'snapshot']) || value.version !== 1 || value.kind !== 'boot-bound-maintenance' || typeof value.id !== 'string' || !UUID.test(value.id)) return false
-  const s = value.snapshot
-  return exactKeys(s, SNAPSHOT_KEYS) && s.version === 1 && Number.isSafeInteger(s.uid) && Number(s.uid) >= 0 &&
-    typeof s.bootId === 'string' && UUID.test(s.bootId) &&
-    ['machineHash', 'homeHash'].every((k) => typeof s[k] === 'string' && /^[a-f0-9]{64}$/.test(s[k] as string)) &&
-    typeof s.fsType === 'string' && /^(ef53|58465342|9123683e)$/.test(s.fsType) &&
-    typeof s.fsId === 'string' && /^[a-f0-9]+$/.test(s.fsId) &&
-    ['homeIdentity', 'directoryIdentity'].every((k) => typeof s[k] === 'string' && /^\d+:\d+$/.test(s[k] as string)) &&
-    typeof s.markerIdentity === 'string' && /^\d+:\d+:\d+:\d+$/.test(s.markerIdentity)
+  return exactKeys(value, ['version', 'kind', 'id', 'snapshot']) && value.version === 1 &&
+    value.kind === 'boot-bound-maintenance' && typeof value.id === 'string' && UUID.test(value.id) && snapshotValid(value.snapshot)
 }
-function witnessEqual(a: unknown, b: Witness): boolean {
-  return witnessValid(a) && a.id === b.id && snapshotEqual(a.snapshot, b.snapshot)
+function witnessEqual(a: Witness, b: Witness): boolean {
+  return a.id === b.id && snapshotEqual(a.snapshot, b.snapshot)
 }
 
 /** Wait for actual child close (which follows exit AND stdio closure). Never
@@ -222,7 +231,7 @@ export function createRecoveryIO(files: Readonly<{ prepared: string; consumed: s
     const value: unknown = JSON.parse((await bounded(c, c.path(name), 8192, true)).text)
     if (!exactKeys(value, ['version', 'kind', 'witness', 'retiredInBoot']) || value.version !== 1 ||
         value.kind !== 'boot-bound-maintenance-retired' || value.retiredInBoot !== bootId ||
-        !witnessEqual(value.witness, witness)) refuse()
+        !witnessValid(value.witness) || !witnessEqual(value.witness, witness)) refuse()
   }
   async function writeWitness(c: Context, name: string, witness: Witness | Completion): Promise<void> {
     const bytes = Buffer.from(JSON.stringify(witness) + '\n')
@@ -251,8 +260,10 @@ export function createRecoveryIO(files: Readonly<{ prepared: string; consumed: s
     if (!match || /^0+$/.test(match[2]) || result.length > 256) refuse()
     const marker = await bounded(c, c.path(MARKER), 64, true, links)
     if (marker.text !== PAYLOAD) refuse()
-    return { version: 1, uid: c.uid, bootId: boot.trim(), machineHash: digest(machine.trim()), homeHash: digest(c.home), fsType: match[1], fsId: match[2],
+    const captured = { version: 1, uid: c.uid, bootId: boot.trim(), machineHash: digest(machine.trim()), homeHash: digest(c.home), fsType: match[1], fsId: match[2],
       homeIdentity: identity(c.homeStat), directoryIdentity: identity(c.directoryStat), markerIdentity: markerIdentity(marker.stat) }
+    if (!snapshotValid(captured)) refuse()
+    return captured
   }
   async function check(c: Context, expected: RecoverySnapshot, links = 1n): Promise<void> {
     if (!snapshotEqual(await snapshot(c, links), expected)) refuse()
@@ -282,7 +293,7 @@ export function createRecoveryIO(files: Readonly<{ prepared: string; consumed: s
       })
     },
     retire: async (input, inputCurrent) => {
-      if (!witnessValid(input) || !witnessValid({ version: 1, kind: 'boot-bound-maintenance', id: input.id, snapshot: inputCurrent })) refuse()
+      if (!witnessValid(input) || !snapshotValid(inputCurrent)) refuse()
       const witness: Witness = { ...input, snapshot: { ...input.snapshot } }
       const current = { ...inputCurrent }
       if (witness.snapshot.bootId === current.bootId || SNAPSHOT_KEYS.some((key) => key !== 'bootId' && witness.snapshot[key] !== current[key])) refuse()

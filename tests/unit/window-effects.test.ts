@@ -4,15 +4,19 @@ import { selectWindowEffectBackend, WindowEffectsService } from '../../src/main/
 import type { WindowEffectEnvironment } from '../../src/main/window-effects'
 
 function setup(env: WindowEffectEnvironment, enabled = false, contrast = () => false) {
-  const store = { windowEffectsEnabled: enabled, setWindowEffectsEnabled: vi.fn(async (value: boolean) => { store.windowEffectsEnabled = value }) }
+  const store = { windowEffectsEnabled: enabled, setWindowEffectsEnabled: vi.fn(async (value: boolean, assertCurrent?: () => void) => {
+    assertCurrent?.()
+    store.windowEffectsEnabled = value
+  }) }
   const blur = vi.fn(async () => undefined)
   const service = new WindowEffectsService(store, env, contrast, blur)
   function window(id = 1) {
-    const mock = { isDestroyed: () => false, once: vi.fn(), webContents: { id, isDestroyed: () => false, send: vi.fn() },
+    const events = new Map<string, () => void>()
+    const mock = { isDestroyed: () => false, once: vi.fn((event: string, listener: () => void) => { events.set(event, listener) }), webContents: { id, isDestroyed: () => false, send: vi.fn() },
       setBackgroundColor: vi.fn(), setBackgroundMaterial: vi.fn(), setVibrancy: vi.fn() }
     const win = mock as unknown as BrowserWindow
     service.bind(win)
-    return { win, mock }
+    return { win, mock, events }
   }
   return { service, store, blur, window }
 }
@@ -38,6 +42,60 @@ it('uses DWM without a transparent native window and restores opaque mode', asyn
   expect(await h.service.setEnabled(1, false)).toMatchObject({ enabled: false, active: false })
   expect(mock.setBackgroundMaterial).toHaveBeenLastCalledWith('none')
   expect(() => h.service.get(99)).toThrow(/主窗口/)
+})
+
+it.each(['ipc', 'replacement', 'closed'] as const)('rejects a retired %s owner at the actual asynchronous settings publication', async kind => {
+  const h = setup({ platform: 'darwin', release: '25.0' })
+  const original = h.window()
+  let publish!: () => void
+  const pendingWrite = new Promise<void>(resolve => { publish = resolve })
+  let current = true
+  const assertCurrent = vi.fn(() => { if (!current) throw new Error('IPC owner retired') })
+  h.store.setWindowEffectsEnabled.mockImplementationOnce(async (value, assertOwned) => {
+    await pendingWrite
+    assertOwned?.()
+    h.store.windowEffectsEnabled = value
+  })
+  const pending = h.service.setEnabled(1, true, assertCurrent)
+  await vi.waitFor(() => expect(h.store.setWindowEffectsEnabled).toHaveBeenCalledOnce())
+  let replacement: ReturnType<typeof h.window> | undefined
+  if (kind === 'ipc') current = false
+  else if (kind === 'replacement') replacement = h.window()
+  else original.events.get('closed')!()
+  publish()
+  await expect(pending).rejects.toThrow(kind === 'ipc' ? 'IPC owner retired' : /主窗口|窗口已变更/)
+  expect(h.store.windowEffectsEnabled).toBe(false)
+  expect(original.mock.setVibrancy).not.toHaveBeenCalled()
+  expect(original.mock.webContents.send).not.toHaveBeenCalled()
+  if (replacement) {
+    // The old native window's eventual close must preserve its replacement.
+    original.events.get('closed')!()
+    expect(h.service.get(1).enabled).toBe(false)
+    await expect(h.service.setEnabled(1, true)).resolves.toMatchObject({ enabled: true, active: true })
+    expect(replacement.mock.setVibrancy).toHaveBeenCalledWith('under-window')
+  }
+})
+
+it('rechecks the captured IPC owner when a queued appearance write finally starts', async () => {
+  const h = setup({ platform: 'darwin', release: '25.0' })
+  h.window()
+  let release!: () => void
+  const firstWrite = new Promise<void>(resolve => { release = resolve })
+  h.store.setWindowEffectsEnabled.mockImplementationOnce(async (value, assertCurrent) => {
+    await firstWrite
+    assertCurrent?.()
+    h.store.windowEffectsEnabled = value
+  })
+  const first = h.service.setEnabled(1, true)
+  let current = true
+  const second = h.service.setEnabled(1, false, () => { if (!current) throw new Error('IPC owner retired') })
+  await vi.waitFor(() => expect(h.store.setWindowEffectsEnabled).toHaveBeenCalledOnce())
+  current = false
+  release()
+  await first
+  await expect(second).rejects.toThrow('IPC owner retired')
+  expect(h.store.setWindowEffectsEnabled).toHaveBeenCalledOnce()
+  expect(h.store.windowEffectsEnabled).toBe(true)
 })
 
 it('uses macOS vibrancy and suppresses it for high contrast without losing preference', async () => {

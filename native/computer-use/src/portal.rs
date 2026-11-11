@@ -61,19 +61,33 @@ struct Revocation {
     emitted: AtomicBool,
     input_cancel: watch::Sender<bool>,
 }
-// A watcher panic/abort is also input revocation, without an unjoined monitor
-// task and without cancelling the parent's correlated close request receiver.
-struct InputCancellationGuard(watch::Sender<bool>);
+// A broken watcher also requests the owned socket's real shutdown. The
+// original RPC, watcher joins and connection drain still run to completion;
+// the parent's correlated close request receiver remains untouched.
+struct InputCancellationGuard {
+    input: watch::Sender<bool>,
+    shutdown: Option<watch::Sender<bool>>,
+}
+impl InputCancellationGuard {
+    fn new(input: watch::Sender<bool>, shutdown: watch::Sender<bool>) -> Self {
+        Self { input, shutdown: Some(shutdown) }
+    }
+    fn revoke(&self) {
+        self.input.send_replace(true);
+        if let Some(shutdown) = &self.shutdown { shutdown.send_replace(true); }
+    }
+}
 impl Drop for InputCancellationGuard {
-    fn drop(&mut self) { self.0.send_replace(true); }
+    fn drop(&mut self) { self.revoke(); }
 }
 impl Revocation {
-    async fn emit(&self) {
+    async fn emit(&self) -> bool {
         self.input_cancel.send_replace(true);
         if !self.emitted.swap(true, Ordering::AcqRel) {
             // Failed transport is never closure proof or a stdout text fallback.
-            let _ = self.output.revoked(self.generation).await;
+            return self.output.revoked(self.generation).await.is_ok();
         }
+        true
     }
 }
 impl PortalSession {
@@ -93,9 +107,9 @@ impl PortalSession {
         let (input_cancel, _) = watch::channel(false);
         let notice = Arc::new(Revocation { generation, output, emitted: AtomicBool::new(false), input_cancel });
         let owner_notice = notice.clone();
-        let input_guard = InputCancellationGuard(notice.input_cancel.clone());
+        let input_guard = InputCancellationGuard::new(notice.input_cancel.clone(), shutdown.clone());
         let owner_task = tokio::spawn(async move {
-            let _input_guard = input_guard;
+            let input_guard = input_guard;
             while let Some(Ok(message)) = changes.next().await {
                 if !trusted_owner_change(&message) { continue; }
                 let Ok((name, old, new)) = message.body().deserialize::<(String, String, String)>() else { break; };
@@ -103,6 +117,7 @@ impl PortalSession {
             }
             trace(Stage::PortalOwnerRevoked);
             revoked_watch.store(true, Ordering::Release);
+            input_guard.revoke();
             owner_notice.emit().await;
         });
         Ok(Self {
@@ -122,7 +137,7 @@ impl PortalSession {
     /// Observation must stop also on a broken watcher; this does not prove closure.
     pub fn is_closed(&self) -> bool {
         self.revoked.load(Ordering::Acquire) || self.owner_task.is_finished()
-            || self.closed.load(Ordering::Acquire)
+            || self.closed.load(Ordering::Acquire) || *self.notice.input_cancel.borrow()
             || self.closed_task.as_ref().is_some_and(|t| t.is_finished())
     }
     pub fn deliverable(&self, generation: u64, cancelled: bool) -> bool {
@@ -230,7 +245,10 @@ impl PortalSession {
         let creating = method == "CreateSession";
         let mut cancel_seen = *cancel.borrow();
         let mut expired = false;
-        let mut poll_closed = tokio::time::interval(Duration::from_millis(50));
+        // Both watchers signal this watch, including their drop/panic path.
+        // Keep bus owner RPCs at dispatch/response/delivery fences, not on a timer.
+        let mut revocation = self.input_cancellation();
+        let mut revocation_seen = false;
         let deadline = tokio::time::sleep(response_deadline(method));
         tokio::pin!(deadline);
         loop {
@@ -244,7 +262,7 @@ impl PortalSession {
                     if cancel_seen && !creating { return RequestEvent::Close; }
                     tokio::select! {
                         _ = cancel.changed(), if !cancel_seen => RequestEvent::Cancel,
-                        _ = poll_closed.tick() => RequestEvent::Poll,
+                        _ = wait_for_revocation(&mut revocation), if !revocation_seen => RequestEvent::Revoked,
                         _ = &mut deadline, if !expired => RequestEvent::Deadline,
                     }
                 },
@@ -288,10 +306,17 @@ impl PortalSession {
                     return Ok(results);
                 }
                 RequestEvent::Cancel => { trace(Stage::RequestCancelled); cancel_seen = true; }
-                RequestEvent::Poll => {
-                    // Owner/watcher failure is unknown, never closure evidence.
+                RequestEvent::Revoked => {
+                    revocation_seen = true;
+                    // A broken owner/session watcher remains unknown. Only the
+                    // actual Session.Closed flag permits the known-session path.
                     trace_result(self.owner_fence().await, Stage::RequestOwnerFailed)?;
-                    if self.is_closed() { trace(Stage::SelectionRevoked); cancel_seen = true; }
+                    if !self.closed.load(Ordering::Acquire) {
+                        trace(Stage::SessionWatcherInvalid);
+                        return Err(invalid());
+                    }
+                    trace(Stage::SelectionRevoked);
+                    cancel_seen = true;
                 }
                 RequestEvent::Deadline => {
                     expired = true;
@@ -333,9 +358,9 @@ impl PortalSession {
         let closed = self.closed.clone();
         let owner = self.owner.clone();
         let notice = self.notice.clone();
-        let input_guard = InputCancellationGuard(notice.input_cancel.clone());
+        let input_guard = InputCancellationGuard::new(notice.input_cancel.clone(), self.shutdown.clone());
         self.closed_task = Some(tokio::spawn(async move {
-            let _input_guard = input_guard;
+            let mut input_guard = input_guard;
             while let Some(message) = closed_signals.next().await {
                 match message {
                     Ok(m) if trusted_session_closed(&owner, path.as_str(), &m) => {
@@ -343,19 +368,29 @@ impl PortalSession {
                         // Backend impl.Session.Closed's empty body is not this API.
                         if m.body().deserialize::<Results>().is_err() {
                             trace(Stage::SessionWatcherInvalid);
+                            input_guard.revoke();
                             notice.emit().await;
                             return false;
                         }
                         trace(Stage::SessionClosed);
                         closed.store(true, Ordering::Release);
-                        notice.emit().await;
+                        // A trusted Closed preserves the known-session Close
+                        // path after a successful notice. Broken output still
+                        // requests disconnect through the guard's drop path.
+                        if notice.emit().await { input_guard.shutdown = None; }
                         return true;
                     }
-                    Err(_) => { trace(Stage::SessionWatcherInvalid); notice.emit().await; return false; }
+                    Err(_) => {
+                        trace(Stage::SessionWatcherInvalid);
+                        input_guard.revoke();
+                        notice.emit().await;
+                        return false;
+                    }
                     _ => {}
                 }
             }
             trace(Stage::SessionWatcherEnded);
+            input_guard.revoke();
             notice.emit().await;
             false
         }));
@@ -434,9 +469,15 @@ fn display_geometry(properties: &mut Results) -> zbus::Result<pion_computer_use_
 enum RequestEvent {
     Response(zbus::Result<(u32, Results)>),
     Cancel,
-    Poll,
+    Revoked,
     Deadline,
     Close,
+}
+async fn wait_for_revocation(revocation: &mut watch::Receiver<bool>) {
+    loop {
+        if *revocation.borrow_and_update() { return; }
+        if revocation.changed().await.is_err() { return; }
+    }
 }
 // Production scheduling primitive, also exercised without any bus connection.
 // In particular an already-requested Close must not bypass a queued Response.
@@ -772,18 +813,37 @@ mod tests {
         }
     }
     #[tokio::test(flavor = "current_thread")]
-    async fn abnormal_watcher_exit_revokes_input_without_global_eof_or_another_task() {
+    async fn abnormal_watcher_exit_revokes_and_disconnects_without_global_eof_or_another_task() {
+        for exit in 0..3 {
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            let (_global, global_rx) = tokio::sync::watch::channel(false);
+            let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let guard = super::InputCancellationGuard::new(tx, shutdown);
+            let (ready, started) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _guard = guard;
+                ready.send(()).unwrap();
+                match exit {
+                    0 => futures_util::future::pending::<()>().await,
+                    1 => panic!("isolated watcher panic"),
+                    _ => (),
+                }
+            });
+            started.await.unwrap();
+            if exit == 0 { task.abort(); }
+            assert_eq!(task.await.is_err(), exit != 2);
+            assert!(*rx.borrow());
+            assert!(*shutdown_rx.borrow());
+            assert!(!*global_rx.borrow());
+        }
+        // Trusted Session.Closed keeps the existing known-session Close path.
         let (tx, rx) = tokio::sync::watch::channel(false);
-        let (_global, global_rx) = tokio::sync::watch::channel(false);
-        let guard = super::InputCancellationGuard(tx);
-        let task = tokio::spawn(async move {
-            let _guard = guard;
-            futures_util::future::pending::<()>().await;
-        });
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut guard = super::InputCancellationGuard::new(tx, shutdown);
+        guard.shutdown = None;
+        drop(guard);
         assert!(*rx.borrow());
-        assert!(!*global_rx.borrow());
+        assert!(!*shutdown_rx.borrow());
     }
     #[tokio::test(flavor = "current_thread")]
     async fn revocation_is_once_and_bound_to_actual_generation() {
@@ -805,6 +865,17 @@ mod tests {
         packet.ack.send(Ok(())).unwrap();
         producer.await.unwrap();
         assert!(rx.try_recv().is_err());
+        let (output, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        let notice = super::Revocation {
+            generation: 19, output: crate::Output(output), emitted: std::sync::atomic::AtomicBool::new(false),
+            input_cancel: tokio::sync::watch::channel(false).0,
+        };
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut guard = super::InputCancellationGuard::new(notice.input_cancel.clone(), shutdown);
+        if notice.emit().await { guard.shutdown = None; }
+        drop(guard);
+        assert!(*shutdown_rx.borrow(), "failed notice transport must request disconnect");
     }
     fn close_reply(sender: &str, void: bool) -> zbus::Message {
         let call = zbus::Message::method_call("/org/freedesktop/portal/desktop/session/mock", "Close")
@@ -888,10 +959,32 @@ mod tests {
         assert!(crate::client_connection::join_watcher(&mut broken).await);
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn revocation_watch_wakes_without_polling_and_keeps_response_priority() {
+        for initially_revoked in [false, true] {
+            let (tx, mut rx) = tokio::sync::watch::channel(initially_revoked);
+            let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+            let guard = super::InputCancellationGuard::new(tx, shutdown);
+            let event = super::response_before_interrupt(std::future::pending(), async {
+                super::wait_for_revocation(&mut rx).await;
+                super::RequestEvent::Revoked
+            });
+            tokio::pin!(event);
+            if !initially_revoked {
+                assert!(futures_util::poll!(event.as_mut()).is_pending());
+            }
+            drop(guard); // The same drop path runs on watcher panic/abort.
+            assert!(matches!(event.await, super::RequestEvent::Revoked));
+            assert!(*shutdown_rx.borrow());
+        }
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        drop(tx);
+        super::wait_for_revocation(&mut rx).await;
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn queued_response_precedes_cancel_close_and_deadline_in_production_scheduler() {
         let path = "/org/freedesktop/portal/desktop/request/queued";
         for interrupt in [super::RequestEvent::Cancel, super::RequestEvent::Close,
-            super::RequestEvent::Deadline] {
+            super::RequestEvent::Deadline, super::RequestEvent::Revoked] {
             let message = zbus::Message::signal(path, "org.freedesktop.portal.Request", "Response")
                 .unwrap().sender(":1.42").unwrap().build(&(0u32, super::Results::new())).unwrap();
             let mut responses = futures_util::stream::iter([Ok(message)]);

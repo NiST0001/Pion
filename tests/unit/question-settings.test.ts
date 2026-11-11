@@ -68,11 +68,16 @@ it('does not silently overwrite corrupt settings or accept oversized runtime fil
   const store = new QuestionSettingsStore(() => path)
   await writeFile(path, '{broken')
   await expect(store.get()).rejects.toThrow()
+  await expect(store.set({ timeoutMinutes: null })).rejects.toThrow()
   await expect(readRuntimeQuestionSettings()).rejects.toThrow('未提供答案或授权')
   expect(await readFile(path, 'utf8')).toBe('{broken')
   await writeFile(path, ' '.repeat(4097))
   await expect(store.get()).rejects.toThrow('文件过大')
   await expect(readRuntimeQuestionSettings()).rejects.toThrow('未提供答案或授权')
+  await writeFile(path, JSON.stringify({ timeoutMinutes: 20 }))
+  expect(await store.get()).toEqual({ timeoutMinutes: 20 })
+  await store.set({ timeoutMinutes: null })
+  expect(await store.get()).toEqual({ timeoutMinutes: null })
 })
 
 it('checks the captured owner again before publishing settings', async () => {

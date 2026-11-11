@@ -49,12 +49,60 @@ it('validates limits, deduplicates saves, and retains the draft on failure', asy
   fireEvent.change(minutes, { target: { value: '25' } })
   fireEvent.submit(container.querySelector('form')!)
   fireEvent.submit(container.querySelector('form')!)
-  expect(set).toHaveBeenCalledTimes(1)
+  await waitFor(() => expect(set).toHaveBeenCalledTimes(1))
   expect(minutes).toBeDisabled()
   await act(async () => reject(new Error('disk failure')))
   expect(screen.getByRole('alert')).toHaveTextContent('保存失败')
   expect(minutes).toHaveValue(25)
   expect(minutes).toBeEnabled()
+})
+
+it.each(['mismatch', 'throw'] as const)('retains a retryable draft after a %s save receipt', async (mode) => {
+  const set = vi.fn(() => {
+    if (mode === 'throw') throw new Error('synchronous disk failure')
+    return Promise.resolve({ timeoutMinutes: 10 })
+  })
+  window.pion = api(undefined, set)
+  const first = render(<QuestionSettings />)
+  await waitFor(() => expect(screen.getByRole('spinbutton')).toBeEnabled())
+  fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '25' } })
+  fireEvent.submit(first.container.querySelector('form')!)
+  expect(await screen.findByRole('alert')).toHaveTextContent('保存失败')
+  expect(screen.getByRole('spinbutton')).toHaveValue(25)
+  expect(screen.getByRole('spinbutton')).toBeEnabled()
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  first.unmount()
+  render(<QuestionSettings />)
+  await waitFor(() => expect(screen.getByRole('spinbutton')).toBeEnabled())
+  expect(screen.getByRole('spinbutton')).toHaveValue(25)
+  expect(screen.getByRole('alert')).toHaveTextContent('保存失败')
+})
+
+it('shares the real read and save promises across simultaneous mounted instances', async () => {
+  let load!: (value: Settings) => void, finish!: (value: Settings) => void
+  let stored: Settings = { timeoutMinutes: 10 }
+  const get = vi.fn().mockReturnValueOnce(new Promise<Settings>((resolve) => { load = resolve })).mockImplementation(async () => stored)
+  const set = vi.fn(() => new Promise<Settings>((resolve) => { finish = resolve }))
+  window.pion = api(get, set)
+  const first = render(<QuestionSettings />)
+  const second = render(<QuestionSettings />)
+  await act(async () => { await Promise.resolve() })
+  expect(get).toHaveBeenCalledOnce()
+  await act(async () => load(stored))
+  const firstInput = first.container.querySelector('input[type="number"]')!
+  fireEvent.change(firstInput, { target: { value: '25' } })
+  fireEvent.submit(first.container.querySelector('form')!)
+  fireEvent.submit(second.container.querySelector('form')!)
+  const third = render(<QuestionSettings />)
+  await act(async () => { await Promise.resolve() })
+  expect(set).toHaveBeenCalledOnce()
+  expect(get).toHaveBeenCalledOnce()
+  expect(third.container.querySelector('input[type="number"]')).toBeDisabled()
+  first.unmount()
+  await act(async () => { stored = { timeoutMinutes: 25 }; finish(stored) })
+  expect(get).toHaveBeenCalledTimes(2)
+  expect(third.container.querySelector('input[type="number"]')).toHaveValue(25)
+  expect(third.container.querySelector('input[type="number"]')).toBeEnabled()
 })
 
 it('isolates late reads and saves after owner/API changes', async () => {
@@ -99,6 +147,50 @@ it('retains a real pending read across unmount after its UI deadline and rejects
   await act(async () => finish({ timeoutMinutes: null }))
   expect(screen.getByRole('spinbutton')).toHaveValue(10)
   expect(screen.getByRole('alert')).toHaveTextContent('读取超时')
+})
+
+it.each(['resolve', 'reject'] as const)('waits across remounts for a timed-out save to %s, then reads and releases the saving state', async (outcome) => {
+  vi.useFakeTimers()
+  let finish!: (value: Settings) => void
+  let fail!: (reason: Error) => void
+  const pending = new Promise<Settings>((resolve, reject) => { finish = resolve; fail = reject })
+  let stored = { timeoutMinutes: 10 }
+  const get = vi.fn(async () => stored)
+  const set = vi.fn().mockReturnValueOnce(pending).mockImplementation(async (value: Settings) => value)
+  window.pion = api(get, set)
+  const first = render(<QuestionSettings />)
+  await act(async () => { await Promise.resolve() })
+  fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '25' } })
+  fireEvent.submit(first.container.querySelector('form')!)
+  await act(async () => { vi.advanceTimersByTime(5000) })
+  expect(screen.getByRole('alert')).toHaveTextContent('结果尚未确认')
+  first.unmount()
+  const waiting = render(<QuestionSettings />)
+  await act(async () => { vi.advanceTimersByTime(10_000) })
+  expect(get).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole('spinbutton')).toHaveValue(25)
+  expect(screen.getByRole('spinbutton')).toBeDisabled()
+  fireEvent.submit(waiting.container.querySelector('form')!)
+  waiting.unmount()
+  const reopened = render(<QuestionSettings />)
+  await act(async () => {
+    if (outcome === 'resolve') { stored = { timeoutMinutes: 25 }; finish(stored) }
+    else fail(new Error('disk failure'))
+  })
+  expect(get).toHaveBeenCalledTimes(2)
+  expect(set).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole('spinbutton')).toHaveValue(25)
+  expect(screen.getByRole('spinbutton')).toBeEnabled()
+  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  if (outcome === 'reject') {
+    expect(screen.getByRole('alert')).toHaveTextContent('保存失败，已保留填写内容')
+    reopened.unmount()
+    render(<QuestionSettings />)
+    await act(async () => { await Promise.resolve() })
+    expect(screen.getByRole('spinbutton')).toHaveValue(25)
+    expect(screen.getByRole('spinbutton')).toBeEnabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('保存失败')
+  } else expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 })
 
 it('retains a real pending save slot after its UI deadline', async () => {

@@ -117,7 +117,6 @@ export const IPC = {
   AgentSetAutoCompaction: 'pion:agent-set-auto-compaction',
   AgentSetAutoRetry: 'pion:agent-set-auto-retry',
   AgentCompact: 'pion:agent-compact',
-  AgentExportHtml: 'pion:agent-export-html',
   AgentRenameSession: 'pion:agent-rename-session',
   AgentSetSteeringMode: 'pion:agent-set-steering-mode',
   AgentSetFollowUpMode: 'pion:agent-set-follow-up-mode',

@@ -119,7 +119,9 @@ export async function createPionRuntime(args: string[], initialCwd = process.cwd
         extensionFactories: [...createPionNativeExtensions(mcpStatus, mcp ? {
           loadConfig: () => mcp.config,
           registrations: (entries) => applyCapabilityMcpRegistrations(entries, preferences, cwd), closeBarrier: nativeClose
-        } : undefined), loadout.capture, { name: 'pion-subagents', factory: subagents.extension }, loadout.declarations, mcpStatus.extension,
+        } : undefined), ...(!capabilityPolicy ? [loadout.capture] : []),
+          { name: 'pion-subagents', factory: subagents.extension },
+          ...(!capabilityPolicy ? [loadout.declarations] : []), mcpStatus.extension,
           ...(capabilityPolicy ? [capabilityPolicy.extension] : []), { name: 'pion-conversation-timing', factory: timing.extension }]
       }
     })

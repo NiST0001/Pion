@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
-import type { ProviderAuthService, ProviderLoginInteraction } from '../../src/main/provider-auth'
+import type { ModelRuntime } from '@earendil-works/pi-coding-agent'
+import { ProviderAuthService, type ProviderLoginInteraction } from '../../src/main/provider-auth'
 import { ProviderConfigStore } from '../../src/main/provider-config'
 import { RunStore } from '../../src/main/run-store'
 import type { ModelProviderInfo } from '../../src/shared/types'
@@ -62,7 +63,7 @@ describe('AgentBridge provider authentication', () => {
     let resolve!: (models: { provider: string; id: string }[]) => void
     const pending = new Promise<{ provider: string; id: string }[]>((done) => { resolve = done })
     const listAvailableModels = vi.fn().mockResolvedValueOnce([{ provider: 'hidden', id: 'child' }]).mockReturnValueOnce(pending)
-    const service = { listAvailableModels, invalidate: vi.fn(), login: vi.fn(), listProviders: vi.fn() } as unknown as ProviderAuthService
+    const service = { listAvailableModels, refreshForRead: vi.fn(), invalidate: vi.fn(), login: vi.fn(), listProviders: vi.fn() } as unknown as ProviderAuthService
     const bridge = new AgentBridge(new RunStore(join(root, 'runs.json')), undefined,
       new ProviderConfigStore(join(root, 'agent')), service)
     const window = () => ({ webContents: { id: 73, send: vi.fn(), isDestroyed: () => false }, isDestroyed: () => false }) as unknown as BrowserWindow
@@ -79,41 +80,81 @@ describe('AgentBridge provider authentication', () => {
     expect(service.listProviders).not.toHaveBeenCalled()
   })
 
-  it('shares a pending directory read until actual settlement, including after owner replacement', async () => {
+  it('shares actual SDK initialization across both read entries and owner replacement, then refreshes settled metadata', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pion-subagent-model-slot-'))
     roots.push(root)
-    let resolve!: (models: []) => void
-    const pending = new Promise<[]>((done) => { resolve = done })
-    const service = { listAvailableModels: vi.fn().mockReturnValueOnce(pending).mockResolvedValue([]), invalidate: vi.fn() } as unknown as ProviderAuthService
+    const runtime = { getAvailableSnapshot: () => [], getProviders: () => [], listCredentials: async () => [] } as unknown as ModelRuntime
+    let resolve!: (runtime: ModelRuntime) => void
+    const pending = new Promise<ModelRuntime>((done) => { resolve = done })
+    const createRuntime = vi.fn().mockReturnValueOnce(pending).mockResolvedValue(runtime)
+    const service = new ProviderAuthService(createRuntime)
+    const available = vi.spyOn(service, 'listAvailableModels')
     const bridge = new AgentBridge(new RunStore(join(root, 'runs.json')), undefined,
       new ProviderConfigStore(join(root, 'agent')), service)
     const window = () => ({ webContents: { id: 73, send: vi.fn(), isDestroyed: () => false }, isDestroyed: () => false }) as unknown as BrowserWindow
     bridge.bind(window())
     const old = bridge.getSubagentModels(73)
     const stale = expect(old).rejects.toThrow('所属主窗口')
+    const providers = bridge.getModelProviders()
     bridge.bind(window())
     const current = bridge.getSubagentModels(73)
-    expect(service.listAvailableModels).toHaveBeenCalledTimes(1)
-    resolve([])
+    expect(available).toHaveBeenCalledOnce()
+    expect(createRuntime).toHaveBeenCalledOnce()
+    resolve(runtime)
     await stale
     await expect(current).resolves.toEqual([])
+    await expect(providers).resolves.toEqual([])
+    const refreshedProviders = bridge.getModelProviders()
+    const refreshedModels = bridge.getSubagentModels(73)
+    expect(createRuntime).toHaveBeenCalledTimes(2)
+    await Promise.all([refreshedProviders, refreshedModels])
     await bridge.getSubagentModels(73)
-    expect(service.listAvailableModels).toHaveBeenCalledTimes(2)
+    expect(createRuntime).toHaveBeenCalledTimes(3)
+    expect(available).toHaveBeenCalledTimes(3)
   })
 
-  it('invalidates the native credential directory after a partially failed provider addition without reloading backends', async () => {
+  it('retires pending outer directory reuse after a partially failed provider addition without clearing a new shared read', async () => {
     const root = await mkdtemp(join(tmpdir(), 'pion-provider-partial-'))
     roots.push(root)
     const store = new ProviderConfigStore(join(root, 'agent'))
     vi.spyOn(store, 'addProvider').mockRejectedValue(new Error('Pi 已保存凭据，但 models.json 写入失败'))
-    const service = { invalidate: vi.fn() } as unknown as ProviderAuthService
+    let resolveOld!: (runtime: ModelRuntime) => void, resolveCurrent!: (runtime: ModelRuntime) => void
+    const createRuntime = vi.fn()
+      .mockReturnValueOnce(new Promise<ModelRuntime>(resolve => { resolveOld = resolve }))
+      .mockReturnValueOnce(new Promise<ModelRuntime>(resolve => { resolveCurrent = resolve }))
+    const service = new ProviderAuthService(createRuntime)
+    const invalidate = vi.spyOn(service, 'invalidate')
+    const available = vi.spyOn(service, 'listAvailableModels')
     const bridge = new AgentBridge(new RunStore(join(root, 'runs.json')), undefined, store, service)
+    bridge.bind({ webContents: { id: 73, send: vi.fn(), isDestroyed: () => false }, isDestroyed: () => false } as unknown as BrowserWindow)
+    const stale = expect(bridge.getSubagentModels(73)).rejects.toThrow('模型目录已失效')
     const reload = vi.spyOn(bridge as unknown as { reloadBackendsAfterProviderMutation(): Promise<[]> }, 'reloadBackendsAfterProviderMutation')
     await expect(bridge.addModelProvider({} as Parameters<AgentBridge['addModelProvider']>[0]))
       .rejects.toThrow('Pi 已保存凭据')
-    expect(service.invalidate).toHaveBeenCalledTimes(1)
+    expect(invalidate).toHaveBeenCalledOnce()
     expect(reload).not.toHaveBeenCalled()
     expect((bridge as unknown as { providerMutationInFlight: boolean }).providerMutationInFlight).toBe(false)
+    const current = bridge.getSubagentModels(73)
+    const shared = bridge.getSubagentModels(73)
+    expect(createRuntime).toHaveBeenCalledTimes(2)
+    resolveOld({ getAvailableSnapshot: () => [{ provider: 'old', id: 'stale' }] } as unknown as ModelRuntime)
+    await stale
+    const stillShared = bridge.getSubagentModels(73)
+    expect(available).toHaveBeenCalledTimes(2)
+    resolveCurrent({ getAvailableSnapshot: () => [{ provider: 'new', id: 'current' }] } as unknown as ModelRuntime)
+    for (const models of await Promise.all([current, shared, stillShared])) expect(models).toEqual([{ provider: 'new', id: 'current' }])
+  })
+
+  it('keeps the lower authentication cancellation warning about credentials already saved', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'pion-provider-cancelled-'))
+    roots.push(root)
+    const warning = '登录已取消；凭据可能已保存，请刷新提供商状态确认'
+    const service = { listProviders: vi.fn(async () => [provider]),
+      login: vi.fn(async () => { throw new Error(warning) }), invalidate: vi.fn() } as unknown as ProviderAuthService
+    const bridge = new AgentBridge(new RunStore(join(root, 'runs.json')), undefined,
+      new ProviderConfigStore(join(root, 'agent')), service)
+    await expect(bridge.loginModelProvider('openai', 'api_key')).rejects.toThrow(warning)
+    expect(bridge.getModelProviderAuthState()).toMatchObject({ phase: 'cancelled', message: warning })
   })
 
   it('routes Pi secret prompts through the existing extension UI queue', async () => {

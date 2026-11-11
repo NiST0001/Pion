@@ -262,13 +262,30 @@ describe('worktree location with scoped Git/filesystem mocks', () => {
     expect(entries.has(worktreeRoot)).toBe(false)
   })
 
-  it.each(['symlink', 'directory', 'hardlink'])('rejects an existing %s exclude without opening or writing it', async (kind) => {
+  it.each(['symlink', 'directory'])('rejects an existing %s exclude without opening or writing it', async (kind) => {
     const content = files.get(excludePath)
-    entries.set(excludePath, kind === 'symlink' ? symlink() : kind === 'directory' ? directory() : { ...regularFile(), nlink: 2n })
+    entries.set(excludePath, kind === 'symlink' ? symlink() : directory())
     await expect(createWorktreeBranch(root, 'blocked')).rejects.toThrow('稳定的普通文件')
     expect(mocks.open).not.toHaveBeenCalled()
     expect(files.get(excludePath)).toBe(content)
     expect(addCalls()).toEqual([])
+  })
+
+  it.each([true, false])('only requires a single-link exclude when appending (rule present: %s)', async (hasRule) => {
+    const content = hasRule ? '/.pion-worktrees/\n' : '# user exclusions\n'
+    files.set(excludePath, content)
+    entries.set(excludePath, { ...regularFile(), nlink: 2n })
+    const creating = createWorktreeBranch(root, 'hardlink')
+    if (hasRule) {
+      await expect(creating).resolves.toMatchObject({ cwd: join(worktreeRoot, 'hardlink') })
+      expect(mocks.git).toHaveBeenCalledWith(root, ['check-ignore', '--quiet', '--no-index', '--', '.pion-worktrees/'])
+    } else {
+      await expect(creating).rejects.toThrow('稳定的普通文件')
+      expect(addCalls()).toEqual([])
+    }
+    expect(files.get(excludePath)).toBe(content)
+    expect(mocks.fdWrite).not.toHaveBeenCalled()
+    expect(mocks.fdClose).toHaveBeenCalledOnce()
   })
 
   it.each(['fd-identity', 'path-swap', 'oversize', 'short-append'])('rejects an unsafe exclude %s and closes the FD', async (kind) => {

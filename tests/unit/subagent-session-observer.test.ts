@@ -1,10 +1,10 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { SubagentSessionStore } from '../../src/main/agent/subagent-session-store'
 import { createSubagentSessionPublisher } from '../../src/main/agent/subagent-session-observer'
-import { SUBAGENT_SESSION_ADMISSION_TITLE, SUBAGENT_SESSION_MAX_PACKET_CHARS, SUBAGENT_SESSION_RETENTION_MS, SUBAGENT_SESSION_WIDGET_KEY, type SubagentSessionNotice } from '../../src/shared/subagent-sessions'
+import { SUBAGENT_SESSION_MAX_PACKET_CHARS, SUBAGENT_SESSION_RETENTION_MS, SUBAGENT_SESSION_WIDGET_KEY, type SubagentSessionNotice } from '../../src/shared/subagent-sessions'
 
 afterEach(() => vi.useRealTimers())
-async function setup() {
+function setup() {
   const packets: SubagentSessionNotice[] = []
   const setWidget = vi.fn((key: string, lines: string[]) => {
     expect(key).toBe(SUBAGENT_SESSION_WIDGET_KEY)
@@ -12,31 +12,14 @@ async function setup() {
     expect(lines[0].length).toBeLessThanOrEqual(SUBAGENT_SESSION_MAX_PACKET_CHARS)
     packets.push(JSON.parse(lines[0]))
   })
-  const input = vi.fn(async () => 'reserved')
-  const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'real-parent-id', getSessionFile: () => '/session.jsonl' }, ui: { setWidget, input } }
+  const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'real-parent-id', getSessionFile: () => '/session.jsonl' }, ui: { setWidget } }
   const publisher = createSubagentSessionPublisher({ nonce: 'private-nonce', createContext: () => ctx })
-  expect(await publisher.reserve('actual-parent-tool-call', 2)).toBe(true)
   const observer = publisher.begin({ name: 'worker' }, 'actual-parent-tool-call')!
-  return { publisher, observer, packets, setWidget, input, last: () => packets.at(-1)! }
+  return { publisher, observer, packets, setWidget, last: () => packets.at(-1)! }
 }
 const message = (type: string, text: string, thinking = '') => ({ type, message: { role: 'assistant',
   content: [{ type: 'text', text, textSignature: 'secret-signature' }, { type: 'thinking', thinking, thinkingSignature: 'secret-signature' },
     { type: 'image', data: 'secret-image' }], usage: { secret: 'secret-usage' }, systemPrompt: 'secret-system' } })
-
-it('uses one mock RPC ACK for 100 display slots, rejects 101, and keeps the terminal TTL', async () => {
-  vi.useFakeTimers()
-  const h = await setup()
-  expect(await h.publisher.reserve('oversized', 101)).toBe(false)
-  const before = h.input.mock.calls.length
-  expect(await h.publisher.reserve('hundred', 100)).toBe(true)
-  expect(h.input).toHaveBeenCalledTimes(before + 1)
-  const children = Array.from({ length: 100 }, (_, i) => h.publisher.begin({ name: `worker-${i}` }, 'hundred'))
-  expect(children.every(Boolean)).toBe(true)
-  expect(h.publisher.begin({ name: 'extra' }, 'hundred')).toBeUndefined()
-  for (const child of children) child!.finish('completed')
-  await vi.advanceTimersByTimeAsync(SUBAGENT_SESSION_RETENTION_MS)
-  expect(SUBAGENT_SESSION_RETENTION_MS).toBe(30 * 60_000)
-})
 
 it('publishes true parent identity and independent runtime/child UUIDs only on the private widget', async () => {
   const h = await setup()
@@ -185,11 +168,33 @@ it('shutdown publishes cancelling rather than a false terminal and fences all la
   expect(h.publisher.begin({ name: 'late-child' }, 'call')).toBeUndefined()
 })
 
+it.each(['context-replaced', 'publication-failed'])('closes an opened observer after %s and rejects its late display callbacks', async (mode) => {
+  vi.useFakeTimers()
+  const setWidget = vi.fn()
+  const make = () => ({ mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => '/session' }, ui: { setWidget } })
+  let ctx = make()
+  const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
+  const observer = publisher.begin({ name: 'worker' }, 'call')!
+  observer.event(message('message_update', 'pending draft'))
+  if (mode === 'context-replaced') ctx = make()
+  else setWidget.mockImplementationOnce(() => { throw new Error('display unavailable') })
+  vi.advanceTimersByTime(100)
+  const count = setWidget.mock.calls.length
+  observer.event(message('message_end', 'late text'))
+  observer.running()
+  observer.cancelling()
+  observer.finish('completed')
+  observer.finish('failed')
+  vi.runAllTimers()
+  expect(setWidget).toHaveBeenCalledTimes(count)
+  expect(vi.getTimerCount()).toBe(0)
+  publisher.halt()
+})
+
 it('display failures and malformed/hostile content never throw into execution', async () => {
   const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => undefined },
-    ui: { input: async () => 'reserved', setWidget: () => { throw new Error('UI unavailable') } } }
+    ui: { setWidget: () => { throw new Error('UI unavailable') } } }
   const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
-  expect(await publisher.reserve('call', 1)).toBe(true)
   expect(publisher.begin({ name: 'worker' }, 'call')).toBeUndefined()
   const h = await setup()
   const observer = h.observer
@@ -205,18 +210,17 @@ it('publishes store-accepted packets at identity/tool/text bounds without trunca
   const cwd = 'c'.repeat(4096), path = 'p'.repeat(4096), nonce = 'n'.repeat(256)
   const parent = 's'.repeat(256), call = 't'.repeat(256)
   const scope = { backendId: 'backend', nonce, cwd, parentSessionPath: path }
+  const receipt = { toolCallId: call }
   let last: SubagentSessionNotice | undefined
   const received: Array<{ notice: SubagentSessionNotice; snapshot: ReturnType<SubagentSessionStore['get']> }> = []
   const ctx = { mode: 'rpc', cwd, sessionManager: { getSessionId: () => parent, getSessionFile: () => path },
-    ui: { input: async (_title: string, metadata?: string) => store.reserveBatch(scope, JSON.parse(metadata!), (id) => id === call) ? 'reserved' : 'denied',
-      setWidget: (widgetKey: string, widgetLines: string[]) => {
+    ui: { setWidget: (widgetKey: string, widgetLines: string[]) => {
       last = JSON.parse(widgetLines[0])
-      store.consume(scope, { type: 'extension_ui_request', method: 'setWidget', widgetKey, widgetLines }, (id) => id === call)
+      store.consume(scope, { type: 'extension_ui_request', method: 'setWidget', widgetKey, widgetLines }, (id) => id === call ? receipt : undefined)
       received.push({ notice: last!, snapshot: store.get(last!.id, 'backend') })
     } } }
   const publisher = createSubagentSessionPublisher({ nonce, createContext: () => ctx })
   try {
-    expect(await publisher.reserve(call, 1)).toBe(true)
     const observer = publisher.begin({ name: 'w'.repeat(80) }, call)!
     expect(observer).toBeDefined()
     for (let n = 0; n < 220; n++) observer.event({ type: 'tool_execution_end', toolCallId: `${n}`,
@@ -240,27 +244,25 @@ it('publishes store-accepted packets at identity/tool/text bounds without trunca
   } finally { publisher.halt(); store.dispose() }
 })
 
-it.each(['', 'x'.repeat(257), 'bad\0identity'])('rejects invalid identity %j before requesting admission/publication', async (invalid) => {
-  const setWidget = vi.fn(), input = vi.fn(async () => 'reserved')
+it.each(['', 'x'.repeat(257), 'bad\0identity'])('rejects invalid identity %j before publication', (invalid) => {
+  const setWidget = vi.fn()
   const make = (nonce = 'nonce', cwd = '/project', parent = 'parent', path: string | undefined = '/session') => {
-    const ctx = { mode: 'rpc', cwd, sessionManager: { getSessionId: () => parent, getSessionFile: () => path }, ui: { setWidget, input } }
+    const ctx = { mode: 'rpc', cwd, sessionManager: { getSessionId: () => parent, getSessionFile: () => path }, ui: { setWidget } }
     return createSubagentSessionPublisher({ nonce, createContext: () => ctx })
   }
-  expect(await make(invalid).reserve('call', 1)).toBe(false)
-  expect(await make('nonce', '/project', invalid).reserve('call', 1)).toBe(false)
-  expect(await make().reserve(invalid, 1)).toBe(false)
+  expect(make(invalid).begin({ name: 'worker' }, 'call')).toBeUndefined()
+  expect(make('nonce', '/project', invalid).begin({ name: 'worker' }, 'call')).toBeUndefined()
+  expect(make().begin({ name: 'worker' }, invalid)).toBeUndefined()
   for (const badPath of ['', 'x'.repeat(4097), 'bad\0path']) {
-    expect(await make('nonce', badPath).reserve('call', 1)).toBe(false)
-    expect(await make('nonce', '/project', 'parent', badPath).reserve('call', 1)).toBe(false)
+    expect(make('nonce', badPath).begin({ name: 'worker' }, 'call')).toBeUndefined()
+    expect(make('nonce', '/project', 'parent', badPath).begin({ name: 'worker' }, 'call')).toBeUndefined()
   }
-  expect(input).not.toHaveBeenCalled()
   expect(setWidget).not.toHaveBeenCalled()
 })
 
 it('falls back for invalid display names and rejects invalid tool identities without clipping', async () => {
   const h = await setup()
   for (const name of ['', 'x'.repeat(81), 'bad\0name']) {
-    expect(await h.publisher.reserve('call', 1)).toBe(true)
     h.publisher.begin({ name }, 'call')!.finish('failed')
     expect(h.last().name).toBe('子代理')
   }
@@ -273,142 +275,68 @@ it('falls back for invalid display names and rejects invalid tool identities wit
   h.publisher.halt()
 })
 
-it('retains 256 admission slots until true terminal TTL, never evicts active/cancelling children', async () => {
+it('retains 256 display slots until true terminal TTL, never evicts active/cancelling children', () => {
   let now = 0
   const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => undefined },
-    ui: { setWidget: vi.fn(), input: vi.fn(async () => 'reserved') } }
+    ui: { setWidget: vi.fn() } }
   const publisher = createSubagentSessionPublisher({ nonce: 'nonce', now: () => now, createContext: () => ctx })
-  expect(await publisher.reserve('call', 1)).toBe(true)
   const first = publisher.begin({ name: 'first' }, 'call')!
+  ctx.ui.setWidget.mockImplementationOnce(() => { throw new Error('display unavailable') })
+  first.cancelling() // Display closure does not invent execution settlement.
   first.finish('failed')
-  for (let n = 1; n < 256; n++) {
-    if (n === 255) expect(await publisher.reserve('call', 2)).toBe(false)
-    expect(await publisher.reserve('call', 1)).toBe(true)
-    publisher.begin({ name: 'worker' }, 'call')!.cancelling()
-  }
-  expect(await publisher.reserve('call', 1)).toBe(false)
+  for (let n = 1; n < 256; n++) publisher.begin({ name: 'worker' }, 'call')!.cancelling()
   expect(publisher.begin({ name: 'overflow' }, 'call')).toBeUndefined()
   now = SUBAGENT_SESSION_RETENTION_MS - 1
-  expect(await publisher.reserve('call', 1)).toBe(false)
+  first.finish('completed') // A repeated finish cannot renew the original deadline.
   expect(publisher.begin({ name: 'early' }, 'call')).toBeUndefined()
   now++
-  expect(await publisher.reserve('call', 1)).toBe(true)
   expect(publisher.begin({ name: 'replacement' }, 'call')).toBeDefined()
-  expect(await publisher.reserve('call', 1)).toBe(false)
   expect(publisher.begin({ name: 'still-full' }, 'call')).toBeUndefined()
-  expect(ctx.ui.input).toHaveBeenCalledTimes(257)
   publisher.halt()
 })
 
-it('requires a reserved ACK and consumes the exact admitted count only for the captured parent', async () => {
-  const setWidget = vi.fn(), input = vi.fn(async () => 'reserved')
-  const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => '/session' }, ui: { input, setWidget } }
+it('keeps the original absent source path when the same real parent learns its display file', async () => {
+  let path: string | undefined
+  const setWidget = vi.fn()
+  const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => path }, ui: { setWidget } }
   const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
-  expect(publisher.begin({ name: 'early' }, 'call')).toBeUndefined()
-  for (const count of [0, 101, 1.5, NaN]) expect(await publisher.reserve('call', count)).toBe(false)
-  expect(input).not.toHaveBeenCalled()
-  expect(await publisher.reserve('call', 2)).toBe(true)
-  expect(input).toHaveBeenCalledOnce()
-  const [title, placeholder, options] = input.mock.calls[0] as unknown as [string, string, { signal: AbortSignal; timeout: number }]
-  expect(title).toBe(SUBAGENT_SESSION_ADMISSION_TITLE)
-  expect(JSON.parse(placeholder)).toEqual({ version: 1, nonce: 'nonce', runtimeId: expect.any(String), parentToolCallId: 'call', count: 2 })
-  expect(options).toMatchObject({ signal: expect.any(AbortSignal), timeout: 5000 })
-  expect(publisher.begin({ name: 'wrong-parent' }, 'other')).toBeUndefined()
-  expect(publisher.begin({ name: 'one' }, 'call')).toBeDefined()
-  expect(publisher.begin({ name: 'two' }, 'call')).toBeDefined()
-  expect(publisher.begin({ name: 'reused' }, 'call')).toBeUndefined()
-  expect(setWidget).toHaveBeenCalledTimes(2)
+  const observer = publisher.begin({ name: 'worker' }, 'call')!
+  path = '/session'
+  expect(observer).toBeDefined()
+  observer.event(message('message_end', 'final'))
+  observer.finish('completed')
+  const [key, lines] = setWidget.mock.calls.at(-1)! as unknown as [string, string[]]
+  expect(key).toBe(SUBAGENT_SESSION_WIDGET_KEY)
+  expect(JSON.parse(lines[0])).toMatchObject({ status: 'completed', parentSessionId: 'parent', rows: [{ text: 'final' }, { text: '' }] })
+  expect(JSON.parse(lines[0])).not.toHaveProperty('parentSessionPath')
   publisher.halt()
 })
 
-it.each(['denied', undefined, 'unexpected'])('does not publish after non-reserved reply %s', async (reply) => {
-  const setWidget = vi.fn(), input = vi.fn(async () => reply)
-  const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => undefined }, ui: { input, setWidget } }
-  const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
-  expect(await publisher.reserve('call', 1)).toBe(false)
-  expect(publisher.begin({ name: 'worker' }, 'call')).toBeUndefined()
-  expect(setWidget).not.toHaveBeenCalled()
-})
-
-it.each(['timeout', 'abort', 'halt'])('fences pending admission and late reserved reply after %s', async (mode) => {
+it('captures live-getter client identity at begin and fences its later replacement', () => {
   vi.useFakeTimers()
-  let respond!: (value: string) => void
-  const input = vi.fn(() => new Promise<string>((resolve) => { respond = resolve }))
-  const setWidget = vi.fn()
-  const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => undefined }, ui: { input, setWidget } }
-  const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
-  const controller = new AbortController()
-  const admission = publisher.reserve('call', 2, controller.signal)
-  expect(await publisher.reserve('another', 1)).toBe(false)
-  expect(publisher.begin({ name: 'pending' }, 'call')).toBeUndefined()
-  if (mode === 'timeout') await vi.advanceTimersByTimeAsync(5000)
-  if (mode === 'abort') controller.abort()
-  if (mode === 'halt') publisher.halt()
-  expect(await admission).toBe(false)
-  respond('reserved')
-  await Promise.resolve()
-  expect(publisher.begin({ name: 'late' }, 'call')).toBeUndefined()
-  expect(input).toHaveBeenCalledOnce()
-  expect(setWidget).not.toHaveBeenCalled()
-  expect(vi.getTimerCount()).toBe(0)
-})
-
-it.each(['before-ack', 'after-ack'])('fails closed for a parent context replacement %s', async (when) => {
-  let respond!: (value: string) => void
-  const input = vi.fn(() => new Promise<string>((resolve) => { respond = resolve }))
-  const setWidget = vi.fn()
-  const make = () => ({ mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => undefined }, ui: { input, setWidget } })
-  let ctx = make()
-  const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
-  const admission = publisher.reserve('call', 1)
-  if (when === 'before-ack') ctx = make()
-  respond('reserved')
-  expect(await admission).toBe(when === 'after-ack')
-  if (when === 'after-ack') ctx = make()
-  expect(publisher.begin({ name: 'worker' }, 'call')).toBeUndefined()
-  expect(setWidget).not.toHaveBeenCalled()
-})
-
-it('fails closed without the real SDK input method and never reuses a failed starting publication', async () => {
-  const ctx = { mode: 'rpc', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => undefined }, ui: { setWidget: vi.fn() } }
-  const missing = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
-  expect(await missing.reserve('call', 1)).toBe(false)
-  const ready = { ...ctx, ui: { ...ctx.ui, input: async () => 'reserved' } }
-  ready.ui.setWidget.mockImplementationOnce(() => { throw new Error('unavailable') })
-  const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ready })
-  expect(await publisher.reserve('call', 1)).toBe(true)
-  expect(publisher.begin({ name: 'first' }, 'call')).toBeUndefined()
-  expect(publisher.begin({ name: 'retry' }, 'call')).toBeUndefined()
-  expect(ready.ui.setWidget).toHaveBeenCalledOnce()
-})
-
-it('captures live-getter client identity before ACK instead of resolving its replacement afterward', async () => {
-  let respond!: (value: string) => void
-  const input = vi.fn(() => new Promise<string>((resolve) => { respond = resolve }))
   const setWidget = vi.fn()
   let manager = { getSessionId: () => 'parent', getSessionFile: () => undefined }
-  let ui = { input, setWidget }
+  let ui = { setWidget }
   const ctx = { mode: 'rpc', cwd: '/project', get sessionManager() { return manager }, get ui() { return ui } }
   const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
-  const admission = publisher.reserve('call', 1)
+  const observer = publisher.begin({ name: 'worker' }, 'call')!
+  expect(setWidget).toHaveBeenCalledOnce()
   manager = { getSessionId: () => 'parent', getSessionFile: () => undefined }
-  ui = { input, setWidget }
-  respond('reserved')
-  expect(await admission).toBe(false)
-  expect(publisher.begin({ name: 'worker' }, 'call')).toBeUndefined()
-  expect(setWidget).not.toHaveBeenCalled()
+  ui = { setWidget }
+  observer.event(message('message_update', 'late'))
+  vi.advanceTimersByTime(100)
+  observer.finish('completed')
+  expect(setWidget).toHaveBeenCalledOnce()
+  publisher.halt()
 })
 
-it('requires RPC mode and fences an admitted token aborted before begin', async () => {
-  const input = vi.fn(async () => 'reserved'), setWidget = vi.fn()
-  const ctx = { mode: 'interactive', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => undefined }, ui: { input, setWidget } }
+it('requires RPC mode before publication', () => {
+  const setWidget = vi.fn()
+  const ctx = { mode: 'interactive', cwd: '/project', sessionManager: { getSessionId: () => 'parent', getSessionFile: () => undefined }, ui: { setWidget } }
   const publisher = createSubagentSessionPublisher({ nonce: 'nonce', createContext: () => ctx })
-  expect(await publisher.reserve('call', 1)).toBe(false)
-  expect(input).not.toHaveBeenCalled()
-  ctx.mode = 'rpc'
-  const controller = new AbortController()
-  expect(await publisher.reserve('call', 1, controller.signal)).toBe(true)
-  controller.abort()
   expect(publisher.begin({ name: 'worker' }, 'call')).toBeUndefined()
   expect(setWidget).not.toHaveBeenCalled()
+  ctx.mode = 'rpc'
+  expect(publisher.begin({ name: 'worker' }, 'call')).toBeDefined()
+  publisher.halt()
 })

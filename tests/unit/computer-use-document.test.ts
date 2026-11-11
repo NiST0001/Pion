@@ -139,6 +139,9 @@ describe('ComputerUse host document ownership (mock only)', () => {
     expect(() => h.host.create(7)).toThrow('document unavailable')
     navigate(h.contents)
     await h.host.stop(7)
+    expect(h.host.service.getState()).toMatchObject({ state: 'stopped', actualPending: false, coordination: 'unclaimed' })
+    expect(h.coordination.claim).not.toHaveBeenCalled()
+    expect(h.coordination.release).not.toHaveBeenCalled()
     h.contents.mainFrame = { detached: false }
     h.finish()
     const fresh = h.host.create(7)

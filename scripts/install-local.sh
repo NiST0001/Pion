@@ -84,9 +84,6 @@ rm -f "$LIST"
 # Electron 在 package.json 里属 devDependency，但它是桌面应用运行时本体
 rm -rf "$APP_DIR/node_modules/electron"
 cp -a node_modules/electron "$APP_DIR/node_modules/electron"
-# npm ls may still report packages left in the developer checkout after a dependency
-# removal. Never ship the removed third-party plan extension (or its namespace).
-rm -rf "$APP_DIR/node_modules/@narumitw"
 mkdir -p "$APP_DIR/node_modules/.bin"
 ln -sfn ../electron/cli.js "$APP_DIR/node_modules/.bin/electron"
 

@@ -46,6 +46,8 @@ export interface WorkflowWorker {
   status: WorkflowWorkerStatus
   kind: 'agent' | 'command'
   worktreePath?: string
+  /** Persisted runner preparation/RPC and process/stdio receipt (also true before invocation); false retains quarantine across restarts. */
+  exitConfirmed?: boolean
   branch?: string
   startedAt?: number
   finishedAt?: number

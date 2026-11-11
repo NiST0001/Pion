@@ -10,7 +10,6 @@ import { formatSessionCompletionNotification, formatToolPermissionNotification,
 import { RunStore } from './run-store'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
 import { UsageLedger } from './usage-ledger'
-import { UsageLedgerError } from './usage-ledger-store'
 import { VerificationService } from './verification'
 import { GitService } from './git-service'
 import { ToolPermissionStore } from './tool-permissions'
@@ -21,12 +20,12 @@ import { IPC, IPC_EVENTS } from '../shared/ipc'
 import { TerminalService } from './terminal-service'
 import { bindBrowserSecurity } from './browser-security'
 import { WindowEffectsService } from './window-effects'
-import { assertSubagentSettingsOwner, SubagentSettingsStore } from './subagent-settings'
+import { SubagentSettingsStore } from './subagent-settings'
 import { CapabilitySettingsStore } from './capability-settings'
 import { QuestionSettingsStore } from './question-settings'
 import { SessionOrganizationStore } from './session-organization'
 import { registerSessionOrganizationIpc } from './ipc/session-organization'
-import { assertThemeSettingsOwner, ThemeSettingsStore } from './theme-settings'
+import { ThemeSettingsStore } from './theme-settings'
 import { ProviderVisibilityStore } from './provider-visibility'
 import { registerAgentIpc } from './ipc/agent'
 import { captureIpcOwner } from './ipc/owner'
@@ -39,7 +38,6 @@ import { PersistentComputerUseCoordination } from './computer-use/coordination'
 import { WaylandComputerUseDriver } from './computer-use/wayland-driver'
 import { sameComputerUseOwner, type ComputerUseOwner } from '../shared/computer-use'
 import { COMPUTER_USE_AGENT_LIMITS as COMPUTER_USE_AGENT_IMAGE_LIMITS } from '../shared/computer-use-agent'
-import { normalizeComputerUseModelPng } from './agent/computer-use-bridge'
 import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import type {
@@ -181,7 +179,7 @@ const windowEffects = new WindowEffectsService(appSettings, {
 }, () => nativeTheme.shouldUseHighContrastColors)
 const providerVisibility = new ProviderVisibilityStore(join(app.getPath('userData'), 'pion-provider-visibility.json'))
 const bridge = new AgentBridge(runStore, appSettings, undefined, undefined, providerVisibility)
-const toolReceiptArchive = new SqliteToolReceiptArchive(join(app.getPath('userData'), 'tool-receipts', 'completed.sqlite'))
+const toolReceiptArchive = new SqliteToolReceiptArchive()
 bridge.configureToolReceiptArchive(toolReceiptArchive)
 const capabilitySettings = new CapabilitySettingsStore(join(app.getPath('userData'), 'pion-capabilities.json'))
 bridge.configureCapabilitySettings(capabilitySettings)
@@ -212,9 +210,9 @@ bridge.configureComputerUseAgent({
       const projected = scale < 1 ? image.resize({ width, height, quality: 'best' }) : image
       const actual = projected.getSize()
       if (projected.isEmpty() || actual.width !== width || actual.height !== height) throw new Error('ComputerUse model image unavailable')
-      // nativeImage may emit color-profile/ancillary chunks. Strip only after
-      // complete integrity validation, then revalidate the exact SDK view.
-      const data = normalizeComputerUseModelPng(new Uint8Array(projected.toPNG()), actual)
+      // The bridge validates these encoder bytes and strips ancillary chunks
+      // once, before exposing the exact model image.
+      const data = new Uint8Array(projected.toPNG())
       if (data.byteLength <= COMPUTER_USE_AGENT_IMAGE_LIMITS.maxModelImageBytes
         && Buffer.from(data).toString('base64').length < COMPUTER_USE_AGENT_IMAGE_LIMITS.maxModelBase64) return { png: data, width: actual.width, height: actual.height }
     }
@@ -334,15 +332,21 @@ function createWindow(): void {
   let captureCloseSettled = false
   let captureClosePending = false
   win.on('close', (event) => {
-    if (captureCloseSettled) return
+    if (captureCloseSettled || captureQuitSettled) return
     event.preventDefault()
     if (captureClosePending) return
     captureClosePending = true
-    void stopLocalCapture(ownerId).then(state => {
-      if (state.actualPending) return // Unknown physical exit stays quarantined.
+    void Promise.allSettled([
+      Promise.resolve().then(() => stopLocalCapture(ownerId)),
+      Promise.resolve().then(() => terminals.disposeOwner(ownerId))
+    ]).then(([capture, terminal]) => {
+      if (capture.status === 'rejected') throw capture.reason
+      if (terminal.status === 'rejected') throw terminal.reason
+      if (capture.value.actualPending) return // Unknown physical exit stays quarantined.
       captureCloseSettled = true
       if (!win.isDestroyed()) win.close()
-    }).catch(error => console.error('[pion] ComputerUse close unverified:', error))
+    }).catch(error => console.error('[pion] window resource close unverified:', error))
+      .finally(() => { captureClosePending = false })
   })
   win.webContents.once('destroyed', () => {
     void stopLocalCapture(ownerId).catch(error => console.error('[pion] ComputerUse destroyed cleanup unverified:', error))
@@ -396,22 +400,10 @@ function registerIpc(): void {
     createLocalOwner: createLocalCaptureOwner,
     getLocalOwner: requireLocalCaptureOwner
   })
-  handle(IPC.GetTheme, (event) => {
-    assertThemeSettingsOwner(event, mainWindowId)
-    return themeSettings.get()
-  })
-  handle(IPC.SetTheme, (event, theme: unknown) => {
-    assertThemeSettingsOwner(event, mainWindowId)
-    return themeSettings.set(theme)
-  })
-  handle(IPC.GetSubagentSettings, (event) => {
-    assertSubagentSettingsOwner(event, mainWindowId)
-    return subagentSettings.get()
-  })
-  handle(IPC.SetSubagentSettings, (event, settings: unknown) => {
-    assertSubagentSettingsOwner(event, mainWindowId)
-    return subagentSettings.set(settings)
-  })
+  handle(IPC.GetTheme, () => themeSettings.get())
+  handle(IPC.SetTheme, (event, theme: unknown) => themeSettings.set(theme, captureIpcOwner(event, getMainWindowId)))
+  handle(IPC.GetSubagentSettings, () => subagentSettings.get())
+  handle(IPC.SetSubagentSettings, (event, settings: unknown) => subagentSettings.set(settings, captureIpcOwner(event, getMainWindowId)))
   registerWindowIpc({
     ipcMain,
     windowFromWebContents: (sender) => BrowserWindow.fromWebContents(sender),
@@ -472,8 +464,10 @@ function registerIpc(): void {
 
   // app settings ------------------------------------------------------------------
   handle(IPC.GetCompletionNotifications, () => completionNotificationsEnabled)
-  handle(IPC.SetCompletionNotifications, async (_event, enabled: boolean) => {
-    await appSettings.setCompletionNotificationsEnabled(enabled === true)
+  handle(IPC.SetCompletionNotifications, async (event, enabled: boolean) => {
+    const assertCurrent = captureIpcOwner(event, getMainWindowId)
+    await appSettings.setCompletionNotificationsEnabled(enabled === true, assertCurrent)
+    assertCurrent()
     completionNotificationsEnabled = appSettings.completionNotificationsEnabled
   })
 
@@ -529,7 +523,9 @@ app.whenReady().then(async () => {
       console.error(`[pion] ${message}`)
       dialog.showErrorBox('Pion 设置读取失败', message)
     }),
-    bridge.loadToolPermissions(), verification.load(), workflows.load()
+    bridge.loadToolPermissions(),
+    verification.load().catch(console.warn),
+    workflows.load().catch(console.warn)
   ])
   completionNotificationsEnabled = appSettings.completionNotificationsEnabled
   usageLedger.setBackgroundCollectionEnabled(appSettings.usageBackgroundCollectionEnabled)
@@ -537,14 +533,34 @@ app.whenReady().then(async () => {
   nativeTheme.on('updated', () => { void windowEffects.refresh() })
   createWindow()
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  app.on('activate', async () => {
+    if (computerUseQuitting || BrowserWindow.getAllWindows().length) return
+    await windowShutdown.catch(() => undefined)
+    if (!computerUseQuitting && BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 
-let windowShutdown: Promise<unknown> = Promise.resolve()
+/** Join every cleanup even when an already-finished save failed. */
+async function settleApplicationCleanup(operations: Array<() => unknown>): Promise<void> {
+  const results = await Promise.allSettled(operations.map((operation) => Promise.resolve().then(operation)))
+  let closeUnknown: unknown
+  for (const result of results) {
+    if (result.status !== 'rejected') continue
+    console.error('[pion] application cleanup failed:', result.reason)
+    // Resource owners explicitly retain unknown physical-close failures.
+    // Pending operations stay joined above; ordinary save errors are settled.
+    if (result.reason?.closeUnknown === true) closeUnknown ??= result.reason
+  }
+  if (closeUnknown) throw closeUnknown
+}
+
+let windowShutdown: Promise<void> = Promise.resolve()
 app.on('window-all-closed', () => {
-  windowShutdown = Promise.all([bridge.stop(), verification.flush(), workflows.shutdown()])
+  if (captureQuitSettled) return
+  // macOS keeps the application alive: only drain/stop reusable owners here.
+  windowShutdown = windowShutdown.catch(() => undefined).then(() => settleApplicationCleanup([
+    () => bridge.stop(), () => verification.flush(), () => workflows.flush()
+  ]))
   void windowShutdown.catch((error) => console.error('[pion] window shutdown incomplete:', error))
   if (process.platform !== 'darwin') app.quit()
 })
@@ -558,27 +574,44 @@ app.on('before-quit', (event) => {
     computerUseQuitting = true
     if (!captureQuitPending) {
       captureQuitPending = true
-      void stopLocalCapture().then(async state => {
-        if (state.actualPending) return // Never force-exit an unknown helper lease.
-        await windowShutdown
-        await bridge.stop()
-        await appSettings.shutdown()
-        await subagentSettings.shutdown()
-        await projects.shutdown()
-        await sessionOrganization.shutdown()
-        try { await usageLedger.flush() } catch (error) {
-          // Data collection failures do not trap quit. Unknown physical closes do.
-          if (error instanceof UsageLedgerError && error.closeUnknown) throw error
-          console.warn('[pion] usage collection incomplete at quit:', error)
-        }
+      const resources = settleApplicationCleanup([
+        async () => {
+          try {
+            const state = await stopLocalCapture()
+            if (state.actualPending) throw Object.assign(new Error('ComputerUse helper close remains unknown'), { closeUnknown: true })
+          } catch (error) {
+            if (computerUse.getState().actualPending) throw Object.assign(new Error('ComputerUse helper close remains unknown'), { closeUnknown: true, cause: error })
+            throw error
+          }
+        },
+        // Wait for admitted window cleanup, then ask current owners again.
+        // A settled prior rejection is not a fresh unknown-close receipt.
+        () => windowShutdown.catch(() => undefined).then(() => settleApplicationCleanup([
+          () => bridge.stop(), () => verification.shutdown(), () => workflows.shutdown()
+        ])),
+        () => terminals.shutdown(),
+        () => appSettings.shutdown(),
+        () => subagentSettings.shutdown(),
+        () => questionSettings.shutdown(),
+        () => themeSettings.shutdown(),
+        () => capabilitySettings.shutdown(),
+        () => providerVisibility.shutdown(),
+        () => projects.shutdown(),
+        () => sessionOrganization.shutdown()
+      ])
+      // Final usage collection follows all admitted work, including finished
+      // save failures. Genuine unknown resources still reject the final join.
+      void settleApplicationCleanup([
+        () => resources,
+        async () => { await resources.catch(() => undefined); await usageLedger.flush() }
+      ]).then(() => {
         toolReceiptArchive.close()
         captureQuitSettled = true
         app.quit()
       }).catch(error => console.error('[pion] shutdown unverified:', error))
+        .finally(() => { captureQuitPending = false })
     }
     return
   }
   bridge.disposeSubagentSessions()
-  terminals.dispose()
-  void Promise.all([bridge.stop(), verification.flush(), workflows.shutdown()])
 })

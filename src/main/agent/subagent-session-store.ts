@@ -2,10 +2,9 @@ import {
   SUBAGENT_SESSION_WIDGET_KEY, SUBAGENT_SESSION_RETENTION_MS, SUBAGENT_SESSION_MAX_ROWS,
   SUBAGENT_SESSION_MAX_CHARS, SUBAGENT_SESSION_MAX_PACKET_CHARS, SUBAGENT_SESSION_MAX_RECORDS
 } from '../../shared/subagent-sessions'
-import { SUBAGENT_LIMITS } from '../../shared/subagents'
 import type {
   SubagentSessionNotice, SubagentSessionRow, SubagentSessionSnapshot, SubagentSessionSummary,
-  SubagentSessionList, SubagentSessionStatus, SubagentSessionAdmission
+  SubagentSessionList, SubagentSessionStatus
 } from '../../shared/subagent-sessions'
 
 interface Scope { backendId: string; nonce: string; cwd: string; parentSessionPath?: string }
@@ -17,9 +16,6 @@ interface RecordState {
   deadline?: number
 }
 interface BackendState { cwd: string; nonce: string; path?: string; runtime?: string; retired: Set<string>; gone: boolean }
-interface Reservation { backendId: string; runtimeId: string; parentToolCallId: string; sourcePath?: string; remaining: number }
-const MAX_TOMBSTONES = 1024
-const MAX_RETIRED_RUNTIMES = 32
 const statuses = new Set(['starting', 'running', 'cancelling', 'completed', 'failed', 'aborted'])
 const terminal = (status: SubagentSessionStatus) => status === 'completed' || status === 'failed' || status === 'aborted'
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -65,15 +61,13 @@ function parse(lines: unknown): SubagentSessionNotice | undefined {
 
 /** Display-only in-memory store. The caller must fence captured backend/client ownership.
  * Nonce/source plus native start receipts are logical provenance, not an OS/plugin boundary.
- * No eviction before retention ends. Saturated backend/tombstone bounds fail closed for new IDs.
+ * No eviction before retention ends. Capacity bounds current records;
+ * source replay fences live only as long as their real native root receipt.
  */
 export class SubagentSessionStore {
   private records = new Map<string, RecordState>()
   private backends = new Map<string, BackendState>()
-  private tombstones = new Set<string>()
-  private reservations = new Map<string, Reservation>()
-  private admittedBatches = new Set<string>()
-  private creationClosed = false
+  private sources = new WeakMap<object, { runtime: string; seenChildIds: Set<string> }>()
   private revision = 0
   private clock = 0
   private disposed = false
@@ -97,104 +91,46 @@ export class SubagentSessionStore {
     for (const [key, record] of this.records) {
       if (record.deadline === undefined || now < record.deadline) continue
       this.records.delete(key)
-      if (this.tombstones.size < MAX_TOMBSTONES) this.tombstones.add(key)
-      else this.creationClosed = true // Never drop a fence and permit a late packet to resurrect it.
       changed = true
     }
+    this.pruneSources()
     if (changed) this.changed()
   }
 
-  private prunePlaceholders(): void {
+  private pruneSources(prunePlaceholders = false): void {
+    const retained = new Map<string, Set<string>>()
+    for (const { snapshot } of this.records.values()) {
+      let runtimes = retained.get(snapshot.backendId)
+      if (!runtimes) retained.set(snapshot.backendId, runtimes = new Set())
+      runtimes.add(snapshot.runtimeId)
+    }
     for (const [id, backend] of this.backends) {
-      if (backend.gone || backend.runtime !== undefined || backend.retired.size > 0
-        || backend.cwd !== '' || backend.nonce !== '') continue
-      if ([...this.records.values()].some((record) => record.snapshot.backendId === id)) continue
-      this.backends.delete(id)
+      const runtimes = retained.get(id)
+      // Retained children keep their runtime fence; new sources need a live root.
+      backend.retired = new Set([...(runtimes ?? [])].filter((runtime) => runtime !== backend.runtime))
+      if (!runtimes && (backend.gone || (prunePlaceholders && backend.runtime === undefined))) this.backends.delete(id)
     }
   }
 
-  /** Synchronous display-quota reservation, NOT permission to execute tools or call models. */
-  reserveBatch(scope: Scope, request: SubagentSessionAdmission, allowCreate: (parentToolCallId: string) => boolean): boolean {
-    if (this.disposed) return false
-    this.expire()
-    if (!object(request) || !keys(request, ['version', 'nonce', 'runtimeId', 'parentToolCallId', 'count'])
-      || request.version !== 1 || !string(scope.backendId, 256) || !string(scope.nonce, 256)
-      || !string(scope.cwd, 4096) || (scope.parentSessionPath !== undefined && !string(scope.parentSessionPath, 4096))
-      || request.nonce !== scope.nonce || !string(request.runtimeId, 256) || !string(request.parentToolCallId, 256)
-      || !Number.isSafeInteger(request.count) || request.count < 1 || request.count > SUBAGENT_LIMITS.maxParallel.max) return false
-    let backend = this.backends.get(scope.backendId)
-    const key = JSON.stringify([scope.backendId, request.runtimeId, request.parentToolCallId])
-    if (this.creationClosed || this.admittedBatches.has(key) || this.admittedBatches.size >= MAX_TOMBSTONES
-      || (backend && (backend.gone || (backend.cwd !== '' && backend.cwd !== scope.cwd)
-        || (backend.nonce !== '' && backend.nonce !== scope.nonce) || backend.retired.has(request.runtimeId)
-        || (backend.path !== undefined && scope.parentSessionPath !== backend.path)
-        || (backend.runtime !== undefined && backend.runtime !== request.runtimeId && backend.retired.size >= MAX_RETIRED_RUNTIMES)))) return false
-    // Replacement may release the old runtime's unused slots only after a native receipt.
-    let pending = 0
-    for (const reservation of this.reservations.values()) {
-      if (reservation.backendId === scope.backendId && reservation.runtimeId !== request.runtimeId) continue
-      pending += reservation.remaining
-    }
-    if (this.records.size + pending + request.count > SUBAGENT_SESSION_MAX_RECORDS) return false
-    if (!backend && this.backends.size >= SUBAGENT_SESSION_MAX_RECORDS) this.prunePlaceholders()
-    if (!backend && this.backends.size >= SUBAGENT_SESSION_MAX_RECORDS) return false
-    if (!allowCreate(request.parentToolCallId)) return false
-    if (!backend) {
-      backend = { cwd: scope.cwd, nonce: scope.nonce, path: scope.parentSessionPath, retired: new Set(), gone: false }
-      this.backends.set(scope.backendId, backend)
-    }
-    let changed = false
-    if (backend.runtime !== undefined && backend.runtime !== request.runtimeId) {
-      backend.retired.add(backend.runtime)
-      for (const [reservationKey, reservation] of this.reservations) {
-        if (reservation.backendId === scope.backendId) this.reservations.delete(reservationKey)
-      }
-      for (const record of this.records.values()) {
-        if (record.snapshot.backendId === scope.backendId && record.deadline === undefined && record.snapshot.status !== 'cancelling') {
-          record.snapshot.status = 'cancelling'
-          record.snapshot.revision++
-          changed = true
-        }
-      }
-    }
-    backend.cwd = scope.cwd
-    backend.nonce = scope.nonce
-    backend.path ??= scope.parentSessionPath
-    backend.runtime = request.runtimeId
-    this.admittedBatches.add(key)
-    this.reservations.set(key, { backendId: scope.backendId, runtimeId: request.runtimeId,
-      parentToolCallId: request.parentToolCallId, sourcePath: scope.parentSessionPath, remaining: request.count })
-    if (changed) this.changed()
-    return true
-  }
-
-  /** Release unconsumed display slots at parent tool_end; retained records keep their own TTL. */
-  releaseBatch(backendId: string, parentCallId: string): void {
-    for (const [key, reservation] of this.reservations) {
-      if (reservation.backendId === backendId && reservation.parentToolCallId === parentCallId) this.reservations.delete(key)
-    }
-  }
-
-  consume(scope: Scope, event: unknown, allowCreate: (parentToolCallId: string) => boolean): boolean {
+  consume(scope: Scope, event: unknown, getSourceReceipt: (parentToolCallId: string) => object | undefined,
+    onSource: (runtimeId: string) => void = () => {}): boolean {
     // The reserved key is always swallowed, even if its outer event is malformed.
     if (!object(event) || event.widgetKey !== SUBAGENT_SESSION_WIDGET_KEY) return false
     if (this.disposed) return true
     this.expire()
     if (event.type !== 'extension_ui_request' || event.method !== 'setWidget' || event.parentToolCallId !== undefined) return true
     const notice = parse(event.widgetLines)
-    if (!notice || !string(scope.backendId, 256) || !string(scope.nonce, 256)
+    if (!notice || !string(scope.backendId, 256) || !string(scope.nonce, 256) || !string(scope.cwd, 4096)
+      || (scope.parentSessionPath !== undefined && !string(scope.parentSessionPath, 4096))
       || notice.nonce !== scope.nonce || notice.cwd !== scope.cwd) return true
-    const backend = this.backends.get(scope.backendId)
-    const reservation = this.reservations.get(JSON.stringify([scope.backendId, notice.runtimeId, notice.parentToolCallId]))
+    let backend = this.backends.get(scope.backendId)
     if (backend && (backend.gone || (backend.cwd !== '' && backend.cwd !== scope.cwd) || (backend.nonce !== '' && backend.nonce !== scope.nonce)
       || backend.retired.has(notice.runtimeId))) return true
     const key = recordKey(scope.backendId, notice.id)
     const existing = this.records.get(key)
-    // A producer (or batch admitted before binding) whose source path was absent
-    // may keep that identity after main learns the display path. A later admission
-    // against a known path cannot create an absent-path child or rewrite a source.
-    const lateBoundSource = notice.parentSessionPath === undefined && (existing !== undefined
-      ? existing.sourcePath === undefined : reservation !== undefined && reservation.sourcePath === undefined)
+    // The producer may publish its first packet after main has learned the path.
+    // Keep the original absent source path separate from the bound display path.
+    const lateBoundSource = notice.parentSessionPath === undefined && (!existing || existing.sourcePath === undefined)
     if ((scope.parentSessionPath !== undefined && notice.parentSessionPath !== scope.parentSessionPath && !lateBoundSource)
       || (backend?.path !== undefined && notice.parentSessionPath !== backend.path && !lateBoundSource)
       || (scope.parentSessionPath !== undefined && backend?.path !== undefined && scope.parentSessionPath !== backend.path)) return true
@@ -206,12 +142,26 @@ export class SubagentSessionStore {
         || existing.sourcePath !== notice.parentSessionPath || old.name !== notice.name
         || notice.revision <= existing.packetRevision) return true
     } else {
-      if (this.creationClosed || this.tombstones.has(key) || this.records.size >= SUBAGENT_SESSION_MAX_RECORDS
-        || !backend || backend.runtime !== notice.runtimeId || !reservation || reservation.remaining <= 0
-        || (reservation.sourcePath !== undefined && reservation.sourcePath !== notice.parentSessionPath)) return true
-      // Recheck the native root receipt; quota alone never authorizes a producer.
-      if (!allowCreate(notice.parentToolCallId)) return true
-      backend.path ??= notice.parentSessionPath
+      if (notice.status !== 'starting' || this.records.size >= SUBAGENT_SESSION_MAX_RECORDS) return true
+      if (!backend && this.backends.size >= SUBAGENT_SESSION_MAX_RECORDS) this.pruneSources(true)
+      if (!backend && this.backends.size >= SUBAGENT_SESSION_MAX_RECORDS) return true
+      const receipt = getSourceReceipt(notice.parentToolCallId)
+      if (!receipt) return true
+      let source = this.sources.get(receipt)
+      if (source && (source.runtime !== notice.runtimeId || source.seenChildIds.has(key))) return true
+      if (!source) this.sources.set(receipt, source = { runtime: notice.runtimeId, seenChildIds: new Set() })
+      source.seenChildIds.add(key)
+      if (!backend) {
+        backend = { cwd: scope.cwd, nonce: scope.nonce, retired: new Set(), gone: false }
+        this.backends.set(scope.backendId, backend)
+      }
+      if (backend.runtime !== undefined && backend.runtime !== notice.runtimeId) this.retireRecords(scope.backendId, false)
+      backend.cwd = scope.cwd
+      backend.nonce = scope.nonce
+      backend.path ??= scope.parentSessionPath ?? notice.parentSessionPath
+      backend.runtime = notice.runtimeId
+      this.pruneSources()
+      onSource(notice.runtimeId)
     }
     const snapshot: SubagentSessionSnapshot = {
       id: notice.id, backendId: scope.backendId, runtimeId: notice.runtimeId,
@@ -221,7 +171,6 @@ export class SubagentSessionStore {
     }
     this.records.set(key, { snapshot, sourcePath: notice.parentSessionPath, packetRevision: notice.revision,
       ...(terminal(notice.status) ? { deadline: this.time() + SUBAGENT_SESSION_RETENTION_MS } : {}) })
-    if (!existing) reservation!.remaining--
     this.changed()
     return true
   }
@@ -245,7 +194,7 @@ export class SubagentSessionStore {
     if (!string(backendId, 256)) return
     let backend = this.backends.get(backendId)
     if (!backend) {
-      if (this.backends.size >= SUBAGENT_SESSION_MAX_RECORDS) this.prunePlaceholders()
+      if (this.backends.size >= SUBAGENT_SESSION_MAX_RECORDS) this.pruneSources(true)
       if (this.backends.size >= SUBAGENT_SESSION_MAX_RECORDS) return
       backend = { cwd: '', nonce: '', path, retired: new Set(), gone: false }
       this.backends.set(backendId, backend)
@@ -267,35 +216,42 @@ export class SubagentSessionStore {
   markBackendGone(backendId: string, exitConfirmed: boolean): void {
     if (this.disposed || !string(backendId, 256)) return
     this.expire()
-    for (const [key, reservation] of this.reservations) {
-      if (reservation.backendId === backendId) this.reservations.delete(key)
-    }
     const backend = this.backends.get(backendId)
     if (backend) backend.gone = true
-    else if (this.backends.size < SUBAGENT_SESSION_MAX_RECORDS) {
-      this.backends.set(backendId, { cwd: '', nonce: '', gone: true, retired: new Set() })
-    } else this.creationClosed = true
+    const changed = this.retireRecords(backendId, exitConfirmed)
+    this.pruneSources()
+    if (changed) this.changed()
+  }
+  /** Called only with the captured runtime's real retirement/exit receipt.
+   * A new runtime's first packet leaves old in-flight children uncertain. */
+  markRuntimeGone(backendId: string, runtimeId: string, exitConfirmed: boolean): void {
+    if (this.disposed || !string(backendId, 256) || !string(runtimeId, 256)) return
+    this.expire()
+    const backend = this.backends.get(backendId)
+    if (backend?.runtime === runtimeId) backend.runtime = undefined
+    const changed = this.retireRecords(backendId, exitConfirmed, runtimeId)
+    this.pruneSources()
+    if (changed) this.changed()
+  }
+  private retireRecords(backendId: string, exitConfirmed: boolean, runtimeId?: string): boolean {
     let changed = false
     for (const record of this.records.values()) {
-      if (record.snapshot.backendId !== backendId || record.deadline !== undefined) continue
+      const { snapshot } = record
+      if (snapshot.backendId !== backendId || record.deadline !== undefined || (runtimeId !== undefined && snapshot.runtimeId !== runtimeId)) continue
       const status = exitConfirmed ? 'aborted' : 'cancelling'
-      const recordChanged = record.snapshot.status !== status || exitConfirmed
-      if (recordChanged) {
-        record.snapshot.status = status
-        record.snapshot.revision++
-        if (exitConfirmed) record.deadline = this.time() + SUBAGENT_SESSION_RETENTION_MS
-        changed = true
-      }
+      if (snapshot.status === status && !exitConfirmed) continue
+      snapshot.status = status
+      snapshot.revision++
+      if (exitConfirmed) record.deadline = this.time() + SUBAGENT_SESSION_RETENTION_MS
+      changed = true
     }
-    if (changed) this.changed()
+    return changed
   }
   dispose(): void {
     this.disposed = true
     clearInterval(this.timer)
     this.records.clear()
     this.backends.clear()
-    this.tombstones.clear()
-    this.reservations.clear()
-    this.admittedBatches.clear()
+    this.sources = new WeakMap()
   }
 }

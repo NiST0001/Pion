@@ -3,7 +3,7 @@ import { resolve, sep } from 'node:path'
 import type { VerificationRun } from '../../shared/operations'
 import type { VerificationService } from '../verification'
 import { piCliPath } from '../pi-runtime'
-import { stopWithProcessExit } from '../process-exit'
+import { prepareProcessStart, stopWithProcessExit, stopWithProcessExitBarrier } from '../process-exit'
 import { ACTIVE_VERIFICATION, MAX_ACTIVE_WORKERS, WORKER_TIMEOUT_MS } from './constants'
 import { clip } from './utils'
 import type {
@@ -13,6 +13,10 @@ import type {
   WorkflowWorkerResult,
   WorkflowWorkerRunner
 } from './types'
+
+function hasUnknownClose(error: unknown): boolean {
+  return (error as { closeUnknown?: unknown } | null)?.closeUnknown === true
+}
 
 function workerTools(role: WorkflowWorkerInput['role']): string {
   return role === 'implementer'
@@ -89,7 +93,7 @@ export class PiWorkflowWorkerRunner implements WorkflowWorkerRunner {
       check()
       return result
     }
-    let stopped: Promise<void> | undefined
+    let stopWait: Promise<void> | undefined
     let cleanedUp: Promise<void> | undefined
     let startInvoked = false
     const stop = (): Promise<void> => {
@@ -98,7 +102,7 @@ export class PiWorkflowWorkerRunner implements WorkflowWorkerRunner {
       if (!target) return Promise.resolve()
       // SDK start spawns synchronously, before its initialization await. Do not
       // wait for start's promise here: it can remain pending indefinitely.
-      return stopped ??= stopWithProcessExit(target, startInvoked)
+      return stopWait ??= stopWithProcessExit(target, startInvoked).finally(() => { stopWait = undefined })
     }
     const operation = {
       cwd: resolve(input.cwd),
@@ -115,12 +119,19 @@ export class PiWorkflowWorkerRunner implements WorkflowWorkerRunner {
       },
       stop
     }
-    const cleanup = (): Promise<void> => cleanedUp ??= (async () => {
-      // Stop first: SDK initialization/RPC can otherwise remain pending forever.
-      await stop()
-      while (pending.size > 0) await Promise.allSettled([...pending])
-      if (this.clients.get(input.id) === operation) this.clients.delete(input.id)
-    })()
+    const cleanup = (): Promise<void> => {
+      if (!cleanedUp) {
+        cleanedUp = (async () => {
+          // The bounded stop wait may expire; actual cleanup keeps owning the
+          // id/cwd/capacity until the shared barrier and original RPCs settle.
+          if (client) await stopWithProcessExitBarrier(client, startInvoked)
+          while (pending.size > 0) await Promise.allSettled([...pending])
+          if (this.clients.get(input.id) === operation) this.clients.delete(input.id)
+        })()
+        void cleanedUp.catch(() => undefined)
+      }
+      return cleanedUp
+    }
     // Preparation counts toward both concurrency and the operation deadline.
     this.clients.set(input.id, operation)
     const onAbort = (): void => operation.cancel()
@@ -211,6 +222,7 @@ export class PiWorkflowWorkerRunner implements WorkflowWorkerRunner {
         }
       })
       await wait(() => {
+        prepareProcessStart(currentClient)
         startInvoked = true
         return currentClient.start()
       })
@@ -243,14 +255,20 @@ export class PiWorkflowWorkerRunner implements WorkflowWorkerRunner {
         unsubscribe()
       } finally {
         try {
-          await cleanup()
+          const actualCleanup = cleanup()
+          await stop()
+          await actualCleanup
         } catch (cleanupError) {
           const diagnostic = cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
           const primary = primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure)
           throw Object.assign(new Error([
             ...(failed ? [primary] : []),
             `Agent 收尾未确认：${diagnostic}`
-          ].join('\n')), { cause: failed ? primaryFailure : cleanupError, cleanupError })
+          ].join('\n')), {
+            cause: failed ? primaryFailure : cleanupError,
+            cleanupError,
+            closeUnknown: hasUnknownClose(cleanupError)
+          })
         } finally {
           input.signal?.removeEventListener('abort', onAbort)
         }
@@ -289,9 +307,10 @@ export class VerificationWorkflowRunner implements WorkflowVerificationRunner {
     let cancelled = signal?.aborted === true
     let timedOut = false
     let cancellation: Promise<void> | undefined
-    let startInvoked = false
+    let execution: Promise<void> | undefined
     let unknown = false
-    let executionSettled = false
+    let failed = false
+    let primaryFailure: unknown
     const deadline = Date.now() + WORKER_TIMEOUT_MS
     const operation = {
       cwd: resolve(cwd),
@@ -300,8 +319,13 @@ export class VerificationWorkflowRunner implements WorkflowVerificationRunner {
         cancelled = true
         controller.abort()
         if (!operation.runId) return Promise.resolve()
-        return cancellation ??= this.service.cancel(operation.runId).then(() => undefined)
+        const runId = operation.runId
+        return cancellation ??= Promise.resolve().then(() => this.service.cancel(runId)).then(() => undefined)
       }
+    }
+    const waitForExecution = (): Promise<void> => {
+      const runId = operation.runId
+      return runId ? execution ??= Promise.resolve().then(() => this.service.waitForRun(runId)) : Promise.resolve()
     }
     const onAbort = (): void => { void operation.cancel().catch(() => undefined) }
     const revoked = (): boolean => {
@@ -327,7 +351,6 @@ export class VerificationWorkflowRunner implements WorkflowVerificationRunner {
         return { state: 'not-found', summary: '未发现 typecheck、lint、test 或 build 命令。' }
       }
       const kinds = [...new Set(plan.steps.map((step) => step.kind))]
-      startInvoked = true
       const started = await this.service.start(cwd, { kinds }, controller.signal)
       operation.runId = started.id
       // The same private signal reaches start's own discovery, before a run ID
@@ -340,8 +363,7 @@ export class VerificationWorkflowRunner implements WorkflowVerificationRunner {
         if (revoked()) break
         if (!current) throw new Error('验证记录在运行期间丢失')
         if (!ACTIVE_VERIFICATION.has(current.state)) {
-          await this.service.waitForRun(started.id)
-          executionSettled = true
+          await waitForExecution()
           if (revoked()) break
           const settled = this.service.listRuns(cwd).find((run) => run.id === started.id)
           if (!settled) throw new Error('验证记录在收尾期间丢失')
@@ -359,23 +381,30 @@ export class VerificationWorkflowRunner implements WorkflowVerificationRunner {
       await operation.cancel()
       return cancelledResult()
     } catch (error) {
+      unknown ||= hasUnknownClose(error)
       if (revoked() && error instanceof Error && error.name === 'AbortError') return cancelledResult()
-      unknown = startInvoked
-      if (startInvoked) await operation.cancel()
+      failed = true
+      primaryFailure = error
+      // Preserve the task/storage error. Cleanup below still joins cancellation
+      // even when the execution barrier rejects with an ordinary settled error.
+      void operation.cancel().catch(() => undefined)
       throw error
     } finally {
       clearTimeout(timer)
-      try {
-        // Cancellation/terminal UI state never substitutes for the real
-        // command, flush, repair and cancellation promises settling.
-        if (operation.runId && !executionSettled) await this.service.waitForRun(operation.runId)
-        if (cancellation) await cancellation
-      } catch (error) {
-        unknown = true
-        throw error
-      } finally {
-        signal?.removeEventListener('abort', onAbort)
-        if (!unknown) this.operations.delete(operation)
+      const results = await Promise.allSettled([waitForExecution()])
+      // A signal can start cancellation while the actual execution is pending.
+      if (cancellation) results.push(...await Promise.allSettled([cancellation]))
+      const errors = results.flatMap((result) => result.status === 'rejected' ? [result.reason as unknown] : [])
+      unknown ||= errors.some(hasUnknownClose)
+      signal?.removeEventListener('abort', onAbort)
+      if (!unknown) this.operations.delete(operation)
+      const cleanupError = errors.find(hasUnknownClose) ?? errors[0]
+      if (errors.length && (!failed || hasUnknownClose(cleanupError) && !hasUnknownClose(primaryFailure))) {
+        if (!failed) throw cleanupError
+        throw Object.assign(new Error([
+          primaryFailure instanceof Error ? primaryFailure.message : String(primaryFailure),
+          `验证收尾未确认：${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
+        ].join('\n')), { cause: primaryFailure, cleanupError, closeUnknown: true })
       }
     }
   }

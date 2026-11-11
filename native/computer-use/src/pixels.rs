@@ -42,15 +42,6 @@ impl Write for BoundedOutput {
         Ok(())
     }
 }
-/// Conservative original-PNG budget for admitted RGB bytes and transformed rows.
-/// Includes uncompressed DEFLATE, filter bytes, block/chunk framing and headers.
-pub fn rgb_png_upper_bound(raw_bytes: usize, output_rows: usize) -> io::Result<usize> {
-    let invalid = || io::Error::from(io::ErrorKind::InvalidData);
-    let filtered = raw_bytes.checked_add(output_rows).ok_or_else(invalid)?;
-    filtered.checked_add(filtered / 16_384 * 5)
-        .and_then(|n| n.checked_add(filtered / 32_768 * 12))
-        .and_then(|n| n.checked_add(1024)).ok_or_else(invalid)
-}
 /// Accept only positive packed stride, explicit offset and negotiated format.
 /// Transform values follow SPA_META_TRANSFORMATION_* (0..7).
 pub fn encode_transformed(
@@ -98,16 +89,13 @@ pub fn encode_transformed(
     if raw_bytes > 24_000_000 {
         return Err(invalid());
     }
-    // Conservative PNG admission before copying pixels: allow an uncompressed
-    // DEFLATE stream plus scanline/filter bytes, block/chunk framing and headers.
-    // MVP may reject a highly compressible frame that would fit; never first
-    // construct a PNG larger than the remaining cumulative byte allowance.
+    // Encoded admission uses actual writes to BoundedOutput. Raw layout and
+    // allocation limits above remain independent of PNG compressibility.
     let (out_width, out_height) = if transform % 2 == 1 {
         (height, width)
     } else {
         (width, height)
     };
-    if rgb_png_upper_bound(raw_bytes, out_height)? > limits.max_frame_bytes { return Err(invalid()); }
     // GPU readback already supplies tight RGB. Borrow it only after all layout
     // and budget checks; padding, channel conversion and transforms still copy.
     let rgb: Cow<'_, [u8]> = if transform == 0 && matches!(format, PackedFormat::Rgb) && stride == row {
@@ -215,9 +203,9 @@ mod tests {
         let open = limits();
         assert!(Limits { max_frame_bytes: 2048, max_frame_pixels: 1, max_frame_edge: 1 }.within(&open));
         assert!(!Limits { max_frame_bytes: 4097, ..open.clone() }.within(&open));
-        // Tiny allowance is admitted as a request, but cannot allocate/copy RGB.
+        // An impossible framing allowance still fails before the RGB copy.
         assert!(encode_transformed(&[1, 2, 3], 0, 3, 1, 1, PackedFormat::Rgb, 0,
-            &Limits { max_frame_bytes: 100, ..open.clone() }).is_err());
+            &Limits { max_frame_bytes: 68, ..open.clone() }).is_err());
         assert!(encode_transformed(&[1, 2, 3, 4, 5, 6], 0, 6, 2, 1, PackedFormat::Rgb, 0,
             &Limits { max_frame_pixels: 1, ..open }).is_err());
     }
@@ -244,21 +232,52 @@ mod tests {
         assert!(encode_transformed(&raw, usize::MAX, 6, 2, 3, PackedFormat::Rgb, 0, &limits()).is_err());
     }
     #[test]
-    fn png_upper_bound_keeps_exact_framing_and_identity_budget_boundary() {
-        for (raw, rows, expected) in [(30, 1, 1055), (30, 10, 1064),
-            (16_380, 3, 17_407), (16_380, 4, 17_413),
-            (32_766, 1, 33_796), (32_766, 2, 33_814)] {
-            assert_eq!(rgb_png_upper_bound(raw, rows).unwrap(), expected);
-        }
-        assert!(rgb_png_upper_bound(usize::MAX, 1).is_err());
-        assert!(rgb_png_upper_bound(usize::MAX - 1024, 1).is_err());
-        let bound = rgb_png_upper_bound(18, 3).unwrap();
-        for bytes in [bound - 1, bound] {
+    fn actual_png_bytes_define_the_exact_remaining_budget() {
+        let length = encode_transformed(&[0; 21], 0, 6, 2, 3, PackedFormat::Rgb, 0, &limits()).unwrap().0.len();
+        for bytes in [length - 1, length] {
             let limits = Limits { max_frame_bytes: bytes, ..limits() };
             for stride in [6, 7] {
-                assert_eq!(encode_transformed(&[0; 21], 0, stride, 2, 3, PackedFormat::Rgb, 0, &limits).is_ok(), bytes == bound);
+                assert_eq!(encode_transformed(&[0; 21], 0, stride, 2, 3, PackedFormat::Rgb, 0, &limits).is_ok(), bytes == length);
             }
         }
+        let original_calls = std::cell::Cell::new(0);
+        assert!(encode_frame_pngs(|| Ok(vec![2]), || {
+            original_calls.set(original_calls.get() + 1);
+            encode_rgb(&[0; 18], 2, 3, length - 1)
+        }).is_err());
+        assert_eq!(original_calls.get(), 1);
+    }
+    #[test]
+    fn compressible_1440p_frame_uses_actual_png_budget_without_resizing() {
+        let (width, height) = (2560, 1440);
+        let raw = vec![0; width * height * 3];
+        let limits = Limits { max_frame_bytes: 8 * 1024 * 1024, max_frame_pixels: 8_000_000, max_frame_edge: 4096 };
+        assert!(raw.len() > limits.max_frame_bytes);
+        let (png, preview, w, h) = encode_transformed(&raw, 0, width * 3, width, height, PackedFormat::Rgb, 0, &limits).unwrap();
+        assert_eq!((w, h), (2560, 1440));
+        assert!(png.len() <= limits.max_frame_bytes);
+        assert!(preview.len() <= PREVIEW_BYTES);
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (w, h));
+        let mut decoded = vec![0; reader.output_buffer_size()];
+        reader.next_frame(&mut decoded).unwrap();
+        assert_eq!(decoded, raw);
+    }
+    #[test]
+    fn noisy_1440p_original_over_eight_mib_fails_once_without_a_resized_retry() {
+        let (width, height) = (2560, 1440);
+        let mut state = 0x12345678u32;
+        let raw: Vec<u8> = (0..width * height * 3).map(|_| {
+            state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+            state as u8
+        }).collect();
+        let calls = std::cell::Cell::new(0);
+        let encoded = encode_frame_pngs(|| encode_preview(&raw, width, height), || {
+            calls.set(calls.get() + 1);
+            encode_rgb(&raw, width, height, 8 * 1024 * 1024)
+        });
+        assert!(encoded.is_err());
+        assert_eq!(calls.get(), 1);
     }
     #[test]
     fn noisy_preview_reduces_dimensions_without_changing_model() {
@@ -271,7 +290,7 @@ mod tests {
         let limits = Limits { max_frame_bytes: 8 * 1024 * 1024, max_frame_pixels: 8_000_000, max_frame_edge: 4096 };
         let (model, preview, w, h) = encode_transformed(&raw, 0, width * 3, width, height, PackedFormat::Rgb, 0, &limits).unwrap();
         assert_eq!((w, h), (1024, 768));
-        assert!(model.len() <= rgb_png_upper_bound(raw.len(), height).unwrap());
+        assert!(model.len() <= limits.max_frame_bytes);
         assert_eq!(u32::from_be_bytes(model[16..20].try_into().unwrap()), w);
         assert_eq!(u32::from_be_bytes(model[20..24].try_into().unwrap()), h);
         assert!(preview.len() <= PREVIEW_BYTES);
@@ -294,20 +313,22 @@ mod tests {
         let mut output = BoundedOutput { bytes: vec![0; 2], limit: 3 };
         assert!(output.write(&[1, 2]).is_err());
         assert_eq!(output.bytes.len(), 2);
+        assert_eq!(output.write(&[3]).unwrap(), 1);
+        assert_eq!(output.bytes, [0, 0, 3]);
+        assert_eq!(output.write(&[]).unwrap(), 0);
+        assert!(output.write(&[4]).is_err());
+        assert_eq!(output.bytes, [0, 0, 3]);
         assert!(encode_preview(&[1, 2, 3], 1, 1).unwrap().len() <= PREVIEW_BYTES);
     }
     #[test]
-    fn odd_rotation_admits_output_scanline_count_not_input_height() {
+    fn odd_rotation_uses_actual_encoded_rows_and_budget() {
         let raw = vec![0; 30];
-        let limits = Limits { max_frame_bytes: 1059, max_frame_pixels: 10, max_frame_edge: 10 };
-        // Input 10x1 fits 30 RGB + 1 filter + 1024 framing; rotated 1x10
-        // requires 10 filter bytes and must fail conservative pre-copy admission.
-        assert!(encode_transformed(&raw, 0, 30, 10, 1, PackedFormat::Rgb, 0, &limits).is_ok());
-        for t in [1, 3, 5, 7] {
-            assert!(encode_transformed(&raw, 0, 30, 10, 1, PackedFormat::Rgb, t, &limits).is_err());
+        for t in [0, 1, 3, 5, 7] {
+            let expected = encode_transformed(&raw, 0, 30, 10, 1, PackedFormat::Rgb, t, &limits()).unwrap();
+            let limits = Limits { max_frame_bytes: expected.0.len(), ..limits() };
+            assert_eq!(encode_transformed(&raw, 0, 30, 10, 1, PackedFormat::Rgb, t, &limits).unwrap(), expected);
+            assert_eq!((expected.2, expected.3), if t % 2 == 0 { (10, 1) } else { (1, 10) });
         }
-        // Reverse rectangle now fits precisely because output has fewer rows.
-        assert!(encode_transformed(&raw, 0, 3, 1, 10, PackedFormat::Rgb, 1, &limits).is_ok());
     }
     #[test]
     fn bounds_before_allocating() {

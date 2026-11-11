@@ -28,7 +28,7 @@ export class WaylandComputerUseDriver implements ComputerUseDriver {
     if (!Number.isSafeInteger(limits.maxFrameBytes) || limits.maxFrameBytes < 1 || limits.maxFrameBytes > 8 * 1024 * 1024 || !Number.isSafeInteger(limits.maxFramePixels) || limits.maxFramePixels < 1 || limits.maxFramePixels > 8_000_000 || !Number.isSafeInteger(limits.maxFrameEdge) || limits.maxFrameEdge < 1 || limits.maxFrameEdge > 4096) throw new Error('computer-use-budget')
     if (process.platform !== 'linux') return this.unavailable()
     this.control = options?.control === true
-    this.client = new ComputerUseHelperClient(this.binary, identity.generation, this.start, this.control, true, this.dmaBufReadback)
+    this.client = new ComputerUseHelperClient(this.binary, identity.generation, this.start, this.control, this.dmaBufReadback)
     // Subscribe before hello/open can synchronously emit a source revocation.
     this.client.onRevoked(() => {
       if (this.client?.transportUnknown) this.captureUnknown = true
@@ -77,8 +77,8 @@ export class WaylandComputerUseDriver implements ComputerUseDriver {
   async close(): Promise<void> {
     this.closed = true
     await this.client?.close()
-    // Resource closure cannot repair an unaccountable physical frame result.
-    if (this.captureUnknown) throw new Error('computer-use-capture-unknown')
+    // Capture accounting uncertainty stays an operation failure. Resource closure
+    // is determined solely by the client's actual request/decode/process barriers.
   }
   private unavailable(): ComputerUseCapability {
     return { platform: 'linux-wayland', method: 'unavailable', capture: false, control: false, scope: 'unknown-window-or-display', unsupportedReason: 'capture-unavailable' }

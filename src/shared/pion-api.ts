@@ -205,7 +205,7 @@ export interface PionApi {
   /** Start a fresh session in the same cwd and initialize its backend. */
   newSession(): Promise<void>
   /** Fork the session at an entry; resolves with the message text at the fork point. */
-  forkAt(entryId: string): Promise<{ text: string; cancelled: boolean }>
+  forkAt(entryId: string): Promise<{ text: string; cancelled: boolean; warning?: string }>
   /** Return before a user message in the same session; keep old branches and all project files. */
   revertMessage(request: MessageRevertRequest): Promise<MessageRevertResult>
   /** Switch to another session file and load/reuse its backend. */
@@ -213,11 +213,11 @@ export interface PionApi {
   /** Delete a persisted session file. */
   deleteSession(sessionPath: string): Promise<DeleteSessionResult>
   /** Copy the selected session's active branch into a new session. */
-  copySession(sessionPath: string): Promise<{ cancelled: boolean }>
+  copySession(sessionPath: string): Promise<{ cancelled: boolean; warning?: string }>
   /** List user messages that can be used as fork points. */
   getSessionForkMessages(sessionPath: string): Promise<ForkMessageOption[]>
   /** Create a new session by forking before a selected user message. */
-  forkSession(sessionPath: string, entryId: string): Promise<{ text: string; cancelled: boolean }>
+  forkSession(sessionPath: string, entryId: string): Promise<{ text: string; cancelled: boolean; warning?: string }>
   /** Full entry list of the active session (kept for diagnostics/compatibility). */
   getEntries(): Promise<{ entries: WireEntry[]; leafId: string | null } | null>
   /** User-message landmarks spanning the selected persisted branch. */
@@ -292,8 +292,6 @@ export interface PionApi {
   setAutoRetry(enabled: boolean): Promise<void>
   /** Compact the session context now (LLM summarization). */
   compactNow(customInstructions?: string): Promise<void>
-  /** Export the session to HTML; resolves with the output path. */
-  exportSessionHtml(): Promise<string>
   renameSession(name: string, sessionPath?: string): Promise<void>
   setSteeringMode(mode: 'all' | 'one-at-a-time'): Promise<void>
   setFollowUpMode(mode: 'all' | 'one-at-a-time'): Promise<void>

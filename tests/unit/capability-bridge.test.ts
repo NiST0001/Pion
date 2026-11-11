@@ -73,7 +73,7 @@ async function harness(persisted = false) {
     switchSession: vi.fn(replace), newSession: vi.fn(async () => {
       const result = await replace()
       state.sessionId = 'fresh-id'
-      state.sessionFile = join(cwd, 'fresh-allocated.jsonl')
+      state.sessionFile = join(cwd, `fresh-allocated-${revision}.jsonl`)
       state.sessionName = undefined
       state.model = { provider: 'default', id: 'default' }
       state.thinkingLevel = 'off'
@@ -134,6 +134,21 @@ async function harness(persisted = false) {
 }
 
 describe('capability Bridge read and source receipts', () => {
+  it('reclaims verified retired sources across more than 64 same-path replacements', async () => {
+    const h = await harness(true)
+    const retirement = vi.spyOn(h.bridge, 'retireRuntimeSources')
+    for (let revision = 1; revision <= 70; revision++) {
+      await h.save()
+      await h.waitApply()
+      expect(h.backend.capability).toMatchObject({ state: 'applied', appliedRevision: revision,
+        retiredRuntimeIds: [], notice: { runtimeId: `runtime-${revision}` } })
+    }
+    expect(retirement).toHaveBeenCalledTimes(70)
+    expect(h.client.switchSession).toHaveBeenCalledTimes(70)
+    expect(h.backend.capability?.quarantined).not.toBe(true)
+    await h.runStore.flush()
+  })
+
   it('projects desired preferences and only existing verified runtime metadata without RPC or startup', async () => {
     const h = await harness()
     await h.bridge.getCapabilitySettings(h.cwd) // Establish the actual named source receipt.
@@ -264,6 +279,33 @@ describe('capability Bridge read and source receipts', () => {
 })
 
 describe('capability Bridge control rejection receipts', () => {
+  it.each(['selection', 'run', 'frame', 'preferences'])('passes the explicit model save owner into queued AppSettings publication (%s)', async (kind) => {
+    const h = await harness()
+    const storage = deferred<void>()
+    let published = false
+    const setSessionModel = vi.fn(async (_path: string, _preference: unknown, assertCurrent?: () => void) => {
+      await storage.promise
+      assertCurrent?.()
+      published = true
+    })
+    const preferences = { getSessionModel: vi.fn(), setSessionModel, deleteSessionModel: vi.fn() }
+    h.bridge.sessionModelPreferences = preferences
+    h.bridge.refresh = vi.fn(async () => undefined)
+    const changing = h.bridge.setModel('explicit-provider', 'explicit-model')
+    const rejected = expect(changing).rejects.toThrow('会话已切换')
+    await gap()
+    expect(setSessionModel).toHaveBeenCalledWith(h.path,
+      { provider: 'explicit-provider', modelId: 'explicit-model' }, expect.any(Function))
+    if (kind === 'selection') h.bridge.sessionSelectionGeneration++
+    if (kind === 'run') h.backend.activeRunId = 'new-run'
+    if (kind === 'frame') h.bridge.win.webContents.mainFrame = {}
+    if (kind === 'preferences') h.bridge.sessionModelPreferences = { ...preferences }
+    storage.resolve()
+    await rejected
+    expect(published).toBe(false)
+    expect(h.bridge.refresh).not.toHaveBeenCalled()
+  })
+
   it.each(['Model not found: missing/model', 'No API key for missing/model'])('does not quarantine the confirmed SDK business negative: %s', async (message) => {
     const h = await harness()
     const pending = deferred<void>()
@@ -468,7 +510,8 @@ describe('capability Bridge true-idle application', () => {
     expect(h.client.setThinkingLevel).toHaveBeenCalledWith('high')
     expect(h.client.setSessionName).toHaveBeenCalledWith('保留的空会话名称')
     expect(h.state.sessionName).toBe('保留的空会话名称')
-    expect(modelPreferences.setSessionModel).toHaveBeenCalledWith(h.state.sessionFile, { provider: 'exact-provider', modelId: 'exact-model' })
+    expect(modelPreferences.setSessionModel).toHaveBeenCalledWith(h.state.sessionFile,
+      { provider: 'exact-provider', modelId: 'exact-model' }, expect.any(Function))
     expect(preferences.get(h.path)).toEqual({ provider: 'older-provider', modelId: 'older-model' })
     expect(modelPreferences.deleteSessionModel).not.toHaveBeenCalled()
     expect(h.bridge.activeSessionPath).toBe(h.state.sessionFile)
@@ -479,6 +522,33 @@ describe('capability Bridge true-idle application', () => {
     expect(h.bridge.activeKey).toBe('retained-backend')
     expect(h.backend.capability?.appliedRevision).toBe(1)
     expect(h.backend.capability?.notice?.runtimeId).toBe('runtime-1')
+  })
+
+  it('keeps a verified runtime dispatchable after a local save warning and saves on explicit retry', async () => {
+    const h = await harness()
+    const saveModel = vi.fn().mockRejectedValueOnce(new Error('local save failed')).mockResolvedValue(undefined)
+    h.bridge.sessionModelPreferences = { getSessionModel: vi.fn(), setSessionModel: saveModel, deleteSessionModel: vi.fn() }
+    h.bridge.status = { phase: 'running', cwd: h.cwd }
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await h.save()
+    await h.waitApply()
+    expect(h.backend.capability).toMatchObject({ state: 'applied', appliedRevision: 1, notice: { runtimeId: 'runtime-1' } })
+    expect(h.backend.capability?.quarantined).not.toBe(true)
+    expect(h.bridge.getStatus()).toMatchObject({ phase: 'running', error: expect.stringContaining('模型偏好保存失败') })
+    await h.bridge.send('healthy runtime')
+    expect(h.client.prompt).toHaveBeenCalledWith('healthy runtime', [])
+    h.emit('agent_start')
+    h.emit('agent_settled')
+    await h.backend.runCompletionPromise
+    await h.save()
+    await h.waitApply()
+    expect(saveModel).toHaveBeenCalledTimes(2)
+    expect(saveModel).toHaveBeenLastCalledWith(h.state.sessionFile,
+      { provider: 'exact-provider', modelId: 'exact-model' }, expect.any(Function))
+    expect(h.backend.capability).toMatchObject({ state: 'applied', appliedRevision: 2, error: undefined })
+    expect(h.backend.capability?.quarantined).not.toBe(true)
+    expect(h.bridge.getStatus().error).toBeUndefined()
+    await h.runStore.flush()
   })
 
   it.each([false, true])('keeps a cancelled replacement runtime readable and retries only an explicit change (persisted=%s)', async (persisted) => {
@@ -567,6 +637,7 @@ describe('capability Bridge true-idle application', () => {
 
   it('retains the real apply promise and isolates replacement failure instead of claiming applied or retrying', async () => {
     const h = await harness(true)
+    const retirement = vi.spyOn(h.bridge, 'retireRuntimeSources')
     const replacement = deferred<{ cancelled: boolean }>()
     const replacing = deferred<void>()
     h.client.switchSession.mockImplementationOnce(() => {
@@ -581,6 +652,7 @@ describe('capability Bridge true-idle application', () => {
     expect(h.client.prompt).not.toHaveBeenCalled()
     replacement.reject(new Error('RPC timeout; actual shutdown unknown'))
     await h.waitApply()
+    expect(retirement).toHaveBeenCalledExactlyOnceWith(h.backend, false)
     expect(h.backend.capability).toMatchObject({ state: 'failed', appliedRevision: 0, quarantined: true })
     await h.save()
     await h.bridge.getCapabilitySettings(h.cwd)

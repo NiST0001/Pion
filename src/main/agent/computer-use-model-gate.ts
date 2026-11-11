@@ -8,7 +8,6 @@ export const COMPUTER_USE_TAINT_ENTRY = 'pion.computer-use.retained.v1'
 // Pinned SDK 1.4.0 image-resize-core defaults: 2000/edge and strictly <4.5 MiB base64.
 export const COMPUTER_USE_MODEL_MAX_EDGE = 2000
 export const COMPUTER_USE_MODEL_MAX_BASE64 = 4.5 * 1024 * 1024
-export const COMPUTER_USE_UNWATCH_TIMEOUT_MS = 5_000
 const STREAM_METHODS = new Set(['stream', 'streamSimple', 'streamDeferred'])
 const OTHER_REQUESTS = new Set(['fetchDeferred', 'cancelDeferred', 'generateImages', 'classify'])
 const PROVIDER_REQUESTS = new Set(['stream', 'streamSimple', 'fetchDeferred', 'cancelDeferred', 'generateImages', 'classify'])
@@ -38,6 +37,28 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 }
 
+/** Recognize the SDK's text-only context shapes. Image/unknown content stays
+ * unproven; a fork header or a plain text summary alone is no screenshot. */
+function textOnlyContent(value: unknown): boolean {
+  if (typeof value === 'string') return true
+  return Array.isArray(value) && value.every(part => {
+    const item = record(part)
+    return item?.type === 'text' ? typeof item.text === 'string'
+      : item?.type === 'thinking' ? typeof item.thinking === 'string'
+        : item?.type === 'toolCall' && typeof item.id === 'string' && typeof item.name === 'string' && !!record(item.arguments)
+  })
+}
+function textOnlyMessage(value: unknown): boolean {
+  const message = record(value)
+  if (!message) return false
+  switch (message.role) {
+    case 'user': case 'assistant': case 'toolResult': case 'custom': return textOnlyContent(message.content)
+    case 'bashExecution': return typeof message.command === 'string' && typeof message.output === 'string'
+    case 'branchSummary': case 'compactionSummary': return typeof message.summary === 'string'
+    default: return false
+  }
+}
+
 /** Scan the entire SDK tree, not only the selected/compacted branch. Taint is
  * sticky, including text summaries derived from screenshots. Unknown provenance
  * (resume/fork/import or an image result without its marker) never grants egress. */
@@ -45,9 +66,11 @@ export function computerUseHistoryState(manager: Pick<SessionManager, 'getEntrie
   try {
     let marked = false
     let evidence = false
-    let branchSummary = false
+    let textOnly = true
     for (const entry of manager.getEntries()) {
-      if (entry.type === 'branch_summary') branchSummary = true
+      if (entry.type === 'branch_summary' || entry.type === 'compaction') textOnly &&= typeof entry.summary === 'string'
+      if (entry.type === 'custom_message') textOnly &&= textOnlyContent(entry.content)
+      if (entry.type === 'context_edit' && entry.replacement !== null) textOnly &&= textOnlyContent(entry.replacement?.content)
       if (entry.type === 'custom' && entry.customType === COMPUTER_USE_TAINT_ENTRY) {
         const data = record(entry.data)
         if (!data || (data.version !== 1 && data.version !== 2) || data.retention !== 'sdk-session' || data.runtimeId !== runtimeId
@@ -63,14 +86,13 @@ export function computerUseHistoryState(manager: Pick<SessionManager, 'getEntrie
       }
       if (entry.type !== 'message') continue
       const message = entry.message
+      textOnly &&= textOnlyMessage(message)
       if (message.role === 'toolResult' && message.toolName === COMPUTER_USE_OBSERVE_TOOL && message.content.some(part => part.type === 'image')) evidence = true
     }
-    // SDK clones copy the complete ancestor path, including our marker, NOT
-    // only the compacted context. A cross-branch summary may derive from an
-    // abandoned path whose marker was not an ancestor; its cloned provenance
-    // is unknown. Ordinary untainted clones must keep working. Do not follow
-    // arbitrary parent paths supplied in imported headers.
-    if (manager.getHeader()?.parentSession && branchSummary && !marked) return 'unknown'
+    // A fork can copy images/custom context without copying an off-branch taint
+    // marker or adding a summary. Only recognized text-only ancestry is clean;
+    // never open an arbitrary parentSession path to infer provenance.
+    if (manager.getHeader()?.parentSession && !marked && !textOnly) return 'unknown'
     return marked ? 'current' : evidence ? 'unknown' : 'clean'
   } catch { return 'unknown' }
 }
@@ -89,6 +111,7 @@ export function createComputerUseModelGate(runtime: ModelRuntime, options: Compu
   let poisoned = false
   let retired = false
   const controllers = new Set<AbortController>()
+  const pendingCleanups = new Set<Promise<void>>()
   const providerFacades = new WeakMap<object, object>()
   const state = () => {
     const history = computerUseHistoryState(options.sessionManager, options.runtimeId)
@@ -96,6 +119,9 @@ export function createComputerUseModelGate(runtime: ModelRuntime, options: Compu
   }
   const sensitive = () => state() !== 'clean' || retainedScope !== undefined || poisoned
   const assertCurrent = () => { if (poisoned || retired || !options.isCurrent()) throw denied() }
+  // Cleanup blocks new operations; an admitted operation keeps checking its
+  // identity and permit even while its normal heartbeat awaits an ACK.
+  const assertAdmission = () => { assertCurrent(); if (pendingCleanups.size) throw denied() }
   const assertSupported = (model: ChatModel, requestOptions?: Record<string, unknown>) => {
     assertCurrent()
     if (options.settingsManager.getBlockImages() || model?.provider !== 'openai-codex' || model.api !== 'openai-codex-responses'
@@ -125,19 +151,28 @@ export function createComputerUseModelGate(runtime: ModelRuntime, options: Compu
   function requestWatch(model: ChatModel, controller: AbortController, signal: AbortSignal, assertPermit: (permit: Permit) => void) {
     controllers.add(controller)
     const stopWatch = new AbortController()
-    const unclosedWatches = new Set<string>()
+    const unclosedWatches = new Map<string, Promise<void> | undefined>()
+    const closeWatch = (watchRequestId: string): Promise<void> => {
+      let closing = unclosedWatches.get(watchRequestId)
+      if (!closing) {
+        closing = options.unwatch(model, watchRequestId).then(() => {
+          pendingCleanups.delete(closing!)
+        })
+        unclosedWatches.set(watchRequestId, closing)
+        pendingCleanups.add(closing)
+      }
+      return closing
+    }
     let watching: Promise<void> | undefined
     const watch = () => {
       watching = (async () => {
         try {
           while (!stopWatch.signal.aborted && !signal.aborted) {
             const request = options.watch(model, AbortSignal.any([signal, stopWatch.signal]))
-            unclosedWatches.add(request.watchRequestId)
+            unclosedWatches.set(request.watchRequestId, undefined)
+            let permit: Permit
             try {
-              const permit = await request.result
-              unclosedWatches.delete(request.watchRequestId)
-              if (stopWatch.signal.aborted) return
-              assertPermit(permit)
+              permit = await request.result
             } catch (error) {
               // A correlated negative Main response (e.g. busy before watcher
               // registration) also ends that poll. Local abort/timeout/error
@@ -145,33 +180,33 @@ export function createComputerUseModelGate(runtime: ModelRuntime, options: Compu
               if (request.isAcknowledged?.()) unclosedWatches.delete(request.watchRequestId)
               throw error
             }
+            // A heartbeat's delivered response ends its Main poll, not the
+            // retained cleanup correlation. Explicitly ACK every successful
+            // poll before replacing it; short/aborted operations share this
+            // same cleanup Promise with finish().
+            await closeWatch(request.watchRequestId)
+            unclosedWatches.delete(request.watchRequestId)
+            if (stopWatch.signal.aborted) return
+            assertPermit(permit)
           }
         } catch { if (!stopWatch.signal.aborted) revoke(controller) }
       })()
     }
     const finish = async () => {
+      // Own the whole barrier before abort: an ACK can precede the watch
+      // result, which must reuse that cleanup before the controller retires.
+      const cleanup = Promise.resolve().then(async () => {
+        await Promise.all([watching, ...[...unclosedWatches.keys()].map(closeWatch)])
+      })
+      pendingCleanups.add(cleanup)
       stopWatch.abort()
-      let timer: ReturnType<typeof setTimeout> | undefined
-      const cleanup = Promise.all([
-        watching,
-        ...[...unclosedWatches].map(async watchRequestId => {
-          await options.unwatch(model, watchRequestId)
-          unclosedWatches.delete(watchRequestId)
-        })
-      ])
-      // A deadline bounds only OUR wait, never proves Main/transport cleanup.
-      // Keep the controller and poison further egress on an unknown result;
-      // the real cleanup promise remains observed even after this deadline.
-      const closed = await Promise.race([
-        cleanup.then(() => true, () => false),
-        new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), COMPUTER_USE_UNWATCH_TIMEOUT_MS) })
-      ])
-      clearTimeout(timer)
-      if (closed && !unclosedWatches.size) controllers.delete(controller)
-      else {
+      try {
+        await cleanup
+        controllers.delete(controller)
+      } catch {
         poisoned = true
         for (const active of controllers) revoke(active)
-      }
+      } finally { pendingCleanups.delete(cleanup) }
     }
     return { watch, finish }
   }
@@ -202,7 +237,9 @@ export function createComputerUseModelGate(runtime: ModelRuntime, options: Compu
         if (!sensitive()) inner = Reflect.apply(Reflect.get(target, method, target), target, args) as AssistantMessageEventStream
         else {
           if (method !== 'stream' && method !== 'streamSimple') throw denied()
+          assertAdmission()
           await approve()
+          assertAdmission()
           watch()
           const originalFetch = globalThis.fetch
           if (typeof originalFetch !== 'function') throw denied()
@@ -272,7 +309,9 @@ export function createComputerUseModelGate(runtime: ModelRuntime, options: Compu
     try {
       // SDK summaries/compaction can call getAuth before streamSimple. The
       // existing bounded Main egress approval must precede OAuth refresh/FS.
+      assertAdmission()
       authScope = (await authorize(model, signal, rawOptions)).scopeRevision
+      assertAdmission()
       assertAuth()
       watch()
       assertAuth()
@@ -329,6 +368,7 @@ export function createComputerUseModelGate(runtime: ModelRuntime, options: Compu
     }
   })
   const assertImageDelivery = (model: ChatModel) => {
+    assertAdmission()
     assertSupported(model)
     const history = state()
     if (history === 'unknown' || (retainedScope === undefined && history !== 'clean')) throw unprovenHistory()

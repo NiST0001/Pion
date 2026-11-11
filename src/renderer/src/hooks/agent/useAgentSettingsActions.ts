@@ -1,9 +1,11 @@
 import { useCallback } from 'react'
 import type { MutableRefObject } from 'react'
 import type { PionApi } from '../../../../shared/types'
+import type { SessionCommandTarget } from '../../../../shared/slash-command-protocol'
 
 interface UseAgentSettingsActionsOptions {
   api: PionApi | undefined
+  captureSessionCommand: () => { target: SessionCommandTarget; isSelected: () => boolean }
   timelineOwnerPath: MutableRefObject<string | undefined>
   reloadTimeline: (sessionPath?: string) => Promise<void>
   refreshHistoryIndex: (sessionPath?: string) => Promise<void>
@@ -11,6 +13,7 @@ interface UseAgentSettingsActionsOptions {
 
 export function useAgentSettingsActions({
   api,
+  captureSessionCommand,
   timelineOwnerPath,
   reloadTimeline,
   refreshHistoryIndex
@@ -37,10 +40,18 @@ export function useAgentSettingsActions({
     if (path) void refreshHistoryIndex(path)
   }, [api, refreshHistoryIndex, reloadTimeline, timelineOwnerPath])
 
-  const exportHtml = useCallback(
-    async (): Promise<string> => (await api?.exportSessionHtml()) ?? '',
-    [api]
-  )
+  const exportHtml = useCallback(async (): Promise<string> => {
+    if (!api) throw new Error('preload 桥未加载')
+    // Own the target and publication here; stale success and failure both return an empty display result.
+    const { target, isSelected } = captureSessionCommand()
+    try {
+      const path = await api.exportSessionForCommand(target)
+      return isSelected() ? path : ''
+    } catch (error) {
+      if (!isSelected()) return ''
+      throw error
+    }
+  }, [api, captureSessionCommand])
 
   const renameSession = useCallback(
     async (name: string, sessionPath?: string): Promise<void> => {

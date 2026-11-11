@@ -24,41 +24,40 @@ struct Request {
     action: Option<Action>,
 }
 /// Explicit capability negotiation, not authentication. Capture requires its
-/// exact first flag; optional input, accounting and DMA-BUF flags follow in
-/// that order. No automatic fallback or OS probing for incompatible arguments.
-fn protocol_features(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Option<(bool, bool, bool)> {
-    let args: Vec<_> = args.into_iter().map(|a| a.as_ref().to_os_string()).collect();
-    let (close, mut tail) = args.split_first()?;
-    if close != "--client-close-receipt-v1" { return None; }
+/// close and accounting flags; optional input precedes accounting and DMA-BUF
+/// stays last. No automatic fallback or OS probing for incompatible arguments.
+fn protocol_features(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> Option<(bool, bool)> {
+    let mut args = args.into_iter().peekable();
+    if args.next()?.as_ref() != std::ffi::OsStr::new("--client-close-receipt-v1") { return None; }
     let mut take = |flag: &str| {
-        let present = tail.first().is_some_and(|a| a == flag);
-        if present { tail = &tail[1..]; }
+        let present = args.peek().is_some_and(|a| a.as_ref() == std::ffi::OsStr::new(flag));
+        if present { args.next(); }
         present
     };
     let input = take("--wayland-virtual-input-v1");
-    let accounting = take("--capture-accounting-v1");
+    if !take("--capture-accounting-v1") { return None; }
     let dmabuf = take("--dmabuf-readback-v1");
-    tail.is_empty().then_some((input, accounting, dmabuf))
+    args.next().is_none().then_some((input, dmabuf))
 }
+#[cfg(test)]
 fn protocol_enabled(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> bool {
     protocol_features(args).is_some()
 }
+#[cfg(test)]
 fn control_protocol_enabled(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> bool {
-    protocol_features(args).is_some_and(|(input, _, _)| input)
+    protocol_features(args).is_some_and(|(input, _)| input)
 }
-fn accounting_protocol_enabled(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> bool {
-    protocol_features(args).is_some_and(|(_, accounting, _)| accounting)
-}
+#[cfg(test)]
 fn dmabuf_protocol_enabled(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> bool {
-    protocol_features(args).is_some_and(|(_, _, dmabuf)| dmabuf)
+    protocol_features(args).is_some_and(|(_, dmabuf)| dmabuf)
 }
 fn control_open(r: &Request, control_enabled: bool) -> bool {
     control_enabled && r.control == Some(true) && r.capture_scope.as_deref() == Some("display")
 }
-fn negotiated_hello(r: &Request, enabled: bool, control_enabled: bool, accounting_enabled: bool, dmabuf_enabled: bool) -> serde_json::Value {
+fn negotiated_hello(r: &Request, enabled: bool, control_enabled: bool, dmabuf_enabled: bool) -> serde_json::Value {
     let mut body = hello_body(r, enabled);
+    if enabled { body["captureAccountingVersion"] = 1.into(); }
     if enabled && control_enabled { body["inputProtocolVersion"] = 1.into(); }
-    if enabled && accounting_enabled { body["captureAccountingVersion"] = 1.into(); }
     if enabled && dmabuf_enabled { body["dmaBufReadbackVersion"] = 1.into(); }
     body
 }
@@ -114,12 +113,6 @@ pub(crate) enum DevelopmentStage {
     GpuFormatModifierInvalid, GpuFormatModifierMismatch,
     GpuReadback, GpuReadbackFailed, GpuCleanup, GpuCleanupFailed,
     PipewireMemoryParamsFailed, PipewireMemoryParamsAccepted,
-    PipewireProbeTargetSeen, PipewireProbeTargetUnavailable,
-    PipewireProbePackedSupported, PipewireProbePackedUnsupported,
-    PipewireProbeSizeMandatory, PipewireProbeSizeNotMandatory,
-    PipewireProbeFramerateMandatory, PipewireProbeFramerateNotMandatory,
-    PipewireProbeModifierPresent, PipewireProbeModifierAbsent,
-    PipewireProbeModifierMandatory, PipewireProbeModifierNotMandatory,
 }
 fn development_stage_trace_enabled(value: Option<&std::ffi::OsStr>) -> bool {
     value == Some(std::ffi::OsStr::new("1"))
@@ -262,9 +255,9 @@ fn stop_diagnostic(pw_ok: bool, portal_ok: bool) -> Option<DiagnosticCode> {
 fn error_body(r: &Request, code: DiagnosticCode) -> serde_json::Value {
     serde_json::json!({"id":r.id,"generation":r.generation,"kind":"error","diagnosticCode":code})
 }
-fn capture_error_body(r: &Request, accounting_enabled: bool, error: &capture::FrameError) -> serde_json::Value {
+fn capture_error_body(r: &Request, error: &capture::FrameError) -> serde_json::Value {
     let mut body = error_body(r, DiagnosticCode::CaptureFrameFailed);
-    if r.kind == "capture" && accounting_enabled && error.no_complete_png {
+    if r.kind == "capture" && error.no_complete_png {
         body["noFrameReceipt"] = serde_json::json!({"version":1,"outcome":"no-complete-png"});
     }
     body
@@ -374,15 +367,15 @@ async fn stop_resources(
     };
     (pw_ok, client_ok, input_ok)
 }
-async fn run(enabled: bool, control_enabled: bool, accounting_enabled: bool, dmabuf_enabled: bool) -> io::Result<()> {
+async fn run(enabled: bool, control_enabled: bool, dmabuf_enabled: bool) -> io::Result<()> {
     let output = Output::start();
-    let result = run_loop(&output, enabled, control_enabled, accounting_enabled, dmabuf_enabled).await;
+    let result = run_loop(&output, enabled, control_enabled, dmabuf_enabled).await;
     // Do not let a fast error/owner-loss exit truncate an already queued notice.
     // Unknown/backpressured transport remains pending, never a clean-close proof.
     let drained = output.finish().await;
     result.and(drained)
 }
-async fn run_loop(output: &Output, enabled: bool, control_enabled: bool, accounting_enabled: bool, dmabuf_enabled: bool) -> io::Result<()> {
+async fn run_loop(output: &Output, enabled: bool, control_enabled: bool, dmabuf_enabled: bool) -> io::Result<()> {
     let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
     let (tx, mut rx) = tokio::sync::mpsc::channel(2);
     let eof_cancel = cancel.clone();
@@ -421,12 +414,12 @@ async fn run_loop(output: &Output, enabled: bool, control_enabled: bool, account
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
         let _ = signal_cancel.send(true);
     });
-    run_requests(output, enabled, control_enabled, accounting_enabled, dmabuf_enabled, &mut rx, &mut cancelled, signal_task).await
+    run_requests(output, enabled, control_enabled, dmabuf_enabled, &mut rx, &mut cancelled, signal_task).await
 }
 /// Shared production request/cleanup core. Tests supply only admitted requests,
 /// writer ACKs and an owned pending task: no desktop, stdin or signal probes.
 async fn run_requests(
-    output: &Output, enabled: bool, control_enabled: bool, accounting_enabled: bool, dmabuf_enabled: bool,
+    output: &Output, enabled: bool, control_enabled: bool, dmabuf_enabled: bool,
     rx: &mut tokio::sync::mpsc::Receiver<Request>,
     cancelled: &mut tokio::sync::watch::Receiver<bool>,
     mut signal_task: tokio::task::JoinHandle<()>,
@@ -472,7 +465,7 @@ async fn run_requests(
             }
             "hello" if !hello && session.is_none() => {
                 hello = enabled;
-                output.send(negotiated_hello(&r, enabled, control_enabled, accounting_enabled, dmabuf_enabled), Vec::new()).await
+                output.send(negotiated_hello(&r, enabled, control_enabled, dmabuf_enabled), Vec::new()).await
             }
             "open" if open_allowed(enabled, hello) && !opened && session.is_none() && !*cancelled.borrow()
                 && (r.control.is_none() || control_open(&r, control_enabled)) => {
@@ -597,7 +590,7 @@ async fn run_requests(
                         let (body, bytes) = frame_body(&r, frame, deliverable, input_frame)?;
                         output.send(body, bytes).await
                     }
-                    Err(error) => output.send(capture_error_body(&r, enabled && accounting_enabled, &error), Vec::new()).await,
+                    Err(error) => output.send(capture_error_body(&r, &error), Vec::new()).await,
                 }
             }
             "act" => {
@@ -634,11 +627,10 @@ async fn run_requests(
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let enabled = protocol_enabled(std::env::args_os().skip(1));
-    let control_enabled = control_protocol_enabled(std::env::args_os().skip(1));
-    let accounting_enabled = accounting_protocol_enabled(std::env::args_os().skip(1));
-    let dmabuf_enabled = dmabuf_protocol_enabled(std::env::args_os().skip(1));
-    if !cfg!(target_os = "linux") || run(enabled, control_enabled, accounting_enabled, dmabuf_enabled).await.is_err() {
+    let features = protocol_features(std::env::args_os().skip(1));
+    let enabled = features.is_some();
+    let (control_enabled, dmabuf_enabled) = features.unwrap_or((false, false));
+    if !cfg!(target_os = "linux") || run(enabled, control_enabled, dmabuf_enabled).await.is_err() {
         eprintln!("computer-use-helper-unverified");
         std::process::exit(1);
     }
@@ -667,61 +659,20 @@ mod tests {
             .as_object().unwrap().len(), 4);
     }
     #[test]
-    fn only_exact_ordered_argv_capabilities_enable_protocol() {
-        let flag = "--client-close-receipt-v1";
-        let input = "--wayland-virtual-input-v1";
-        assert!(protocol_enabled([flag]));
-        assert!(!control_protocol_enabled([flag]));
-        assert!(protocol_enabled([flag, input]));
-        assert!(control_protocol_enabled([flag, input]));
-        for args in [vec![input], vec![input, flag], vec![flag, input, input], vec![flag, flag, input], vec![flag, input, "--unknown"]] {
-            assert!(!protocol_enabled(&args));
-            assert!(!control_protocol_enabled(&args));
-        }
-        for args in [vec![], vec!["--unknown"], vec![flag, flag], vec![flag, "--unknown"],
-            vec!["--unknown", flag], vec!["--client-close-receipt-v1=true"]] {
-            assert!(!protocol_enabled(args));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStringExt;
-            assert!(!protocol_enabled([std::ffi::OsString::from_vec(vec![0xff])]));
-        }
+    fn protocol_features_reads_the_arguments_in_one_pass() {
+        let calls = std::cell::Cell::new(0);
+        let args = ["--client-close-receipt-v1", "--wayland-virtual-input-v1",
+            "--capture-accounting-v1", "--dmabuf-readback-v1"].into_iter().inspect(|_| calls.set(calls.get() + 1));
+        assert_eq!(protocol_features(args), Some((true, true)));
+        assert_eq!(calls.get(), 4);
     }
     #[test]
-    fn accounting_negotiation_is_exact_ordered_and_hello_only() {
-        let c = "--client-close-receipt-v1";
-        let i = "--wayland-virtual-input-v1";
-        let a = "--capture-accounting-v1";
-        let hello = Request { kind: "hello".into(), ..close_request() };
-        for (args, input, accounting) in [(vec![c], false, false), (vec![c, i], true, false),
-            (vec![c, a], false, true), (vec![c, i, a], true, true)] {
-            assert!(protocol_enabled(&args));
-            assert_eq!(control_protocol_enabled(&args), input);
-            assert_eq!(accounting_protocol_enabled(&args), accounting);
-            let body = negotiated_hello(&hello, true, input, accounting, false);
-            assert_eq!(body.get("inputProtocolVersion").is_some(), input);
-            assert_eq!(body.get("captureAccountingVersion").is_some(), accounting);
-        }
-        for args in [vec![a], vec![i, a], vec![a, c], vec![c, a, i], vec![c, a, a], vec![c, i, a, a],
-            vec![c, i, i, a], vec![c, c, a], vec![c, a, "--unknown"]] {
-            assert!(!protocol_enabled(&args));
-            assert!(!control_protocol_enabled(&args));
-            assert!(!accounting_protocol_enabled(&args));
-            assert_eq!(negotiated_hello(&hello, false, false, false, false), hello_body(&hello, false));
-        }
-        assert_eq!(negotiated_hello(&hello, false, true, true, true), hello_body(&hello, false));
-    }
-    #[test]
-    fn dmabuf_argv_has_exactly_eight_ordered_combinations_and_legacy_hello_stays_frozen() {
+    fn argv_has_four_ordered_combinations_with_required_accounting_and_bare_rejection() {
         let flags = ["--client-close-receipt-v1", "--wayland-virtual-input-v1",
             "--capture-accounting-v1", "--dmabuf-readback-v1"];
         let hello = Request { kind: "hello".into(), ..close_request() };
-        let legal: Vec<Vec<&str>> = (0..8).map(|bits| {
-            let mut args = vec![flags[0]];
-            for index in 0..3 { if bits & (1 << index) != 0 { args.push(flags[index + 1]); } }
-            args
-        }).collect();
+        let legal = [vec![flags[0], flags[2]], vec![flags[0], flags[1], flags[2]],
+            vec![flags[0], flags[2], flags[3]], vec![flags[0], flags[1], flags[2], flags[3]]];
         // Exhaust all permutations/subsets/repetitions through length five,
         // including missing close, wrong order and repeated final GPU flags.
         for length in 0..=5 {
@@ -734,16 +685,24 @@ mod tests {
                     continue;
                 }
                 let input = control_protocol_enabled(&args);
-                let accounting = accounting_protocol_enabled(&args);
                 let gpu = dmabuf_protocol_enabled(&args);
-                let body = negotiated_hello(&hello, true, input, accounting, gpu);
+                let body = negotiated_hello(&hello, true, input, gpu);
                 assert_eq!(body.get("inputProtocolVersion").is_some(), input);
-                assert_eq!(body.get("captureAccountingVersion").is_some(), accounting);
+                assert_eq!(body["captureAccountingVersion"], 1);
                 assert_eq!(body.get("dmaBufReadbackVersion").is_some(), gpu);
                 if gpu { assert_eq!(body["dmaBufReadbackVersion"], 1); }
-                assert_eq!(body.as_object().unwrap().len(), 3 + input as usize + accounting as usize + gpu as usize);
-                assert_eq!(negotiated_hello(&hello, false, input, accounting, gpu), hello_body(&hello, false));
+                assert_eq!(body.as_object().unwrap().len(), 4 + input as usize + gpu as usize);
+                assert_eq!(negotiated_hello(&hello, false, input, gpu), hello_body(&hello, false));
             }
+        }
+        for args in [vec!["--unknown"], vec![flags[0], flags[2], "--unknown"],
+            vec!["--client-close-receipt-v1=true", flags[2]]] {
+            assert!(!protocol_enabled(&args));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            assert!(!protocol_enabled([std::ffi::OsString::from_vec(vec![0xff])]));
         }
         for key in ["dmaBufReadbackVersion", "dmabuf", "gpu"] {
             let mut value = serde_json::json!({"id":1,"generation":2,"kind":"open",
@@ -755,9 +714,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn dmabuf_hello_and_invalid_argv_use_production_zero_resource_core() {
         let c = "--client-close-receipt-v1";
+        let a = "--capture-accounting-v1";
+        let i = "--wayland-virtual-input-v1";
         let d = "--dmabuf-readback-v1";
-        for args in [vec![c], vec![c, d], vec![d], vec![c, d, d],
-            vec![c, d, "--capture-accounting-v1"], vec![d, c]] {
+        for args in [vec![c, a], vec![c, i, a], vec![c, a, d], vec![c, i, a, d],
+            vec![], vec![c], vec![c, i], vec![c, d], vec![a], vec![c, a, a],
+            vec![c, a, i], vec![c, a, d, d], vec![c, d, a], vec![d, c]] {
             let enabled = protocol_enabled(&args);
             let (tx, mut rx) = tokio::sync::mpsc::channel(3);
             tx.send(Request { kind: "hello".into(), ..close_request() }).await.unwrap();
@@ -769,13 +731,13 @@ mod tests {
             let (signal, _) = tracked_pending_task().await;
             let (out, mut packets) = tokio::sync::mpsc::channel(2);
             let output = Output(out);
-            let core = run_requests(&output, enabled, control_protocol_enabled(&args), accounting_protocol_enabled(&args),
+            let core = run_requests(&output, enabled, control_protocol_enabled(&args),
                 dmabuf_protocol_enabled(&args), &mut rx, &mut cancelled, signal);
             let writer = async {
                 let packet: Packet = packets.recv().await.unwrap();
                 let body: serde_json::Value = serde_json::from_slice(&packet.json).unwrap();
                 assert_eq!(body, negotiated_hello(&close_request(), enabled, control_protocol_enabled(&args),
-                    accounting_protocol_enabled(&args), dmabuf_protocol_enabled(&args)));
+                    dmabuf_protocol_enabled(&args)));
                 assert!(packet.bytes.is_empty());
                 packet.ack.send(Ok(())).unwrap();
                 if !enabled {
@@ -812,28 +774,26 @@ mod tests {
     #[test]
     fn no_frame_receipt_is_only_negotiated_capture_error_with_producer_evidence() {
         let request = Request { kind: "capture".into(), ..close_request() };
-        for negotiated in [false, true] {
-            for producer_proved in [false, true] {
-                let error = capture::FrameError { no_complete_png: producer_proved };
-                let body = capture_error_body(&request, negotiated, &error);
-                assert_eq!(body["kind"], "error");
-                assert_eq!(body["diagnosticCode"], "capture-frame-failed");
-                assert_eq!(body.get("noFrameReceipt").is_some(), negotiated && producer_proved);
-                if negotiated && producer_proved {
-                    assert_eq!(body["noFrameReceipt"], serde_json::json!({"version":1,"outcome":"no-complete-png"}));
-                    assert_eq!(body.as_object().unwrap().len(), 5);
-                } else { assert_eq!(body, error_body(&request, DiagnosticCode::CaptureFrameFailed)); }
-                for field in ["width", "height", "previewPng", "deliverable", "inputFrame", "captureAccountingVersion"] {
-                    assert!(body.get(field).is_none());
-                }
-                let mut wire = Vec::new();
-                write_packet(&mut wire, &serde_json::to_vec(&body).unwrap(), &[]).unwrap();
-                assert_eq!(&wire[8..12], &[0; 4]);
+        for producer_proved in [false, true] {
+            let error = capture::FrameError { no_complete_png: producer_proved };
+            let body = capture_error_body(&request, &error);
+            assert_eq!(body["kind"], "error");
+            assert_eq!(body["diagnosticCode"], "capture-frame-failed");
+            assert_eq!(body.get("noFrameReceipt").is_some(), producer_proved);
+            if producer_proved {
+                assert_eq!(body["noFrameReceipt"], serde_json::json!({"version":1,"outcome":"no-complete-png"}));
+                assert_eq!(body.as_object().unwrap().len(), 5);
+            } else { assert_eq!(body, error_body(&request, DiagnosticCode::CaptureFrameFailed)); }
+            for field in ["width", "height", "previewPng", "deliverable", "inputFrame", "captureAccountingVersion"] {
+                assert!(body.get(field).is_none());
             }
+            let mut wire = Vec::new();
+            write_packet(&mut wire, &serde_json::to_vec(&body).unwrap(), &[]).unwrap();
+            assert_eq!(&wire[8..12], &[0; 4]);
         }
         for kind in ["hello", "open", "close", "act", "frame"] {
             let r = Request { kind: kind.into(), ..close_request() };
-            assert!(capture_error_body(&r, true, &capture::FrameError { no_complete_png: true }).get("noFrameReceipt").is_none());
+            assert!(capture_error_body(&r, &capture::FrameError { no_complete_png: true }).get("noFrameReceipt").is_none());
         }
         for kind in ["opened", "closed", "frame", "error"] {
             assert!(reply_body(&request, kind, None, None).unwrap().0.get("noFrameReceipt").is_none());
@@ -847,31 +807,6 @@ mod tests {
             let (body, bytes) = frame_body(&request, frame, deliverable, None).unwrap();
             assert_eq!(bytes, vec![1,2,3]);
             assert!(body.get("noFrameReceipt").is_none());
-        }
-    }
-    #[tokio::test(flavor = "current_thread")]
-    async fn invalid_accounting_arguments_reject_open_in_production_core_without_resources() {
-        let c = "--client-close-receipt-v1";
-        let a = "--capture-accounting-v1";
-        for args in [vec![a], vec![c, a, a], vec![c, a, "--wayland-virtual-input-v1"]] {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(3);
-            for kind in ["hello", "open", "close"] { tx.send(Request { kind: kind.into(), ..close_request() }).await.unwrap(); }
-            let (_cancel, mut cancelled) = tokio::sync::watch::channel(false);
-            let (signal, _) = tracked_pending_task().await;
-            let (out, mut packets) = tokio::sync::mpsc::channel(2);
-            let output = Output(out);
-            let core = run_requests(&output, protocol_enabled(&args), control_protocol_enabled(&args), accounting_protocol_enabled(&args), dmabuf_protocol_enabled(&args), &mut rx, &mut cancelled, signal);
-            let writer = async {
-                for kind in ["error", "error", "closed"] {
-                    let packet: Packet = packets.recv().await.unwrap();
-                    assert_eq!(serde_json::from_slice::<serde_json::Value>(&packet.json).unwrap(),
-                        serde_json::json!({"id":9,"generation":17,"kind":kind}));
-                    assert!(packet.bytes.is_empty());
-                    packet.ack.send(Ok(())).unwrap();
-                }
-            };
-            let (result, _) = tokio::join!(core, writer);
-            result.unwrap();
         }
     }
     #[tokio::test(flavor = "current_thread")]
@@ -947,7 +882,7 @@ mod tests {
             let (signal, dropped) = tracked_pending_task().await;
             let (out, mut packets) = tokio::sync::mpsc::channel(2);
             let output = Output(out);
-            let request = run_requests(&output, true, false, false, false, &mut rx, &mut cancelled, signal);
+            let request = run_requests(&output, true, false, false, &mut rx, &mut cancelled, signal);
             let writer = async {
                 let packet: Packet = packets.recv().await.unwrap();
                 let body: serde_json::Value = serde_json::from_slice(&packet.json).unwrap();
@@ -973,7 +908,7 @@ mod tests {
             let (signal, dropped) = tracked_pending_task().await;
             let (out, mut packets) = tokio::sync::mpsc::channel(2);
             let output = Output(out);
-            let request = run_requests(&output, true, false, false, false, &mut rx, &mut cancelled, signal);
+            let request = run_requests(&output, true, false, false, &mut rx, &mut cancelled, signal);
             let writer = async {
                 let packet: Packet = packets.recv().await.unwrap();
                 assert!(dropped.load(Ordering::SeqCst), "cleanup must precede ACK enqueue");
@@ -1252,9 +1187,9 @@ mod tests {
         assert!(!control_open(&display, false));
         assert!(control_open(&display, true));
         let hello = Request { kind: "hello".into(), ..close_request() };
-        assert_eq!(negotiated_hello(&hello, true, true, false, false)["inputProtocolVersion"], 1);
+        assert_eq!(negotiated_hello(&hello, true, true, false)["inputProtocolVersion"], 1);
         for (enabled, control) in [(false, false), (false, true), (true, false)] {
-            assert!(negotiated_hello(&hello, enabled, control, false, false).get("inputProtocolVersion").is_none());
+            assert!(negotiated_hello(&hello, enabled, control, false).get("inputProtocolVersion").is_none());
         }
     }
     #[test]

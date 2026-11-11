@@ -1,126 +1,127 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SqliteToolReceiptArchive } from '../../src/main/agent/tool-receipt-archive'
 
-let root: string
 const archives: SqliteToolReceiptArchive[] = []
-const archive = (file = join(root, 'private', 'receipts.sqlite')) => {
-  const value = new SqliteToolReceiptArchive(file)
+const archive = () => {
+  const value = new SqliteToolReceiptArchive()
   archives.push(value)
   return value
 }
-beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'pion-receipt-archive-')) })
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const value of archives.splice(0)) value.close()
-  rmSync(root, { recursive: true, force: true })
 })
 
 describe('private completed tool receipt index', () => {
-  it('creates lazily with private permissions and exact scope-isolated membership', () => {
+  it('opens a temporary database lazily with bounded cache and exact scope-isolated membership', () => {
+    const exec = vi.spyOn(DatabaseSync.prototype, 'exec')
     const value = archive()
-    const path = join(root, 'private', 'receipts.sqlite')
-    expect(existsSync(path)).toBe(false)
+    expect(exec).not.toHaveBeenCalled()
     value.remember('scope-a', ['call', 'call', 'CALL', 'call\0suffix'])
-    expect(value.has('scope-a', 'call')).toBe(true)
-    expect(value.has('scope-a', 'CALL')).toBe(true)
-    expect(value.has('scope-a', 'call\0suffix')).toBe(true)
+    value.remember('scope-a\0suffix', ['call'])
+    const db = exec.mock.contexts[0] as DatabaseSync
+    expect(db.prepare('PRAGMA database_list').get()?.file).toBe('')
+    expect(db.prepare('PRAGMA cache_size').get()?.cache_size).toBe(-1024)
+    expect(db.prepare('SELECT count(*) AS count FROM tool_receipts').get()?.count).toBe(4)
+    for (const id of ['call', 'CALL', 'call\0suffix']) expect(value.has('scope-a', id)).toBe(true)
+    expect(value.has('scope-a', 'call\0other')).toBe(false)
     expect(value.has('scope-a', 'Call')).toBe(false)
     expect(value.has('scope-b', 'call')).toBe(false)
-    if (process.platform !== 'win32') {
-      expect(lstatSync(path).mode & 0o777).toBe(0o600)
-      expect(lstatSync(join(root, 'private')).mode & 0o777).toBe(0o700)
-    }
+    value.forget('scope-a')
+    expect(value.has('scope-a\0suffix', 'call')).toBe(true)
   })
 
-  it('commits batches beyond 512, reopens, and forgets only the retired scope', () => {
+  it('keeps batches beyond 512 for the connection lifetime and forgets only the retired scope', () => {
     const ids = Array.from({ length: 2048 }, (_, index) => `call-${index}`)
-    const first = archive()
-    first.remember('scope-a', ids)
-    first.remember('scope-b', ['call-0'])
-    first.close()
-    const second = archive()
-    for (const id of ids) expect(second.has('scope-a', id)).toBe(true)
-    second.forget('scope-a')
-    expect(second.has('scope-a', 'call-0')).toBe(false)
-    expect(second.has('scope-a', 'call-2047')).toBe(false)
-    expect(second.has('scope-b', 'call-0')).toBe(true)
-    second.close()
-    expect(archive().has('scope-a', 'call-0')).toBe(false)
+    const value = archive()
+    value.remember('scope-a', ids)
+    value.remember('scope-b', ['call-0'])
+    value.remember('scope-a', ids)
+    for (const id of ids) expect(value.has('scope-a', id)).toBe(true)
+    value.forget('scope-a')
+    for (const id of ids) expect(value.has('scope-a', id)).toBe(false)
+    expect(value.has('scope-b', 'call-0')).toBe(true)
+    expect(archive().has('scope-b', 'call-0')).toBe(false)
+    value.close()
+    expect(archive().has('scope-b', 'call-0')).toBe(false)
   })
 
-  it('uses SQLite transactions across instances without clearing foreign scopes', () => {
-    const first = archive()
-    first.remember('a', ['one'])
-    const second = archive()
-    second.remember('b', ['two'])
-    expect(first.has('b', 'two')).toBe(true)
-    first.forget('a')
-    expect(second.has('a', 'one')).toBe(false)
-    expect(second.has('b', 'two')).toBe(true)
-  })
-
-  it('rolls back the whole failed batch and poisons subsequent reads/writes', () => {
+  it('rolls back the whole failed batch and permits a later retry', () => {
     const value = archive()
     value.remember('a', ['prior'])
     expect(() => value.remember('a', ['first', null as unknown as string])).toThrow()
-    expect(() => value.has('a', 'first')).toThrow()
-    expect(() => value.remember('a', ['later'])).toThrow()
-    value.close()
-    const reopened = archive()
-    expect(reopened.has('a', 'prior')).toBe(true)
-    expect(reopened.has('a', 'first')).toBe(false)
+    expect(value.has('a', 'first')).toBe(false)
+    expect(value.has('a', 'prior')).toBe(true)
+    value.remember('a', ['first', 'later'])
+    expect(value.has('a', 'first')).toBe(true)
+    expect(value.has('a', 'later')).toBe(true)
   })
 
-  it('preserves corrupt and unrelated existing sources and refuses reads and writes', () => {
-    const file = join(root, 'bad.sqlite')
-    const source = Buffer.from('existing corrupt source')
-    writeFileSync(file, source)
-    const value = archive(file)
-    expect(() => value.has('a', 'id')).toThrow()
-    expect(() => value.remember('a', ['id'])).toThrow()
-    expect(readFileSync(file)).toEqual(source)
-    const other = join(root, 'other.sqlite')
-    const db = new DatabaseSync(other)
-    db.exec('CREATE TABLE unrelated (value TEXT)')
-    db.close()
-    const bytes = readFileSync(other)
-    expect(() => archive(other).remember('a', ['id'])).toThrow()
-    expect(readFileSync(other)).toEqual(bytes)
-  })
-
-  it.skipIf(process.platform === 'win32')('preserves symlink targets and rejects non-regular paths and sidecars', () => {
-    const target = join(root, 'source')
-    writeFileSync(target, 'keep')
-    const link = join(root, 'link.sqlite')
-    symlinkSync(target, link)
-    expect(() => archive(link).remember('a', ['id'])).toThrow()
-    expect(lstatSync(link).isSymbolicLink()).toBe(true)
-    expect(readFileSync(target, 'utf8')).toBe('keep')
-    const dir = join(root, 'directory.sqlite')
-    mkdirSync(dir)
-    expect(() => archive(dir).has('a', 'id')).toThrow()
+  it('permits retry when SQLite itself has already rolled back the failed batch', () => {
+    const exec = vi.spyOn(DatabaseSync.prototype, 'exec')
     const value = archive()
-    value.remember('a', ['id'])
-    symlinkSync(target, join(root, 'private', 'receipts.sqlite-journal'))
-    expect(() => value.has('a', 'missing')).toThrow()
-    expect(readFileSync(target, 'utf8')).toBe('keep')
+    value.remember('a', ['prior'])
+    const db = exec.mock.contexts[0] as DatabaseSync
+    db.exec("CREATE TRIGGER rollback_test BEFORE INSERT ON tool_receipts WHEN NEW.tool_call_id = 'fail' BEGIN SELECT RAISE(ROLLBACK, 'batch failed'); END")
+    expect(() => value.remember('a', ['first', 'fail'])).toThrow('batch failed')
+    expect(value.has('a', 'first')).toBe(false)
+    value.remember('a', ['later'])
+    expect(value.has('a', 'later')).toBe(true)
   })
 
-  it.skipIf(process.platform === 'win32')('rejects unsafe parent directories before creating a database', () => {
-    const target = join(root, 'target')
-    mkdirSync(target, { mode: 0o700 })
-    const link = join(root, 'linked-directory')
-    symlinkSync(target, link)
-    expect(() => archive(join(link, 'receipts.sqlite')).remember('a', ['id'])).toThrow()
-    expect(existsSync(join(target, 'receipts.sqlite'))).toBe(false)
-    const wide = join(root, 'wide')
-    mkdirSync(wide)
-    chmodSync(wide, 0o755)
-    expect(() => archive(join(wide, 'receipts.sqlite')).has('a', 'id')).toThrow()
-    expect(existsSync(join(wide, 'receipts.sqlite'))).toBe(false)
+  it('retries ordinary SQL and initialization failures without losing existing IDs', () => {
+    const value = archive()
+    vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementationOnce(() => { throw new Error('initialization failed') })
+    expect(() => value.has('a', 'prior')).toThrow('initialization failed')
+    value.remember('a', ['prior'])
+    vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementationOnce(() => { throw new Error('query failed') })
+    expect(() => value.has('a', 'prior')).toThrow('query failed')
+    expect(value.has('a', 'prior')).toBe(true)
+    vi.mocked(DatabaseSync.prototype.prepare).mockImplementationOnce(() => { throw new Error('delete failed') })
+    expect(() => value.forget('a')).toThrow('delete failed')
+    expect(value.has('a', 'prior')).toBe(true)
+    value.forget('a')
+    expect(value.has('a', 'prior')).toBe(false)
+  })
+
+  it('retains an unconfirmed rollback error and rejects further operations on that instance', () => {
+    const value = archive()
+    value.remember('a', ['prior'])
+    const exec: (this: DatabaseSync, sql: string) => void = DatabaseSync.prototype.exec
+    vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (this: DatabaseSync, sql: string): void {
+      if (sql === 'ROLLBACK') throw new Error('rollback failed')
+      return exec.call(this, sql)
+    })
+    expect(() => value.remember('a', ['first', null as unknown as string])).toThrow('rollback is unconfirmed')
+    expect(() => value.has('a', 'prior')).toThrow('rollback is unconfirmed')
+    expect(() => value.remember('a', ['later'])).toThrow('rollback is unconfirmed')
+    expect(() => value.forget('a')).toThrow('rollback is unconfirmed')
+    const healthy = archive()
+    healthy.remember('a', ['later'])
+    expect(healthy.has('a', 'prior')).toBe(false)
+    expect(healthy.has('a', 'later')).toBe(true)
+  })
+
+  it.each([false, true])('retains an unconfirmed close without retrying it (initialization failure: %s)', (initializationFailure) => {
+    const value = new SqliteToolReceiptArchive()
+    const close: (this: DatabaseSync) => void = DatabaseSync.prototype.close
+    const failure = new Error('close failed')
+    // Actually release the test connection before simulating an unknown close receipt.
+    const closeSpy = vi.spyOn(DatabaseSync.prototype, 'close').mockImplementationOnce(function (this: DatabaseSync): void {
+      close.call(this)
+      throw failure
+    })
+    if (initializationFailure) {
+      vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementationOnce(() => { throw new Error('initialization failed') })
+      expect(() => value.has('a', 'id')).toThrow('initialization close is unconfirmed')
+    } else {
+      value.remember('a', ['id'])
+      expect(() => value.close()).toThrow(failure)
+    }
+    expect(() => value.has('a', 'id')).toThrow()
+    expect(() => value.close()).toThrow()
+    expect(closeSpy).toHaveBeenCalledTimes(1)
   })
 
   it('rejects every operation after close, including an unopened archive', () => {

@@ -7,10 +7,13 @@ import {
   CAPABILITY_RUNTIME_COMMAND, CAPABILITY_RUNTIME_MAX_CHARS, PI_CORE_TOOL_NAMES,
   capabilityEnabled, type CapabilityItem, type CapabilityPreferences, type CapabilityRuntimeNotice
 } from '../../shared/capability-settings'
+import { PLAN_READ_ONLY_BUILTIN_TOOL_NAMES } from '../../shared/capabilities'
 import { capabilityResourceId } from '../capability-ids'
-import type { createPionNativeLoadoutBoundary } from './native-extensions'
+import { createPionToolNameMatcher, type createPionNativeLoadoutBoundary } from './native-extensions'
+import { sessionMode } from './wire'
 
 const CORE = new Set<string>(PI_CORE_TOOL_NAMES)
+const PLAN_READ_ONLY = new Set<string>(PLAN_READ_ONLY_BUILTIN_TOOL_NAMES)
 const DEFAULT_TOOLS = ['read', 'bash', 'edit', 'write']
 const PION_TOOLS = new Set(['pion_task', 'pion_ask_user', 'pion_subagents', 'pion_generate_image', 'pion_computer_observe', 'pion_computer_act'])
 const RESOURCE_KEYS = ['packages', 'extensions', 'skills', 'prompts', 'themes'] as const
@@ -24,14 +27,8 @@ type Tool = Pick<ToolInfo, 'name' | 'sourceInfo' | 'exposure'> & { defaultActive
  * Expand against real registrations only; raw negative rules remain a separate
  * execution ceiling because SDK modifier resolution can discard them. */
 export function expandCapabilityDefaultTools(entries: readonly string[] | undefined, registeredNames: Iterable<string>): Set<string> {
-  const selection = entries ?? DEFAULT_TOOLS
-  if (selection.some((entry) => !entry || /[^A-Za-z0-9_.*-]/.test(entry))) {
-    throw new Error('不支持的 SDK defaultTools 选择语法；已保守拒绝（仅支持精确名称和 *）。')
-  }
-  const exact = new Set(selection.filter((entry) => !entry.includes('*')))
-  const patterns = selection.filter((entry) => entry.includes('*')).map((entry) =>
-    new RegExp(`^${entry.split('*').map((part) => part.replace(/\./g, '\\.')).join('.*')}$`))
-  return new Set([...registeredNames].filter((name) => exact.has(name) || patterns.some((pattern) => pattern.test(name))))
+  const matches = createPionToolNameMatcher(entries ?? DEFAULT_TOOLS)
+  return new Set([...registeredNames].filter(matches))
 }
 
 /** The SDK package resolver otherwise installs missing packages even with no*.
@@ -151,10 +148,25 @@ export function createCapabilityPolicy(options: {
     // Preset core-name overrides cannot grant a plugin impersonating a Pi tool.
     !(preferences.defaults.tool === false && CORE.has(tool.name) && !isCore(tool))
   const allowed = (tool: Tool): boolean => desired(tool) && (!initialized || options.loadout.allowed(tool.name))
+  const filterActiveTools = (pi: ExtensionAPI, inPlan = false): string[] => {
+    const tools = new Map(pi.getAllTools().map((tool) => [tool.name, tool]))
+    const retained = pi.getActiveTools().filter((name) => {
+      const tool = tools.get(name)
+      return tool && allowed(tool) && (!inPlan ||
+        (PLAN_READ_ONLY.has(name) && isCore(tool)) ||
+        (name === 'pion_ask_user' && tool.sourceInfo.source === 'sdk'))
+    })
+    // Only retain the current selection: plan/tree restores keep their own
+    // active subset, and late registrations still intersect the same ceiling.
+    pi.setActiveTools(retained)
+    return retained
+  }
   const record = (entry: RegisteredTool) => {
     const tool = { name: entry.definition.name, sourceInfo: entry.sourceInfo,
       exposure: entry.definition.exposure ?? 'direct', defaultActive: entry.definition.defaultActive }
-    if (known.size < 4096 || known.has(tool.name)) known.set(tool.name, tool)
+    // Complete registrations define the initial execution ceiling; receipt
+    // projection limits apply only when serializing metadata for display.
+    known.set(tool.name, tool)
     return allowed(tool)
   }
   const install = (result: LoadExtensionsResult): LoadExtensionsResult => {
@@ -232,23 +244,20 @@ export function createCapabilityPolicy(options: {
     pi.on('session_start', () => {
       if (generation !== noticeGeneration) return
       sessionStarted = true
+      filterActiveTools(pi)
+      refreshNotice()
+    })
+    pi.on('session_tree', () => {
+      if (generation !== noticeGeneration) return
+      filterActiveTools(pi)
       refreshNotice()
     })
     pi.on('session_shutdown', () => { if (generation === noticeGeneration) retire() })
-    pi.on('before_agent_start', (event) => {
+    pi.on('before_agent_start', (event, ctx) => {
       if (generation !== noticeGeneration) return
-      const inPlan = event.systemPrompt.includes('[PION PLAN MODE]')
-      const tools = new Map(pi.getAllTools().map((tool) => [tool.name, tool]))
-      const retained = pi.getActiveTools().filter((name) => {
-        const tool = tools.get(name)
-        return tool && allowed(tool) && (!inPlan ||
-          (['read', 'grep', 'find', 'ls'].includes(name) && isCore(tool)) ||
-          (name === 'pion_ask_user' && tool.sourceInfo.source === 'sdk'))
-      })
       // SDK explicit allowlists can reactivate declarations on late registry
       // refresh. Reapply the existing plan intersection after native readiness.
-      pi.setActiveTools(retained)
-      const active = new Set(retained)
+      const active = new Set(filterActiveTools(pi, sessionMode(ctx.sessionManager.getBranch()) === 'plan'))
       event.systemPromptOptions.selectedTools = event.systemPromptOptions.selectedTools.filter((name) => active.has(name))
       refreshNotice()
     })

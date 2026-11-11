@@ -88,8 +88,10 @@ export function useAgentSessionActions({
       timelineOwnerPath.current = undefined
       historyCursor.current = null
       await reloadTimeline()
+      if (!isCurrentApi() || !isSelected()) return
+      if (result.warning) dispatch({ type: 'statusError', error: result.warning })
     },
-    [api, captureSelectionIntent, clearTimeline, historyCursor, isCurrentApi, reloadTimeline, timelineOwnerPath]
+    [api, captureSelectionIntent, clearTimeline, dispatch, historyCursor, isCurrentApi, reloadTimeline, timelineOwnerPath]
   )
 
   const getSessionForkMessages = useCallback(
@@ -113,9 +115,11 @@ export function useAgentSessionActions({
       await reloadTimeline()
       // The owned reload selects the fork's new path itself. Fence explicit
       // navigation/API replacement, rather than rejecting that valid update.
-      return isCurrentApi() && isSelected() ? result.text : ''
+      if (!isCurrentApi() || !isSelected()) return ''
+      if (result.warning) dispatch({ type: 'statusError', error: result.warning })
+      return result.text
     },
-    [api, captureSelectionIntent, clearTimeline, historyCursor, isCurrentApi, reloadTimeline, timelineOwnerPath]
+    [api, captureSelectionIntent, clearTimeline, dispatch, historyCursor, isCurrentApi, reloadTimeline, timelineOwnerPath]
   )
 
   return {

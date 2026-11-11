@@ -1,6 +1,6 @@
 import { useId, useRef, useState } from 'react'
 import { PionSelect } from '../common/PionSelect'
-import type { ComputerUseConsent, ComputerUseStatus } from '../../../../shared/computer-use'
+import { COMPUTER_USE_CAPTURE_MESSAGES as captureErrors, isComputerUseCaptureBudgetExhausted, isComputerUseCaptureReady, type ComputerUseConsent, type ComputerUseStatus } from '../../../../shared/computer-use'
 import { copyComputerUseDiagnostics, type ComputerUseDiagnosticCode } from '../../../../shared/computer-use-diagnostics'
 
 export interface ComputerUsePanelProps {
@@ -28,7 +28,7 @@ export interface ComputerUsePanelProps {
 
 const labels: Record<ComputerUseStatus['state'], string> = {
   disabled: '尚未开始', preparing: '正在准备', 'awaiting-consent': '等待本次确认',
-  observing: '本地观察中', ready: '本实例可请求新观察（非控制就绪或任务完成）',
+  observing: '本地观察中', ready: '本实例可请求新观察；控制能力与任务完成须另行确认',
   acting: '输入操作处理中（不代表实际操作通过）', stopping: '正在停止，尚未确认释放',
   stopped: '本实例观察已停止（不代表其他实例或全桌面已停止）', paused: '会话已暂停', quarantined: '已隔离：底层状态未确认'
 }
@@ -122,11 +122,17 @@ export function ComputerUsePanel({ state, preview, previewUnavailable, busy, err
   const known = Object.hasOwn(labels, state.state)
   const foreignBlocked = state.state === 'quarantined' && state.coordination === 'blocked'
     && !state.actualPending && !state.owner
-  const statusLabel = foreignBlocked ? '共享观察标记存在，可能由其他实例使用或上次未确认收尾'
+  const captureExhausted = isComputerUseCaptureBudgetExhausted(state.budget)
+  const captureUnknown = error === captureErrors.unknown
+  const statusLabel = foreignBlocked ? '共享控制标记存在，可能由其他实例使用或上次未确认收尾'
     : state.state === 'disabled' && state.coordination === 'not-checked' ? '本实例尚未开始；未检查其他实例'
       : state.state === 'stopped' && state.coordination === 'released' ? '本实例观察已停止，本实例标记已释放（不代表全桌面已停止）'
-        : state.state === 'stopped' && state.coordination === 'unclaimed' ? '本实例未启动观察、未占用共享标记（不代表其他实例或全桌面已停止）'
-          : known ? labels[state.state] : '状态未知：不能确认会话是否停止或可用'
+        : state.state === 'stopped' && state.coordination === 'unclaimed' ? '本实例观察已收尾，未持有共享控制标记（不代表其他实例或全桌面已停止）'
+          : state.state === 'ready' && captureUnknown ? captureErrors.unknown
+            : state.state === 'ready' && captureExhausted ? captureErrors.budget
+              : state.state === 'ready' && !isComputerUseCaptureReady(state) ? '本实例观察就绪条件待确认'
+                : state.state === 'ready' && state.coordination === 'not-checked' ? `${labels.ready}；只读观察未检查共享控制标记`
+                  : known ? labels[state.state] : '状态未知：会话停止与可用性待确认'
   const blocked = !known || state.state === 'stopping' || state.state === 'quarantined' || state.state === 'acting'
   const canStart = known && (foreignBlocked || (state.coordination === 'unclaimed' && state.state === 'stopped')
     || (['not-checked', 'released'].includes(state.coordination)
@@ -135,13 +141,8 @@ export function ComputerUsePanel({ state, preview, previewUnavailable, busy, err
     && (foreignBlocked || !state.capability || state.capability.unsupportedReason === 'not-probed'
       || (state.capability.capture && (state.capability.method === 'portal-screencast'
         || state.capability.method === 'portal-screencast+wayland-virtual-input')))
-  const canCapture = !blocked && !busy && !state.actualPending
-    && state.coordination === 'held' && state.state === 'ready'
-    && state.consent?.capture === true && state.capability?.capture === true
-    && ((!display && state.consent.control === false && state.consent.captureScope !== 'display'
-      && state.capability.method === 'portal-screencast' && state.capability.scope !== 'display')
-      || (display && state.consent.control === true && state.consent.captureScope === 'display'
-        && state.capability.method === 'portal-screencast+wayland-virtual-input' && state.capability.scope === 'display'))
+  const canCapture = !blocked && !busy && isComputerUseCaptureReady(state)
+    && display === (state.consent?.control === true)
   const owner = state.owner
   const consentKey = JSON.stringify([owner?.ownerWindowId, owner?.backendId, owner?.runtimeId, owner?.runId,
     owner?.generation, state.scopeRevision, state.state, state.coordination, canStart, mode, inputDevelopmentEnabled])
@@ -165,7 +166,7 @@ export function ComputerUsePanel({ state, preview, previewUnavailable, busy, err
     <p>能力：{state.capability?.capture ? '宿主报告可截图' : '截图能力未确认或不可用'}；{state.capability?.control ? '已建输入连接，不等于实际操作通过' : '控制未启用'}。此面板不会自动探测能力。</p>
     <p>范围：{state.capability?.scope === 'window' ? 'Portal 报告窗口类型' : state.capability?.scope === 'display' ? 'Portal 报告显示器类型（非窗口）' : '未知窗口或显示器'}。
       应用名称 / PID 未知；Portal 选定窗口类型不等于可信应用身份或可控坐标。</p>
-    <p>共享标记仅协调同账户实例；账户目录和环境变量不认证应用，也不是 OS 沙箱。重试须重新勾选，仅手动开始时检查。</p>
+    <p>只读窗口观察跳过共享控制标记；屏幕控制准备才检查同账户互斥。单实例仍只保留一个观察或控制会话；重试须重新勾选。标记仅协调合作实例，权限边界仍由宿主检查。</p>
     {error && <p className="computer-use-error" role="alert">{error.slice(0, 512)}</p>}
     {diagnostics && Object.keys(diagnostics).length > 0 && <div aria-label="观察失败阶段">
       {(['open', 'capture', 'act', 'close'] as const).map(operation => diagnostics[operation] && <p key={operation}>

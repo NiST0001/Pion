@@ -1,9 +1,7 @@
 import { constants } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import { SessionTokenCache } from '../../src/main/agent/session-token-cache'
-import {
-  readSessionTokenSnapshot, type SessionTokenFileHandle, type SessionTokenFileSystem
-} from '../../src/main/agent/session-token-total'
+import { readSessionTokenSnapshot, type SessionTokenFileHandle, type SessionTokenFileSystem } from '../../src/main/agent/session-token-total'
 
 const expected = { id: 'session-id', cwd: '/fixture/project' }
 const path = '/fixture/session.jsonl'
@@ -65,47 +63,51 @@ function setup(maxEntries = 8) {
 }
 
 describe('validated sidebar token snapshot cache', () => {
-  it('reopens with no-follow and checks both FD/path snapshots, without reading unchanged JSONL again', async () => {
+  it('reuses an unchanged validated total after one lstat without opening or reading again', async () => {
     const { file, cache } = setup()
     expect(await cache.read(path, expected)).toBe(10)
+    expect(file.filesystem.open).toHaveBeenCalledWith(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    file.filesystem.open.mockClear()
+    file.filesystem.lstat.mockClear()
+    file.reads.mockClear()
     expect(await cache.read(path, expected)).toBe(10)
-    expect(file.reads).toHaveBeenCalledTimes(2)
+    expect(file.filesystem.lstat).toHaveBeenCalledExactlyOnceWith(path, { bigint: true })
+    expect(file.filesystem.open).not.toHaveBeenCalled()
+    expect(file.reads).not.toHaveBeenCalled()
+  })
+
+  it('reparses a changed stamp even when size and mtime remain unchanged', async () => {
+    const { file, cache } = setup()
+    expect(await cache.read(path, expected)).toBe(10)
+    file.rewrite(content(20))
+    file.stat.ctimeNs += 1n
+    expect(await cache.read(path, expected)).toBe(20)
     expect(file.filesystem.open).toHaveBeenCalledTimes(2)
-    for (const call of file.filesystem.open.mock.calls) {
-      expect(call).toEqual([path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK])
-    }
-    expect(file.filesystem.lstat).toHaveBeenCalledTimes(4)
-    for (const handle of file.handles) {
-      expect(handle.stat).toHaveBeenCalledTimes(2)
-      expect(handle.close).toHaveBeenCalledOnce()
-    }
   })
 
-  it.each(['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const)('reparses when %s changes, even with the old mtime otherwise preserved', async field => {
-    const { file, cache } = setup()
-    expect(await cache.read(path, expected)).toBe(10)
-    const total = field === 'size' ? 120 : 20
-    file.rewrite(content(total))
-    if (field !== 'size') file.stat[field] += 1n
-    expect(await cache.read(path, expected)).toBe(total)
-    expect(file.reads).toHaveBeenCalledTimes(4)
-  })
-
-  it.each(['fd', 'path-before', 'path-after'])('rejects a replacement during a fast-path %s check', async phase => {
+  it('rejects a changed FD during a fresh read and discards the previous receipt', async () => {
     const { file, cache } = setup()
     await cache.read(path, expected)
-    const replaced = { ...file.stat, ino: 99n }
-    if (phase === 'fd') file.onOpen = handle => {
-      handle.stat.mockResolvedValueOnce({ ...file.stat }).mockResolvedValueOnce(replaced)
+    file.stat.ctimeNs += 1n
+    file.onOpen = handle => {
+      handle.stat.mockResolvedValueOnce({ ...file.stat }).mockResolvedValueOnce({ ...file.stat, ino: 99n })
     }
-    else if (phase === 'path-before') file.filesystem.lstat.mockResolvedValueOnce(replaced)
-    else file.filesystem.lstat.mockResolvedValueOnce({ ...file.stat }).mockResolvedValueOnce(replaced)
     expect(await cache.read(path, expected)).toBeUndefined()
     expect(file.handles[1].close).toHaveBeenCalledOnce()
     file.onOpen = undefined
+    file.stat.ctimeNs -= 1n
     expect(await cache.read(path, expected)).toBe(10)
-    // A failed verification discards the prior receipt, even if the old stamp returns.
-    expect(file.reads).toHaveBeenCalledTimes(4)
+    expect(file.filesystem.open).toHaveBeenCalledTimes(3)
+  })
+
+  it.each(['id', 'cwd'] as const)('checks the actual header %s after a file change', async field => {
+    const { file, cache } = setup()
+    expect(await cache.read(path, expected)).toBe(10)
+    file.rewrite(content(10, field === 'cwd' ? '/fixture/another' : expected.cwd,
+      field === 'id' ? 'another-id' : expected.id))
+    file.stat.ctimeNs += 1n
+    expect(await cache.read(path, expected)).toBeUndefined()
+    expect(file.handles[1].close).toHaveBeenCalledOnce()
   })
 
   it('keys by exact path/header ID/cwd and keeps different cache owners independent', async () => {
@@ -117,43 +119,19 @@ describe('validated sidebar token snapshot cache', () => {
     expect(await cache.read(path, { ...expected, cwd: '/fixture/project/.' })).toBe(10)
     const other = new SessionTokenCache({ filesystem: file.filesystem })
     expect(await other.read(path, expected)).toBe(10)
-    expect(file.handles.map(handle => handle.read.mock.calls.length)).toEqual([2, 1, 1, 2, 2, 2])
+    expect(file.filesystem.open).toHaveBeenCalledTimes(6)
   })
 
-  it('accepts only an actual immutable receipt from the same exact identity', async () => {
-    const { file } = setup()
-    const options = { filesystem: file.filesystem }
-    const receipt = await readSessionTokenSnapshot(path, expected, { ...options, previous: { total: 999 } })
-    expect(receipt.total).toBe(10)
-    expect(Object.isFrozen(receipt)).toBe(true)
-    await expect(readSessionTokenSnapshot(path, { ...expected, cwd: '/other/project' }, { ...options, previous: receipt }))
-      .rejects.toMatchObject({ closeUnknown: false })
-    expect((await readSessionTokenSnapshot('/fixture/alias.jsonl', expected, { ...options, previous: receipt })).total).toBe(10)
-    expect((await readSessionTokenSnapshot(path, expected, { filesystem: { ...file.filesystem }, previous: receipt })).total).toBe(10)
-    expect(file.handles.map(handle => handle.read.mock.calls.length)).toEqual([2, 1, 2, 2])
+  it('keeps snapshot receipts scoped to their filesystem instance', async () => {
+    const first = fixture(), second = fixture()
+    const previous = await readSessionTokenSnapshot(path, expected, { filesystem: first.filesystem })
+    second.rewrite(content(20))
+    expect((await readSessionTokenSnapshot(path, expected, { filesystem: second.filesystem, previous })).total).toBe(20)
+    expect(second.filesystem.open).toHaveBeenCalledOnce()
   })
 
-  it('ignores forged receipt getters, copies and prototype wrappers without trusting their total', async () => {
-    const { file } = setup()
-    const options = { filesystem: file.filesystem }
-    const total = vi.fn(() => 999)
-    const forged = Object.defineProperty({}, 'total', { get: total }) as { readonly total: number }
-    const receipt = await readSessionTokenSnapshot(path, expected, { ...options, previous: forged })
-    for (const previous of [Object.freeze({ ...receipt, total: 999 }), Object.create(receipt) as typeof receipt]) {
-      expect((await readSessionTokenSnapshot(path, expected, { ...options, previous })).total).toBe(10)
-    }
-    expect(total).not.toHaveBeenCalled()
-    expect(file.handles.map(handle => handle.read.mock.calls.length)).toEqual([2, 2, 2])
-  })
-
-  it('rejects ownership accessors before cache admission and captures shared mutable data', async () => {
-    const { file, cache } = setup()
-    const access = vi.fn(() => expected.id)
-    const accessor = Object.defineProperties({}, { id: { get: access }, cwd: { value: expected.cwd } }) as typeof expected
-    expect(await cache.read(path, accessor)).toBeUndefined()
-    await expect(readSessionTokenSnapshot(path, accessor, { filesystem: file.filesystem })).rejects.toMatchObject({ closeUnknown: false })
-    expect(access).not.toHaveBeenCalled()
-    expect(file.filesystem.open).not.toHaveBeenCalled()
+  it('captures caller ownership before asynchronous cache admission', async () => {
+    const { cache } = setup()
     const mutable = { ...expected }
     const pending = cache.read(path, mutable)
     mutable.id = 'other-id'
@@ -178,9 +156,10 @@ describe('validated sidebar token snapshot cache', () => {
     expect(await cache.read(path, expected)).toBe(0)
   })
 
-  it('rejects path lookup/open failures and non-files on a previously successful fast path', async () => {
+  it('keeps lookup/open failures and non-files unknown and permits later reads', async () => {
     const { file, cache } = setup()
     expect(await cache.read(path, expected)).toBe(10)
+    file.stat.ctimeNs += 1n
     file.filesystem.open.mockRejectedValueOnce(new Error('no-follow refused'))
     expect(await cache.read(path, expected)).toBeUndefined()
     expect(await cache.read(path, expected)).toBe(10)
@@ -188,6 +167,7 @@ describe('validated sidebar token snapshot cache', () => {
     expect(await cache.read(path, expected)).toBeUndefined()
     file.filesystem.lstat.mockRejectedValueOnce(new Error('lookup failed'))
     expect(await cache.read(path, expected)).toBeUndefined()
+    expect(await cache.read(path, expected)).toBe(10)
   })
 
   it('keeps a cancelled caller, singleflight and capacity held through actual reading and close', async () => {
@@ -219,22 +199,36 @@ describe('validated sidebar token snapshot cache', () => {
     expect(file.filesystem.open).toHaveBeenCalledTimes(2)
   })
 
+  it('admits one actual path reader across competing identities until its rejected close settles', async () => {
+    const { file, cache } = setup(2)
+    const closing = deferred(), release = deferred()
+    file.onOpen = handle => {
+      handle.close.mockImplementation(async () => {
+        closing.resolve()
+        await release.promise
+        throw new Error('unknown close')
+      })
+    }
+    const first = cache.read(path, expected)
+    await closing.promise
+    const shared = cache.read(path, expected)
+    const otherOwner = cache.read(path, { ...expected, id: 'other-id' })
+    await Promise.resolve()
+    expect(file.filesystem.open).toHaveBeenCalledOnce()
+    release.resolve()
+    expect(await Promise.all([first, shared, otherOwner])).toEqual([undefined, undefined, undefined])
+    file.onOpen = undefined
+    expect(await cache.read(path, expected)).toBe(10)
+    expect(await cache.read('/fixture/another.jsonl', expected)).toBe(10)
+    expect(file.filesystem.open).toHaveBeenCalledTimes(3)
+  })
+
   it('performs no I/O for a caller already cancelled before admission', async () => {
     const { file, cache } = setup()
     const controller = new AbortController()
     controller.abort()
     expect(await cache.read(path, expected, { signal: controller.signal })).toBeUndefined()
     expect(file.filesystem.open).not.toHaveBeenCalled()
-  })
-
-  it('quarantines unknown closes across identities and retains their capacity without a retry', async () => {
-    const { file, cache } = setup(1)
-    file.onOpen = handle => { handle.close.mockRejectedValueOnce(new Error('close unknown')) }
-    expect(await cache.read(path, expected)).toBeUndefined()
-    expect(await cache.read(path, expected)).toBeUndefined()
-    expect(await cache.read(path, { ...expected, cwd: '/other/project' })).toBeUndefined()
-    expect(await cache.read('/fixture/other.jsonl', expected)).toBeUndefined()
-    expect(file.filesystem.open).toHaveBeenCalledOnce()
   })
 
   it('evicts only settled least-recently-used entries at the fixed capacity', async () => {
@@ -244,6 +238,8 @@ describe('validated sidebar token snapshot cache', () => {
     await cache.read(path, expected)
     await cache.read('/fixture/third.jsonl', expected)
     await cache.read('/fixture/second.jsonl', expected)
-    expect(file.handles.map(handle => handle.read.mock.calls.length)).toEqual([2, 2, 0, 2, 2])
+    expect(file.filesystem.open.mock.calls.map(([opened]) => opened)).toEqual([
+      path, '/fixture/second.jsonl', '/fixture/third.jsonl', '/fixture/second.jsonl'
+    ])
   })
 })

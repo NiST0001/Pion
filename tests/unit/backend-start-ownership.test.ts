@@ -77,7 +77,7 @@ describe('backend initialization child ownership', () => {
     expect(h.bridge.markSubagentBackendGone).toHaveBeenLastCalledWith(backend, true)
   })
 
-  it.each(['state-read', 'path-mismatch'])('quarantines the child, cwd and real paths after %s and unknown stop, despite late exit/close', async (stage) => {
+  it.each(['state-read', 'path-mismatch'])('retains the timed-out %s writer until its real exit and close, then releases its cwd and paths', async (stage) => {
     vi.useFakeTimers()
     const h = harness()
     const actualPath = join(h.cwd, 'actual.jsonl')
@@ -100,11 +100,25 @@ describe('backend initialization child ownership', () => {
     }
     expect(h.bridge.unconfirmedStoppedWorktreeCwds.has(h.cwd)).toBe(true)
     child.exit()
-    child.close()
     await gap()
     expect(h.pool.get('writer')).toBe(backend)
+    expect(h.bridge.quarantinedSessionPaths.has(h.path)).toBe(true)
     await expect(h.bridge.createBackend('new', h.cwd, join(h.cwd, 'different.jsonl'))).rejects.toThrow('writer')
     expect(sdk.start).toHaveBeenCalledTimes(1)
+    expect(sdk.stop).toHaveBeenCalledTimes(1)
+    child.close()
+    await gap()
+    expect(h.pool.get('writer')).toBeUndefined()
+    expect(h.bridge.backendKeysBySessionPath.size).toBe(0)
+    expect(h.bridge.quarantinedSessionPaths.has(h.path)).toBe(false)
+    expect(h.bridge.quarantinedSessionPaths.has(actualPath)).toBe(false)
+    expect(h.bridge.unconfirmedStoppedWorktreeCwds.has(h.cwd)).toBe(false)
+    expect(h.bridge.startupQuarantinedCwds.has(h.cwd)).toBe(false)
+    expect(backend.startupProcess).toBeUndefined()
+    expect(h.bridge.markSubagentBackendGone).toHaveBeenLastCalledWith(backend, true)
+    sdk.state.mockResolvedValueOnce({ sessionFile: h.path })
+    await expect(h.bridge.createBackend('new', h.cwd, h.path)).resolves.toMatchObject({ phase: 'running' })
+    expect(sdk.start).toHaveBeenCalledTimes(2)
     expect(sdk.stop).toHaveBeenCalledTimes(1)
   })
 

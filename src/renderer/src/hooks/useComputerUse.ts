@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { createDisabledComputerUseStatus, normalizeComputerUseStatus } from '../../../shared/computer-use'
+import { COMPUTER_USE_CAPTURE_MESSAGES as captureErrors, createDisabledComputerUseStatus, isComputerUseCaptureReady, isComputerUseObservationReady as observable, normalizeComputerUseStatus } from '../../../shared/computer-use'
 import type { ComputerUseConsent, ComputerUseStatus } from '../../../shared/computer-use'
 import type { ComputerUseLocalApi } from '../../../shared/pion-api'
 
@@ -41,13 +41,17 @@ function recordStatus(slot: Reservation, value: unknown) {
   return next
 }
 function publish(slot: Reservation) { slot.listeners.forEach(listener => listener()) }
-const observable = (state: ComputerUseStatus) => state.coordination === 'held' && state.state === 'ready'
-  && state.consent?.capture === true && state.capability?.capture === true
-  && ((state.consent.control === false && state.consent.captureScope !== 'display'
-    && state.capability.method === 'portal-screencast' && state.capability.scope !== 'display')
-    || (state.consent.control === true && state.consent.captureScope === 'display'
-      && state.capability.method === 'portal-screencast+wayland-virtual-input' && state.capability.scope === 'display'))
 const pending = (state: ComputerUseStatus) => state.actualPending || state.state === 'acting'
+const keepCaptureError = (previous: string | undefined, fallback: string | undefined) =>
+  Object.values(captureErrors).some(message => message === previous) ? previous : fallback
+function captureError(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : ''
+  // Electron may prefix invoke rejections. Match only fixed terminal messages;
+  // never display arbitrary host/helper error text or infer a close receipt.
+  const matches = (fixed: string) => message === fixed || message.endsWith(`: ${fixed}`)
+  return matches('computer-use-capture-unknown') ? captureErrors.unknown
+    : matches('ComputerUse capture budget exhausted') ? captureErrors.budget : captureErrors.failed
+}
 
 export function useComputerUse(active: boolean) {
   const [state, setState] = useState(createDisabledComputerUseStatus)
@@ -111,19 +115,19 @@ export function useComputerUse(active: boolean) {
     slot.unknownScope = baseScope
     const generation = lifecycle.current.generation
     const valid = () => lifecycle.current.active && lifecycle.current.generation === generation
-    if (valid()) { setBusy(true); setError('正在停止；释放尚未确认。') }
+    if (valid()) { setBusy(true); setError(previous => keepCaptureError(previous, '正在停止；释放尚未确认。')) }
     // Invoke synchronously during cleanup, never after awaiting an old start.
     void (async () => {
       try {
         const next = recordStatus(slot, await api.stop())
         if (next && stopped(next) && next.scopeRevision === baseScope + 1
           && next.revision > baseRevision) slot.unknown = false
-        if (next && valid() && accept(next)) setError(slot.unknown ? '已隔离：停止尚未确认。' : undefined)
+        if (next && valid() && accept(next)) setError(previous => keepCaptureError(previous, slot.unknown ? '已隔离：停止尚未确认。' : undefined))
       } catch {
         slot.stopRejected = true
         slot.unknown = true
         slot.unknownRevision = Math.max(slot.revision, baseRevision)
-        if (valid()) { setState(previous => ({ ...previous, state: 'quarantined' })); setError('已隔离：停止尚未确认。') }
+        if (valid()) { setState(previous => ({ ...previous, state: 'quarantined' })); setError(previous => keepCaptureError(previous, '已隔离：停止尚未确认。')) }
       } finally {
         slot.stop = false
         publish(slot)
@@ -161,9 +165,9 @@ export function useComputerUse(active: boolean) {
       const failureClosed = failedStart.current?.closedRevision !== undefined && stopped(current.current)
         && current.current.scopeRevision === failedStart.current.scope + 1
         && current.current.revision >= failedStart.current.closedRevision
-      setError(previous => hostStopping ? '正在停止；释放尚未确认。' : slot.unknown ? '已隔离：停止尚未确认。'
+      setError(previous => keepCaptureError(previous, hostStopping ? '正在停止；释放尚未确认。' : slot.unknown ? '已隔离：停止尚未确认。'
         : failureClosed ? '本次启动未成功，收尾已确认。' : previous?.startsWith('已隔离') || previous?.startsWith('正在停止')
-          || (lifecycle.current.known && (previous === '正在读取本地观察状态。' || previous === '无法读取本地观察状态。')) ? undefined : previous)
+          || (lifecycle.current.known && (previous === '正在读取本地观察状态。' || previous === '无法读取本地观察状态。')) ? undefined : previous))
     }
     slot.listeners.add(refresh)
     const unsubscribe = api.onState(next => {
@@ -246,7 +250,7 @@ export function useComputerUse(active: boolean) {
     if (!api || !lifecycle.current.active || !lifecycle.current.known) return
     const slot = reservation(api)
     const before = current.current
-    if (slot.operation || slot.stop || slot.unknown || before.actualPending || before.scopeRevision < slot.scope || !observable(before)
+    if (slot.operation || slot.stop || slot.unknown || before.actualPending || before.scopeRevision < slot.scope || !isComputerUseCaptureReady(before)
       || owned.current?.scope !== before.scopeRevision) return
     slot.operation = true
     const generation = lifecycle.current.generation
@@ -264,7 +268,13 @@ export function useComputerUse(active: boolean) {
         if (!recorded || !accept(recorded)) return
         setPreview(result.preview)
         setPreviewUnavailable(result.previewUnavailable ? '当前系统无法生成本地缩略图。' : undefined)
-      } catch { if (valid()) setError('无法获取本地静态截图。') }
+      } catch (cause) {
+        if (valid() && (current.current.scopeRevision === before.scopeRevision
+          || (current.current.scopeRevision === before.scopeRevision + 1
+            && ['stopping', 'stopped', 'quarantined'].includes(current.current.state)))) {
+          setError(captureError(cause))
+        }
+      }
       finally { slot.operation = false; publish(slot); if (valid()) setBusy(!lifecycle.current.known || slot.stop || slot.unknown || pending(current.current)) }
     })()
   }, [accept, clearPreview])

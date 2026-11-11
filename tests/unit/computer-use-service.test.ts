@@ -7,7 +7,7 @@ import { WaylandComputerUseDriver } from '../../src/main/computer-use/wayland-dr
 import { ComputerUseService, type ComputerUseServiceOptions } from '../../src/main/computer-use/service'
 import type { ComputerUseDriver, ComputerUseDriverFrame } from '../../src/main/computer-use/driver'
 import type { ComputerUseCoordination, ComputerUseCoordinationClaim, ComputerUseCoordinationReceipt } from '../../src/main/computer-use/coordination'
-import { COMPUTER_USE_LIMITS as L, validateComputerUseStatus, type ComputerUseAction, type ComputerUseCapability, type ComputerUseOwner, type ComputerUseStatus } from '../../src/shared/computer-use'
+import { COMPUTER_USE_LIMITS as L, isComputerUseCaptureReady, validateComputerUseStatus, type ComputerUseAction, type ComputerUseCapability, type ComputerUseOwner, type ComputerUseStatus } from '../../src/shared/computer-use'
 import type { ComputerUseDiagnostics } from '../../src/shared/computer-use-diagnostics'
 import { makeStaticPng } from '../fixtures/static-png'
 
@@ -219,15 +219,15 @@ describe('ComputerUse development-only local input (mock, no desktop)', () => {
 })
 
 describe('ComputerUse cached diagnostics remain display-only and lease-owned', () => {
-  it('does not read driver diagnostics on construction, state reads, pending claim or successful start', async () => {
-    const f = fixture()
+  it('does not read driver diagnostics on construction, state reads, pending control claim or successful start', async () => {
+    const f = inputFixture()
     const getDiagnostics = vi.fn(() => ({ open: 'portal-connect-failed' as const }))
     f.driver.getDiagnostics = getDiagnostics
     const claiming = deferred<ComputerUseCoordinationClaim>()
     vi.mocked(f.coordination.claim).mockReturnValue(claiming.promise)
     expect(f.service.getState()).not.toHaveProperty('diagnostics')
     expect(f.service.getState()).not.toHaveProperty('diagnostics')
-    const starting = f.service.start(A, consent)
+    const starting = f.service.start(A, inputConsent)
     await tick()
     f.service.getState()
     expect(f.driverFactory).not.toHaveBeenCalled()
@@ -254,7 +254,7 @@ describe('ComputerUse cached diagnostics remain display-only and lease-owned', (
     await expect(f.service.start(A, consent)).rejects.toThrow('ComputerUse start failed or revoked')
     const stopped = await f.service.stop(A)
     expect(stopped).toMatchObject({
-      state: 'quarantined', owner: A, actualPending: true, coordination: 'held',
+      state: 'quarantined', owner: A, actualPending: true, coordination: 'not-checked',
       diagnostics: { open: 'pipewire-start-failed', close: 'portal-close-failed' },
       capability: { unsupportedReason: 'stop-unverified' }
     })
@@ -269,34 +269,6 @@ describe('ComputerUse cached diagnostics remain display-only and lease-owned', (
       expect(JSON.stringify(state)).not.toMatch(/private|URI|token/)
     }
   })
-
-  it.each(['throw', 'raw-code', 'extra-field', 'accessor'] as const)(
-    'ignores %s diagnostics without overriding actual successful or uncertain close', async invalid => {
-      for (const closeFails of [false, true]) {
-        const f = fixture()
-        const rawSecret = 'raw-private-diagnostic /home/private token'
-        const accessor = vi.fn(() => rawSecret)
-        f.driver.getDiagnostics = vi.fn(() => {
-          if (invalid === 'throw') throw new Error(rawSecret)
-          if (invalid === 'raw-code') return { close: rawSecret } as unknown as ComputerUseDiagnostics
-          if (invalid === 'extra-field') return { close: 'portal-close-failed', stderr: rawSecret } as unknown as ComputerUseDiagnostics
-          return Object.defineProperty({}, 'close', { enumerable: true, get: accessor }) as ComputerUseDiagnostics
-        })
-        vi.mocked(f.driver.open).mockRejectedValue(new Error(rawSecret))
-        if (closeFails) vi.mocked(f.driver.close).mockRejectedValue(new Error(rawSecret))
-        await expect(f.service.start(A, consent)).rejects.toThrow('ComputerUse start failed or revoked')
-        const stopped = await f.service.stop(A)
-        expect(stopped).not.toHaveProperty('diagnostics')
-        expect(stopped).toMatchObject(closeFails
-          ? { state: 'quarantined', actualPending: true, coordination: 'held', owner: A }
-          : { state: 'stopped', actualPending: false, coordination: 'released' })
-        expect(f.coordination.release).toHaveBeenCalledTimes(closeFails ? 0 : 1)
-        expect(accessor).not.toHaveBeenCalled()
-        expect(f.driver.close).toHaveBeenCalledTimes(1)
-        for (const [state] of f.publish.mock.calls) expect(JSON.stringify(state)).not.toContain(rawSecret)
-      }
-    }
-  )
 
   it('preserves first failure per operation while copying cache, published snapshots and state reads', async () => {
     const f = fixture()
@@ -324,12 +296,13 @@ describe('ComputerUse cached diagnostics remain display-only and lease-owned', (
     expect(f.service.getState().diagnostics).toEqual({ open: 'window-selection-failed', capture: 'capture-frame-failed' })
     closing.resolve()
     const final = await stopped
-    expect(final).toMatchObject({ state: 'stopped', coordination: 'released', actualPending: false })
+    expect(final).toMatchObject({ state: 'stopped', coordination: 'unclaimed', actualPending: false })
     expect(final.diagnostics).toEqual({ open: 'window-selection-failed', capture: 'capture-frame-failed', close: 'pipewire-stop-failed' })
     cache.close = 'both-stop-failed'
     final.diagnostics!.close = 'request-state-invalid'
     expect(f.service.getState().diagnostics).toEqual({ open: 'window-selection-failed', capture: 'capture-frame-failed', close: 'pipewire-stop-failed' })
-    expect(f.coordination.release).toHaveBeenCalledExactlyOnceWith(f.receipt)
+    expect(f.coordination.claim).not.toHaveBeenCalled()
+    expect(f.coordination.release).not.toHaveBeenCalled()
   })
 
   it('resets diagnostics immediately for a new start and does not consult the retired driver for the new owner', async () => {
@@ -383,7 +356,7 @@ describe('ComputerUse cached diagnostics remain display-only and lease-owned', (
     await tick()
     const stopping = f.service.stop(A)
     await tick()
-    expect(f.service.getState()).toMatchObject({ owner: A, actualPending: true, coordination: 'held' })
+    expect(f.service.getState()).toMatchObject({ owner: A, actualPending: true, coordination: 'not-checked' })
     expect(f.coordination.release).not.toHaveBeenCalled()
     await expect(f.service.start(B, consent)).rejects.toThrow('occupied')
     oldCache[operation] = operation === 'open' ? 'post-start-not-deliverable' : 'capture-frame-failed'
@@ -414,79 +387,57 @@ describe('ComputerUse cached diagnostics remain display-only and lease-owned', (
   })
 })
 
-describe('ComputerUse durable coordination and actual ownership ledger', () => {
+describe('ComputerUse read-only native closure (synthetic protocol, no desktop)', () => {
   describe('synthetic Linux helper protocol', () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
     beforeEach(() => { Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'linux' }) })
     afterEach(() => { Object.defineProperty(process, 'platform', originalPlatform) })
 
-  it.each(['window-selection-failed', 'pipewire-start-failed'] as const)('failed native open %s can release after client-disconnected receipt and actual close, without automatic restart', async diagnosticCode => {
-    const children: Array<EventEmitter & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough }> = []
-    const drivers: WaylandComputerUseDriver[] = []
-    const commands: string[][] = []
-    const factory = vi.fn(() => {
-      const index = children.length
-      const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() })
-      children.push(child)
-      commands.push([])
-      child.stdin.on('data', (packet: Buffer) => {
-        const request = JSON.parse(packet.subarray(12, 12 + packet.readUInt32BE(4)).toString()) as { id: number; generation: number; kind: string }
-        commands[index].push(request.kind)
-        const kind = request.kind === 'open' ? (index === 0 ? 'error' : 'opened') : request.kind === 'close' ? 'closed' : 'hello'
-        child.stdout.emit('data', encodeHelperPacket({ id: request.id, generation: request.generation, kind,
-          ...(kind === 'hello' ? { captureAccountingVersion: 1 } : {}),
-          ...(kind === 'error' ? { diagnosticCode } : {}),
-          ...(kind === 'opened' ? { sourceType: 2, streamId: '42' } : {}),
-          ...(kind === 'closed' ? { closeReceipt: { version: 1, boundary: 'client-disconnected' } } : {}) }))
-      })
-      const driver = new WaylandComputerUseDriver('/explicit/mock-helper', false, () => child as unknown as ChildProcessWithoutNullStreams)
-      drivers.push(driver)
-      return driver
+  it.each(['open', 'capture', 'none'] as const)('%s failure/readiness keeps the local lease until actual native close, without marker IO', async failure => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() })
+    const commands: string[] = []
+    child.stdin.on('data', (packet: Buffer) => {
+      const request = JSON.parse(packet.subarray(12, 12 + packet.readUInt32BE(4)).toString()) as { id: number; generation: number; kind: string }
+      commands.push(request.kind)
+      const kind = request.kind === failure ? 'error' : request.kind === 'open' ? 'opened' : request.kind === 'close' ? 'closed' : 'hello'
+      child.stdout.emit('data', encodeHelperPacket({ id: request.id, generation: request.generation, kind,
+        ...(kind === 'hello' ? { captureAccountingVersion: 1 } : {}),
+        // A failed capture without a negative receipt stays a failed/unknown
+        // image outcome. It supplies no proof of zero generated image bytes.
+        ...(kind === 'error' ? { diagnosticCode: failure === 'capture' ? 'capture-frame-failed' : 'window-selection-failed' } : {}),
+        ...(kind === 'opened' ? { sourceType: 2, streamId: '42' } : {}),
+        ...(kind === 'closed' ? { closeReceipt: { version: 1, boundary: 'client-disconnected' } } : {}) }))
     })
-    const f = fixture({ driverFactory: factory })
-    const releasing = deferred<void>()
-    vi.mocked(f.coordination.release).mockReturnValueOnce(releasing.promise)
-    await expect(f.service.start(A, consent)).rejects.toThrow('ComputerUse start failed or revoked')
+    const driver = new WaylandComputerUseDriver('/explicit/mock-helper', false, () => child as unknown as ChildProcessWithoutNullStreams)
+    const f = fixture({ driverFactory: () => driver })
+    if (failure === 'open') await expect(f.service.start(A, consent)).rejects.toThrow('start failed')
+    else {
+      await f.service.start(A, consent)
+      if (failure === 'capture') await expect(f.service.capture(A)).rejects.toThrow('computer-use-capture-unknown')
+    }
     const stopping = f.service.stop(A)
     await tick()
-    expect(commands[0]).toEqual(['hello', 'open', 'close'])
-    expect(f.service.getState()).toMatchObject({ state: 'stopping', actualPending: true, coordination: 'held', owner: A, consent: { capture: false }, diagnostics: { open: diagnosticCode } })
-    expect(f.coordination.release).not.toHaveBeenCalled()
+    expect(commands).toEqual(['hello', 'open', ...(failure === 'capture' ? ['capture'] : []), 'close'])
+    expect(f.service.getState()).toMatchObject({ state: 'stopping', actualPending: true, coordination: 'not-checked', owner: A, consent: { capture: false } })
+    expect(f.service.stop(A)).toBe(stopping)
+    expect(() => f.service.stop(B)).toThrow('owner mismatch')
     await expect(f.service.start(B, consent)).rejects.toThrow('occupied')
-    children[0].emit('exit', 0, null)
-    children[0].stdout.emit('end')
+    child.emit('exit', 0, null)
+    child.stdout.emit('end')
     await tick()
-    expect(f.coordination.release).not.toHaveBeenCalled()
-    children[0].emit('close', 0, null)
-    await drivers[0].close()
-    await tick()
-    expect(f.coordination.release).toHaveBeenCalledExactlyOnceWith(f.receipt)
-    expect(f.service.getState()).toMatchObject({ state: 'stopping', actualPending: true, owner: A, coordination: 'held', diagnostics: { open: diagnosticCode } })
-    await expect(f.service.start(B, consent)).rejects.toThrow('occupied')
-    releasing.resolve()
+    expect(f.service.getState().actualPending).toBe(true)
+    child.emit('close', 0, null)
+    await driver.close()
     const stopped = await stopping
-    expect(stopped).toMatchObject({ state: 'stopped', actualPending: false, coordination: 'released', diagnostics: { open: diagnosticCode } })
+    expect(stopped).toMatchObject({ state: 'stopped', actualPending: false, coordination: 'unclaimed', budget: { captures: failure === 'capture' ? 1 : 0 } })
     expect(stopped.owner).toBeUndefined()
-    expect(f.publish.mock.calls.some(([state]) => state.state === 'ready')).toBe(false)
-    f.service.getState()
+    if (failure === 'capture') expect(stopped.budget).toMatchObject({ frameBytes: 0, framePixels: 0 })
+    if (failure !== 'none') expect(stopped.diagnostics?.[failure]).toBe(failure === 'capture' ? 'capture-frame-failed' : 'window-selection-failed')
     await f.service.stop(A)
-    await tick()
-    expect(factory).toHaveBeenCalledTimes(1)
-    expect(f.coordination.claim).toHaveBeenCalledTimes(1)
-    // Only another explicit approval/start may enter a new lease; no automatic
-    // retry, diagnostic reinterpretation or historical marker release occurred.
-    const nextOwner = { ...B, generation: 2 }
-    await f.service.start(nextOwner, consent)
-    expect(factory).toHaveBeenCalledTimes(2)
-    expect(f.coordination.claim).toHaveBeenCalledTimes(2)
-    expect(f.service.getState()).toMatchObject({ state: 'ready', owner: nextOwner, actualPending: false })
-    expect(f.service.getState().scopeRevision).toBeGreaterThan(stopped.scopeRevision)
-    expect(f.service.getState()).not.toHaveProperty('diagnostics')
-    const nextStop = f.service.stop(nextOwner)
-    await tick()
-    children[1].emit('close', 0, null)
-    await nextStop
-    expect(f.coordination.release).toHaveBeenCalledTimes(2)
+    f.service.getState()
+    expect(f.coordination.claim).not.toHaveBeenCalled()
+    expect(f.coordination.release).not.toHaveBeenCalled()
+    expect(commands.filter(kind => kind === 'close')).toHaveLength(1)
   })
 
   it.each(['legacy-error', 'poisoned-receipt'] as const)('%s cannot become release proof after normal process close or repeated Stop', async mode => {
@@ -514,7 +465,7 @@ describe('ComputerUse durable coordination and actual ownership ledger', () => {
     child.emit('close', 0, null)
     await stopping
     const state = f.service.getState()
-    expect(state).toMatchObject({ state: 'quarantined', owner: A, actualPending: true, coordination: 'held', diagnostics: { open: 'window-selection-failed' }, capability: { unsupportedReason: 'stop-unverified' } })
+    expect(state).toMatchObject({ state: 'quarantined', owner: A, actualPending: true, coordination: 'not-checked', diagnostics: { open: 'window-selection-failed' }, capability: { unsupportedReason: 'stop-unverified' } })
     expect(state.diagnostics?.close).toBe(mode === 'legacy-error' ? 'portal-close-failed' : 'helper-protocol-invalid')
     expect(f.coordination.release).not.toHaveBeenCalled()
     await f.service.stop(A)
@@ -523,60 +474,12 @@ describe('ComputerUse durable coordination and actual ownership ledger', () => {
     expect(f.service.getState()).toEqual(state)
     expect(commands).toEqual(['hello', 'open', 'close'])
     expect(factory).toHaveBeenCalledTimes(1)
-    expect(f.coordination.claim).toHaveBeenCalledTimes(1)
-  })
-
-  it.each([false, true])('normal native closed (DMA config %s) releases exactly once after local process/stdio and coordination settle', async dmaBufReadback => {
-    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() })
-    const commands: string[] = []
-    child.stdin.on('data', (packet: Buffer) => {
-      const request = JSON.parse(packet.subarray(12, 12 + packet.readUInt32BE(4)).toString()) as { id: number; generation: number; kind: string }
-      commands.push(request.kind)
-      const kind = request.kind === 'open' ? 'opened' : request.kind === 'close' ? 'closed' : 'hello'
-      // closed represents native standard Portal close + actual PW join, not
-      // a separate revoked/Session.Closed notification. Local exit is still held.
-      child.stdout.emit('data', encodeHelperPacket({ id: request.id, generation: request.generation, kind,
-        ...(kind === 'hello' ? { captureAccountingVersion: 1, ...(dmaBufReadback ? { dmaBufReadbackVersion: 1 } : {}) } : {}),
-        ...(kind === 'opened' ? { sourceType: 2, streamId: '42' } : {}),
-        ...(kind === 'closed' ? { closeReceipt: { version: 1, boundary: 'client-disconnected' } } : {}) }))
-    })
-    const driver = new WaylandComputerUseDriver('/explicit/mock-helper', dmaBufReadback, () => child as unknown as ChildProcessWithoutNullStreams)
-    const f = fixture({ driverFactory: () => driver, allowDmaBufReadback: dmaBufReadback })
-    const releasing = deferred<void>()
-    vi.mocked(f.coordination.release).mockReturnValue(releasing.promise)
-    await f.service.start(A, consent)
-    const stopping = f.service.stop(A)
-    await tick()
-    expect(commands).toEqual(['hello', 'open', 'close'])
-    expect(f.service.getState()).toMatchObject({ state: 'stopping', actualPending: true, coordination: 'held', owner: A })
-    expect(f.coordination.release).not.toHaveBeenCalled()
-    await expect(f.service.start(B, consent)).rejects.toThrow('occupied')
-    expect(() => f.service.stop(B)).toThrow('owner mismatch')
-    child.emit('exit', 0, null)
-    child.stdout.emit('end')
-    await tick()
-    expect(f.coordination.release).not.toHaveBeenCalled()
-    child.emit('close', 0, null)
-    // Wait for the actual helper/driver promise chain, not an arbitrary timeout.
-    await driver.close()
-    await tick()
-    expect(f.coordination.release).toHaveBeenCalledExactlyOnceWith(f.receipt)
-    expect(f.service.getState()).toMatchObject({ state: 'stopping', actualPending: true, coordination: 'held', owner: A })
-    expect(f.service.stop(A)).toBe(stopping)
-    await expect(f.service.start(B, consent)).rejects.toThrow('occupied')
-    releasing.resolve()
-    expect(await stopping).toMatchObject({ state: 'stopped', actualPending: false, coordination: 'released' })
-    expect(f.service.getState().owner).toBeUndefined()
-    await f.service.stop()
-    f.service.getState()
-    expect(commands).toEqual(['hello', 'open', 'close'])
-    expect(f.coordination.claim).toHaveBeenCalledTimes(1)
-    expect(f.coordination.release).toHaveBeenCalledExactlyOnceWith(f.receipt)
+    expect(f.coordination.claim).not.toHaveBeenCalled()
   })
 
   })
 
-  it('rejects Windows capture before helper spawn and releases the local mock claim', async () => {
+  it('rejects Windows observation before helper spawn without coordination IO', async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
     Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'win32' })
     try {
@@ -586,16 +489,56 @@ describe('ComputerUse durable coordination and actual ownership ledger', () => {
       await expect(f.service.start(A, consent)).rejects.toThrow('ComputerUse start failed or revoked')
       await f.service.stop(A)
       expect(start).not.toHaveBeenCalled()
-      expect(f.coordination.claim).toHaveBeenCalledTimes(1)
-      expect(f.coordination.release).toHaveBeenCalledExactlyOnceWith(f.receipt)
-      expect(f.service.getState()).toMatchObject({ state: 'stopped', actualPending: false, coordination: 'released' })
+      expect(f.coordination.claim).not.toHaveBeenCalled()
+      expect(f.coordination.release).not.toHaveBeenCalled()
+      expect(f.service.getState()).toMatchObject({ state: 'stopped', actualPending: false, coordination: 'unclaimed' })
       expect(f.publish.mock.calls.some(([state]) => state.state === 'ready')).toBe(false)
     } finally {
       Object.defineProperty(process, 'platform', originalPlatform)
     }
   })
 
-  it('never constructs or opens a chooser before the actual durable claim settles', async () => {
+})
+
+describe('ComputerUse control coordination and actual ownership ledger', () => {
+  // Existing claim/release cases belong exclusively to explicit control approval.
+  const fixture = inputFixture
+  const consent = inputConsent
+  const capability = inputCapability
+
+  it('shares the control mutex across instances while read-only observation remains independent', async () => {
+    const first = fixture()
+    const second = fixture({ coordination: first.coordination })
+    const observer = new ComputerUseService({ coordination: first.coordination, driverFactory: () => ({
+      open: async () => ({ ...capability, method: 'portal-screencast', control: false, scope: 'window', unsupportedReason: 'control-unavailable' }),
+      capture: async () => raw(), close: async () => {}
+    }), clock: () => 10, randomId: () => 'observed-frame', publish: () => {} })
+    let held = false
+    vi.mocked(first.coordination.claim).mockImplementation(async () => {
+      if (held) return { kind: 'occupied' }
+      held = true
+      return { kind: 'claimed', receipt: first.receipt }
+    })
+    vi.mocked(first.coordination.release).mockImplementation(async receipt => {
+      expect(receipt).toBe(first.receipt)
+      held = false
+    })
+    await first.service.start(A, consent)
+    await observer.start(B, { ...consent, control: false, captureScope: 'window' })
+    await observer.capture(B)
+    expect((await observer.stop(B)).coordination).toBe('unclaimed')
+    expect(first.coordination.claim).toHaveBeenCalledTimes(1)
+    expect(first.coordination.release).not.toHaveBeenCalled()
+    await expect(second.service.start(B, consent)).rejects.toThrow()
+    expect(await second.service.stop(B)).toMatchObject({ state: 'quarantined', coordination: 'blocked', actualPending: false })
+    expect(second.driver.open).not.toHaveBeenCalled()
+    expect((await first.service.stop(A)).coordination).toBe('released')
+    await second.service.start(B, consent)
+    expect((await second.service.stop(B)).coordination).toBe('released')
+    expect(first.coordination.release).toHaveBeenCalledTimes(2)
+  })
+
+  it('never constructs or opens a chooser before the actual durable control claim settles', async () => {
     const f = fixture()
     const claiming = deferred<ComputerUseCoordinationClaim>()
     vi.mocked(f.coordination.claim).mockReturnValue(claiming.promise)
@@ -914,6 +857,25 @@ describe('ComputerUse durable coordination and actual ownership ledger', () => {
 })
 
 describe('ComputerUse local observation broker ownership', () => {
+  it('observes without any coordination IO and certifies unclaimed only after the real close', async () => {
+    const f = fixture()
+    vi.mocked(f.coordination.claim).mockRejectedValue(new Error('coordination IO forbidden'))
+    vi.mocked(f.coordination.release).mockRejectedValue(new Error('coordination IO forbidden'))
+    await f.service.start(A, consent)
+    expect(f.service.getState()).toMatchObject({ state: 'ready', coordination: 'not-checked' })
+    await f.service.capture(A)
+    const closing = deferred<void>()
+    vi.mocked(f.driver.close).mockReturnValue(closing.promise)
+    const stopping = f.service.stop(A)
+    await tick()
+    expect(f.service.getState()).toMatchObject({ state: 'stopping', coordination: 'not-checked', actualPending: true, owner: A })
+    await expect(f.service.start(B, consent)).rejects.toThrow('occupied')
+    closing.resolve()
+    expect(await stopping).toMatchObject({ state: 'stopped', coordination: 'unclaimed', actualPending: false, budget: { captures: 1 } })
+    expect(f.coordination.claim).not.toHaveBeenCalled()
+    expect(f.coordination.release).not.toHaveBeenCalled()
+  })
+
   it('constructs and reads disabled state without factory/probing/capture, and cannot control', async () => {
     const f = fixture()
     expect(f.service.getState()).toMatchObject({ state: 'disabled', capability: { capture: false, control: false, unsupportedReason: 'not-probed' } })
@@ -1248,6 +1210,7 @@ describe('ComputerUse local observation broker ownership', () => {
     internal.state.budget[field] = cap - increment
     const result = await f.service.capture(A)
     expect(result.state.budget[field]).toBe(cap)
+    expect(isComputerUseCaptureReady(result.state)).toBe(false)
     expect(result.png).toEqual(raw().png)
     expect(f.driver.capture).toHaveBeenCalledWith(expect.any(AbortSignal), {
       maxFrameBytes: field === 'frameBytes' ? increment : L.maxFrameBytes,
@@ -1577,6 +1540,7 @@ describe('ComputerUse local observation broker ownership', () => {
     expect(L.maxCaptures).toBe(80) // Observation alone cannot create an unlimited workflow.
     for (let i = 0; i < 80; i++) await f.service.capture(A)
     expect(f.service.getState().budget).toMatchObject({ captures: 80, actions: 0 })
+    expect(isComputerUseCaptureReady(f.service.getState())).toBe(false)
     await expect(f.service.capture(A)).rejects.toThrow('budget')
     expect(f.driver.capture).toHaveBeenCalledTimes(L.maxCaptures)
     await f.service.stop(A)

@@ -8,7 +8,7 @@ import { makeStaticPng } from '../fixtures/static-png'
 import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import { PendingRequestStore } from '../../src/main/agent/pending-requests'
 import { createDisabledComputerUseStatus } from '../../src/shared/computer-use'
-import { COMPUTER_USE_AGENT_SOURCE_FIELD, COMPUTER_USE_AGENT_TITLE_PREFIX, COMPUTER_USE_OBSERVE_TOOL, type ComputerUseAgentRequest } from '../../src/shared/computer-use-agent'
+import { COMPUTER_USE_AGENT_SOURCE_FIELD, COMPUTER_USE_AGENT_TITLE_PREFIX, COMPUTER_USE_OBSERVE_TOOL, type ComputerUseAgentRequest, type ComputerUseAgentResponse } from '../../src/shared/computer-use-agent'
 import type { BackendRecord } from '../../src/main/agent/types'
 import type { ComputerUseAgentAdmission } from '../../src/main/agent/computer-use-bridge'
 import { TOOL_PERMISSION_MARKER } from '../../src/main/tool-permissions'
@@ -139,6 +139,9 @@ describe('Main ComputerUse real captured-source boundary (mock)', () => {
     h.backend.busy = false
     h.backend.activeRunId = undefined
     h.backend.controlDispatchPromises = new Set([new Promise(() => undefined)])
+    h.backend.historyMutation = true
+    h.bridge.stopping = true
+    h.bridge.dispatchLifecycle(h.backend).generation++
     const cleanup = { ...fields, operation: 'unwatch' as const, requestId: 'cleanup-own-watch', watchRequestId: watch.requestId }
     await expect(h.admit(cleanup)).resolves.toBe(captured)
     await expect(h.admit(cleanup)).resolves.toBe(captured)
@@ -153,19 +156,48 @@ describe('Main ComputerUse real captured-source boundary (mock)', () => {
     expect(h.service.act).not.toHaveBeenCalled()
   })
 
-  it('confirms screenshot entry provenance only from the captured SDK entry event and root factory receipt', async () => {
+  it.each(['early', 'early-delivery-error', 'late-delivery-error'] as const)('cleans a failed watch after its real state RPC and exact delivered ACK: %s', async timing => {
     const h = fixture()
     h.start({ [COMPUTER_USE_AGENT_SOURCE_FIELD]: h.source })
-    const admitted = await h.admit()
-    const record = vi.spyOn(h.bridge.computerUseAgent, 'recordScreenshotEntry')
-    const entry = { type: 'message', id: 'actual-sdk-entry', message: { role: 'toolResult', toolName: COMPUTER_USE_OBSERVE_TOOL, toolCallId: 'actual-root' } }
-    h.bridge.recordComputerUseScreenshotEntry(h.backend, { type: 'entry_appended', entry })
-    expect(record).toHaveBeenCalledWith(admitted.sessionIdentity,
-      { backendId: h.backend.usageBackendId, runtimeId: h.source.runtimeId, runId: h.run.id, toolCallId: 'actual-root' }, entry)
-    record.mockClear()
-    h.backend.nativeToolReceipts!.get('actual-root')!.parentId = 'unknown-codemode'
-    h.bridge.recordComputerUseScreenshotEntry(h.backend, { type: 'entry_appended', entry })
-    expect(record).not.toHaveBeenCalled()
+    await h.admit() // Real source capture establishes the pre-watch SDK identity.
+    h.backend.nativeToolReceipts!.get('actual-root')!.state = 'ended'
+    const { toolCallId: _id, ...fields } = h.request
+    const watch = { ...fields, operation: 'watch' as const, requestId: 'failed-watch' }
+    const cleanup = { ...fields, operation: 'unwatch' as const, requestId: 'early-cleanup', watchRequestId: watch.requestId }
+    let fail!: () => void
+    h.client.getState.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = () => reject(new Error('state failed')) }))
+    const replies = new Map<string, (response: ComputerUseAgentResponse) => void>()
+    let dialog = 0
+    let rejectDelivery = timing !== 'early'
+    h.bridge.respondToExtensionUi.mockImplementation((_client: unknown, id: string, value: { value: string }) => {
+      const response: ComputerUseAgentResponse = JSON.parse(value.value)
+      replies.get(id)!(response)
+      if (rejectDelivery) throw new Error('response delivery failed')
+    })
+    const submit = (request: ComputerUseAgentRequest) => new Promise<ComputerUseAgentResponse>(resolve => {
+      const id = `dialog-${++dialog}`
+      replies.set(id, resolve)
+      h.bridge.handleComputerUseAgentRequest(h.backend, h.client, { type: 'extension_ui_request', method: 'input', id, title: COMPUTER_USE_AGENT_TITLE_PREFIX + JSON.stringify(request) })
+    })
+    const watching = submit(watch)
+    let cleaned = false
+    const cleaning = timing.startsWith('early') ? submit(cleanup).then(response => { cleaned = true; return response }) : undefined
+    await vi.waitFor(() => expect(fail).toBeTypeOf('function'))
+    expect(cleaned).toBe(false)
+    expect(h.bridge.capabilityHasPendingInteraction(h.backend)).toBe(true)
+    fail()
+    expect((await watching).ok).toBe(false)
+    if (cleaning) expect(await cleaning).toEqual({ version: 1, ok: true, operation: 'unwatch', requestId: cleanup.requestId })
+    expect(h.bridge.capabilityHasPendingInteraction(h.backend)).toBe(rejectDelivery)
+    rejectDelivery = false
+    expect((await submit(cleanup)).ok).toBe(true) // Exact retry/replay is idempotent.
+    expect(h.bridge.capabilityHasPendingInteraction(h.backend)).toBe(false)
+    h.backend.client = { ...h.client } as unknown as BackendRecord['client']
+    expect((await submit(cleanup)).error).toBe('source-unverified')
+    expect(h.client.getState).toHaveBeenCalledTimes(2)
+    expect(h.service.start).not.toHaveBeenCalled()
+    expect(h.service.capture).not.toHaveBeenCalled()
+    expect(h.service.act).not.toHaveBeenCalled()
   })
 
   it('admits retained only from the original ended observe root and the same actual SDK file/id/client, never reminting restored identity', async () => {
@@ -181,13 +213,12 @@ describe('Main ComputerUse real captured-source boundary (mock)', () => {
     await expect(h.admit({ ...request, retained: { ...request.retained!, sessionId: 'payload-session' } })).rejects.toThrow('source-unverified')
     h.state.sessionId = 'different-real-sdk-session'
     await expect(h.admit({ ...request, retained: { ...request.retained!, sessionId: h.state.sessionId } })).rejects.toThrow('source-unverified')
-    expect(h.bridge.computerUseSessionIdentities.get(h.backend).identity).toBe(observed.sessionIdentity)
     h.state.sessionId = request.retained!.sessionId
     h.backend.nativeToolReceipts!.get('actual-root')!.parentId = 'nested-parent'
     await expect(h.admit(request)).rejects.toThrow('source-unverified')
   })
 
-  it('completes observe -> next physical request with pinned message_end-before-append ordering and no entry_appended event (synthetic SDK/Main)', async () => {
+  it('keeps SDK auth pending after a delivered failed watch, then permits the next physical request (synthetic SDK/Main)', async () => {
     const h = fixture()
     h.bridge.requestComputerUseApproval = vi.fn(async () => true)
     // Real SDK tree/append and egress gate, memory-only. Persistence metadata,
@@ -206,8 +237,13 @@ describe('Main ComputerUse real captured-source boundary (mock)', () => {
       desktop = { ...desktop, frame: { id: 'native-frame', width: 1, height: 1, createdAt: 10, scopeRevision: 1, captureScope: 'window', actualScope: 'window' } }
       return { state: structuredClone(desktop), png: makeStaticPng(1, 1) }
     })
+    let mainEvent!: (event: unknown) => void
+    Object.assign(h.client, { onEvent: (listener: typeof mainEvent) => { mainEvent = listener } })
+    h.bridge.attachBackendEvents(h.backend)
     const replies = new Map<string, (value: string) => void>()
     const privateRequests: ComputerUseAgentRequest[] = []
+    let finishAuthWatch!: () => void
+    let stopOnCleanup = false
     h.bridge.respondToExtensionUi.mockImplementation((_client: unknown, id: string, value: { value: string }) => replies.get(id)!(value.value))
     const model = { ...h.state.model, api: 'openai-codex-responses' }
     const modelRegistry = {}
@@ -218,7 +254,16 @@ describe('Main ComputerUse real captured-source boundary (mock)', () => {
       privateRequests.push(request)
       const id = `private-dialog-${privateRequests.length}`
       replies.set(id, resolve)
-      h.bridge.handleComputerUseAgentRequest(h.backend, h.client, { type: 'extension_ui_request', method: 'input', id, title })
+      if (request.operation === 'watch' && !finishAuthWatch) {
+        h.client.getState.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+          finishAuthWatch = () => reject(new Error('state failed'))
+        }))
+      }
+      if (request.operation === 'unwatch' && stopOnCleanup) {
+        h.backend.historyMutation = true
+        h.bridge.stopping = true
+      }
+      mainEvent({ type: 'extension_ui_request', method: 'input', id, title })
     })) } } as unknown as ExtensionCommandContext
     const listeners = new Set<(event: any) => void>()
     const session = { sessionManager: manager, messages: [] as any[], extensionRunner: { createCommandContext: () => command }, dispose: vi.fn(),
@@ -227,7 +272,12 @@ describe('Main ComputerUse real captured-source boundary (mock)', () => {
     } as unknown as AgentSession
     const network = vi.fn(async () => new Response('synthetic SSE'))
     vi.stubGlobal('fetch', network)
+    let finishAuth!: () => void
     const runtime = { getPhysicalModel: () => model, getAvailableSnapshot: () => [model], getRegisteredProviderConfig: () => undefined, getRegisteredNativeProvider: () => undefined,
+      getAuth: vi.fn(async () => {
+        await new Promise<void>(resolve => { finishAuth = resolve })
+        return { auth: { apiKey: 'synthetic-oauth-only' }, source: 'OAuth' as const }
+      }),
       streamSimple: vi.fn((_model: unknown, _context: unknown, options: { fetch: typeof fetch; onPayload: (payload: unknown, actual: unknown) => Promise<unknown> }) => {
         const stream = createAssistantMessageEventStream()
         void (async () => {
@@ -272,12 +322,27 @@ describe('Main ComputerUse real captured-source boundary (mock)', () => {
     await expect(factory.authorizeEgress(model as never, signal)).rejects.toThrow('egress-revoked')
     expect(privateRequests.map(value => value.operation)).toEqual(['observe'])
     const actualEntryId = manager.appendMessage(message) // SDK persists after emit
+    let authSettled = false
+    const auth = gate.models.getAuth(model as never).finally(() => { authSettled = true })
+    const rejected = expect(auth).rejects.toThrow()
+    await vi.waitFor(() => expect(runtime.getAuth).toHaveBeenCalledOnce())
+    expect(h.bridge.capabilityHasPendingInteraction(h.backend)).toBe(true)
+    finishAuthWatch()
+    await vi.waitFor(() => expect(h.bridge.capabilityHasPendingInteraction(h.backend)).toBe(false))
+    expect(authSettled).toBe(false) // Main cleanup leaves the original SDK auth Promise pending.
+    finishAuth()
+    await rejected
+    expect(privateRequests.some(value => value.operation === 'unwatch')).toBe(false)
+    expect(h.bridge.capabilityHasPendingInteraction(h.backend)).toBe(false)
+    stopOnCleanup = true
     const next = await gate.models.streamSimple(model as never, { messages: [] }, { transport: 'sse' }).result()
     expect(next.stopReason).toBe('stop')
     expect(network).toHaveBeenCalledOnce()
     expect(privateRequests.slice(0, 3).map(value => value.operation)).toEqual(['observe', 'retained', 'egress'])
     expect(privateRequests.filter(value => value.operation === 'retained')).toHaveLength(1)
     expect(privateRequests.some(value => value.operation === 'unwatch')).toBe(true)
+    expect(h.bridge.stopping).toBe(true)
+    expect(h.bridge.capabilityHasPendingInteraction(h.backend)).toBe(false)
     expect(privateRequests[1]).toMatchObject({ toolCallId: h.request.toolCallId, retained: { observationRequestId: privateRequests[0].requestId,
       entryId: actualEntryId, sessionFile: h.state.sessionFile, sessionId: h.state.sessionId, scopeRevision: 1 } })
     expect(events.some(event => event.type === 'entry_appended')).toBe(false)
