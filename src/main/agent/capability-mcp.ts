@@ -6,7 +6,7 @@ import type { LoadedMcpConfig, McpServerEntry } from '@earendil-works/pi-coding-
 import { capabilityEnabled, type CapabilityItem, type CapabilityPreferences } from '../../shared/capability-settings'
 import { capabilityResourceId } from '../capability-ids'
 
-const SDK_VERSION = '1.4.0'
+const SDK_VERSION = '1.5.2'
 const require = createRequire(import.meta.url)
 const CONFIG_UNAVAILABLE = '无法只读解析当前版本的原生 MCP 配置；未启动服务器。'
 const CONFIG_INVALID = '部分原生 MCP 配置无效或读取失败，已跳过；未运行配置中的命令或认证。'
@@ -18,8 +18,9 @@ type McpRegistration = { name: string; extensionPath: string; config: { enabled?
 /** The root exports this type, not loadMcpConfig. Its exports map has an import
  * condition only: resolve the public IMPORT entry, then require the audited
  * absolute ESM file (Node >=22.19). Do not guess a public/internal subpath export.
- * Pinned config.js only reads/validates JSON; it never expands !command/env,
- * reads OAuth credentials, creates a manager, or imports the transport runtime.
+ * Pinned config.js reads/validates JSON through pi-mcp's config helpers. Its
+ * package barrel also loads transport definitions, but does not instantiate
+ * them, expand !command/env, or read OAuth credentials.
  * A changed layout/version fails closed instead of falling back to a connection.
  */
 function readCanonicalConfiguration(options: ConfigOptions): LoadedMcpConfig {

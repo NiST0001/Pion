@@ -188,7 +188,7 @@ import {
   promptPreview
 } from './utils'
 
-// Reviewed with the pinned 1.4.0 adapter: spawn and process assignment precede
+// Reviewed with the pinned 1.5.2 adapter: spawn and process assignment precede
 // the first await. Only that exact entry can attest a null, never-created child.
 const PINNED_RPC_START = RpcClient.prototype.start
 const HISTORY_STOP_WAIT_MS = 5_000
@@ -3834,7 +3834,7 @@ export class AgentBridge {
     let noProcessCreated = false
     const startPromise = Promise.resolve().then(() => {
       const ownsHandle = Object.prototype.hasOwnProperty.call(client, 'process')
-      const nativeStart = VERSION === '1.4.0' && client.start === PINNED_RPC_START
+      const nativeStart = VERSION === '1.5.2' && client.start === PINNED_RPC_START
       const before = ownsHandle ? (client as unknown as { process: unknown }).process : undefined
       prepareProcessStart(this.processStopClient(backend))
       try { return client.start() }

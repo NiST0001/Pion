@@ -235,8 +235,16 @@ describe('completed native receipt recycling', () => {
     expect(next.usage.total).toBe(0)
     expect(next.tools).toEqual([])
     h.emit('tool_execution_start', { toolCallId: 'fresh-batch', toolName: 'pion_subagents' })
-    const source = AgentBridge.prototype as unknown as { hasSubagentSourceReceipt(backend: BackendRecord, id: string): boolean }
-    expect(source.hasSubagentSourceReceipt.call(h.bridge, h.backend, 'fresh-batch')).toBe(true)
+    const source = h.bridge as unknown as { getSubagentSourceReceipt(backend: BackendRecord, id: string): unknown }
+    expect(source.getSubagentSourceReceipt(h.backend, 'paid-0')).toBeUndefined()
+    const freshReceipt = h.backend.nativeToolReceipts!.get('fresh-batch')
+    expect(freshReceipt).toBeDefined()
+    expect(source.getSubagentSourceReceipt(h.backend, 'fresh-batch')).toBe(freshReceipt)
+    h.backend.activeRunId = 'run'
+    expect(source.getSubagentSourceReceipt(h.backend, 'fresh-batch')).toBeUndefined()
+    h.backend.activeRunId = 'next'
+    h.emit('tool_execution_end', { toolCallId: 'fresh-batch', toolName: 'pion_subagents' })
+    expect(source.getSubagentSourceReceipt(h.backend, 'fresh-batch')).toBeUndefined()
   })
 
   it('recycles 800 completed nested leaves while retaining their running root and once-only usage', () => {

@@ -103,7 +103,11 @@ export interface ComputerUseToolsOptions {
 
 /** Root SDK custom tools only. No extension factory/defaultTools mutation and
  * no additions to the subagent builtin whitelist or nested tool loadout. */
-export function createComputerUseTools(options: ComputerUseToolsOptions) {
+export function createComputerUseTools(options: ComputerUseToolsOptions): {
+  tools: ToolDefinition[]
+  authorizeEgress(model: ChatModel, signal: AbortSignal): Promise<{ scopeRevision: number }>
+  attach(session: AgentSession): void
+} {
   const roots = new Map<string, string>()
   let attached: AgentSession | undefined
   const tools: ToolDefinition[] = []

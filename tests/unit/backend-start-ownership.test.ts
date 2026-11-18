@@ -5,10 +5,10 @@ import { AgentBridge } from '../../src/main/agent/agent-bridge'
 import { BackendPool } from '../../src/main/agent/backend-pool'
 import type { BackendRecord } from '../../src/main/agent/types'
 
-const sdk = vi.hoisted(() => ({ start: vi.fn(), state: vi.fn(), stop: vi.fn() }))
+const sdk = vi.hoisted(() => ({ start: vi.fn(), state: vi.fn(), stop: vi.fn(), version: '1.5.2' }))
 vi.mock('@earendil-works/pi-coding-agent', async (original) => {
   const actual = await original<typeof import('@earendil-works/pi-coding-agent')>()
-  return { ...actual, RpcClient: class extends actual.RpcClient {
+  return { ...actual, get VERSION() { return sdk.version }, RpcClient: class extends actual.RpcClient {
     override start() { return sdk.start(this) }
     override getState() { return sdk.state(this) }
     override stop() { return sdk.stop(this) }
@@ -32,6 +32,7 @@ function deferred<T>() {
 }
 async function gap() { for (let i = 0; i < 40; i++) await Promise.resolve() }
 function harness() {
+  sdk.version = '1.5.2'
   sdk.start.mockReset()
   sdk.state.mockReset().mockRejectedValue(new Error('initial state failed'))
   sdk.stop.mockReset().mockResolvedValue(undefined)
@@ -141,6 +142,16 @@ describe('backend initialization child ownership', () => {
     expect(h.bridge.quarantinedSessionPaths).toBeUndefined()
     expect(sdk.state).not.toHaveBeenCalled()
     expect(sdk.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['1.4.0', '1.5.3'])('isolates a null child after start failure with SDK %s', async (version) => {
+    const h = harness()
+    sdk.version = version
+    sdk.start.mockRejectedValue(new Error('start failed'))
+    await expect(h.bridge.createBackend('writer', h.cwd, h.path)).rejects.toThrow('start failed')
+    expect(h.pool.get('writer')).toMatchObject({ historyStopFailed: true, startupProcess: null })
+    expect(h.bridge.startupQuarantinedCwds.has(h.cwd)).toBe(true)
+    expect(sdk.stop).not.toHaveBeenCalled()
   })
 
   it('requires the pinned start implementation before trusting a rejected start with no child', async () => {

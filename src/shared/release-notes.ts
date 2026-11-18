@@ -8,6 +8,14 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.107',
+    changes: [
+      '内置 Pi 升级至 1.5.2，更新模型目录及上游工具、MCP 和会话运行时修复。',
+      '适配新版 MCP 配置、能力目录与 RPC 响应，保留现有权限和会话收尾约束。',
+      'Pi 的缓存预热默认改为 idle，符合条件时在轮次间刷新可能产生额外费用；既有显式设置继续生效。'
+    ]
+  },
+  {
     version: '0.1.106',
     changes: [
       '自动回收已完成且无后续依赖的工具执行回执，修复长会话因历史回执累积导致子代理无法启动的问题。',

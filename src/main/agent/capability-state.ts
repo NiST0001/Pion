@@ -76,11 +76,11 @@ export type CapabilityRpcRejection = { command: 'set_model'; provider: string; m
 const negativeResponses = new WeakMap<Error, { client: RpcClient; command: string; requestId: string; message: string }>()
 const observedClients = new WeakSet<RpcClient>()
 
-/** SDK 1.4.0 erases RPC negatives into ordinary Errors in getData. Observe that
+/** SDK 1.5.2 erases RPC negatives into ordinary Errors in getData. Observe that
  * exact decoder, not error text/stack or arbitrary transport rejections. The next
  * request ID belongs to a command invoked synchronously after this observation. */
 export function observeCapabilityRpcRejections(client: RpcClient): string | undefined {
-  if (VERSION !== '1.4.0') return
+  if (VERSION !== '1.5.2') return
   type Decoder = { getData(response: unknown): unknown; requestId?: number }
   const decoder = client as unknown as Decoder
   if (!observedClients.has(client)) {

@@ -46,9 +46,11 @@ async function runtimeNotice(preferences: CapabilityPreferences, items: Capabili
     && capabilityEnabled(preferences, item.id, item.kind, item.enabled)).map((item) => ({ name: item.name, exposure: 'direct',
     sourceInfo: { path: '<inline:fixture>', source: 'inline', scope: 'temporary', origin: 'top-level' } }))
   let description = ''
+  let activeTools = actual.map((item) => item.name)
   const handlers = new Map<string, () => void>()
   const api = { on: (name: string, handler: () => void) => { handlers.set(name, handler); return () => handlers.delete(name) },
-    getAllTools: () => actual, getActiveTools: () => actual.map((item) => item.name),
+    getAllTools: () => actual, getActiveTools: () => [...activeTools],
+    setActiveTools: (names: string[]) => { activeTools = [...names] },
     registerCommand: (_name: string, command: { description?: string }) => { description = command.description ?? '' } } as unknown as ExtensionAPI
   if (typeof policy.extension === 'function') throw new Error('Expected a named Pion observer')
   await policy.extension.factory(api)
@@ -317,6 +319,20 @@ it('handles installed npm tags locally and leaves missing/mismatched packages un
   expect(result.notices.join(' ')).not.toContain('never-run-custom-wrapper')
   expect(await readdir(agentDir)).toEqual(before) // no tmp/extension install roots or lock files
   expect(JSON.parse(await readFile(join(agentDir, 'settings.json'), 'utf8'))).toEqual(settings)
+})
+
+it('refuses resource resolution for an unaudited SDK version', async () => {
+  vi.resetModules()
+  vi.doMock('@earendil-works/pi-coding-agent', async (original) => ({
+    ...await original<typeof import('@earendil-works/pi-coding-agent')>(), VERSION: '1.5.3', getAgentDir: () => agentDir
+  }))
+  const sdk = await import('@earendil-works/pi-coding-agent')
+  const resolve = vi.spyOn(sdk.DefaultPackageManager.prototype, 'resolve')
+  const { readCapabilityResources } = await import('../../src/main/capability-catalogue')
+  const result = await readCapabilityResources({ cwd, agentDir, projectTrusted: true, preferences: prefs() })
+  expect(resolve).not.toHaveBeenCalled()
+  expect(result.extensionPaths).toEqual([])
+  expect(result.notices.join(' ')).toContain('当前 SDK 版本尚未核对只读资源解析')
 })
 
 it('retains SDK project package deltas and exposes both colliding Skill identities for later reopening', async () => {

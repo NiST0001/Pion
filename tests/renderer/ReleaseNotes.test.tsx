@@ -32,12 +32,12 @@ it('keeps bundled versions unique and in descending numeric order', () => {
   expect(versions).toEqual(newestFirst)
 })
 
-it('prepares 0.1.105 notes while preserving existing entries and omitting local install-only versions', () => {
+it('prepares 0.1.107 notes while preserving existing entries and omitting local install-only versions', () => {
   const versions = RELEASE_NOTES.map((release) => release.version)
   const historyStart = versions.indexOf('0.1.82')
   expect(historyStart).toBeGreaterThanOrEqual(0)
   expect(versions.slice(0, historyStart)).toEqual([
-    '0.1.105', '0.1.104', '0.1.103', '0.1.102', '0.1.101', '0.1.100', '0.1.99', '0.1.98', '0.1.97', '0.1.96', '0.1.95', '0.1.94', '0.1.93', '0.1.92', '0.1.91', '0.1.90', '0.1.89',
+    '0.1.107', '0.1.106', '0.1.105', '0.1.104', '0.1.103', '0.1.102', '0.1.101', '0.1.100', '0.1.99', '0.1.98', '0.1.97', '0.1.96', '0.1.95', '0.1.94', '0.1.93', '0.1.92', '0.1.91', '0.1.90', '0.1.89',
     '0.1.88', '0.1.87', '0.1.86', '0.1.85', '0.1.84', '0.1.83'
   ])
   expect(versions.slice(historyStart, historyStart + 16)).toEqual([
@@ -53,6 +53,12 @@ it('prepares 0.1.105 notes while preserving existing entries and omitting local 
   for (let patch = 52; patch <= 66; patch++) {
     expect(versions).not.toContain(`0.1.${patch}`)
   }
+})
+
+it('documents the Pi upgrade and potential cache-warming costs in 0.1.107', () => {
+  const changes = RELEASE_NOTES.find((release) => release.version === '0.1.107')!.changes
+  expect(changes[0]).toMatch(/Pi 升级至 1\.5\.2/)
+  expect(changes[2]).toMatch(/缓存预热默认改为 idle.*可能产生额外费用.*既有显式设置继续生效/)
 })
 
 it('documents provider visibility and the shared child conversation interface in 0.1.70', () => {

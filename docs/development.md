@@ -178,7 +178,7 @@ Vite 同时构建 Electron 主入口与 SDK 子进程入口，共享块使用 `.
 
 ## pi SDK 兼容与缓存预热
 
-Pion 当前将 pi 精确锁定为 1.4.0，依赖与解析以 `package.json` / `package-lock.json` 为准，Node 最低要求仍为 22.19。升级依赖不会更新正在运行的安装版。子代理从 `AgentSession.systemPrompt` 继承有效系统提示，不读取新版已移入 transcript 的旧 `agent.state.systemPrompt` 字段。消息撤销校验支持 SDK 的独立 `usage`、`context_edit` 与不保留旧消息的压缩边界；上下文编辑只影响模型输入，不改写原始聊天记录或撤销时恢复的原文。旧进程真实退出屏障仍须保留。
+Pion 当前将 pi 精确锁定为 1.5.2，依赖与解析以 `package.json` / `package-lock.json` 为准，Node 最低要求仍为 22.19。升级依赖不会更新正在运行的安装版。子代理从 `AgentSession.systemPrompt` 继承有效系统提示，不读取新版已移入 transcript 的旧 `agent.state.systemPrompt` 字段。消息撤销校验支持 SDK 的独立 `usage`、`context_edit` 与不保留旧消息的压缩边界；上下文编辑只影响模型输入，不改写原始聊天记录或撤销时恢复的原文。旧进程真实退出屏障仍须保留。
 
 ### 工具与能力开关
 
@@ -186,11 +186,11 @@ Pion 当前将 pi 精确锁定为 1.4.0，依赖与解析以 `package.json` / `p
 
 `capability-catalogue.ts` 通过只读 SettingsManager storage 和已安装包元数据枚举，跳过未安装/不匹配资源、禁止包管理器全局位置探测命令，不构造 ResourceLoader/ModelRuntime 或执行工厂。目录不启动会话、认证或 MCP；动态能力仅由已有可信运行时补充，unknown 不推测。资源使用来源绑定 ID，目录 revision 与 desired revision 分开；4096 项只约束显示，完整资源集合继续参与 SDK 加载/执行过滤，包 manifest 与 convention fallback 沿锁定 SDK 解析结果。
 
-`runtime-host.ts` 在加载前过滤可选扩展入口，`agent/capability-policy.ts` 再过滤最终 Skill、工具声明/发现/嵌套和晚注册；模式从所选真实分支状态读取，`defaultTools` 正负规则及计划/权限/实验门共用单一执行 ceiling/loadout owner，计划只读集合统一引用 `shared/capabilities.ts` 并核真实工具来源；计划退出仅恢复进入前真实 active 集合及既有内置提问例外，再按当前 ceiling 删禁用项，保隐藏选择。prompt 文本仅作提示；pattern 共用锁定 SDK 的 matcher 语义（仅 `*` 特殊，其余字符字面匹配）。`agent/capability-mcp.ts` 对锁定 SDK 1.4.0 适配纯 `config.js` 读取器，在 native MCP 启动前覆盖真实 enabled，不执行配置命令/凭据解析；该读取器并非公开 root export，版本/布局不符时 fail closed。disabled 定义仍保留，不能让同名注册补位。旧插件自行管理的连接不受原生服务器开关接管，需关闭相应扩展入口。
+`runtime-host.ts` 在加载前过滤可选扩展入口，`agent/capability-policy.ts` 再过滤最终 Skill、工具声明/发现/嵌套和晚注册；模式从所选真实分支状态读取，`defaultTools` 正负规则及计划/权限/实验门共用单一执行 ceiling/loadout owner，计划只读集合统一引用 `shared/capabilities.ts` 并核真实工具来源；计划退出仅恢复进入前真实 active 集合及既有内置提问例外，再按当前 ceiling 删禁用项，保隐藏选择。prompt 文本仅作提示；pattern 共用锁定 SDK 的 matcher 语义（仅 `*` 特殊，其余字符字面匹配）。`agent/capability-mcp.ts` 对锁定 SDK 1.5.2 适配纯 `config.js` 读取器，在 native MCP 启动前覆盖真实 enabled，不执行配置命令/凭据解析；该读取器并非公开 root export，版本/布局不符时 fail closed。disabled 定义仍保留，不能让同名注册补位。旧插件自行管理的连接不受原生服务器开关接管，需关闭相应扩展入口。
 
 Bridge 显式保存后将全部 retained 后端标待应用，仅在所属轮次及实际调用/检查点/完成监听器收口后，优先于下一本地 FIFO 用公开同路径 `switchSession` 替换 runtime；未落盘空会话以 `newSession` 恢复精确模型、思考、名称和模式/子代理偏好并映射新路径。旧分支/队列与 Composer/草稿不重建，SDK cancelled 保旧来源；替换未知失败及 MCP 真实 close 失败隔离，不自动重启/重试连接。SDK 最终核验后的本地会话模型偏好保存错误单列，保已确认应用状态。`native-extensions.ts` 保留真实 close Promise；SDK replacement 与 RPC 外层可能重复 bind，同 factory 共享 start/close Promise，不重复启动。状态回执只读真正命名来源的 getCommands 描述，保持与 prompt 分离；应用 epoch 拒旧查询和中间默认模型，已确认替换后退休旧来源，无累计替换次数寿命门，真实 pending/未知 close 继续持槽。
 
-SDK 1.4.0 RpcClient 会将业务负响应抹成普通 Error。`agent/capability-state.ts` 的窄版本适配仅观察所属实际 client 的原始 getData 解码结果，以 WeakMap 关联 `set_model`/`compact` 的有限明确无副作用否定及 `export_html` 的明确失败响应；后者确认 writer RPC 已结束，允许后续显式导出。未知 transport/timeout、丢 ACK 或同文普通 Error 继续守原隔离。升级 SDK 时应复核或替换该内部适配，不能仅靠错误字符串放宽隔离。
+SDK 1.5.2 RpcClient 会将业务负响应抹成普通 Error。`agent/capability-state.ts` 的窄版本适配仅观察所属实际 client 的原始 getData 解码结果，以 WeakMap 关联 `set_model`/`compact` 的有限明确无副作用否定及 `export_html` 的明确失败响应；后者确认 writer RPC 已结束，允许后续显式导出。未知 transport/timeout、丢 ACK 或同文普通 Error 继续守原隔离。升级 SDK 时应复核或替换该内部适配，不能仅靠错误字符串放宽隔离。
 
 设置页保跨卸载实际保存槽、API/cwd/scope/generation 隔离与可见 pending 轮询，分开展示保存/应用状态及 desired/available；IPC 复查所属窗口/活主帧。完整协议见[功能约束](feature-contracts.md#工具与能力开关)。相关回归源码位于 `tests/unit/capability-{settings,catalogue,mcp,policy,bridge,ipc}.test.ts` 与 `tests/renderer/CapabilitySettingsPage.test.tsx`；本次仅静态检查，未执行测试、类型检查、构建、GUI、真实模型或 MCP。源码修改不更新正在运行的安装版，不能据此宣称已发布或远端资源已停止。
 
@@ -208,7 +208,7 @@ Pion 通过 `agent/native-extensions.ts` 向 SDK 显式注入 CLI 同源的 MCP�
 
 “技能与工具 → MCP”查看所选现有后端的状态、登记工具数和曝光方式。刷新只读主进程缓存，不创建后端或 manager，不发 prompt、调用模型、启动/重连服务器或认证；服务器原有的启动副作用仍按上一节处理。旧插件接管 `/mcp`、原生未启用、没有后端、等待/超时及格式不支持均单独显示，不从工具目录、注册或历史推断连接。工具数来自 `connection.tools.length`，不是当前模式可见或获准数量；`starting` / `disabled` 是原生格式的派生显示，不是额外的连接状态。
 
-SDK 没有公开结构化状态 getter。`agent/mcp-status-observer.ts` 仅适配已核对的 SDK 1.4.0：捕获真正 builtin 的空参数 handler，检查成功的原生启动和 `getCommands()` 的 builtin 来源，并使用所属 SDK `extensionRunner.createCommandContext()` 的真实 RPC 上下文。传入的固定窄上下文仅有 RPC mode 与一次 info notify，活 session/model/control 接口保持私有，不执行旧插件同名 handler。每 3 秒更新，2 秒 deadline 只关闭采集；实际 pending 未收口前，同 RPC owner 跨 SDK 替换保持一个槽，不排队。关闭/替换使迟到结果失效，不声称取消了原生连接等待。
+SDK 没有公开结构化状态 getter。`agent/mcp-status-observer.ts` 仅适配已核对的 SDK 1.5.2：捕获真正 builtin 的空参数 handler，检查成功的原生启动和 `getCommands()` 的 builtin 来源，并使用所属 SDK `extensionRunner.createCommandContext()` 的真实 RPC 上下文。传入的固定窄上下文仅有 RPC mode 与一次 info notify，活 session/model/control 接口保持私有，不执行旧插件同名 handler。每 3 秒更新，2 秒 deadline 只关闭采集；实际 pending 未收口前，同 RPC owner 跨 SDK 替换保持一个槽，不排队。关闭/替换使迟到结果失效，不声称取消了原生连接等待。
 
 `shared/mcp.ts` 按 SDK 文字格式作白名单投影：最多 128 台服务器、64 KiB 单行私有通知；只保留名称、状态、曝光和 connected 的工具数。私有通知接收时规范化一次，缓存读取复制 typed 快照，页面省去重复 schema 投影。原始错误、配置尾部及其中的路径、URL、headers、命令参数不进入状态列表；未知格式整份转为未知。限制只覆盖 Pion 投影，不限制 SDK 构造原始状态字符串的开销。`__pion_mcp_status_v1` 是私有传输标记，不是插件身份或认证边界。
 
@@ -244,7 +244,7 @@ Azure 的提供商 ID 从 `azure-openai-responses` 改为 `azure`。使用 Azure
 
 验证报告应分别列出静态检查、类型检查、相关模拟回归、全量测试、coverage、构建、安装、GUI 与真实 API 的实际执行范围；依赖锁定、源码适配或模拟测试不能替代其他范围的验证，真实认证/API 调用需要单独授权。
 
-沿用 pi 的缓存预热设置；子代理内存设置继承父级的 `off` / `streaming` / `idle`，不写用户配置。预热可能额外调用模型并产生费用：主会话按 backend 实例、项目/会话、提供商与条目时间归入最近已派发运行（预热返回的模型别名不必等于配置 ID），子代理独立 usage 随结果累计。两者只更新累计用量，不覆盖真实上下文占用。子代理使用有界的近期 ID 窗口去重；主进程 receipt 与运行账本原子持久化，淘汰后以时间下界保守拒绝旧事件，避免重复计费，但可能漏计非常迟到的首次事件。无匹配已派发运行的费用不虚构运行、不算给未来队列；完整记录保留在 SDK 会话文件，运行统计仍仅代表已加载运行，不是整个会话账单。
+沿用 pi 的缓存预热设置；1.5.2 默认 `idle`，满足上游条件时可在轮次间最多 30 分钟预热，显式 `streaming` 保留仅运行中预热，`off` 关闭预热。子代理内存设置继承父级的 `off` / `streaming` / `idle`，不写用户配置。预热可能额外调用模型并产生费用：主会话按 backend 实例、项目/会话、提供商与条目时间归入最近已派发运行（预热返回的模型别名不必等于配置 ID），子代理独立 usage 随结果累计。两者只更新累计用量，不覆盖真实上下文占用。子代理使用有界的近期 ID 窗口去重；主进程 receipt 与运行账本原子持久化，淘汰后以时间下界保守拒绝旧事件，避免重复计费，但可能漏计非常迟到的首次事件。无匹配已派发运行的费用不虚构运行、不算给未来队列；完整记录保留在 SDK 会话文件，运行统计仍仅代表已加载运行，不是整个会话账单。
 
 ## 用户消息撤销
 

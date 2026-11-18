@@ -27,7 +27,7 @@ function unknownClose(error: unknown): ProcessExitError {
 }
 
 /**
- * Private adapter for pinned pi SDK 1.4.0: start() assigns a ChildProcess with
+ * Private adapter for pinned pi SDK 1.5.2: start() assigns a ChildProcess with
  * exactly three pipes; stop() may clear it before SIGKILL's actual exit.
  * Re-review this layout and Node pipe close semantics on SDK upgrades.
  */

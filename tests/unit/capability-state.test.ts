@@ -43,6 +43,23 @@ describe('owned SDK export negative receipts', () => {
         : { command: 'export_html', requestId: mismatch === 'request' ? 'req_99' : mismatch === 'missing-request' ? undefined : requestId })).toBe(false)
   })
 
+  it.each(['1.4.0', '1.5.3'])('keeps SDK %s negative responses unbranded', async version => {
+    vi.resetModules()
+    vi.doMock('@earendil-works/pi-coding-agent', async original => ({
+      ...await original<typeof import('@earendil-works/pi-coding-agent')>(), VERSION: version
+    }))
+    try {
+      const state = await import('../../src/main/agent/capability-state')
+      const { client } = transport()
+      expect(state.observeCapabilityRpcRejections(client)).toBeUndefined()
+      expect(state.knownCapabilityRpcRejection(client, await rejectedExport(client),
+        { command: 'export_html', requestId: 'req_1' })).toBe(false)
+    } finally {
+      vi.doUnmock('@earendil-works/pi-coding-agent')
+      vi.resetModules()
+    }
+  })
+
   it('keeps transport rejection and an unknown decoder unbranded even with identical text', async () => {
     const { client } = transport()
     const requestId = observeCapabilityRpcRejections(client)

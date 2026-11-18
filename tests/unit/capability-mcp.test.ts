@@ -60,6 +60,21 @@ it('uses the pinned canonical loader for exact merge, override ownership and pri
   expect(JSON.parse(await readFile(join(cwd, '.pi', 'mcp.json'), 'utf8'))).toEqual(project)
 })
 
+it('keeps command-valued secrets literal while reading enabled configuration', async () => {
+  const marker = join(root, 'executed')
+  const command = `!touch ${marker}`
+  await json(join(agentDir, 'mcp.json'), { mcpServers: {
+    local: { command: 'never-execute', env: { TOKEN: command } },
+    remote: { url: 'https://private.invalid/mcp', headers: { Authorization: command }, oauth: { clientSecret: command } }
+  } })
+  const result = load()
+  expect(result.config.servers).toHaveLength(2)
+  expect(result.config.servers[0].config).toMatchObject({ env: { TOKEN: command } })
+  expect(result.config.servers[1].config).toMatchObject({ headers: { Authorization: command }, oauth: { clientSecret: command } })
+  await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(fetch).not.toHaveBeenCalled()
+})
+
 it('applies desired enabled before native startup, retaining disabled canonical rows as merge tombstones', async () => {
   await json(join(agentDir, 'mcp.json'), { mcpServers: { same: { command: 'never-execute', enabled: false }, other: { url: 'https://private.invalid/mcp' } } })
   const inherited = load()
@@ -164,7 +179,7 @@ it('keeps canonical validation, namespace collisions and the global-only auth ba
 
 it('refuses an unaudited internal loader rather than returning empty config and reviving registrations', async () => {
   vi.resetModules()
-  vi.doMock('node:fs', () => ({ readFileSync: () => JSON.stringify({ version: '1.4.1' }) }))
+  vi.doMock('node:fs', () => ({ readFileSync: () => JSON.stringify({ version: '1.5.3' }) }))
   const adapter = await import('../../src/main/agent/capability-mcp')
   expect(() => adapter.loadCapabilityMcpConfiguration({ cwd, agentDir, projectTrusted: true, preferences: preferences() })).toThrow('无法只读解析当前版本')
   expect(fetch).not.toHaveBeenCalled()

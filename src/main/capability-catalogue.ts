@@ -159,7 +159,7 @@ export async function readCapabilityResources(options: ReadCapabilityResourcesOp
     settingsIdentity = [settings.getGlobalSettings(), settings.getProjectSettings()]
     defaultTools = settings.getDefaultTools()
   } catch { throw new Error(READ_NOTICE) }
-  // Audited SDK 1.4.0 resolve: npm version/range/tag checking reads installed
+  // Audited SDK 1.5.2 resolve: npm version/range/tag checking reads installed
   // package.json only; missing installs/repairs go exclusively through onMissing.
   // BUT global legacy lookup calls npm/pnpm/bun through getNpmCommand even with
   // skip. Block that public getter on this scan-only manager BEFORE resolve.
@@ -170,7 +170,7 @@ export async function readCapabilityResources(options: ReadCapabilityResourcesOp
     throw new Error('Capability catalogue cannot execute package-manager commands')
   }
   let resources: ResolvedPaths = { extensions: [], skills: [], prompts: [], themes: [] }
-  if (VERSION === '1.4.0') {
+  if (VERSION === '1.5.2') {
     try {
       resources = await new DefaultPackageManager({ cwd, agentDir, settingsManager: settings, builtinExtensions: BUILTINS }).resolve(async () => {
         notices.add('部分包未安装或版本不匹配（unknown）；目录已跳过，不安装或修复。')

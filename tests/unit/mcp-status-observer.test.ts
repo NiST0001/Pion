@@ -150,7 +150,7 @@ describe('MCP observer source and lifecycle gates', () => {
   })
 
   it('skips an unsupported SDK and preserves the actual non-RPC mode', async () => {
-    const unsupported = setup({ sdkVersion: '1.4.1' })
+    const unsupported = setup({ sdkVersion: '1.5.3' })
     await unsupported.start()
     expect(unsupported.latest()).toMatchObject({ reason: 'unsupported-sdk', servers: [] })
     expect(unsupported.nativeHandler).not.toHaveBeenCalled()

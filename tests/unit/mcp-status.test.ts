@@ -4,7 +4,7 @@ import {
 } from '../../src/shared/mcp'
 import type { McpServerState } from '../../src/shared/mcp'
 
-// Formatter fixtures from locked SDK 1.4.0; no servers or user configuration.
+// Formatter fixtures from locked SDK 1.5.2; no servers or user configuration.
 const states: Array<{ state: McpServerState; formatted: string }> = [
   { state: 'connecting', formatted: 'connecting' },
   { state: 'connected', formatted: 'connected, 37 tools' },
@@ -36,7 +36,7 @@ function boundedAsciiDiagnostic(bytes: number): string {
 
 describe('native MCP formatter projection', () => {
   it('pins the supported formatter and projection budgets', () => {
-    expect(MCP_STATUS_SDK_VERSION).toBe('1.4.0')
+    expect(MCP_STATUS_SDK_VERSION).toBe('1.5.2')
     expect(MCP_STATUS_MAX_BYTES).toBe(64 * 1024)
     expect(MCP_STATUS_MAX_SERVERS).toBe(128)
   })
