@@ -8,6 +8,12 @@ export interface ReleaseNote {
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.1.108',
+    changes: [
+      '不同子代理可并行运行 Bash 或 PowerShell，并用 edit/write 修改不同文件；单个子代理内仍按序执行，SDK 内置 edit/write 对同一路径仍串行，保留权限检查和检查点。'
+    ]
+  },
+  {
     version: '0.1.107',
     changes: [
       '内置 Pi 升级至 1.5.2，更新模型目录及上游工具、MCP 和会话运行时修复。',

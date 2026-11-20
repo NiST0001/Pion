@@ -250,10 +250,8 @@ export function createSubagentControl(run: Runner, getSettings: () => SubagentSe
  * live hooks. This preserves project policy, YOLO, UI confirmation and lazy
  * checkpoints; copying bare SDK tools alone would silently bypass them. */
 export function createSubagentRunner(getParent: () => AgentSession, getModels: () => ModelRuntime, cwd: string, agentDir: string): Runner {
-  // Serialize mutating tools between siblings. Models/read-only tools still
-  // work in parallel. This is not a filesystem sandbox or conflict resolver.
-  let writeTail: Promise<unknown> = Promise.resolve()
   return async (task, signal, progress, settings = DEFAULT_SUBAGENT_SETTINGS, observer) => {
+    let mutationTail: Promise<unknown> = Promise.resolve()
     let childCreated = false
     const observe = (fn: (value: SubagentSessionObserver) => void) => { try { if (observer) fn(observer) } catch { /* Display must not affect execution. */ } }
     const displayAbort = () => observe((value) => value.cancelling())
@@ -331,8 +329,8 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
           }
           const execute = async () => {
             if (!readOnly) {
-              // Mutable policy/checkpoint admission belongs to the same sibling
-              // write slot as execution. An allow-once is consumed only here.
+              // Check live policy and checkpoints in the child mutation slot.
+              // An allow-once is consumed only here.
               const decision = await beforeToolCall(call!.context, toolSignal)
               if (decision?.block) return { content: [{ type: 'text' as const, text: decision.reason || '子代理工具调用未获授权' }], details: {}, isError: true,
                 ...(decision.terminate === true ? { terminate: true } : {}) }
@@ -343,8 +341,9 @@ export function createSubagentRunner(getParent: () => AgentSession, getModels: (
             return tool.execute(prefix + id, args, toolSignal, update)
           }
           if (readOnly) return execute()
-          const pending = writeTail.then(execute, execute)
-          writeTail = pending.catch(() => {})
+          // The SDK serializes built-in edit/write mutations for the same resolved file key.
+          const pending = mutationTail.then(execute)
+          mutationTail = pending.catch(() => {})
           return pending
         }
       }))
